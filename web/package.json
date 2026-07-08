@@ -4,8 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "bun build ./src/main.ts --outdir ./dist --target browser",
-    "dev": "bun ./src/main.ts"
+    "build:wasm": "cargo build -p trd-wasm --target wasm32-unknown-unknown --release && wasm-bindgen --target web --out-dir src/generated --out-name trd_wasm ../target/wasm32-unknown-unknown/release/trd_wasm.wasm",
+    "build": "bun run build:wasm && rm -rf dist && bun build ./index.html --outdir dist && cp src/generated/trd_wasm_bg.wasm dist/trd_wasm_bg.wasm",
+    "dev": "bun run build:wasm && bun ./index.html"
   },
   "devDependencies": {
     "typescript": "^5.6.0"
