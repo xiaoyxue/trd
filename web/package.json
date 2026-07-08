@@ -1,0 +1,13 @@
+{
+  "name": "trd-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun build ./src/main.ts --outdir ./dist --target browser",
+    "dev": "bun ./src/main.ts"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  }
+}
