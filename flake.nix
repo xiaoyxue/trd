@@ -24,10 +24,10 @@
           libGL
           wayland
           libxkbcommon
-          xorg.libX11
-          xorg.libXcursor
-          xorg.libXi
-          xorg.libXrandr
+          libx11
+          libxcursor
+          libxi
+          libxrandr
         ];
       in
       {
@@ -43,6 +43,11 @@
 
           shellHook = ''
             export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath runtimeLibs}:$LD_LIBRARY_PATH"
+            # Mesa (nixpkgs) bundles the Dozen "dzn" ICD (Vulkan-on-D3D12). It is
+            # never useful on a Linux GPU machine and crashes during Vulkan
+            # adapter enumeration when no D3D12 backend exists, so disable it.
+            # The loader still selects a real GPU adapter when one is present.
+            export VK_LOADER_DRIVERS_DISABLE="*dzn*"
             echo "trd devShell: $(rustc --version), bun $(bun --version)"
           '';
         };

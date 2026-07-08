@@ -4,6 +4,14 @@
 //! Native and web entry points are thin wrappers that only provide a render
 //! target and call into this crate.
 
+mod render;
+pub use render::render_triangle;
+
+#[cfg(not(target_arch = "wasm32"))]
+mod native;
+#[cfg(not(target_arch = "wasm32"))]
+pub use native::{render_to_png, RenderError};
+
 /// Returns the project greeting used by the CLI and web entry points.
 pub fn greeting() -> String {
     "Hello from trd-core!".to_string()

@@ -6,3 +6,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+wgpu = "30"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pollster = "0.4"
+thiserror = "2"
+image = { version = "0.25", default-features = false, features = ["png"] }
