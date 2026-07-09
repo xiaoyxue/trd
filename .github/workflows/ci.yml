@@ -14,7 +14,7 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Nix provides the whole toolchain (pinned Rust + wasm32 target, bun,
       # wasm-bindgen, and the native build libs) from the flake, so CI matches
