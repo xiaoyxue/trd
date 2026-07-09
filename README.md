@@ -28,6 +28,21 @@ nix develop
 cargo run -p trd-cli -- --width 512 --height 512 --output triangle.png
 ```
 
+The renderer honours `WGPU_BACKEND` (e.g. `vulkan`, `gl`) and logs which adapter
+it selected. Set `RUST_LOG=info` for more detail.
+
+#### GPU selection
+
+- **Native Linux / NVIDIA:** the default (Vulkan) backend uses the GPU directly.
+- **WSL2:** there is no native Linux Vulkan driver, so the default Vulkan
+  backend falls back to software (llvmpipe). For real GPU rendering, use the GL
+  backend over Mesa's D3D12 driver:
+  ```sh
+  WGPU_BACKEND=gl cargo run -p trd-cli -- --output triangle.png
+  ```
+  The dev shell auto-detects WSL2 (`/dev/dxg`) and sets `GALLIUM_DRIVER=d3d12`
+  plus the Windows GPU library path, so only `WGPU_BACKEND=gl` is needed.
+
 ### Tests
 
 ```sh

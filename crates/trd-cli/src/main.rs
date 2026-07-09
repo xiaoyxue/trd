@@ -20,6 +20,11 @@ struct Cli {
 }
 
 fn main() -> Result<(), trd_core::RenderError> {
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("warn,trd_core=info"),
+    )
+    .init();
+
     let cli = Cli::parse();
     println!("{}", trd_core::greeting());
     trd_core::render_to_png(cli.width, cli.height, &cli.output)?;

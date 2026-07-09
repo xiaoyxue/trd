@@ -37,10 +37,19 @@ pub fn render_to_png(width: u32, height: u32, path: &Path) -> Result<(), RenderE
 }
 
 async fn render_to_png_async(width: u32, height: u32, path: &Path) -> Result<(), RenderError> {
-    let instance = wgpu::Instance::default();
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions::default())
         .await?;
+    let info = adapter.get_info();
+    log::info!(
+        "using {:?} adapter \"{}\" ({:?}), driver: {}",
+        info.backend,
+        info.name,
+        info.device_type,
+        info.driver_info
+    );
     let (device, queue) = adapter
         .request_device(&wgpu::DeviceDescriptor {
             label: Some("trd device"),

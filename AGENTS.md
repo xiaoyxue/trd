@@ -20,6 +20,10 @@ Guidance for agents working in this repository.
 - The `web/` folder is bun-managed; run bun from inside `nix develop`.
 - We always work on GPU machines. GPU-dependent tests are marked `#[ignore]`
   and run locally; simple CI skips them.
+- **WSL2 GPU:** NVIDIA ships no native Linux Vulkan ICD for WSL, so the Vulkan
+  backend falls back to software (llvmpipe) and Mesa's `dzn` (Vulkan-on-D3D12)
+  crashes at device creation. Use `WGPU_BACKEND=gl` for real GPU rendering via
+  Mesa's D3D12 OpenGL driver; the dev shell auto-configures this on WSL.
 
 ## PR Workflow
 
