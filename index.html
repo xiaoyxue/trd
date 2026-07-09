@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>trd — hello triangle</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #1b1b1b;
+        color: #eaeaea;
+        font-family: system-ui, sans-serif;
+      }
+      #trd-canvas-container {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 100%;
+      }
+      #trd-canvas-container canvas {
+        width: 800px;
+        height: 600px;
+        border-radius: 6px;
+        box-shadow: 0 0 24px rgba(0, 0, 0, 0.6);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="trd-canvas-container"></div>
+    <script type="module" src="./bootstrap.js"></script>
+  </body>
+</html>
