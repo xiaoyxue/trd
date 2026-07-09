@@ -9,10 +9,10 @@ use clap::Parser;
 #[command(name = "trd", version, about)]
 struct Cli {
     /// Output image width in pixels.
-    #[arg(long, default_value_t = 512)]
+    #[arg(long, default_value_t = 512, value_parser = clap::value_parser!(u32).range(1..))]
     width: u32,
     /// Output image height in pixels.
-    #[arg(long, default_value_t = 512)]
+    #[arg(long, default_value_t = 512, value_parser = clap::value_parser!(u32).range(1..))]
     height: u32,
     /// Path to write the PNG file to.
     #[arg(long, short, default_value = "triangle.png")]

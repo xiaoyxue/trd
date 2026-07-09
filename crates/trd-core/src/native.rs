@@ -20,6 +20,9 @@ pub enum RenderError {
     /// Mapping the readback buffer failed.
     #[error("failed to map readback buffer: {0}")]
     BufferMap(#[from] wgpu::BufferAsyncError),
+    /// The requested image dimensions are invalid (must be non-zero).
+    #[error("image dimensions must be non-zero, got {width}x{height}")]
+    InvalidDimensions { width: u32, height: u32 },
     /// The read-back bytes did not form a valid image buffer.
     #[error("read-back bytes did not form a valid {width}x{height} image")]
     ImageBuffer { width: u32, height: u32 },
@@ -33,6 +36,9 @@ const BYTES_PER_PIXEL: u32 = 4;
 /// Renders the hello-triangle at `width` x `height` and writes it to `path` as
 /// a PNG. Blocks until the GPU work completes.
 pub fn render_to_png(width: u32, height: u32, path: &Path) -> Result<(), RenderError> {
+    if width == 0 || height == 0 {
+        return Err(RenderError::InvalidDimensions { width, height });
+    }
     pollster::block_on(render_to_png_async(width, height, path))
 }
 
@@ -151,6 +157,26 @@ async fn render_to_png_async(width: u32, height: u32, path: &Path) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_zero_dimensions() {
+        // The dimension guard returns before any GPU work, so this needs no GPU.
+        let path = std::env::temp_dir().join("trd_zero_dims_should_not_exist.png");
+        std::fs::remove_file(&path).ok();
+
+        let err = render_to_png(0, 16, &path).expect_err("zero width must be rejected");
+        assert!(matches!(
+            err,
+            RenderError::InvalidDimensions {
+                width: 0,
+                height: 16
+            }
+        ));
+        assert!(
+            !path.exists(),
+            "no file should be written for invalid dimensions"
+        );
+    }
 
     #[test]
     #[ignore = "requires a GPU adapter"]
