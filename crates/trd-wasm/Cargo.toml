@@ -1,0 +1,20 @@
+[package]
+name = "trd-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# trd-wasm targets the browser only. On non-wasm hosts it compiles to an empty
+# crate (see the crate-level cfg in src/lib.rs) so workspace-wide native builds,
+# clippy, and tests skip it cleanly instead of failing on web-only wgpu APIs.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+trd-core.workspace = true
+wgpu = "30"
+wasm-bindgen = "=0.2.121"
+wasm-bindgen-futures = "0.4"
+console_error_panic_hook = "0.1"
+web-sys = { version = "0.3", features = ["HtmlCanvasElement"] }

@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # Nix provides the whole toolchain (pinned Rust + wasm32 target, bun,
+      # wasm-bindgen, and the native build libs) from the flake, so CI matches
+      # the local dev shell exactly. No apt/rustup setup is needed.
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v22
+
+      # NOTE on GPU: this runner has no GPU. GPU-dependent render tests are
+      # marked `#[ignore]`, so `cargo test` skips them and never creates a wgpu
+      # device. Building wgpu is compile-only and needs no GPU. GPU render tests
+      # are run locally on a GPU machine (see AGENTS.md).
+      - name: Rust checks (fmt, clippy, build, test)
+        run: |
+          nix develop --command bash -eo pipefail -c '
+            cargo fmt --all --check
+            cargo clippy --workspace --all-targets -- -D warnings
+            cargo clippy -p trd-wasm --target wasm32-unknown-unknown -- -D warnings
+            cargo build --workspace
+            cargo test --workspace
+          '
+
+      - name: Web build (wasm-pack package + bun bundle)
+        run: |
+          nix develop --command bash -eo pipefail -c '
+            cd web
+            bun run build:wasm                 # build the wasm npm package (pkg/) first
+            bun install --frozen-lockfile      # link the local pkg + devDeps
+            bunx tsc --noEmit                  # types resolve from the generated package
+            rm -rf dist
+            bun build ./index.html --outdir dist
+            # bun emits the wasm as a hashed asset (imported with type: "file").
+            ls dist/*.wasm >/dev/null
+          '
+
+# Caching is intentionally omitted for a reliable first pass; cold `nix develop`
+# mostly downloads prebuilt substitutes from cache.nixos.org. A nix store cache
+# (e.g. nix-community/cache-nix-action) can be added later to speed runs up.

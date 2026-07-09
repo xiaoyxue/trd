@@ -1,0 +1,46 @@
+# AGENTS.md
+
+Guidance for agents working in this repository.
+
+## Architecture
+
+- **Rust + wgpu is the single unified rendering core** (`crates/trd-core`).
+  The same core renders natively (CLI) and in the browser (compiled to wasm).
+- **JS/TS is a thin bootstrap wrapper only.** Do not call the WebGPU API
+  directly from JavaScript; all rendering logic lives in Rust.
+- **Vertical slicing.** Each increment threads the whole stack and is
+  independently end-to-end verifiable.
+- Major input data is columnar (Apache Arrow tables) with simple glue logic.
+
+## Toolchain
+
+- Enter the dev environment with `nix develop` (provides the pinned Rust
+  toolchain via rust-overlay, `bun`, `wasm-bindgen-cli`, and Vulkan).
+- Build/test/debug with plain `cargo` inside the dev shell.
+- The `web/` folder is bun-managed; run bun from inside `nix develop`.
+- We always work on GPU machines. GPU-dependent tests are marked `#[ignore]`
+  and run locally; simple CI skips them.
+- **WSL2 GPU:** NVIDIA ships no native Linux Vulkan ICD for WSL, so the Vulkan
+  backend falls back to software (llvmpipe) and Mesa's `dzn` (Vulkan-on-D3D12)
+  crashes at device creation. Use `WGPU_BACKEND=gl` for real GPU rendering via
+  Mesa's D3D12 OpenGL driver; the dev shell auto-configures this on WSL.
+
+## PR Workflow
+
+- **pr_first: true** — push work on a feature branch and open a **draft PR**
+  as early as practical; use the PR as the working surface.
+- **auto_merge: small** — small, low-risk PRs may be squash-merged once CI is
+  green. Risky PRs (public API, schemas, migrations, auth, infra) require human
+  review.
+- **branch naming:** `feat/<topic>`, `fix/<topic>`, etc.
+- **merge strategy:** squash.
+- PRs that resolve an issue must include a `Closes #nn` keyword.
+- **Worktrees:** keep the git root checkout on `main` at all times. Do all
+  branch/PR work in a git worktree under the root's `.worktree/` folder, e.g.:
+  ```sh
+  git worktree add .worktree/<topic> -b feat/<topic>
+  cd .worktree/<topic>
+  ```
+  Never check out a feature branch in the root itself. `.worktree/` is
+  gitignored. Remove the worktree after the PR merges
+  (`git worktree remove .worktree/<topic>`).
