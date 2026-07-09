@@ -36,6 +36,8 @@
             rustToolchain
             bun
             wasm-bindgen-cli
+            wasm-pack
+            binaryen
             vulkan-loader
             vulkan-tools
             pkg-config

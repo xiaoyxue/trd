@@ -36,12 +36,16 @@ jobs:
             cargo test --workspace
           '
 
-      - name: Web build (wasm + bun bundle)
+      - name: Web build (wasm-pack package + bun bundle)
         run: |
           nix develop --command bash -eo pipefail -c '
             cd web
-            bun install --frozen-lockfile
-            bun run build
+            bun run build:wasm                 # build the wasm npm package (pkg/) first
+            bun install --frozen-lockfile      # link the local pkg + devDeps
+            bunx tsc --noEmit                  # types resolve from the generated package
+            rm -rf dist
+            bun build ./index.html --outdir dist
+            cp ../crates/trd-wasm/pkg/trd_wasm_bg.wasm dist/trd_wasm_bg.wasm
             test -f dist/trd_wasm_bg.wasm
           '
 

@@ -4,9 +4,12 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build:wasm": "cargo build -p trd-wasm --target wasm32-unknown-unknown --release && wasm-bindgen --target web --out-dir src/generated --out-name trd_wasm ../target/wasm32-unknown-unknown/release/trd_wasm.wasm",
-    "build": "bun run build:wasm && rm -rf dist && bun build ./index.html --outdir dist && cp src/generated/trd_wasm_bg.wasm dist/trd_wasm_bg.wasm",
-    "dev": "bun run build:wasm && bun ./index.html"
+    "build:wasm": "wasm-pack build ../crates/trd-wasm --mode no-install --target web --out-dir pkg",
+    "build": "bun run build:wasm && bun install && rm -rf dist && bun build ./index.html --outdir dist && cp ../crates/trd-wasm/pkg/trd_wasm_bg.wasm dist/trd_wasm_bg.wasm",
+    "dev": "bun run build:wasm && bun install && bun ./index.html"
+  },
+  "dependencies": {
+    "trd-wasm": "file:../crates/trd-wasm/pkg"
   },
   "devDependencies": {
     "typescript": "^5.6.0"

@@ -6,7 +6,9 @@ target
 # Node/bun (web/)
 node_modules
 web/dist
-web/src/generated
+
+# wasm-pack output (generated npm package for the wasm core)
+crates/trd-wasm/pkg
 
 # Nix
 result
