@@ -35,3 +35,12 @@ Guidance for agents working in this repository.
 - **branch naming:** `feat/<topic>`, `fix/<topic>`, etc.
 - **merge strategy:** squash.
 - PRs that resolve an issue must include a `Closes #nn` keyword.
+- **Worktrees:** keep the git root checkout on `main` at all times. Do all
+  branch/PR work in a git worktree under the root's `.worktree/` folder, e.g.:
+  ```sh
+  git worktree add .worktree/<topic> -b feat/<topic>
+  cd .worktree/<topic>
+  ```
+  Never check out a feature branch in the root itself. `.worktree/` is
+  gitignored. Remove the worktree after the PR merges
+  (`git worktree remove .worktree/<topic>`).
