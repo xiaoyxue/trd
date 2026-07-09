@@ -45,8 +45,8 @@ jobs:
             bunx tsc --noEmit                  # types resolve from the generated package
             rm -rf dist
             bun build ./index.html --outdir dist
-            cp ../crates/trd-wasm/pkg/trd_wasm_bg.wasm dist/trd_wasm_bg.wasm
-            test -f dist/trd_wasm_bg.wasm
+            # bun emits the wasm as a hashed asset (imported with type: "file").
+            ls dist/*.wasm >/dev/null
           '
 
 # Caching is intentionally omitted for a reliable first pass; cold `nix develop`
