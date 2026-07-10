@@ -366,7 +366,7 @@ fn tensor_field(name: &str, width: u32, height: u32) -> Result<Field, StreamErro
     let ext = FixedShapeTensor::try_new(
         DataType::UInt8,
         vec![height as usize, width as usize],
-        None,
+        Some(vec!["height".to_string(), "width".to_string()]),
         None,
     )?;
     Ok(Field::new(name, storage, false).with_extension_type(ext))

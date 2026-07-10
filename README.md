@@ -24,26 +24,26 @@ Everything runs inside the Nix dev shell (pinned Rust toolchain, `bun`,
 nix develop
 ```
 
-### Native CLI (headless render to PNG)
+### Native CLI (Arrow streaming renderer)
+
+`trd` is a pure Arrow filter: it reads an Arrow IPC stream of per-frame
+parameters on stdin and writes an Arrow IPC stream of rendered images on stdout
+(trd stream protocol 0.0.1). It never buffers the whole animation — one record
+batch is in flight at a time.
+
+Generate an animation fully via pipes (no intermediate files), using pyarrow +
+ffmpeg for the input/output glue:
 
 ```sh
-cargo run -p trd-cli -- --width 512 --height 512 --output triangle.png
+uv run --with pyarrow --with numpy scripts/gen_frames.py --frames 60 \
+  | WGPU_BACKEND=gl cargo run -q -p trd-cli -- --width 256 --height 256 \
+  | uv run --with pyarrow --with numpy scripts/encode.py --fps 30 -o out.gif
 ```
 
-The renderer honours `WGPU_BACKEND` (e.g. `vulkan`, `gl`) and logs which adapter
-it selected. Set `RUST_LOG=info` for more detail.
-
-#### GPU selection
-
-- **Native Linux / NVIDIA:** the default (Vulkan) backend uses the GPU directly.
-- **WSL2:** there is no native Linux Vulkan driver, so the default Vulkan
-  backend falls back to software (llvmpipe). For real GPU rendering, use the GL
-  backend over Mesa's D3D12 driver:
-  ```sh
-  WGPU_BACKEND=gl cargo run -p trd-cli -- --output triangle.png
-  ```
-  The dev shell auto-detects WSL2 (`/dev/dxg`) and sets `GALLIUM_DRIVER=d3d12`
-  plus the Windows GPU library path, so only `WGPU_BACKEND=gl` is needed.
+- `scripts/gen_frames.py` sweeps `theta` and emits the input Arrow stream.
+- `trd` renders each row to `r,g,b,a` `fixed_shape_tensor<u8>` channels.
+- `scripts/encode.py` decodes the tensors and pipes RGBA frames to ffmpeg
+  (`.gif` or `.webp` by output extension). On non-WSL GPUs, drop `WGPU_BACKEND=gl`.
 
 ### Tests
 
