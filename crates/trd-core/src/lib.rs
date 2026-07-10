@@ -8,11 +8,6 @@ mod render;
 pub use render::{create_triangle_pipeline, render_triangle, FrameParams};
 
 #[cfg(not(target_arch = "wasm32"))]
-mod native;
-#[cfg(not(target_arch = "wasm32"))]
-pub use native::{render_to_png, RenderError};
-
-#[cfg(not(target_arch = "wasm32"))]
 mod stream;
 #[cfg(not(target_arch = "wasm32"))]
 pub use stream::{input_schema, output_schema, run_stream, StreamError};

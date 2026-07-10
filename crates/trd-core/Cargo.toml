@@ -13,6 +13,5 @@ bytemuck = { version = "1", features = ["derive"] }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 pollster = "0.4"
 thiserror = "2"
-image = { version = "0.25", default-features = false, features = ["png"] }
 arrow = { version = "59", default-features = false, features = ["ipc", "canonical_extension_types"] }
 arrow-schema = { version = "59", default-features = false, features = ["canonical_extension_types"] }
