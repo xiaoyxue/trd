@@ -5,7 +5,7 @@
 //! target and call into this crate.
 
 mod render;
-pub use render::render_triangle;
+pub use render::{create_triangle_pipeline, render_triangle, FrameParams};
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;

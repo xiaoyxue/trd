@@ -84,7 +84,7 @@ async fn render_to_png_async(width: u32, height: u32, path: &Path) -> Result<(),
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-    render_triangle(&device, &queue, &view, format);
+    render_triangle(&device, &queue, &view, format, crate::render::FrameParams::IDENTITY);
 
     // copy_texture_to_buffer requires each row to be a multiple of
     // COPY_BYTES_PER_ROW_ALIGNMENT (256 bytes); pad and strip the padding after.
