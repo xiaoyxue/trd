@@ -37,6 +37,32 @@
           name = "source";
         };
 
+        # wasm-bindgen requires the CLI to exactly match the `wasm-bindgen`
+        # crate. Derive the CLI from Cargo.lock (rather than the unversioned
+        # `pkgs.wasm-bindgen-cli` alias, which can drift on `nix flake update`)
+        # so the two can never silently diverge.
+        wasmBindgenVersion =
+          (lib.findFirst (p: p.name == "wasm-bindgen") (throw "wasm-bindgen not found in Cargo.lock")
+            (builtins.fromTOML (builtins.readFile ./Cargo.lock)).package
+          ).version;
+        wasmBindgenCliAttr = "wasm-bindgen-cli_${lib.replaceStrings [ "." ] [ "_" ] wasmBindgenVersion}";
+        wasmBindgenCli =
+          pkgs.${wasmBindgenCliAttr}
+            or (throw "nixpkgs lacks ${wasmBindgenCliAttr} (to match Cargo.lock wasm-bindgen ${wasmBindgenVersion})");
+
+        # The nix web build bundles offline: it provides the nix-built trd-wasm
+        # as node_modules and skips `bun install`, and the tsc check supplies
+        # typescript via nixpkgs. That shortcut is only valid while these are the
+        # sole dependencies, so make the invariant executable and fail loudly if
+        # a real npm dependency is ever added.
+        webPackageJson = builtins.fromJSON (builtins.readFile ./web/package.json);
+        checkedWebSrc =
+          assert lib.assertMsg (lib.attrNames (webPackageJson.dependencies or { }) == [ "trd-wasm" ])
+            "web/package.json runtime dependencies must be exactly {trd-wasm}: the nix web build skips `bun install`. Add npm-dependency support (e.g. bun2nix) before adding runtime deps.";
+          assert lib.assertMsg (lib.attrNames (webPackageJson.devDependencies or { }) == [ "typescript" ])
+            "web/package.json devDependencies must be exactly {typescript}: the tsc check provides it via nixpkgs. Add npm-dependency support before adding devDeps.";
+          webSrc;
+
         # Runtime libraries the wgpu/Vulkan backend loads via dlopen.
         runtimeLibs = with pkgs; [
           vulkan-loader
@@ -92,7 +118,7 @@
             pname = "trd-wasm";
             cargoArtifacts = cargoArtifactsWasm;
             nativeBuildInputs = commonArgs.nativeBuildInputs ++ [
-              pkgs.wasm-bindgen-cli
+              wasmBindgenCli
               pkgs.binaryen
             ];
             doNotPostBuildInstallCargoBinaries = true;
@@ -150,7 +176,7 @@
         web = pkgs.stdenv.mkDerivation {
           pname = "trd-web";
           version = "0.1.0";
-          src = webSrc;
+          src = checkedWebSrc;
           nativeBuildInputs = [ pkgs.bun ];
           buildPhase = ''
             runHook preBuild
@@ -235,7 +261,7 @@
                 nativeBuildInputs = [ pkgs.typescript ];
               }
               ''
-                cp -r ${webSrc} web && chmod -R u+w web && cd web
+                cp -r ${checkedWebSrc} web && chmod -R u+w web && cd web
                 ${provideNodeModules}
                 tsc --noEmit
                 touch $out
@@ -248,13 +274,13 @@
                 nativeBuildInputs = [ pkgs.biome ];
               }
               ''
-                cp -r ${webSrc} web && chmod -R u+w web && cd web
+                cp -r ${checkedWebSrc} web && chmod -R u+w web && cd web
                 biome ci .
                 touch $out
               '';
         };
 
-        formatter = pkgs.nixfmt-rfc-style;
+        formatter = pkgs.nixfmt;
 
         devShells.default = pkgs.mkShell {
           buildInputs =
@@ -262,7 +288,7 @@
             [
               rustToolchain
               bun
-              wasm-bindgen-cli
+              wasmBindgenCli
               wasm-pack
               binaryen
               biome
