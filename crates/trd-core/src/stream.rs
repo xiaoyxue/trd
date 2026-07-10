@@ -139,15 +139,17 @@ fn read_vec2(list: &FixedSizeListArray, row: usize) -> [f32; 2] {
 }
 
 /// Decodes every row of `batch` into [`FrameParams`], validating required
-/// columns, types, and non-nullness.
+/// columns, types, and non-nullness (including the fixed-size-list children).
 pub fn decode_frames(batch: &RecordBatch) -> Result<Vec<FrameParams>, StreamError> {
     let center = require_vec2(batch, "center")?;
     let size = require_vec2(batch, "size")?;
     let theta = require_f32(batch, "theta")?;
-    if center.null_count() > 0 {
+    // Reject nulls at both the list level and the child-element level: a
+    // non-null list row may still contain null float components.
+    if center.null_count() > 0 || center.values().null_count() > 0 {
         return Err(StreamError::NullValues("center"));
     }
-    if size.null_count() > 0 {
+    if size.null_count() > 0 || size.values().null_count() > 0 {
         return Err(StreamError::NullValues("size"));
     }
     if theta.null_count() > 0 {
@@ -445,8 +447,11 @@ pub fn run_stream<R: Read, W: Write>(
     check_version(reader.schema().as_ref())?;
 
     let out_schema = Arc::new(output_schema(width, height)?);
-    let mut writer = StreamWriter::try_new(output, &out_schema)?;
+    // Build the GPU context before the writer: StreamWriter::try_new emits the
+    // schema immediately, so a GPU-setup failure here must happen before any
+    // bytes reach stdout (else a downstream consumer sees a partial stream).
     let mut renderer = BatchRenderer::new(width, height)?;
+    let mut writer = StreamWriter::try_new(output, &out_schema)?;
     let pixels = (width * height) as usize;
 
     for batch in reader {
@@ -518,6 +523,39 @@ mod tests {
         assert!(matches!(
             decode_frames(&reduced),
             Err(StreamError::MissingColumn("theta"))
+        ));
+    }
+
+    #[test]
+    fn child_null_in_vec2_is_error() {
+        // A non-null list row whose child float is null must be rejected.
+        let item = Arc::new(Field::new("item", DataType::Float32, true));
+        let center_values = Float32Array::from(vec![Some(0.0), None]);
+        let center = FixedSizeListArray::new(item.clone(), 2, Arc::new(center_values), None);
+        let size = FixedSizeListArray::new(
+            Arc::new(Field::new("item", DataType::Float32, false)),
+            2,
+            Arc::new(Float32Array::from(vec![1.0, 1.0])),
+            None,
+        );
+        let theta = Float32Array::from(vec![0.0]);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("center", center.data_type().clone(), false),
+            Field::new("size", size.data_type().clone(), false),
+            Field::new("theta", DataType::Float32, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(center) as ArrayRef,
+                Arc::new(size),
+                Arc::new(theta),
+            ],
+        )
+        .unwrap();
+        assert!(matches!(
+            decode_frames(&batch),
+            Err(StreamError::NullValues("center"))
         ));
     }
 

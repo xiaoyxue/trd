@@ -20,18 +20,20 @@ def main() -> None:
     args = ap.parse_args()
 
     n = args.frames
+    # Match the Rust protocol schema exactly: non-null fields, non-null list item.
+    vec2 = pa.list_(pa.field("item", pa.float32(), nullable=False), 2)
     center = pa.FixedSizeListArray.from_arrays(
-        pa.array([0.0, 0.0] * n, pa.float32()), 2
+        pa.array([0.0, 0.0] * n, pa.float32()), type=vec2
     )
     size = pa.FixedSizeListArray.from_arrays(
-        pa.array([args.size, args.size] * n, pa.float32()), 2
+        pa.array([args.size, args.size] * n, pa.float32()), type=vec2
     )
     theta = pa.array([i * 2 * math.pi / n for i in range(n)], pa.float32())
     schema = pa.schema(
         [
-            pa.field("center", center.type),
-            pa.field("size", size.type),
-            pa.field("theta", pa.float32()),
+            pa.field("center", vec2, nullable=False),
+            pa.field("size", vec2, nullable=False),
+            pa.field("theta", pa.float32(), nullable=False),
         ],
         metadata={b"trd.protocol.version": b"0.0.1"},
     )
