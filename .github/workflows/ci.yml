@@ -16,39 +16,27 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # Nix provides the whole toolchain (pinned Rust + wasm32 target, bun,
-      # wasm-bindgen, and the native build libs) from the flake, so CI matches
-      # the local dev shell exactly. No apt/rustup setup is needed.
+      # Nix builds every output from the flake, so CI matches local builds
+      # exactly. No apt/rustup/bun setup is needed.
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@v22
 
+      # Runs every quality gate defined as a flake check: rustfmt, clippy
+      # (native + wasm32), cargo test, tsc, and Biome (format + lint).
+      #
       # NOTE on GPU: this runner has no GPU. GPU-dependent render tests are
       # marked `#[ignore]`, so `cargo test` skips them and never creates a wgpu
-      # device. Building wgpu is compile-only and needs no GPU. GPU render tests
-      # are run locally on a GPU machine (see AGENTS.md).
-      - name: Rust checks (fmt, clippy, build, test)
-        run: |
-          nix develop --command bash -eo pipefail -c '
-            cargo fmt --all --check
-            cargo clippy --workspace --all-targets -- -D warnings
-            cargo clippy -p trd-wasm --target wasm32-unknown-unknown -- -D warnings
-            cargo build --workspace
-            cargo test --workspace
-          '
+      # device. Building wgpu is compile-only and needs no GPU.
+      - name: Flake checks (rust fmt/clippy/test, tsc, biome)
+        run: nix flake check --print-build-logs
 
-      - name: Web build (wasm-pack package + bun bundle)
-        run: |
-          nix develop --command bash -eo pipefail -c '
-            cd web
-            bun run build:wasm                 # build the wasm npm package (pkg/) first
-            bun install --frozen-lockfile      # link the local pkg + devDeps
-            bunx tsc --noEmit                  # types resolve from the generated package
-            rm -rf dist
-            bun build ./index.html --outdir dist
-            # bun emits the wasm as a hashed asset (imported with type: "file").
-            ls dist/*.wasm >/dev/null
-          '
+      # Builds the servable web bundle (Rust core -> wasm library -> bun dist).
+      # This also exercises the trd-cli and trd-wasm package outputs it depends
+      # on. `nix run .#web` serves the resulting dist/ over HTTP.
+      - name: Build web bundle
+        run: nix build .#web --print-build-logs
 
-# Caching is intentionally omitted for a reliable first pass; cold `nix develop`
-# mostly downloads prebuilt substitutes from cache.nixos.org. A nix store cache
-# (e.g. nix-community/cache-nix-action) can be added later to speed runs up.
+# Caching is intentionally omitted for a reliable first pass; cold builds mostly
+# download prebuilt substitutes from cache.nixos.org. A nix store cache (e.g.
+# nix-community/cache-nix-action or a Cachix cache for the crate builds) can be
+# added later to speed runs up.
