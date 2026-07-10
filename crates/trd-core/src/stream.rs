@@ -164,6 +164,29 @@ pub fn decode_frames(batch: &RecordBatch) -> Result<Vec<FrameParams>, StreamErro
 
 const BYTES_PER_PIXEL: u32 = 4;
 
+/// Validates image dimensions against zero and `u32` overflow, returning the
+/// pixel count. Does not check device limits (that needs an adapter). Called
+/// before any `width * height` / `width * 4` arithmetic so absurd dimensions
+/// produce a clean [`StreamError::InvalidDimensions`] instead of an overflow.
+fn check_dimensions(width: u32, height: u32) -> Result<u32, StreamError> {
+    let pixels = width
+        .checked_mul(height)
+        .filter(|&p| p > 0 && p <= i32::MAX as u32)
+        .ok_or(StreamError::InvalidDimensions {
+            width,
+            height,
+            reason: "width*height must be non-zero and <= i32::MAX",
+        })?;
+    width
+        .checked_mul(BYTES_PER_PIXEL)
+        .ok_or(StreamError::InvalidDimensions {
+            width,
+            height,
+            reason: "row byte size overflows u32",
+        })?;
+    Ok(pixels)
+}
+
 /// A persistent GPU context that renders one [`FrameParams`] to tightly-packed
 /// row-major RGBA bytes (`width*height*4`) per call.
 pub struct BatchRenderer {
@@ -187,23 +210,8 @@ impl BatchRenderer {
     }
 
     async fn new_async(width: u32, height: u32) -> Result<Self, StreamError> {
-        // Guard against zero / overflow / device limits before allocating.
-        let pixels = width
-            .checked_mul(height)
-            .filter(|&p| p > 0 && p <= i32::MAX as u32)
-            .ok_or(StreamError::InvalidDimensions {
-                width,
-                height,
-                reason: "width*height must be non-zero and <= i32::MAX",
-            })?;
-        width
-            .checked_mul(BYTES_PER_PIXEL)
-            .ok_or(StreamError::InvalidDimensions {
-                width,
-                height,
-                reason: "row byte size overflows u32",
-            })?;
-        let _ = pixels;
+        // Guard against zero / overflow before allocating (device limits below).
+        check_dimensions(width, height)?;
 
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
@@ -429,6 +437,10 @@ pub fn run_stream<R: Read, W: Write>(
     width: u32,
     height: u32,
 ) -> Result<(), StreamError> {
+    // Validate dimensions up front so schema construction (which multiplies
+    // width*height) can't overflow before BatchRenderer's guard runs.
+    check_dimensions(width, height)?;
+
     let reader = StreamReader::try_new(input, None)?;
     check_version(reader.schema().as_ref())?;
 
@@ -562,6 +574,20 @@ mod tests {
     fn version_check_allows_absent_and_matching() {
         assert!(check_version(&Schema::empty()).is_ok());
         assert!(check_version(&input_schema()).is_ok());
+    }
+
+    #[test]
+    fn check_dimensions_rejects_zero_and_overflow() {
+        assert!(check_dimensions(4, 3).is_ok());
+        assert!(matches!(
+            check_dimensions(0, 3),
+            Err(StreamError::InvalidDimensions { .. })
+        ));
+        // width*height overflows u32 / exceeds i32::MAX.
+        assert!(matches!(
+            check_dimensions(100_000, 100_000),
+            Err(StreamError::InvalidDimensions { .. })
+        ));
     }
 
     #[test]
