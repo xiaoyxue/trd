@@ -1,0 +1,25 @@
+[package]
+name = "trd-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "trd-app"
+path = "src/main.rs"
+
+[dependencies]
+trd-core.workspace = true
+
+# trd-app is the interactive native desktop window (winit + a live wgpu surface).
+# The windowing stack is native-only; on wasm the crate compiles to an empty
+# `main` (see the cfg gate in src/main.rs) so workspace-wide wasm builds skip it,
+# mirroring how trd-wasm is empty on native. The browser target is trd-wasm.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+wgpu = "30"
+winit = "0.30"
+pollster = "0.4"
+env_logger = "0.11"
+log = "0.4"
+thiserror = "2"

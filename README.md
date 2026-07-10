@@ -10,6 +10,7 @@ thin bootstrap wrapper only — no WebGPU API is called from JS.
 
 - `crates/trd-core` — platform-agnostic wgpu render core (shared by all targets)
 - `crates/trd-cli` — native headless CLI; renders to a PNG
+- `crates/trd-app` — native interactive window (winit + a live wgpu surface)
 - `crates/trd-wasm` — `wasm-bindgen` entry point; packaged as the `trd-wasm`
   npm library via `wasm-pack` (output in `crates/trd-wasm/pkg`, gitignored)
 - `web/` — bun-managed thin TypeScript wrapper that consumes the `trd-wasm`
@@ -44,6 +45,17 @@ it selected. Set `RUST_LOG=info` for more detail.
   ```
   The dev shell auto-detects WSL2 (`/dev/dxg`) and sets `GALLIUM_DRIVER=d3d12`
   plus the Windows GPU library path, so only `WGPU_BACKEND=gl` is needed.
+
+### Native window (interactive)
+
+Opens a window and renders the triangle into a live wgpu surface (the desktop
+counterpart of the browser wasm target):
+
+```sh
+cargo run -p trd-app
+```
+
+It honours `WGPU_BACKEND` / `RUST_LOG` like the CLI. Close the window to exit.
 
 ### Tests
 

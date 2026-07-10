@@ -5,7 +5,8 @@ Guidance for agents working in this repository.
 ## Architecture
 
 - **Rust + wgpu is the single unified rendering core** (`crates/trd-core`).
-  The same core renders natively (CLI) and in the browser (compiled to wasm).
+  The same core renders natively (headless CLI and an interactive window) and
+  in the browser (compiled to wasm).
 - **JS/TS is a thin bootstrap wrapper only.** Do not call the WebGPU API
   directly from JavaScript; all rendering logic lives in Rust.
 - **Vertical slicing.** Each increment threads the whole stack and is

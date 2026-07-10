@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/trd-core",
     "crates/trd-cli",
+    "crates/trd-app",
     "crates/trd-wasm",
 ]
 
