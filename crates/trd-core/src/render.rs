@@ -104,6 +104,10 @@ pub(crate) fn create_params_binding(
 }
 
 /// Writes `params` into an existing params uniform buffer.
+///
+/// Only used by the native batch renderer; the wasm one-shot path rebuilds the
+/// binding each frame via [`create_params_binding`].
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn write_params(queue: &wgpu::Queue, buffer: &wgpu::Buffer, params: FrameParams) {
     queue.write_buffer(buffer, 0, bytemuck::bytes_of(&Uniform::from(params)));
 }

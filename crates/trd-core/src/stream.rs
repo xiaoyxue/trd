@@ -74,9 +74,12 @@ pub fn input_schema() -> Schema {
         Field::new("theta", DataType::Float32, false),
     ])
     .with_metadata(
-        [(PROTOCOL_VERSION_KEY.to_string(), PROTOCOL_VERSION.to_string())]
-            .into_iter()
-            .collect(),
+        [(
+            PROTOCOL_VERSION_KEY.to_string(),
+            PROTOCOL_VERSION.to_string(),
+        )]
+        .into_iter()
+        .collect(),
     )
 }
 
@@ -243,7 +246,11 @@ impl BatchRenderer {
 
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("trd render target"),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -290,7 +297,9 @@ impl BatchRenderer {
 
         let mut encoder = self
             .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("trd frame") });
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("trd frame"),
+            });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("trd frame pass"),
@@ -327,7 +336,11 @@ impl BatchRenderer {
                     rows_per_image: Some(self.height),
                 },
             },
-            wgpu::Extent3d { width: self.width, height: self.height, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: self.width,
+                height: self.height,
+                depth_or_array_layers: 1,
+            },
         );
         self.queue.submit(Some(encoder.finish()));
 
@@ -380,9 +393,12 @@ pub fn output_schema(width: u32, height: u32) -> Result<Schema, StreamError> {
         .collect::<Result<Vec<_>, _>>()?
         .into();
     Ok(Schema::new(fields).with_metadata(
-        [(PROTOCOL_VERSION_KEY.to_string(), PROTOCOL_VERSION.to_string())]
-            .into_iter()
-            .collect(),
+        [(
+            PROTOCOL_VERSION_KEY.to_string(),
+            PROTOCOL_VERSION.to_string(),
+        )]
+        .into_iter()
+        .collect(),
     ))
 }
 
@@ -455,8 +471,7 @@ mod tests {
             Arc::new(Float32Array::from(flat_center)),
             None,
         );
-        let size =
-            FixedSizeListArray::new(item, 2, Arc::new(Float32Array::from(flat_size)), None);
+        let size = FixedSizeListArray::new(item, 2, Arc::new(Float32Array::from(flat_size)), None);
         let theta = Float32Array::from(thetas);
         RecordBatch::try_new(
             schema,
@@ -473,7 +488,11 @@ mod tests {
     fn decodes_frames_roundtrip() {
         let frames = vec![
             FrameParams::IDENTITY,
-            FrameParams { center: [0.1, -0.2], size: [0.5, 0.5], theta: 1.25 },
+            FrameParams {
+                center: [0.1, -0.2],
+                size: [0.5, 0.5],
+                theta: 1.25,
+            },
         ];
         let batch = build_input_batch(&frames);
         let decoded = decode_frames(&batch).unwrap();
@@ -510,12 +529,19 @@ mod tests {
         let theta = Int32Array::from(vec![3]);
         let batch = RecordBatch::try_new(
             schema,
-            vec![Arc::new(center) as ArrayRef, Arc::new(size), Arc::new(theta)],
+            vec![
+                Arc::new(center) as ArrayRef,
+                Arc::new(size),
+                Arc::new(theta),
+            ],
         )
         .unwrap();
         assert!(matches!(
             decode_frames(&batch),
-            Err(StreamError::ColumnType { column: "theta", .. })
+            Err(StreamError::ColumnType {
+                column: "theta",
+                ..
+            })
         ));
     }
 
@@ -542,13 +568,19 @@ mod tests {
     fn output_schema_is_fixed_shape_tensor() {
         let schema = output_schema(4, 3).unwrap();
         assert_eq!(
-            schema.metadata().get(PROTOCOL_VERSION_KEY).map(String::as_str),
+            schema
+                .metadata()
+                .get(PROTOCOL_VERSION_KEY)
+                .map(String::as_str),
             Some(PROTOCOL_VERSION)
         );
         for name in ["r", "g", "b", "a"] {
             let field = schema.field_with_name(name).unwrap();
             assert_eq!(
-                field.metadata().get("ARROW:extension:name").map(String::as_str),
+                field
+                    .metadata()
+                    .get("ARROW:extension:name")
+                    .map(String::as_str),
                 Some("arrow.fixed_shape_tensor")
             );
             match field.data_type() {
@@ -617,7 +649,8 @@ mod tests {
         assert_eq!(row0(&a, 0, corner), 255);
         // Center pixel is inside the triangle (non-black).
         let center = (h as usize / 2) * w as usize + w as usize / 2;
-        let cbright = row0(&r, 0, center) as u32 + row0(&g, 0, center) as u32 + row0(&b, 0, center) as u32;
+        let cbright =
+            row0(&r, 0, center) as u32 + row0(&g, 0, center) as u32 + row0(&b, 0, center) as u32;
         assert!(cbright > 0, "center should be inside the triangle");
         // Rotation changes the image between the first and a later frame.
         let last = frames.len() - 1;
