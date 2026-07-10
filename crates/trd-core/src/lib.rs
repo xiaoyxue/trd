@@ -15,7 +15,7 @@ pub use native::{render_to_png, RenderError};
 #[cfg(not(target_arch = "wasm32"))]
 mod stream;
 #[cfg(not(target_arch = "wasm32"))]
-pub use stream::StreamError;
+pub use stream::{input_schema, output_schema, run_stream, StreamError};
 
 /// Returns the project greeting used by the CLI and web entry points.
 pub fn greeting() -> String {

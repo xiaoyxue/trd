@@ -104,7 +104,6 @@ pub(crate) fn create_params_binding(
 }
 
 /// Writes `params` into an existing params uniform buffer.
-#[allow(dead_code)]
 pub(crate) fn write_params(queue: &wgpu::Queue, buffer: &wgpu::Buffer, params: FrameParams) {
     queue.write_buffer(buffer, 0, bytemuck::bytes_of(&Uniform::from(params)));
 }

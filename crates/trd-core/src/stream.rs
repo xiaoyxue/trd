@@ -6,8 +6,13 @@
 use std::sync::Arc;
 
 use arrow::array::{Array, FixedSizeListArray, Float32Array, RecordBatch};
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::array::{FixedSizeListArray as U8List, UInt8Array};
+use arrow::datatypes::{DataType, Field, Fields, Schema};
 use arrow::error::ArrowError;
+use arrow::ipc::reader::StreamReader;
+use arrow::ipc::writer::StreamWriter;
+use arrow_schema::extension::FixedShapeTensor;
+use std::io::{Read, Write};
 
 use crate::render::FrameParams;
 
@@ -154,6 +159,285 @@ pub fn decode_frames(batch: &RecordBatch) -> Result<Vec<FrameParams>, StreamErro
         .collect())
 }
 
+const BYTES_PER_PIXEL: u32 = 4;
+
+/// A persistent GPU context that renders one [`FrameParams`] to tightly-packed
+/// row-major RGBA bytes (`width*height*4`) per call.
+pub struct BatchRenderer {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    pipeline: wgpu::RenderPipeline,
+    uniform: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+    texture: wgpu::Texture,
+    staging: wgpu::Buffer,
+    width: u32,
+    height: u32,
+    padded_bytes_per_row: u32,
+}
+
+impl BatchRenderer {
+    /// Builds the GPU context (instance/adapter/device/pipeline/target/readback)
+    /// once for a fixed `width` x `height`.
+    pub fn new(width: u32, height: u32) -> Result<Self, StreamError> {
+        pollster::block_on(Self::new_async(width, height))
+    }
+
+    async fn new_async(width: u32, height: u32) -> Result<Self, StreamError> {
+        // Guard against zero / overflow / device limits before allocating.
+        let pixels = width
+            .checked_mul(height)
+            .filter(|&p| p > 0 && p <= i32::MAX as u32)
+            .ok_or(StreamError::InvalidDimensions {
+                width,
+                height,
+                reason: "width*height must be non-zero and <= i32::MAX",
+            })?;
+        width
+            .checked_mul(BYTES_PER_PIXEL)
+            .ok_or(StreamError::InvalidDimensions {
+                width,
+                height,
+                reason: "row byte size overflows u32",
+            })?;
+        let _ = pixels;
+
+        let instance =
+            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions::default())
+            .await
+            .map_err(|e| StreamError::Render(e.to_string()))?;
+        let info = adapter.get_info();
+        log::info!(
+            "using {:?} adapter \"{}\" ({:?})",
+            info.backend,
+            info.name,
+            info.device_type
+        );
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("trd device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::downlevel_defaults(),
+                experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                memory_hints: wgpu::MemoryHints::MemoryUsage,
+                trace: wgpu::Trace::Off,
+            })
+            .await
+            .map_err(|e| StreamError::Render(e.to_string()))?;
+
+        let max_dim = device.limits().max_texture_dimension_2d;
+        if width > max_dim || height > max_dim {
+            return Err(StreamError::InvalidDimensions {
+                width,
+                height,
+                reason: "exceeds adapter max_texture_dimension_2d",
+            });
+        }
+
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let pipeline = crate::render::create_triangle_pipeline(&device, format);
+        let (uniform, bind_group) =
+            crate::render::create_params_binding(&device, &pipeline, FrameParams::IDENTITY);
+
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("trd render target"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+
+        let unpadded = width * BYTES_PER_PIXEL;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded_bytes_per_row = unpadded.div_ceil(align) * align;
+        let staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("trd readback buffer"),
+            size: u64::from(padded_bytes_per_row) * u64::from(height),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        Ok(Self {
+            device,
+            queue,
+            pipeline,
+            uniform,
+            bind_group,
+            texture,
+            staging,
+            width,
+            height,
+            padded_bytes_per_row,
+        })
+    }
+
+    /// Renders `params` and returns tightly-packed row-major RGBA bytes
+    /// (`width*height*4`).
+    pub fn render(&mut self, params: FrameParams) -> Result<Vec<u8>, StreamError> {
+        pollster::block_on(self.render_async(params))
+    }
+
+    async fn render_async(&mut self, params: FrameParams) -> Result<Vec<u8>, StreamError> {
+        crate::render::write_params(&self.queue, &self.uniform, params);
+        let view = self
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("trd frame") });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("trd frame pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &self.bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &self.staging,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(self.padded_bytes_per_row),
+                    rows_per_image: Some(self.height),
+                },
+            },
+            wgpu::Extent3d { width: self.width, height: self.height, depth_or_array_layers: 1 },
+        );
+        self.queue.submit(Some(encoder.finish()));
+
+        let slice = self.staging.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|e| StreamError::Render(e.to_string()))?;
+        rx.recv()
+            .expect("map_async callback dropped")
+            .map_err(|e| StreamError::Render(e.to_string()))?;
+
+        let unpadded = (self.width * BYTES_PER_PIXEL) as usize;
+        let mut pixels = Vec::with_capacity(unpadded * self.height as usize);
+        {
+            let mapped = slice.get_mapped_range().expect("buffer mapped after poll");
+            for row in 0..self.height as usize {
+                let start = row * self.padded_bytes_per_row as usize;
+                pixels.extend_from_slice(&mapped[start..start + unpadded]);
+            }
+        }
+        self.staging.unmap();
+        Ok(pixels)
+    }
+}
+
+/// Builds a `fixed_shape_tensor<u8>` field of shape `[height, width]`.
+fn tensor_field(name: &str, width: u32, height: u32) -> Result<Field, StreamError> {
+    let storage = DataType::FixedSizeList(
+        Arc::new(Field::new("item", DataType::UInt8, false)),
+        (width * height) as i32,
+    );
+    let ext = FixedShapeTensor::try_new(
+        DataType::UInt8,
+        vec![height as usize, width as usize],
+        None,
+        None,
+    )?;
+    Ok(Field::new(name, storage, false).with_extension_type(ext))
+}
+
+/// Builds the protocol 0.0.1 output schema (`r,g,b,a` tensors + version).
+pub fn output_schema(width: u32, height: u32) -> Result<Schema, StreamError> {
+    let fields: Fields = ["r", "g", "b", "a"]
+        .into_iter()
+        .map(|n| tensor_field(n, width, height))
+        .collect::<Result<Vec<_>, _>>()?
+        .into();
+    Ok(Schema::new(fields).with_metadata(
+        [(PROTOCOL_VERSION_KEY.to_string(), PROTOCOL_VERSION.to_string())]
+            .into_iter()
+            .collect(),
+    ))
+}
+
+/// Builds one channel column: a `FixedSizeList<u8>[W*H]` with `rows` entries,
+/// pulling byte `channel` from each frame's interleaved RGBA plane.
+fn channel_column(frames: &[Vec<u8>], channel: usize, pixels: usize) -> Arc<U8List> {
+    let mut values: Vec<u8> = Vec::with_capacity(frames.len() * pixels);
+    for frame in frames {
+        for px in 0..pixels {
+            values.push(frame[px * 4 + channel]);
+        }
+    }
+    let item = Arc::new(Field::new("item", DataType::UInt8, false));
+    Arc::new(U8List::new(
+        item,
+        pixels as i32,
+        Arc::new(UInt8Array::from(values)),
+        None,
+    ))
+}
+
+/// Reads an Arrow IPC stream of frame params from `input`, renders each row,
+/// and writes an Arrow IPC stream of `fixed_shape_tensor` images to `output`.
+/// Output batch boundaries mirror input batches (one batch in flight).
+pub fn run_stream<R: Read, W: Write>(
+    input: R,
+    output: W,
+    width: u32,
+    height: u32,
+) -> Result<(), StreamError> {
+    let reader = StreamReader::try_new(input, None)?;
+    check_version(reader.schema().as_ref())?;
+
+    let out_schema = Arc::new(output_schema(width, height)?);
+    let mut writer = StreamWriter::try_new(output, &out_schema)?;
+    let mut renderer = BatchRenderer::new(width, height)?;
+    let pixels = (width * height) as usize;
+
+    for batch in reader {
+        let batch = batch?;
+        let frames = decode_frames(&batch)?;
+        let planes: Vec<Vec<u8>> = frames
+            .iter()
+            .map(|p| renderer.render(*p))
+            .collect::<Result<_, _>>()?;
+        let columns: Vec<arrow::array::ArrayRef> = (0..4)
+            .map(|c| channel_column(&planes, c, pixels) as arrow::array::ArrayRef)
+            .collect();
+        let out_batch = RecordBatch::try_new(out_schema.clone(), columns)?;
+        writer.write(&out_batch)?;
+    }
+    writer.finish()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -252,5 +536,92 @@ mod tests {
     fn version_check_allows_absent_and_matching() {
         assert!(check_version(&Schema::empty()).is_ok());
         assert!(check_version(&input_schema()).is_ok());
+    }
+
+    #[test]
+    fn output_schema_is_fixed_shape_tensor() {
+        let schema = output_schema(4, 3).unwrap();
+        assert_eq!(
+            schema.metadata().get(PROTOCOL_VERSION_KEY).map(String::as_str),
+            Some(PROTOCOL_VERSION)
+        );
+        for name in ["r", "g", "b", "a"] {
+            let field = schema.field_with_name(name).unwrap();
+            assert_eq!(
+                field.metadata().get("ARROW:extension:name").map(String::as_str),
+                Some("arrow.fixed_shape_tensor")
+            );
+            match field.data_type() {
+                DataType::FixedSizeList(_, 12) => {} // 4*3
+                other => panic!("unexpected storage type: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    fn run_stream_renders_rotating_triangle() {
+        let (w, h) = (32u32, 32u32);
+        let frames: Vec<FrameParams> = (0..6)
+            .map(|i| FrameParams {
+                center: [0.0, 0.0],
+                size: [1.0, 1.0],
+                theta: i as f32 * std::f32::consts::PI / 6.0,
+            })
+            .collect();
+
+        // Encode input to an in-memory Arrow IPC stream.
+        let mut input_bytes = Vec::new();
+        {
+            let schema = Arc::new(input_schema());
+            let mut wr = StreamWriter::try_new(&mut input_bytes, &schema).unwrap();
+            wr.write(&build_input_batch(&frames)).unwrap();
+            wr.finish().unwrap();
+        }
+
+        let mut output_bytes = Vec::new();
+        run_stream(&input_bytes[..], &mut output_bytes, w, h).unwrap();
+
+        // Decode output and assert per-frame invariants.
+        let reader = StreamReader::try_new(&output_bytes[..], None).unwrap();
+        let batches: Vec<RecordBatch> = reader.map(|b| b.unwrap()).collect();
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, frames.len());
+
+        let batch = &batches[0];
+        let pixels = (w * h) as usize;
+        let get = |name: &str| -> U8List {
+            batch
+                .column_by_name(name)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<U8List>()
+                .unwrap()
+                .clone()
+        };
+        let (r, g, b, a) = (get("r"), get("g"), get("b"), get("a"));
+        assert_eq!(r.value_length(), pixels as i32);
+
+        let row0 = |ch: &U8List, row: usize, i: usize| -> u8 {
+            ch.value(row)
+                .as_any()
+                .downcast_ref::<UInt8Array>()
+                .unwrap()
+                .value(i)
+        };
+        // Top-left corner is background black; alpha opaque everywhere.
+        let corner = 0usize;
+        assert_eq!(row0(&r, 0, corner), 0);
+        assert_eq!(row0(&g, 0, corner), 0);
+        assert_eq!(row0(&b, 0, corner), 0);
+        assert_eq!(row0(&a, 0, corner), 255);
+        // Center pixel is inside the triangle (non-black).
+        let center = (h as usize / 2) * w as usize + w as usize / 2;
+        let cbright = row0(&r, 0, center) as u32 + row0(&g, 0, center) as u32 + row0(&b, 0, center) as u32;
+        assert!(cbright > 0, "center should be inside the triangle");
+        // Rotation changes the image between the first and a later frame.
+        let last = frames.len() - 1;
+        let differs = (0..pixels).any(|i| row0(&r, 0, i) != row0(&r, last, i));
+        assert!(differs, "rotation should change pixels across frames");
     }
 }
