@@ -8,12 +8,17 @@ thin bootstrap wrapper only — no WebGPU API is called from JS.
 
 ## Layout
 
-- `crates/trd-core` — platform-agnostic wgpu render core (shared by all targets)
-- `crates/trd-cli` — native headless CLI; renders to a PNG
+- `crates/trd-core` — unified Rust/wgpu render core:
+  - `render.rs` + `triangle.wgsl` — cross-platform parametric triangle renderer
+  - `stream.rs` — native Arrow protocol, persistent GPU batch renderer, and
+    Arrow IPC stdin/stdout pipeline
+- `crates/trd-cli` — thin native headless CLI; Arrow IPC stdin → Arrow IPC stdout
 - `crates/trd-wasm` — `wasm-bindgen` entry point; packaged as the `trd-wasm`
   npm library via `wasm-pack` (output in `crates/trd-wasm/pkg`, gitignored)
 - `web/` — bun-managed thin TypeScript wrapper that consumes the `trd-wasm`
   package
+- `examples/` — runnable JSONL animation example and `render.sh` wrapper
+- `scripts/encode.py` — Arrow tensor stream → ffmpeg GIF/WebP adapter
 
 ## Development
 
@@ -23,6 +28,10 @@ Everything runs inside the Nix dev shell (pinned Rust toolchain, `bun`,
 ```sh
 nix develop
 ```
+
+All commands below assume this shell is active. DuckDB is intentionally an
+external dependency because its Arrow output is a runtime community extension;
+install it separately or provide it on `PATH`.
 
 ### Native CLI (Arrow streaming renderer)
 
@@ -37,16 +46,20 @@ in [`examples/frames.jsonl`](examples/frames.jsonl) (one JSON object per frame:
 `center`, `size`, `theta`). Render it to a GIF with the wrapper script:
 
 ```sh
-# on WSL, prefix with WGPU_BACKEND=gl for GPU rendering (else software)
+# First enter the project environment:
+nix develop
+
+# Then render. On WSL, prefix with WGPU_BACKEND=gl for GPU rendering.
 examples/render.sh examples/frames.jsonl out.gif
 # examples/render.sh [INPUT.jsonl] [OUTPUT.gif|.webp] [WIDTH] [HEIGHT] [FPS]
 ```
 
-It requires `duckdb` (e.g. `nix run nixpkgs#duckdb`), `cargo`, `uv`, and
-`ffmpeg` on `PATH`. Under the hood it is a fully-piped JSONL -> DuckDB -> trd ->
-ffmpeg flow (no intermediate files) — **DuckDB** reads the JSONL, casts the
-`[x, y]` arrays to fixed-size `FLOAT[2]` (Arrow `FixedSizeList<f32>[2]`), and
-streams Arrow IPC to stdout:
+The Nix shell provides `cargo`, `uv`, and `ffmpeg`; `duckdb` must also be on
+`PATH`. The script checks these prerequisites before starting, so a missing tool
+cannot cause a misleading downstream Arrow error. Under the hood it is a
+fully-piped JSONL -> DuckDB -> trd -> ffmpeg flow (no intermediate files) —
+**DuckDB** reads the JSONL, casts the `[x, y]` arrays to fixed-size `FLOAT[2]`
+(Arrow `FixedSizeList<f32>[2]`), and streams Arrow IPC to stdout:
 
 ```sh
 duckdb -c "INSTALL arrow FROM community; LOAD arrow;
@@ -68,8 +81,10 @@ duckdb -c "INSTALL arrow FROM community; LOAD arrow;
 ### Tests
 
 ```sh
-cargo test --workspace            # fast, no GPU
-cargo test --workspace -- --ignored   # GPU-gated render tests (needs a GPU)
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace                 # fast; GPU tests are skipped
+cargo test --workspace -- --ignored    # GPU-gated render tests
 ```
 
 ### Web (wasm)

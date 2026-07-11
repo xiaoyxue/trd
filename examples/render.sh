@@ -8,7 +8,8 @@
 #   examples/render.sh [INPUT.jsonl] [OUTPUT.gif|.webp] [WIDTH] [HEIGHT] [FPS]
 # Defaults: examples/frames.jsonl  out.gif  256 256 30
 #
-# Requires on PATH: duckdb (e.g. `nix run nixpkgs#duckdb`), cargo, uv, ffmpeg.
+# Run from `nix develop`. Also requires duckdb on PATH (for example, install it
+# system-wide or start the shell with a profile that provides it).
 # On WSL, prefix with WGPU_BACKEND=gl for GPU rendering (else it uses software).
 set -euo pipefail
 
@@ -19,10 +20,13 @@ width="${3:-256}"
 height="${4:-256}"
 fps="${5:-30}"
 
-if ! command -v duckdb >/dev/null 2>&1; then
-  echo "error: duckdb not found on PATH (try: nix run nixpkgs#duckdb)" >&2
-  exit 1
-fi
+for tool in cargo uv ffmpeg duckdb; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "error: $tool not found on PATH" >&2
+    echo "run this example inside 'nix develop'; duckdb is an external dependency" >&2
+    exit 1
+  fi
+done
 
 # DuckDB reads the JSONL, casts the [x,y] arrays to fixed-size FLOAT[2]
 # (Arrow FixedSizeList<f32>[2]), and streams Arrow IPC (FORMAT arrows) to stdout.
