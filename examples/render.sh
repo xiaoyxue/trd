@@ -19,6 +19,8 @@ output="${2:-out.gif}"
 width="${3:-256}"
 height="${4:-256}"
 fps="${5:-30}"
+# DuckDB SQL string literals escape a single quote by doubling it.
+sql_input=${input//\'/\'\'}
 
 for tool in cargo uv ffmpeg duckdb; do
   if ! command -v "$tool" >/dev/null 2>&1; then
@@ -34,7 +36,7 @@ done
 duckdb -c "INSTALL arrow FROM community; LOAD arrow;
   COPY (
     SELECT center::FLOAT[2] AS center, size::FLOAT[2] AS size, theta::FLOAT AS theta
-    FROM read_json_auto('$input')
+    FROM read_json_auto('$sql_input')
   ) TO '/dev/stdout' (FORMAT arrows);" \
   | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-cli -- --width "$width" --height "$height" \
   | uv run --with pyarrow --with numpy "$root/scripts/encode.py" --fps "$fps" -o "$output"
