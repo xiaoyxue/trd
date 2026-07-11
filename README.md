@@ -34,16 +34,22 @@ batch is in flight at a time.
 Frame parameters are just columnar data, so any tool that emits the input
 columns as an Arrow IPC stream can drive the renderer. The example input lives
 in [`examples/frames.jsonl`](examples/frames.jsonl) (one JSON object per frame:
-`center`, `size`, `theta`), and **DuckDB** turns it into the protocol stream —
-reading the JSONL, casting the `[x, y]` arrays to fixed-size `FLOAT[2]` (Arrow
-`FixedSizeList<f32>[2]`), and streaming Arrow IPC to stdout:
+`center`, `size`, `theta`). Render it to a GIF with the wrapper script:
 
 ```sh
-# One-time: install DuckDB's Arrow output extension.
-duckdb -c "INSTALL arrow FROM community;"
+# on WSL, prefix with WGPU_BACKEND=gl for GPU rendering (else software)
+examples/render.sh examples/frames.jsonl out.gif
+# examples/render.sh [INPUT.jsonl] [OUTPUT.gif|.webp] [WIDTH] [HEIGHT] [FPS]
+```
 
-# JSONL -> DuckDB (Arrow IPC) -> trd -> ffmpeg GIF, fully piped (no temp files):
-duckdb -c "LOAD arrow;
+It requires `duckdb` (e.g. `nix run nixpkgs#duckdb`), `cargo`, `uv`, and
+`ffmpeg` on `PATH`. Under the hood it is a fully-piped JSONL -> DuckDB -> trd ->
+ffmpeg flow (no intermediate files) — **DuckDB** reads the JSONL, casts the
+`[x, y]` arrays to fixed-size `FLOAT[2]` (Arrow `FixedSizeList<f32>[2]`), and
+streams Arrow IPC to stdout:
+
+```sh
+duckdb -c "INSTALL arrow FROM community; LOAD arrow;
   COPY (
     SELECT center::FLOAT[2] AS center, size::FLOAT[2] AS size, theta::FLOAT AS theta
     FROM read_json_auto('examples/frames.jsonl')
@@ -52,10 +58,9 @@ duckdb -c "LOAD arrow;
   | uv run --with pyarrow --with numpy scripts/encode.py --fps 30 -o out.gif
 ```
 
-- DuckDB (an external tool — e.g. `nix run nixpkgs#duckdb`, or your system
-  package) reads the JSONL and emits the input Arrow stream. `FORMAT arrows`
-  (plural) is the streaming IPC format. The protocol version metadata is
-  optional, so DuckDB's stream is accepted as-is.
+- DuckDB (an external tool) emits the input stream. `FORMAT arrows` (plural) is
+  the streaming IPC format. The protocol version metadata is optional, so
+  DuckDB's stream is accepted as-is.
 - `trd` renders each row to `r,g,b,a` `fixed_shape_tensor<u8>` channels.
 - `scripts/encode.py` decodes the tensors and pipes RGBA frames to ffmpeg
   (`.gif` or `.webp` by output extension). On non-WSL GPUs, drop `WGPU_BACKEND=gl`.
