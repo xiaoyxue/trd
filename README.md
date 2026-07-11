@@ -31,16 +31,31 @@ parameters on stdin and writes an Arrow IPC stream of rendered images on stdout
 (trd stream protocol 0.0.1). It never buffers the whole animation — one record
 batch is in flight at a time.
 
-Generate an animation fully via pipes (no intermediate files), using pyarrow +
-ffmpeg for the input/output glue:
+Frame parameters are just columnar data, so any tool that emits the input
+columns as an Arrow IPC stream can drive the renderer. The example input lives
+in [`examples/frames.jsonl`](examples/frames.jsonl) (one JSON object per frame:
+`center`, `size`, `theta`), and **DuckDB** turns it into the protocol stream —
+reading the JSONL, casting the `[x, y]` arrays to fixed-size `FLOAT[2]` (Arrow
+`FixedSizeList<f32>[2]`), and streaming Arrow IPC to stdout:
 
 ```sh
-uv run --with pyarrow --with numpy scripts/gen_frames.py --frames 60 \
+# One-time: install DuckDB's Arrow output extension.
+duckdb -c "INSTALL arrow FROM community;"
+
+# JSONL -> DuckDB (Arrow IPC) -> trd -> ffmpeg GIF, fully piped (no temp files):
+duckdb -c "LOAD arrow;
+  COPY (
+    SELECT center::FLOAT[2] AS center, size::FLOAT[2] AS size, theta::FLOAT AS theta
+    FROM read_json_auto('examples/frames.jsonl')
+  ) TO '/dev/stdout' (FORMAT arrows);" \
   | WGPU_BACKEND=gl cargo run -q -p trd-cli -- --width 256 --height 256 \
   | uv run --with pyarrow --with numpy scripts/encode.py --fps 30 -o out.gif
 ```
 
-- `scripts/gen_frames.py` sweeps `theta` and emits the input Arrow stream.
+- DuckDB (an external tool — e.g. `nix run nixpkgs#duckdb`, or your system
+  package) reads the JSONL and emits the input Arrow stream. `FORMAT arrows`
+  (plural) is the streaming IPC format. The protocol version metadata is
+  optional, so DuckDB's stream is accepted as-is.
 - `trd` renders each row to `r,g,b,a` `fixed_shape_tensor<u8>` channels.
 - `scripts/encode.py` decodes the tensors and pipes RGBA frames to ffmpeg
   (`.gif` or `.webp` by output extension). On non-WSL GPUs, drop `WGPU_BACKEND=gl`.
