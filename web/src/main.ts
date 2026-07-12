@@ -12,7 +12,7 @@ import wasmUrl from "trd-wasm/trd_wasm_bg.wasm" with { type: "file" };
 
 const canvas = document.getElementById("trd-canvas");
 if (!(canvas instanceof HTMLCanvasElement)) {
-  throw new Error("expected a <canvas id=\"trd-canvas\"> element");
+  throw new Error('expected a <canvas id="trd-canvas"> element');
 }
 
 await init({ module_or_path: wasmUrl });
