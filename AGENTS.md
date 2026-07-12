@@ -19,7 +19,8 @@ Guidance for agents working in this repository.
   and Vulkan) for local iteration and GPU work.
 - The flake is the build system, not just a dev shell. Prefer the real outputs:
   - `nix build .#trd-cli` — native CLI binary (`trd`), wrapped with the Vulkan/
-    GL runtime libs. `nix run .#trd -- --output out.png` renders.
+    GL runtime libs. `nix run .#trd -- --width 256 --height 256` runs the Arrow
+    stream filter (frames on stdin -> images on stdout).
   - `nix build .#trd-wasm` — the `wasm-bindgen` JS/TS library package (built with
     `wasm-bindgen-cli` + `wasm-opt`, replacing `wasm-pack` in the nix build).
   - `nix build .#web` (also `.#`) — the bun-bundled, HTTP-servable `dist/`.
