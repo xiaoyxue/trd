@@ -294,6 +294,8 @@
               biome
               typescript
               static-web-server
+              ffmpeg
+              uv
               vulkan-loader
               vulkan-tools
               pkg-config
