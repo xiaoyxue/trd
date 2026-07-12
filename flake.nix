@@ -38,6 +38,8 @@
             wasm-bindgen-cli
             wasm-pack
             binaryen
+            ffmpeg
+            uv
             vulkan-loader
             vulkan-tools
             pkg-config

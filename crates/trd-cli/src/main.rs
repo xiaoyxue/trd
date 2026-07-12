@@ -1,38 +1,34 @@
-//! trd-cli: native headless entry point for the trd rendering core.
+//! trd-cli: native headless entry point.
+//!
+//! Reads an Arrow IPC stream of per-frame params on stdin and writes an Arrow
+//! IPC stream of rendered images on stdout (trd protocol 0.0.1).
 
-use std::path::PathBuf;
+use std::io::{self, Write};
 
 use clap::Parser;
 
-/// Headless renderer for trd. Renders the hello-triangle to a PNG file.
+/// Streaming Arrow renderer for trd (protocol 0.0.1).
 #[derive(Parser)]
 #[command(name = "trd", version, about)]
 struct Cli {
     /// Output image width in pixels.
-    #[arg(long, default_value_t = 512, value_parser = clap::value_parser!(u32).range(1..))]
+    #[arg(long, default_value_t = 256, value_parser = clap::value_parser!(u32).range(1..))]
     width: u32,
     /// Output image height in pixels.
-    #[arg(long, default_value_t = 512, value_parser = clap::value_parser!(u32).range(1..))]
+    #[arg(long, default_value_t = 256, value_parser = clap::value_parser!(u32).range(1..))]
     height: u32,
-    /// Path to write the PNG file to.
-    #[arg(long, short, default_value = "triangle.png")]
-    output: PathBuf,
 }
 
-fn main() -> Result<(), trd_core::RenderError> {
+fn main() -> Result<(), trd_core::StreamError> {
     env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("warn,trd_core=info"),
     )
     .init();
 
     let cli = Cli::parse();
-    println!("{}", trd_core::greeting());
-    trd_core::render_to_png(cli.width, cli.height, &cli.output)?;
-    println!(
-        "Rendered {}x{} triangle to {}",
-        cli.width,
-        cli.height,
-        cli.output.display()
-    );
+    let stdin = io::stdin().lock();
+    let stdout = io::stdout().lock();
+    trd_core::run_stream(stdin, stdout, cli.width, cli.height)?;
+    io::stdout().flush()?;
     Ok(())
 }

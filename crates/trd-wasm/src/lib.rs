@@ -65,7 +65,13 @@ pub async fn start(canvas: web_sys::HtmlCanvasElement) -> Result<(), JsValue> {
         .texture
         .create_view(&wgpu::TextureViewDescriptor::default());
 
-    trd_core::render_triangle(&device, &queue, &view, config.format);
+    trd_core::render_triangle(
+        &device,
+        &queue,
+        &view,
+        config.format,
+        trd_core::FrameParams::IDENTITY,
+    );
 
     queue.present(frame);
     Ok(())

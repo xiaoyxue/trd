@@ -5,12 +5,12 @@
 //! target and call into this crate.
 
 mod render;
-pub use render::render_triangle;
+pub use render::{create_triangle_pipeline, render_triangle, FrameParams};
 
 #[cfg(not(target_arch = "wasm32"))]
-mod native;
+mod stream;
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::{render_to_png, RenderError};
+pub use stream::{input_schema, output_schema, run_stream, StreamError};
 
 /// Returns the project greeting used by the CLI and web entry points.
 pub fn greeting() -> String {

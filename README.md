@@ -8,12 +8,17 @@ thin bootstrap wrapper only — no WebGPU API is called from JS.
 
 ## Layout
 
-- `crates/trd-core` — platform-agnostic wgpu render core (shared by all targets)
-- `crates/trd-cli` — native headless CLI; renders to a PNG
+- `crates/trd-core` — unified Rust/wgpu render core:
+  - `render.rs` + `triangle.wgsl` — cross-platform parametric triangle renderer
+  - `stream.rs` — native Arrow protocol, persistent GPU batch renderer, and
+    Arrow IPC stdin/stdout pipeline
+- `crates/trd-cli` — thin native headless CLI; Arrow IPC stdin → Arrow IPC stdout
 - `crates/trd-wasm` — `wasm-bindgen` entry point; packaged as the `trd-wasm`
   npm library via `wasm-pack` (output in `crates/trd-wasm/pkg`, gitignored)
 - `web/` — bun-managed thin TypeScript wrapper that consumes the `trd-wasm`
   package
+- `examples/` — runnable JSONL animation example and `render.sh` wrapper
+- `scripts/encode.py` — Arrow tensor stream → ffmpeg GIF/WebP adapter
 
 ## Development
 
@@ -24,32 +29,62 @@ Everything runs inside the Nix dev shell (pinned Rust toolchain, `bun`,
 nix develop
 ```
 
-### Native CLI (headless render to PNG)
+All commands below assume this shell is active. DuckDB is intentionally an
+external dependency because its Arrow output is a runtime community extension;
+install it separately or provide it on `PATH`.
+
+### Native CLI (Arrow streaming renderer)
+
+`trd` is a pure Arrow filter: it reads an Arrow IPC stream of per-frame
+parameters on stdin and writes an Arrow IPC stream of rendered images on stdout
+(trd stream protocol 0.0.1). It never buffers the whole animation — one record
+batch is in flight at a time.
+
+Frame parameters are just columnar data, so any tool that emits the input
+columns as an Arrow IPC stream can drive the renderer. The example input lives
+in [`examples/frames.jsonl`](examples/frames.jsonl) (one JSON object per frame:
+`center`, `size`, `theta`). Render it to a GIF with the wrapper script:
 
 ```sh
-cargo run -p trd-cli -- --width 512 --height 512 --output triangle.png
+# First enter the project environment:
+nix develop
+
+# Then render. On WSL, prefix with WGPU_BACKEND=gl for GPU rendering.
+examples/render.sh examples/frames.jsonl out.gif
+# examples/render.sh [INPUT.jsonl] [OUTPUT.gif|.webp] [WIDTH] [HEIGHT] [FPS]
 ```
 
-The renderer honours `WGPU_BACKEND` (e.g. `vulkan`, `gl`) and logs which adapter
-it selected. Set `RUST_LOG=info` for more detail.
+The Nix shell provides `cargo`, `uv`, and `ffmpeg`; `duckdb` must also be on
+`PATH`. The script checks these prerequisites before starting, so a missing tool
+cannot cause a misleading downstream Arrow error. Under the hood it is a
+fully-piped JSONL -> DuckDB -> trd -> ffmpeg flow (no intermediate files) —
+**DuckDB** reads the JSONL, casts the `[x, y]` arrays to fixed-size `FLOAT[2]`
+(Arrow `FixedSizeList<f32>[2]`), and streams Arrow IPC to stdout:
 
-#### GPU selection
+```sh
+duckdb -c "INSTALL arrow FROM community; LOAD arrow;
+  COPY (
+    SELECT center::FLOAT[2] AS center, size::FLOAT[2] AS size, theta::FLOAT AS theta
+    FROM read_json_auto('examples/frames.jsonl')
+  ) TO '/dev/stdout' (FORMAT arrows);" \
+  | WGPU_BACKEND=gl cargo run -q -p trd-cli -- --width 256 --height 256 \
+  | uv run --with pyarrow --with numpy scripts/encode.py --fps 30 -o out.gif
+```
 
-- **Native Linux / NVIDIA:** the default (Vulkan) backend uses the GPU directly.
-- **WSL2:** there is no native Linux Vulkan driver, so the default Vulkan
-  backend falls back to software (llvmpipe). For real GPU rendering, use the GL
-  backend over Mesa's D3D12 driver:
-  ```sh
-  WGPU_BACKEND=gl cargo run -p trd-cli -- --output triangle.png
-  ```
-  The dev shell auto-detects WSL2 (`/dev/dxg`) and sets `GALLIUM_DRIVER=d3d12`
-  plus the Windows GPU library path, so only `WGPU_BACKEND=gl` is needed.
+- DuckDB (an external tool) emits the input stream. `FORMAT arrows` (plural) is
+  the streaming IPC format. The protocol version metadata is optional, so
+  DuckDB's stream is accepted as-is.
+- `trd` renders each row to `r,g,b,a` `fixed_shape_tensor<u8>` channels.
+- `scripts/encode.py` decodes the tensors and pipes RGBA frames to ffmpeg
+  (`.gif` or `.webp` by output extension). On non-WSL GPUs, drop `WGPU_BACKEND=gl`.
 
 ### Tests
 
 ```sh
-cargo test --workspace            # fast, no GPU
-cargo test --workspace -- --ignored   # GPU-gated render tests (needs a GPU)
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace                 # fast; GPU tests are skipped
+cargo test --workspace -- --ignored    # GPU-gated render tests
 ```
 
 ### Web (wasm)
