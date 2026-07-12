@@ -50,6 +50,9 @@
           pkgs.${wasmBindgenCliAttr}
             or (throw "nixpkgs lacks ${wasmBindgenCliAttr} (to match Cargo.lock wasm-bindgen ${wasmBindgenVersion})");
 
+        # Single source of truth for the project version: the Cargo workspace.
+        workspaceVersion = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
+
         # The nix web build bundles offline: it provides the nix-built trd-wasm
         # as node_modules and skips `bun install`, and the tsc check supplies
         # typescript via nixpkgs. That shortcut is only valid while these are the
@@ -139,7 +142,7 @@
               {
                 "name": "trd-wasm",
                 "type": "module",
-                "version": "0.1.0",
+                "version": "${workspaceVersion}",
                 "main": "trd_wasm.js",
                 "types": "trd_wasm.d.ts",
                 "files": [
@@ -175,7 +178,7 @@
 
         web = pkgs.stdenv.mkDerivation {
           pname = "trd-web";
-          version = "0.1.0";
+          version = workspaceVersion;
           src = checkedWebSrc;
           nativeBuildInputs = [ pkgs.bun ];
           buildPhase = ''
