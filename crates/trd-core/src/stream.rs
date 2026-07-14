@@ -14,12 +14,8 @@ use arrow::ipc::writer::StreamWriter;
 use arrow_schema::extension::FixedShapeTensor;
 use std::io::{Read, Write};
 
+use crate::protocol::{PROTOCOL_VERSION, PROTOCOL_VERSION_KEY};
 use crate::render::FrameParams;
-
-/// The trd stream protocol version carried in schema metadata.
-pub const PROTOCOL_VERSION: &str = "0.0.1";
-/// Schema-metadata key for the protocol version.
-pub const PROTOCOL_VERSION_KEY: &str = "trd.protocol.version";
 
 /// Errors from decoding, validating, rendering, or encoding a trd stream.
 #[derive(Debug, thiserror::Error)]
