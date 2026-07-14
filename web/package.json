@@ -6,7 +6,10 @@
   "scripts": {
     "build:wasm": "wasm-pack build ../crates/trd-wasm --mode no-install --target web --out-dir pkg",
     "build": "bun run build:wasm && bun install && rm -rf dist && bun build ./index.html --outdir dist",
-    "dev": "bun run build:wasm && bun install && bun ./index.html"
+    "dev": "bun run build:wasm && bun install && bun ./index.html",
+    "typecheck": "tsc --noEmit",
+    "check": "biome ci .",
+    "format": "biome format --write ."
   },
   "dependencies": {
     "trd-wasm": "file:../crates/trd-wasm/pkg"

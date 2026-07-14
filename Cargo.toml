@@ -15,3 +15,6 @@ repository = "https://github.com/Hong-Xiang/trd"
 
 [workspace.dependencies]
 trd-core = { path = "crates/trd-core" }
+
+[workspace.metadata.crane]
+name = "trd"

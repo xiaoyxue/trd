@@ -16,11 +16,28 @@ Guidance for agents working in this repository.
 ## Toolchain
 
 - Enter the dev environment with `nix develop` (provides the pinned Rust
-  toolchain via rust-overlay, `bun`, `wasm-bindgen-cli`, and Vulkan).
-- Build/test/debug with plain `cargo` inside the dev shell.
-- The `web/` folder is bun-managed; run bun from inside `nix develop`.
+  toolchain via rust-overlay, `bun`, `wasm-bindgen-cli`, `biome`, `typescript`,
+  and Vulkan) for local iteration and GPU work.
+- The flake is the build system, not just a dev shell. Prefer the real outputs:
+  - `nix build .#trd-cli` — native CLI binary (`trd`), wrapped with the Vulkan/
+    GL runtime libs. `nix run .#trd -- --width 256 --height 256` runs the Arrow
+    stream filter (frames on stdin -> images on stdout).
+  - `nix build .#trd-wasm` — the `wasm-bindgen` JS/TS library package (built with
+    `wasm-bindgen-cli` + `wasm-opt`, replacing `wasm-pack` in the nix build).
+  - `nix build .#web` (also `.#`) — the bun-bundled, HTTP-servable `dist/`.
+    `nix run .#web` serves it (`PORT` overridable, defaults to 8080).
+  - `nix flake check` — every quality gate: `cargo fmt`, clippy (native + wasm32),
+    `cargo test`, `tsc --noEmit`, and Biome (format + lint). No GPU required.
+  - `nix fmt` — formats nix files (`nixfmt`).
+- Local `cargo` inside `nix develop` still works for fast iteration.
+- The `web/` folder is bun-managed; its lint/format gate is **Biome**
+  (`web/biome.json`). Run `bun run check` / `bun run format` / `bun run typecheck`
+  from inside `nix develop`.
+- **`nix build`/`nix flake check` only see git-tracked files.** `git add` new
+  files (e.g. a new `biome.json` or source file) before building, or the sandbox
+  won't include them.
 - We always work on GPU machines. GPU-dependent tests are marked `#[ignore]`
-  and run locally; simple CI skips them.
+  and run locally; CI skips them.
 - **WSL2 GPU:** NVIDIA ships no native Linux Vulkan ICD for WSL, so the Vulkan
   backend falls back to software (llvmpipe) and Mesa's `dzn` (Vulkan-on-D3D12)
   crashes at device creation. Use `WGPU_BACKEND=gl` for real GPU rendering via
