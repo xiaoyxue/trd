@@ -3,7 +3,7 @@
 
 Decodes the r,g,b,a fixed_shape_tensor channels and streams raw RGBA frames to
 ffmpeg (no intermediate files). Run via:
-  uv run --with pyarrow --with numpy scripts/encode.py --fps 30 -o out.gif
+  uv run --with pyarrow --with numpy scripts/encode.py --fps 30 -o output/out.gif
 """
 import argparse
 import subprocess

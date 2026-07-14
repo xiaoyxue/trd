@@ -105,13 +105,13 @@ accepted as-is.
 
 ```sh
 # Linux / macOS / WSL
-examples/render.sh            # render → out.gif
+examples/render.sh            # render → output/out.gif
 examples/render.sh --native   # play live in a window
 ```
 
 ```powershell
 # Windows (PowerShell 7)
-examples\render.ps1           # render → out.gif
+examples\render.ps1           # render → output/out.gif
 examples\render.ps1 -Native   # play live in a window
 ```
 
@@ -152,7 +152,7 @@ out. The `examples/render.*` wrappers build the whole JSONL → GIF pipeline for
 ```sh
 examples/render.sh  [INPUT.jsonl] [OUT.gif|.webp] [WIDTH] [HEIGHT] [FPS]   # Linux/macOS
 examples\render.ps1 [-InputPath]  [-Output]       [-Width] [-Height] [-Fps]  # Windows (PS7)
-# Defaults: examples/frames.jsonl → out.gif, 256×256 @ 30 fps
+# Defaults: examples/frames.jsonl → output/out.gif, 256×256 @ 30 fps
 ```
 
 On Windows the Arrow stages are handed off through a temp dir (Windows DuckDB
@@ -168,7 +168,7 @@ intermediate files:
 # producer → renderer → encoder   (duckdb-free; uses pyarrow)
 uv run --with pyarrow scripts/jsonl_to_arrow.py examples/frames.jsonl \
   | cargo run -q -p trd-cli -- --width 256 --height 256 \
-  | uv run --with pyarrow --with numpy scripts/encode.py --fps 30 -o out.gif
+  | uv run --with pyarrow --with numpy scripts/encode.py --fps 30 -o output/out.gif
 ```
 
 - **Producer** — emits the input params stream. The wrappers use `duckdb` when its
@@ -189,7 +189,7 @@ duckdb -c "INSTALL arrow FROM community; LOAD arrow;
     FROM read_json_auto('examples/frames.jsonl')
   ) TO '/dev/stdout' (FORMAT arrows);" \
   | cargo run -q -p trd-cli -- --width 256 --height 256 \
-  | uv run --with pyarrow --with numpy scripts/encode.py --fps 30 -o out.gif
+  | uv run --with pyarrow --with numpy scripts/encode.py --fps 30 -o output/out.gif
 ```
 
 `FORMAT arrows` (plural) is the streaming IPC format.
@@ -279,7 +279,7 @@ ffmpeg/duckdb/uv. It installs a missing `uv` via winget automatically (pass
 
 ```powershell
 cargo build -p trd-cli      # cargo can now link native binaries
-examples\render.ps1         # render examples\frames.jsonl → out.gif
+examples\render.ps1         # render examples\frames.jsonl → output\out.gif
 ```
 
 Notes:

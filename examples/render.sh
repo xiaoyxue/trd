@@ -6,7 +6,7 @@
 #
 # Usage:
 #   examples/render.sh [--native|--app] [INPUT.jsonl] [OUTPUT.gif|.webp] [WIDTH] [HEIGHT] [FPS]
-# Defaults: examples/frames.jsonl  out.gif  256 256 30
+# Defaults: examples/frames.jsonl  output/out.gif  256 256 30
 #
 # By default the frame stream is rendered to a GIF/WebP via the headless trd-cli.
 # With --native (alias --app) it is played live in the interactive trd-app window
@@ -30,7 +30,7 @@ if [ ${#positional[@]} -gt 0 ]; then set -- "${positional[@]}"; else set --; fi
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 input="${1:-$root/examples/frames.jsonl}"
-output="${2:-out.gif}"
+output="${2:-output/out.gif}"
 width="${3:-256}"
 height="${4:-256}"
 fps="${5:-30}"
@@ -84,6 +84,7 @@ if [ "$native" -eq 1 ]; then
     | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-app -- --width "$width" --height "$height" --fps "$fps"
   echo "streamed $input to the trd-app window (${width}x${height}, ${fps}fps)"
 else
+  mkdir -p "$(dirname "$output")"
   frames \
     | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-cli -- --width "$width" --height "$height" \
     | uv run --with pyarrow --with numpy "$root/scripts/encode.py" --fps "$fps" -o "$output"

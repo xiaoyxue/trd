@@ -13,7 +13,7 @@
 #   examples/render.ps1 [-InputPath INPUT.jsonl] [-Output OUTPUT.gif|.webp] `
 #                       [-Width 256] [-Height 256] [-Fps 30] [-Native]
 #   examples/render.ps1 INPUT.jsonl OUTPUT.gif 256 256 30   # positional
-# Defaults: examples/frames.jsonl  out.gif  256 256 30
+# Defaults: examples/frames.jsonl  output/out.gif  256 256 30
 #
 # By default the frame stream is rendered to a GIF/WebP via the headless trd-cli.
 # With -Native (alias -App) it is played live in the interactive trd-app window
@@ -30,7 +30,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)][string]$InputPath,
-    [Parameter(Position = 1)][string]$Output = 'out.gif',
+    [Parameter(Position = 1)][string]$Output = 'output/out.gif',
     [Parameter(Position = 2)][int]$Width = 256,
     [Parameter(Position = 3)][int]$Height = 256,
     [Parameter(Position = 4)][int]$Fps = 30,
@@ -91,6 +91,10 @@ if (-not $producer) {
 # encode.py needs pyarrow + numpy. Prefer `uv run` (as render.sh does); fall
 # back to a system `python` that already has both. Skipped for the native viewer.
 if (-not $Native) {
+    $outDir = Split-Path -Parent $Output
+    if ($outDir -and -not (Test-Path $outDir)) {
+        New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+    }
     $encodePy = Join-Path $root 'scripts/encode.py'
     if ($uvOk) {
         $encoderFile = 'uv'
