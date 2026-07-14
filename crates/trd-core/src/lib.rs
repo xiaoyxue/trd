@@ -10,7 +10,7 @@ mod render;
 pub use protocol::{
     FrameBatch, InputSession, ProtocolError, PROTOCOL_VERSION, PROTOCOL_VERSION_KEY,
 };
-pub use render::{create_triangle_pipeline, render_triangle, FrameParams};
+pub use render::{create_triangle_pipeline, render_triangle, FrameParams, TriangleRenderer};
 
 #[cfg(not(target_arch = "wasm32"))]
 mod stream;
