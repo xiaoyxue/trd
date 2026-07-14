@@ -240,7 +240,7 @@ impl App {
     fn idle(&self) -> bool {
         self.stream_done
             && self.cursor >= self.frames.len()
-            && !(self.loop_playback && !self.frames.is_empty())
+            && (!self.loop_playback || self.frames.is_empty())
     }
 }
 
