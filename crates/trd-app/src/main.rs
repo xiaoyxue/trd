@@ -1,9 +1,10 @@
 //! trd-app: the interactive native desktop entry point for the trd core.
 //!
-//! It opens a window, creates a live wgpu surface from it, and draws the shared
-//! [`trd_core::render_triangle`] into that surface — the desktop counterpart of
-//! the headless `trd-cli` (offscreen PNG) and the browser `trd-wasm` (canvas
-//! surface). All rendering logic still lives in `trd-core`.
+//! It opens a window, creates a live wgpu surface from it, and plays a trd
+//! frame-params stream read from stdin — the desktop counterpart of the headless
+//! `trd-cli` (Arrow image stream) and the browser `trd-wasm` (canvas surface).
+//! Each frame is drawn with the shared [`trd_core::render_triangle`], so all
+//! rendering logic still lives in `trd-core`.
 //!
 //! The windowing stack (winit) is native-only, so on wasm this crate compiles
 //! to an empty `main`, keeping workspace-wide wasm builds clean.

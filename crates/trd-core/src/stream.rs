@@ -164,6 +164,29 @@ pub fn decode_frames(batch: &RecordBatch) -> Result<Vec<FrameParams>, StreamErro
         .collect())
 }
 
+/// Reads an Arrow IPC frame-params stream from `input`, invoking `on_frame` for
+/// each decoded [`FrameParams`] in stream order.
+///
+/// This is the input-side counterpart to [`run_stream`]: instead of rendering
+/// each row to an output image stream, it hands every frame to the caller — for
+/// example, a live window that renders it to a surface. It validates the
+/// protocol version and each batch's columns, types, and non-nullness via
+/// [`decode_frames`]. Returns once the stream is exhausted.
+pub fn read_frame_stream<R: Read>(
+    input: R,
+    mut on_frame: impl FnMut(FrameParams),
+) -> Result<(), StreamError> {
+    let reader = StreamReader::try_new(input, None)?;
+    check_version(reader.schema().as_ref())?;
+    for batch in reader {
+        let batch = batch?;
+        for frame in decode_frames(&batch)? {
+            on_frame(frame);
+        }
+    }
+    Ok(())
+}
+
 const BYTES_PER_PIXEL: u32 = 4;
 
 /// Validates image dimensions against zero and `u32` overflow, returning the
@@ -514,6 +537,34 @@ mod tests {
         let batch = build_input_batch(&frames);
         let decoded = decode_frames(&batch).unwrap();
         assert_eq!(decoded, frames);
+    }
+
+    #[test]
+    fn read_frame_stream_roundtrip() {
+        use arrow::ipc::writer::StreamWriter;
+
+        let frames = vec![
+            FrameParams::IDENTITY,
+            FrameParams {
+                center: [0.2, -0.1],
+                size: [0.5, 0.5],
+                theta: 1.0,
+            },
+        ];
+        let batch = build_input_batch(&frames);
+
+        // Encode the batch as an Arrow IPC stream, then read it back through the
+        // public streaming decoder used by the live viewer.
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut buf, batch.schema().as_ref()).unwrap();
+            writer.write(&batch).unwrap();
+            writer.finish().unwrap();
+        }
+
+        let mut got = Vec::new();
+        read_frame_stream(buf.as_slice(), |p| got.push(p)).unwrap();
+        assert_eq!(got, frames);
     }
 
     #[test]

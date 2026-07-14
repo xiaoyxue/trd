@@ -2378,6 +2378,7 @@ checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 name = "trd-app"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "env_logger",
  "log",
  "pollster",
