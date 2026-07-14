@@ -32,7 +32,13 @@ Guidance for agents working in this repository.
 - Local `cargo` inside `nix develop` still works for fast iteration.
 - The `web/` folder is bun-managed; its lint/format gate is **Biome**
   (`web/biome.json`). Run `bun run check` / `bun run format` / `bun run typecheck`
-  from inside `nix develop`.
+  from inside `nix develop`, or directly on Windows — `@biomejs/biome` and
+  `apache-arrow` are now declared in `web/package.json`, so `bun install` +
+  `bun run check` / `typecheck` / `build:web` work without Nix.
+- **The Nix web build (`nix build .#web`, `nix flake check`) still needs a bun2nix
+  step to install `web/`'s external npm deps (`apache-arrow`) reproducibly.** Until
+  that lands, run the web gates with plain `bun` (above); the native gates
+  (`cargo fmt`/clippy/test) are unaffected.
 - **`nix build`/`nix flake check` only see git-tracked files.** `git add` new
   files (e.g. a new `biome.json` or source file) before building, or the sandbox
   won't include them.
