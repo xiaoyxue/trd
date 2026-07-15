@@ -43,7 +43,7 @@ Each is a *thin shell* that only supplies a render target and calls the core:
 |---|---|---|---|
 | **`trd-cli`** | Arrow params stream (stdin) | offscreen texture → pixel read-back | Arrow image stream (stdout) |
 | **`trd-app`** | Arrow params stream (stdin) | live window swapchain | frames on screen |
-| **`trd-wasm`** | a `<canvas>` element | live canvas surface | frames in the browser |
+| **`trd-wasm`** | Arrow params stream (via `pushIpc`) | live canvas surface | frames in the browser |
 
 - **`trd-cli` — headless Arrow filter.** For each input frame it renders to an
   offscreen texture, copies the pixels back (`copy_texture_to_buffer`), and writes
