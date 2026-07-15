@@ -127,8 +127,12 @@ examples\render.ps1 -Native   # play live in a window
 **3. Try the web build:**
 
 ```sh
-nix run .#web    # build + serve at http://localhost:8080 (open in a WebGPU browser)
+examples/render.sh --web   # build + serve, printing the URL + SSH-tunnel command
+nix run .#web              # equivalent: build + serve at http://localhost:8080
 ```
+
+Open the printed URL in a WebGPU browser (Chrome/Edge). On a remote (SSH) host,
+run the printed tunnel command first, then browse to <http://localhost:8080>.
 
 ## Building & running
 
@@ -227,6 +231,21 @@ output file is ignored and neither `uv` nor `ffmpeg` is needed.
 nix build .#web    # Rust core → wasm-bindgen lib → bun dist/  (in ./result)
 nix run   .#web    # serve dist/ over HTTP  (PORT, default 8080)
 ```
+
+The [`examples/render.sh`](examples/render.sh) wrapper wraps that build-and-serve
+step behind a `--web` (alias `--wasm`) flag, and — handy for a remote GPU box —
+prints the machine URL plus a ready-to-copy SSH-tunnel command before serving
+(`PORT` overrides the port, default 8080; all positional arguments are ignored,
+since the demo generates its own frames in-browser):
+
+```sh
+examples/render.sh --web            # build .#web, print URLs + SSH tunnel, then serve
+PORT=9000 examples/render.sh --wasm # serve on a custom port
+```
+
+The server binds all interfaces, so browse to `http://<host-ip>:PORT` directly,
+or forward it — `ssh -L 8080:localhost:8080 <user>@<host>`, then open
+<http://localhost:8080>.
 
 The wasm core is a standard, TypeScript-typed npm package (`nix build .#trd-wasm`,
 built with `wasm-bindgen-cli` + `wasm-opt`). `web/` imports it and drives it with
