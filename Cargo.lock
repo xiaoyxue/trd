@@ -2415,6 +2415,7 @@ name = "trd-wasm"
 version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
+ "js-sys",
  "trd-core",
  "wasm-bindgen",
  "wasm-bindgen-futures",

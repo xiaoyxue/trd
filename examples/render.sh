@@ -5,24 +5,30 @@
 #   JSONL --(Arrow IPC: duckdb or pyarrow)--> trd --(tensors)--> ffmpeg
 #
 # Usage:
-#   examples/render.sh [--native|--app] [INPUT.jsonl] [OUTPUT.gif|.webp] [WIDTH] [HEIGHT] [FPS]
+#   examples/render.sh [--native|--app|--web|--wasm] [INPUT.jsonl] [OUTPUT.gif|.webp] [WIDTH] [HEIGHT] [FPS]
 # Defaults: examples/frames.jsonl  output/out.gif  256 256 30
 #
 # By default the frame stream is rendered to a GIF/WebP via the headless trd-cli.
 # With --native (alias --app) it is played live in the interactive trd-app window
 # (trd-native); OUTPUT is then ignored and neither uv nor ffmpeg are needed.
+# With --web (alias --wasm) it builds the browser (wasm) bundle via nix and serves
+# it, printing the URLs and an SSH-tunnel command. The web demo generates its own
+# Arrow frame stream in-browser, so all positional arguments are ignored. Override
+# the port with PORT (default 8080); the server binds all interfaces.
 #
 # Run from `nix develop`. The Arrow frame stream is built with duckdb's 'arrow'
 # community extension when it loads, otherwise with pyarrow (via uv/python3).
 # On WSL, prefix with WGPU_BACKEND=gl for GPU rendering (else it uses software).
 set -euo pipefail
 
-# Extract the optional --native/--app flag; the rest are positional.
+# Extract the optional --native/--app and --web/--wasm flags; rest are positional.
 native=0
+web=0
 positional=()
 for arg in "$@"; do
   case "$arg" in
     --native|--app) native=1 ;;
+    --web|--wasm) web=1 ;;
     *) positional+=("$arg") ;;
   esac
 done
@@ -37,8 +43,15 @@ fps="${5:-30}"
 # DuckDB SQL string literals escape a single quote by doubling it.
 sql_input=${input//\'/\'\'}
 
-# cargo is always required; the GIF path also needs ffmpeg (and uv for encoding).
-if [ "$native" -eq 1 ]; then tools="cargo"; else tools="cargo ffmpeg uv"; fi
+# The web path builds/serves via nix; native needs only cargo; the GIF path also
+# needs ffmpeg (and uv for encoding).
+if [ "$web" -eq 1 ]; then
+  tools="nix"
+elif [ "$native" -eq 1 ]; then
+  tools="cargo"
+else
+  tools="cargo ffmpeg uv"
+fi
 for tool in $tools; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "error: $tool not found on PATH" >&2
@@ -46,6 +59,36 @@ for tool in $tools; do
     exit 1
   fi
 done
+
+# --web/--wasm: build the browser (wasm) bundle and serve it. The demo generates
+# its own Arrow frame stream in-browser, so the positional arguments are ignored.
+if [ "$web" -eq 1 ]; then
+  port="${PORT:-8080}"
+  user="$(whoami)"
+  # First non-loopback IPv4 of this host (for the direct / SSH-tunnel URLs).
+  ip="$(hostname -I 2>/dev/null | awk '{print $1; exit}')"
+  [ -n "$ip" ] || ip="<server-ip>"
+
+  echo "building trd web (wasm) bundle via nix (.#web)…" >&2
+  (cd "$root" && nix build --no-link ".#web")
+
+  cat <<EOF
+
+trd web (wasm) server — port $port  (press Ctrl-C to stop)
+
+  On this machine:        http://localhost:$port
+  Direct (same network):  http://$ip:$port
+
+  SSH tunnel (recommended if the port is not directly reachable):
+    ssh -L $port:localhost:$port $user@$ip
+  then open in a WebGPU browser (Chrome/Edge):
+                          http://localhost:$port
+
+EOF
+
+  cd "$root"
+  exec env PORT="$port" nix run ".#web"
+fi
 
 # Choose a frame producer: DuckDB's 'arrow' community extension if it loads,
 # otherwise scripts/jsonl_to_arrow.py via uv (or python3 with pyarrow).

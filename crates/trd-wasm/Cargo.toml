@@ -12,9 +12,10 @@ crate-type = ["cdylib", "rlib"]
 # crate (see the crate-level cfg in src/lib.rs) so workspace-wide native builds,
 # clippy, and tests skip it cleanly instead of failing on web-only wgpu APIs.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook = "0.1"
+js-sys = "0.3"
 trd-core.workspace = true
-wgpu = "30"
 wasm-bindgen = "=0.2.121"
 wasm-bindgen-futures = "0.4"
-console_error_panic_hook = "0.1"
-web-sys = { version = "0.3", features = ["HtmlCanvasElement"] }
+web-sys = { version = "0.3", features = ["HtmlCanvasElement", "Performance", "Window"] }
+wgpu = "30"

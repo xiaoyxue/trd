@@ -9,9 +9,9 @@ repository.workspace = true
 wgpu = "30"
 log = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-pollster = "0.4"
 thiserror = "2"
 arrow = { version = "59", default-features = false, features = ["ipc", "canonical_extension_types"] }
 arrow-schema = { version = "59", default-features = false, features = ["canonical_extension_types"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pollster = "0.4"

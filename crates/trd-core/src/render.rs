@@ -105,9 +105,8 @@ pub(crate) fn create_params_binding(
 
 /// Writes `params` into an existing params uniform buffer.
 ///
-/// Only used by the native batch renderer; the wasm one-shot path rebuilds the
-/// binding each frame via [`create_params_binding`].
-#[cfg(not(target_arch = "wasm32"))]
+/// Shared by the native `BatchRenderer` and the persistent [`TriangleRenderer`],
+/// which reuse one uniform buffer across frames instead of rebuilding it.
 pub(crate) fn write_params(queue: &wgpu::Queue, buffer: &wgpu::Buffer, params: FrameParams) {
     queue.write_buffer(buffer, 0, bytemuck::bytes_of(&Uniform::from(params)));
 }
@@ -151,4 +150,68 @@ pub fn render_triangle(
         pass.draw(0..3, 0..1);
     }
     queue.submit(Some(encoder.finish()));
+}
+
+/// Persistent triangle renderer: owns one pipeline, uniform buffer, and bind
+/// group, and encodes a single frame into a caller-provided encoder and view.
+///
+/// `encode` never creates a command encoder, submits, acquires a surface, or
+/// presents; those belong to the target adapter (CLI readback or canvas).
+pub struct TriangleRenderer {
+    pipeline: wgpu::RenderPipeline,
+    uniform: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+}
+
+impl TriangleRenderer {
+    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+        let pipeline = create_triangle_pipeline(device, format);
+        let (uniform, bind_group) = create_params_binding(device, &pipeline, FrameParams::IDENTITY);
+        Self {
+            pipeline,
+            uniform,
+            bind_group,
+        }
+    }
+
+    pub fn encode(
+        &self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        params: FrameParams,
+    ) {
+        write_params(queue, &self.uniform, params);
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("trd triangle pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.draw(0..3, 0..1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uniform_layout_matches_wgsl_params() {
+        assert_eq!(std::mem::size_of::<Uniform>(), 32);
+        assert_eq!(Uniform::from(FrameParams::IDENTITY).theta, 0.0);
+    }
 }

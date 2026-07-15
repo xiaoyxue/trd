@@ -27,9 +27,13 @@ Platform-agnostic wgpu logic, shared verbatim by every target:
   params)` draws one parametric triangle (`FrameParams` = `center`, `size`,
   `theta`) into *any* `wgpu::TextureView`. That one function is why the same code
   targets an offscreen texture, a window swapchain, or a browser canvas.
-- **`stream.rs`** — the Arrow IPC protocol: `read_frame_stream` decodes the input
-  frames; `run_stream` is the CLI filter. Only one record batch is ever in flight,
-  so an animation of any length streams in constant memory.
+- **`stream.rs`** — the native Arrow IPC filter: `read_frame_stream` decodes the
+  input frames; `run_stream` is the CLI filter. Only one record batch is ever in
+  flight, so an animation of any length streams in constant memory.
+- **`protocol.rs`** — the cross-platform (native + wasm) incremental Arrow IPC
+  decoder. `InputSession` feeds arbitrary byte chunks through `arrow`'s
+  `StreamDecoder`, validates the protocol-0.0.1 schema once, and yields one
+  `FrameBatch` (`Vec<FrameParams>`) per record batch — the browser's input path.
 
 ### The three consumers
 
@@ -39,7 +43,7 @@ Each is a *thin shell* that only supplies a render target and calls the core:
 |---|---|---|---|
 | **`trd-cli`** | Arrow params stream (stdin) | offscreen texture → pixel read-back | Arrow image stream (stdout) |
 | **`trd-app`** | Arrow params stream (stdin) | live window swapchain | frames on screen |
-| **`trd-wasm`** | a `<canvas>` element | live canvas surface | frames in the browser |
+| **`trd-wasm`** | Arrow params stream (via `pushIpc`) | live canvas surface | frames in the browser |
 
 - **`trd-cli` — headless Arrow filter.** For each input frame it renders to an
   offscreen texture, copies the pixels back (`copy_texture_to_buffer`), and writes
@@ -49,11 +53,13 @@ Each is a *thin shell* that only supplies a render target and calls the core:
   stdin; the window plays it at `--fps`, drawing each frame **straight into the
   swapchain surface** and presenting it. No read-back, no file — pixels go on
   screen. With no stdin it shows the identity triangle.
-- **`trd-wasm` / `web/` — browser.** `start(canvas)` obtains a wgpu surface from
-  the `<canvas>` and draws into it with the same core. Today it renders one static
-  frame (the identity triangle) — the browser counterpart that will consume the
-  same params stream next. Packaged as the `trd-wasm` npm library; `web/main.ts`
-  only calls `init()` then `start(canvas)`.
+- **`trd-wasm` / `web/` — browser.** `CanvasRenderer.create(canvas)` obtains a wgpu
+  surface from the `<canvas>` and holds a persistent pipeline plus an `InputSession`.
+  `web/main.ts` produces a persistent Apache Arrow IPC stream (one one-row batch per
+  `requestAnimationFrame`) and pumps its bytes into `canvas.pushIpc(chunk)`; Rust
+  decodes and draws each frame straight to the canvas — no pixel read-back. JS only
+  moves Arrow bytes and schedules frames; it never touches the WebGPU API. Packaged
+  as the `trd-wasm` npm library.
 
 ### Stream protocol 0.0.1
 
@@ -121,8 +127,18 @@ examples\render.ps1 -Native   # play live in a window
 **3. Try the web build:**
 
 ```sh
-nix run .#web    # build + serve at http://localhost:8080 (open in a WebGPU browser)
+# Linux / macOS / WSL
+examples/render.sh --web   # build + serve, printing the URL + SSH-tunnel command
+nix run .#web              # equivalent: build + serve at http://localhost:8080
 ```
+
+```powershell
+# Windows (PowerShell 7)
+examples\render.ps1 -Web   # build + serve, printing the URL + SSH-tunnel command
+```
+
+Open the printed URL in a WebGPU browser (Chrome/Edge). On a remote (SSH) host,
+run the printed tunnel command first, then browse to <http://localhost:8080>.
 
 ## Building & running
 
@@ -222,12 +238,50 @@ nix build .#web    # Rust core → wasm-bindgen lib → bun dist/  (in ./result)
 nix run   .#web    # serve dist/ over HTTP  (PORT, default 8080)
 ```
 
+The [`examples/render.sh`](examples/render.sh) wrapper wraps that build-and-serve
+step behind a `--web` (alias `--wasm`) flag, and — handy for a remote GPU box —
+prints the machine URL plus a ready-to-copy SSH-tunnel command before serving
+(`PORT` overrides the port, default 8080; all positional arguments are ignored,
+since the demo generates its own frames in-browser):
+
+```sh
+examples/render.sh --web            # build .#web, print URLs + SSH tunnel, then serve
+PORT=9000 examples/render.sh --wasm # serve on a custom port
+```
+
+The server binds all interfaces, so browse to `http://<host-ip>:PORT` directly,
+or forward it — `ssh -L 8080:localhost:8080 <user>@<host>`, then open
+<http://localhost:8080>.
+
+On Windows (no Nix), [`examples/render.ps1`](examples/render.ps1) exposes the same
+flag as `-Web` (alias `-Wasm`): it builds the bundle with `wasm-pack` + `bun`
+(`web`'s `bun run build`) and serves `web/dist` with a small Bun static server,
+printing the same URLs + SSH-tunnel command (`$env:PORT` overrides the port,
+default 8088; positional arguments are ignored):
+
+```powershell
+examples\render.ps1 -Web                       # build wasm + bun bundle, print URLs, then serve
+$env:PORT = 9000; examples\render.ps1 -Wasm    # serve on a custom port
+```
+
 The wasm core is a standard, TypeScript-typed npm package (`nix build .#trd-wasm`,
-built with `wasm-bindgen-cli` + `wasm-opt`). `web/` imports it like any library:
+built with `wasm-bindgen-cli` + `wasm-opt`). `web/` imports it and drives it with
+Apache Arrow JS — the browser produces the same protocol-0.0.1 IPC stream the CLI
+consumes and pumps it into the renderer:
 
 ```ts
-import init, { start } from "trd-wasm"; // fully typed
+import init, { CanvasRenderer } from "trd-wasm"; // fully typed
+
+await init({ module_or_path: wasmUrl });
+const canvas = await CanvasRenderer.create(canvasEl);
+const rendered = canvas.pushIpc(ipcChunk); // rows drawn this chunk
+canvas.finish();                           // end of stream
 ```
+
+`web/`'s npm dependencies (`apache-arrow` and its tree) are installed offline in
+the Nix sandbox via [bun2nix](https://github.com/nix-community/bun2nix):
+`web/bun.nix` pins them by hash from `web/bun.lock`. Regenerate it after changing
+`web/bun.lock` — see [`AGENTS.md`](AGENTS.md) for the exact command.
 
 For local iteration inside `nix develop`, `web/` uses `wasm-pack` + bun:
 
@@ -235,9 +289,15 @@ For local iteration inside `nix develop`, `web/` uses `wasm-pack` + bun:
 cd web
 bun run build      # wasm-pack → pkg, then bun bundles → web/dist
 bun run dev        # dev server; open the printed URL in a WebGPU browser
-bun run check      # Biome format-check + lint
+bun run check      # Biome format-check + lint (local @biomejs/biome)
 bun run typecheck  # tsc --noEmit
 ```
+
+The demo animates one Arrow one-row batch per frame. Two query flags help testing:
+`?smoke=1` renders a single two-row batch then stops (sets
+`#trd-status[data-rows-rendered="2"]`); `?benchmarkRate=60` / `?benchmarkRate=120`
+drive a fixed-rate run and log p50/p95/p99 timings (Arrow generation, `pushIpc`
+total, render-submit, and derived transfer-plus-decode) to the console.
 
 (The `web` wasm-bindgen target is used because bun does not instantiate the
 `bundler` target's ESM-imported wasm.)
@@ -292,6 +352,10 @@ Notes:
   manage the environment yourself.
 - On WSL, set `$env:WGPU_BACKEND = 'gl'` first for GPU rendering (otherwise the
   Vulkan backend falls back to software).
+- The **web** wrapper also builds on Windows with just `bun` (no Nix): `cd web;
+  bun run build:wasm; bun install; bun run typecheck; bun run check; bun run dev`.
+  `@biomejs/biome` is a local dev dependency, so `bun run check` works outside the
+  Nix dev shell. `apache-arrow` is fetched by `bun install`.
 
 ### Tests
 
