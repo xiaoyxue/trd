@@ -9,6 +9,10 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     crane.url = "github:ipetkov/crane";
+    bun2nix = {
+      url = "github:nix-community/bun2nix/2.1.1";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
@@ -18,6 +22,7 @@
       flake-utils,
       rust-overlay,
       crane,
+      bun2nix,
     }:
     flake-utils.lib.eachDefaultSystem (
       system:
@@ -52,19 +57,6 @@
 
         # Single source of truth for the project version: the Cargo workspace.
         workspaceVersion = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
-
-        # The nix web build bundles offline: it provides the nix-built trd-wasm
-        # as node_modules and skips `bun install`, and the tsc check supplies
-        # typescript via nixpkgs. That shortcut is only valid while these are the
-        # sole dependencies, so make the invariant executable and fail loudly if
-        # a real npm dependency is ever added.
-        webPackageJson = builtins.fromJSON (builtins.readFile ./web/package.json);
-        checkedWebSrc =
-          assert lib.assertMsg (lib.attrNames (webPackageJson.dependencies or { }) == [ "trd-wasm" ])
-            "web/package.json runtime dependencies must be exactly {trd-wasm}: the nix web build skips `bun install`. Add npm-dependency support (e.g. bun2nix) before adding runtime deps.";
-          assert lib.assertMsg (lib.attrNames (webPackageJson.devDependencies or { }) == [ "typescript" ])
-            "web/package.json devDependencies must be exactly {typescript}: the tsc check provides it via nixpkgs. Add npm-dependency support before adding devDeps.";
-          webSrc;
 
         # Runtime libraries the wgpu/Vulkan backend loads via dlopen.
         runtimeLibs = with pkgs; [
@@ -157,44 +149,90 @@
         );
 
         # --- Web bundle ------------------------------------------------------
+        # bun2nix materializes web/'s npm dependencies (apache-arrow, typescript,
+        # and their transitive tree) reproducibly from web/bun.nix, so the nix
+        # web build and tsc check can run an offline `bun install` in the sandbox
+        # instead of the old shortcut of injecting only trd-wasm. (The biome lint
+        # runs from nixpkgs' biome instead, see the `biome` check below.)
+        bun2nixPkg = bun2nix.packages.${system}.default;
+
+        webBunDeps = bun2nixPkg.fetchBunDeps {
+          bunNix = ./web/bun.nix;
+        };
+
+        # The web build resolves `trd-wasm` via `file:../crates/trd-wasm/pkg`, so
+        # the source must contain the repo layout (web/ as a subdir with a sibling
+        # crates/). Keep it lean by dropping build outputs and VCS metadata.
         webSrc = lib.cleanSourceWith {
-          src = ./web;
+          src = ./.;
           filter =
             path: type:
             let
               b = baseNameOf path;
             in
-            b != "node_modules" && b != "dist";
-          name = "web-src";
+            b != "node_modules"
+            && b != "dist"
+            && b != "pkg"
+            && b != "target"
+            && b != ".worktree"
+            && b != ".git";
+          name = "trd-web-src";
         };
 
-        # Provide the sole runtime dependency (the nix-built wasm package) as
-        # node_modules/trd-wasm; bun then bundles offline with no `bun install`.
-        provideNodeModules = ''
-          mkdir -p node_modules
-          cp -r ${trd-wasm} node_modules/trd-wasm
-          chmod -R u+w node_modules
-        '';
+        # Shared builder for the bun-driven web derivations (bundle + checks).
+        # The bun2nix hook installs node_modules offline in `bunRoot`; the
+        # pre-install hook first materializes the nix-built trd-wasm at the
+        # `file:` path referenced by web/package.json.
+        mkWebDerivation =
+          {
+            pname,
+            buildCommand,
+            installCommand,
+          }:
+          pkgs.stdenv.mkDerivation {
+            inherit pname;
+            version = workspaceVersion;
+            src = webSrc;
+            nativeBuildInputs = [ bun2nixPkg.hook ];
+            bunDeps = webBunDeps;
+            bunRoot = "web";
+            dontUseBunCheck = true;
+            # Use bun's standard hoisted node_modules layout instead of the
+            # bun2nix hook default `--linker=isolated`, so bundler/tsc module
+            # resolution matches a normal `bun install`.
+            bunInstallFlags = "--linker=hoisted";
 
-        web = pkgs.stdenv.mkDerivation {
+            preBunNodeModulesInstallPhase = ''
+              mkdir -p ../crates/trd-wasm/pkg
+              cp -r ${trd-wasm}/. ../crates/trd-wasm/pkg/
+              chmod -R u+w ../crates/trd-wasm/pkg
+            '';
+
+            buildPhase = ''
+              runHook preBuild
+              cd web
+              ${buildCommand}
+              runHook postBuild
+            '';
+
+            installPhase = ''
+              runHook preInstall
+              ${installCommand}
+              runHook postInstall
+            '';
+
+            dontFixup = true;
+          };
+
+        web = mkWebDerivation {
           pname = "trd-web";
-          version = workspaceVersion;
-          src = checkedWebSrc;
-          nativeBuildInputs = [ pkgs.bun ];
-          buildPhase = ''
-            runHook preBuild
-            export HOME=$TMPDIR
-            export DO_NOT_TRACK=1
-            ${provideNodeModules}
-            bun build ./index.html --outdir dist
-            runHook postBuild
+          buildCommand = ''
+            bun run build:web
           '';
-          installPhase = ''
-            runHook preInstall
-            cp -r dist $out
-            runHook postInstall
+          installCommand = ''
+            mkdir -p $out
+            cp -r dist/. $out
           '';
-          dontFixup = true;
         };
 
         webServe = pkgs.writeShellApplication {
@@ -256,28 +294,32 @@
             }
           );
 
-          # TS type-check using nixpkgs' typescript; the wasm package supplies
-          # the `trd-wasm` types via node_modules.
-          tsc =
-            pkgs.runCommand "check-tsc"
-              {
-                nativeBuildInputs = [ pkgs.typescript ];
-              }
-              ''
-                cp -r ${checkedWebSrc} web && chmod -R u+w web && cd web
-                ${provideNodeModules}
-                tsc --noEmit
-                touch $out
-              '';
+          # TS type-check using the project's own typescript (installed offline
+          # via bun2nix); the nix-built wasm package supplies the trd-wasm types.
+          tsc = mkWebDerivation {
+            pname = "check-tsc";
+            buildCommand = ''
+              bun run typecheck
+            '';
+            installCommand = ''
+              mkdir -p $out
+              touch $out/success
+            '';
+          };
 
-          # Biome format-check + lint for the web wrapper.
+          # Biome format-check + lint for the web wrapper. Biome only parses the
+          # source (it never resolves npm imports), so it needs no node_modules
+          # and runs straight from nixpkgs' biome. nixpkgs pins the same version
+          # as web/package.json (2.4.16), so the gate matches `bun run check`.
+          # (bun2nix can't materialize biome's large optional platform binary
+          # @biomejs/cli-linux-x64 into the sandbox node_modules, so we avoid it.)
           biome =
             pkgs.runCommand "check-biome"
               {
                 nativeBuildInputs = [ pkgs.biome ];
               }
               ''
-                cp -r ${checkedWebSrc} web && chmod -R u+w web && cd web
+                cp -r ${webSrc}/web web && chmod -R u+w web && cd web
                 biome ci .
                 touch $out
               '';

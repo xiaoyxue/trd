@@ -242,6 +242,11 @@ const rendered = canvas.pushIpc(ipcChunk); // rows drawn this chunk
 canvas.finish();                           // end of stream
 ```
 
+`web/`'s npm dependencies (`apache-arrow` and its tree) are installed offline in
+the Nix sandbox via [bun2nix](https://github.com/nix-community/bun2nix):
+`web/bun.nix` pins them by hash from `web/bun.lock`. Regenerate it after changing
+`web/bun.lock` — see [`AGENTS.md`](AGENTS.md) for the exact command.
+
 For local iteration inside `nix develop`, `web/` uses `wasm-pack` + bun:
 
 ```sh
