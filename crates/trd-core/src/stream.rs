@@ -6,16 +6,14 @@
 use std::sync::Arc;
 
 use arrow::array::{Array, FixedSizeListArray, Float32Array, RecordBatch};
-use arrow::array::{FixedSizeListArray as U8List, UInt8Array};
-use arrow::datatypes::{DataType, Field, Fields, Schema};
+use arrow::datatypes::{DataType, Field, Schema};
 use arrow::error::ArrowError;
 use arrow::ipc::reader::StreamReader;
-use arrow::ipc::writer::StreamWriter;
-use arrow_schema::extension::FixedShapeTensor;
 use std::io::{Read, Write};
 
 use crate::protocol::{PROTOCOL_VERSION, PROTOCOL_VERSION_KEY};
 use crate::render::FrameParams;
+use crate::OutputSession;
 
 /// Errors from decoding, validating, rendering, or encoding a trd stream.
 #[derive(Debug, thiserror::Error)]
@@ -52,6 +50,8 @@ pub enum StreamError {
     /// GPU rendering failed.
     #[error("render error: {0}")]
     Render(String),
+    #[error(transparent)]
+    Output(#[from] crate::OutputError),
 }
 
 fn vec2_field(name: &str) -> Field {
@@ -385,68 +385,13 @@ impl BatchRenderer {
             .expect("map_async callback dropped")
             .map_err(|e| StreamError::Render(e.to_string()))?;
 
-        let unpadded = (self.width * BYTES_PER_PIXEL) as usize;
-        let mut pixels = Vec::with_capacity(unpadded * self.height as usize);
-        {
+        let pixels = {
             let mapped = slice.get_mapped_range().expect("buffer mapped after poll");
-            for row in 0..self.height as usize {
-                let start = row * self.padded_bytes_per_row as usize;
-                pixels.extend_from_slice(&mapped[start..start + unpadded]);
-            }
-        }
+            crate::tightly_pack_rgba(&mapped, self.width, self.height, self.padded_bytes_per_row)?
+        };
         self.staging.unmap();
         Ok(pixels)
     }
-}
-
-/// Builds a `fixed_shape_tensor<u8>` field of shape `[height, width]`.
-fn tensor_field(name: &str, width: u32, height: u32) -> Result<Field, StreamError> {
-    let storage = DataType::FixedSizeList(
-        Arc::new(Field::new("item", DataType::UInt8, false)),
-        (width * height) as i32,
-    );
-    let ext = FixedShapeTensor::try_new(
-        DataType::UInt8,
-        vec![height as usize, width as usize],
-        Some(vec!["height".to_string(), "width".to_string()]),
-        None,
-    )?;
-    Ok(Field::new(name, storage, false).with_extension_type(ext))
-}
-
-/// Builds the protocol 0.0.1 output schema (`r,g,b,a` tensors + version).
-pub fn output_schema(width: u32, height: u32) -> Result<Schema, StreamError> {
-    let fields: Fields = ["r", "g", "b", "a"]
-        .into_iter()
-        .map(|n| tensor_field(n, width, height))
-        .collect::<Result<Vec<_>, _>>()?
-        .into();
-    Ok(Schema::new(fields).with_metadata(
-        [(
-            PROTOCOL_VERSION_KEY.to_string(),
-            PROTOCOL_VERSION.to_string(),
-        )]
-        .into_iter()
-        .collect(),
-    ))
-}
-
-/// Builds one channel column: a `FixedSizeList<u8>[W*H]` with `rows` entries,
-/// pulling byte `channel` from each frame's interleaved RGBA plane.
-fn channel_column(frames: &[Vec<u8>], channel: usize, pixels: usize) -> Arc<U8List> {
-    let mut values: Vec<u8> = Vec::with_capacity(frames.len() * pixels);
-    for frame in frames {
-        for px in 0..pixels {
-            values.push(frame[px * 4 + channel]);
-        }
-    }
-    let item = Arc::new(Field::new("item", DataType::UInt8, false));
-    Arc::new(U8List::new(
-        item,
-        pixels as i32,
-        Arc::new(UInt8Array::from(values)),
-        None,
-    ))
 }
 
 /// Reads an Arrow IPC stream of frame params from `input`, renders each row,
@@ -454,7 +399,7 @@ fn channel_column(frames: &[Vec<u8>], channel: usize, pixels: usize) -> Arc<U8Li
 /// Output batch boundaries mirror input batches (one batch in flight).
 pub fn run_stream<R: Read, W: Write>(
     input: R,
-    output: W,
+    mut output: W,
     width: u32,
     height: u32,
 ) -> Result<(), StreamError> {
@@ -465,13 +410,9 @@ pub fn run_stream<R: Read, W: Write>(
     let reader = StreamReader::try_new(input, None)?;
     check_version(reader.schema().as_ref())?;
 
-    let out_schema = Arc::new(output_schema(width, height)?);
-    // Build the GPU context before the writer: StreamWriter::try_new emits the
-    // schema immediately, so a GPU-setup failure here must happen before any
-    // bytes reach stdout (else a downstream consumer sees a partial stream).
     let mut renderer = BatchRenderer::new(width, height)?;
-    let mut writer = StreamWriter::try_new(output, &out_schema)?;
-    let pixels = (width * height) as usize;
+    let mut output_session = OutputSession::new(width, height)?;
+    output.write_all(&output_session.drain_new()?)?;
 
     for batch in reader {
         let batch = batch?;
@@ -480,20 +421,19 @@ pub fn run_stream<R: Read, W: Write>(
             .iter()
             .map(|p| renderer.render(*p))
             .collect::<Result<_, _>>()?;
-        let columns: Vec<arrow::array::ArrayRef> = (0..4)
-            .map(|c| channel_column(&planes, c, pixels) as arrow::array::ArrayRef)
-            .collect();
-        let out_batch = RecordBatch::try_new(out_schema.clone(), columns)?;
-        writer.write(&out_batch)?;
+        output_session.write_rgba_batch(&planes)?;
+        output.write_all(&output_session.drain_new()?)?;
     }
-    writer.finish()?;
+    output_session.finish()?;
+    output.write_all(&output_session.drain_new()?)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::ArrayRef;
+    use arrow::array::{ArrayRef, FixedSizeListArray as U8List, UInt8Array};
+    use arrow::ipc::writer::StreamWriter;
 
     fn build_input_batch(frames: &[FrameParams]) -> RecordBatch {
         let schema = Arc::new(input_schema());
@@ -676,32 +616,6 @@ mod tests {
     }
 
     #[test]
-    fn output_schema_is_fixed_shape_tensor() {
-        let schema = output_schema(4, 3).unwrap();
-        assert_eq!(
-            schema
-                .metadata()
-                .get(PROTOCOL_VERSION_KEY)
-                .map(String::as_str),
-            Some(PROTOCOL_VERSION)
-        );
-        for name in ["r", "g", "b", "a"] {
-            let field = schema.field_with_name(name).unwrap();
-            assert_eq!(
-                field
-                    .metadata()
-                    .get("ARROW:extension:name")
-                    .map(String::as_str),
-                Some("arrow.fixed_shape_tensor")
-            );
-            match field.data_type() {
-                DataType::FixedSizeList(_, 12) => {} // 4*3
-                other => panic!("unexpected storage type: {other:?}"),
-            }
-        }
-    }
-
-    #[test]
     #[ignore = "requires a GPU adapter"]
     fn run_stream_renders_rotating_triangle() {
         let (w, h) = (32u32, 32u32);
@@ -713,12 +627,15 @@ mod tests {
             })
             .collect();
 
-        // Encode input to an in-memory Arrow IPC stream.
+        // Encode two input batches to an in-memory Arrow IPC stream.
+        let first = build_input_batch(&frames[..1]);
+        let second = build_input_batch(&frames[1..]);
         let mut input_bytes = Vec::new();
         {
             let schema = Arc::new(input_schema());
             let mut wr = StreamWriter::try_new(&mut input_bytes, &schema).unwrap();
-            wr.write(&build_input_batch(&frames)).unwrap();
+            wr.write(&first).unwrap();
+            wr.write(&second).unwrap();
             wr.finish().unwrap();
         }
 
@@ -727,13 +644,19 @@ mod tests {
 
         // Decode output and assert per-frame invariants.
         let reader = StreamReader::try_new(&output_bytes[..], None).unwrap();
-        let batches: Vec<RecordBatch> = reader.map(|b| b.unwrap()).collect();
+        let batches = reader.collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(
+            batches
+                .iter()
+                .map(RecordBatch::num_rows)
+                .collect::<Vec<_>>(),
+            vec![1, frames.len() - 1]
+        );
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, frames.len());
 
-        let batch = &batches[0];
         let pixels = (w * h) as usize;
-        let get = |name: &str| -> U8List {
+        let get = |batch: &RecordBatch, name: &str| -> U8List {
             batch
                 .column_by_name(name)
                 .unwrap()
@@ -742,7 +665,12 @@ mod tests {
                 .unwrap()
                 .clone()
         };
-        let (r, g, b, a) = (get("r"), get("g"), get("b"), get("a"));
+        let (r, g, b, a) = (
+            get(&batches[0], "r"),
+            get(&batches[0], "g"),
+            get(&batches[0], "b"),
+            get(&batches[0], "a"),
+        );
         assert_eq!(r.value_length(), pixels as i32);
 
         let row0 = |ch: &U8List, row: usize, i: usize| -> u8 {
@@ -764,8 +692,9 @@ mod tests {
             row0(&r, 0, center) as u32 + row0(&g, 0, center) as u32 + row0(&b, 0, center) as u32;
         assert!(cbright > 0, "center should be inside the triangle");
         // Rotation changes the image between the first and a later frame.
-        let last = frames.len() - 1;
-        let differs = (0..pixels).any(|i| row0(&r, 0, i) != row0(&r, last, i));
+        let last = get(&batches[1], "r");
+        let last_row = frames.len() - 2;
+        let differs = (0..pixels).any(|i| row0(&r, 0, i) != row0(&last, last_row, i));
         assert!(differs, "rotation should change pixels across frames");
     }
 }
