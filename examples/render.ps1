@@ -11,13 +11,17 @@
 #
 # Usage:
 #   examples/render.ps1 [-InputPath INPUT.jsonl] [-Output OUTPUT.gif|.webp] `
-#                       [-Width 256] [-Height 256] [-Fps 30] [-Native]
+#                       [-Width 256] [-Height 256] [-Fps 30] [-Native] [-Web]
 #   examples/render.ps1 INPUT.jsonl OUTPUT.gif 256 256 30   # positional
 # Defaults: examples/frames.jsonl  output/out.gif  256 256 30
 #
 # By default the frame stream is rendered to a GIF/WebP via the headless trd-cli.
 # With -Native (alias -App) it is played live in the interactive trd-app window
 # (trd-native); -Output is then ignored and neither uv nor ffmpeg are needed.
+# With -Web (alias -Wasm) it builds the browser (wasm) bundle with wasm-pack + bun
+# and serves web/dist, printing the machine URLs and an SSH-tunnel command. The web
+# demo generates its own Arrow frame stream in-browser, so all positional arguments
+# are ignored. Override the port with $env:PORT (default 8088); binds all interfaces.
 #
 # On Windows this auto-sources scripts\dev-env.ps1 (the flake.nix devShell
 # counterpart; see README "Windows setup (without Nix)" for the one-time
@@ -34,7 +38,8 @@ param(
     [Parameter(Position = 2)][int]$Width = 256,
     [Parameter(Position = 3)][int]$Height = 256,
     [Parameter(Position = 4)][int]$Fps = 30,
-    [Alias('App')][switch]$Native
+    [Alias('App')][switch]$Native,
+    [Alias('Wasm')][switch]$Web
 )
 
 Set-StrictMode -Version Latest
@@ -47,6 +52,84 @@ if (-not $InputPath) { $InputPath = Join-Path $PSScriptRoot 'frames.jsonl' }
 $devEnv = Join-Path $root 'scripts\dev-env.ps1'
 if ((Test-Path $devEnv) -and -not $env:TRD_SKIP_DEV_ENV) {
     . $devEnv -Quiet -NoInstall
+}
+
+# --- -Web/-Wasm: build the browser (wasm) bundle and serve it -----------------
+# Mirrors the --web/--wasm mode of render.sh, but Windows-native (no Nix): the
+# bundle is built with wasm-pack + bun (web/'s `bun run build`) and served from
+# web/dist by a small Bun static server. The demo generates its own Arrow frame
+# stream in-browser, so InputPath/Output and the other arguments are ignored.
+if ($Web) {
+    foreach ($tool in @('cargo', 'wasm-pack', 'bun')) {
+        if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
+            Write-Error "error: $tool not found on PATH`n-Web needs cargo, wasm-pack and bun. On Windows run '. scripts\dev-env.ps1' first (and install wasm-pack + bun); on Linux/macOS use 'nix develop'."
+        }
+    }
+
+    $port = if ($env:PORT) { $env:PORT } else { '8088' }
+    $webDir = Join-Path $root 'web'
+    Write-Host 'building trd web (wasm) bundle (wasm-pack + bun)...'
+    Push-Location $webDir
+    try {
+        & bun run build
+        if ($LASTEXITCODE -ne 0) { throw "web build failed (exit $LASTEXITCODE)" }
+    }
+    finally {
+        Pop-Location
+    }
+
+    $user = if ($env:USERNAME) { $env:USERNAME } else { 'user' }
+    # First non-loopback IPv4 of this host (for the direct / SSH-tunnel URLs).
+    $ip = $null
+    try {
+        $ip = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop |
+            Where-Object { $_.IPAddress -ne '127.0.0.1' -and $_.PrefixOrigin -ne 'WellKnown' } |
+            Select-Object -First 1 -ExpandProperty IPAddress
+    }
+    catch { }
+    if (-not $ip) { $ip = '<server-ip>' }
+
+    $distDir = Join-Path $webDir 'dist'
+    # Small Bun static file server (the no-Nix counterpart of static-web-server,
+    # which nix's `.#web` app uses). Bun.file sets content-types, incl. wasm.
+    $serveScript = Join-Path ([System.IO.Path]::GetTempPath()) "trd-web-serve-$([guid]::NewGuid()).ts"
+    @'
+const root = process.argv[2];
+const port = Number(Bun.env.PORT ?? 8088);
+Bun.serve({
+  port,
+  hostname: "0.0.0.0",
+  async fetch(req) {
+    let path = decodeURIComponent(new URL(req.url).pathname);
+    if (path.endsWith("/")) path += "index.html";
+    const asset = Bun.file(root + path);
+    return (await asset.exists())
+      ? new Response(asset)
+      : new Response("404 Not Found", { status: 404 });
+  },
+});
+'@ | Set-Content -Path $serveScript -Encoding utf8
+
+    Write-Host ''
+    Write-Host "trd web (wasm) server - port $port  (press Ctrl-C to stop)"
+    Write-Host ''
+    Write-Host "  On this machine:        http://localhost:$port"
+    Write-Host "  Direct (same network):  http://${ip}:$port"
+    Write-Host ''
+    Write-Host '  SSH tunnel (recommended if the port is not directly reachable):'
+    Write-Host "    ssh -L ${port}:localhost:$port $user@$ip"
+    Write-Host '  then open in a WebGPU browser (Chrome/Edge):'
+    Write-Host "                          http://localhost:$port"
+    Write-Host ''
+
+    try {
+        $env:PORT = $port
+        & bun $serveScript $distDir
+    }
+    finally {
+        Remove-Item -Force $serveScript -ErrorAction SilentlyContinue
+    }
+    exit 0
 }
 
 # Fail early if a base tool is missing. cargo is always required; the GIF path

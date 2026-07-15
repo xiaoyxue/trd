@@ -127,8 +127,14 @@ examples\render.ps1 -Native   # play live in a window
 **3. Try the web build:**
 
 ```sh
+# Linux / macOS / WSL
 examples/render.sh --web   # build + serve, printing the URL + SSH-tunnel command
 nix run .#web              # equivalent: build + serve at http://localhost:8080
+```
+
+```powershell
+# Windows (PowerShell 7)
+examples\render.ps1 -Web   # build + serve, printing the URL + SSH-tunnel command
 ```
 
 Open the printed URL in a WebGPU browser (Chrome/Edge). On a remote (SSH) host,
@@ -246,6 +252,17 @@ PORT=9000 examples/render.sh --wasm # serve on a custom port
 The server binds all interfaces, so browse to `http://<host-ip>:PORT` directly,
 or forward it — `ssh -L 8080:localhost:8080 <user>@<host>`, then open
 <http://localhost:8080>.
+
+On Windows (no Nix), [`examples/render.ps1`](examples/render.ps1) exposes the same
+flag as `-Web` (alias `-Wasm`): it builds the bundle with `wasm-pack` + `bun`
+(`web`'s `bun run build`) and serves `web/dist` with a small Bun static server,
+printing the same URLs + SSH-tunnel command (`$env:PORT` overrides the port,
+default 8088; positional arguments are ignored):
+
+```powershell
+examples\render.ps1 -Web                       # build wasm + bun bundle, print URLs, then serve
+$env:PORT = 9000; examples\render.ps1 -Wasm    # serve on a custom port
+```
 
 The wasm core is a standard, TypeScript-typed npm package (`nix build .#trd-wasm`,
 built with `wasm-bindgen-cli` + `wasm-opt`). `web/` imports it and drives it with
