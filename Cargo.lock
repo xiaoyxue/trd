@@ -132,6 +132,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "approx"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cab112f0a86d568ea0e627cc1d6be74a1e9cd55214684db5561995f6dad897c6"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -950,6 +959,11 @@ name = "glam"
 version = "0.30.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19fc433e8437a212d1b6f1e68c7824af3aed907da60afa994e7f542d18d12aa9"
+dependencies = [
+ "approx",
+ "bytemuck",
+ "libm",
+]
 
 [[package]]
 name = "glow"
@@ -2540,6 +2554,7 @@ dependencies = [
 name = "trd-core"
 version = "0.1.0"
 dependencies = [
+ "approx",
  "arrow",
  "arrow-schema",
  "bytemuck",

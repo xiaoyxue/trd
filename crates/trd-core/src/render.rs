@@ -478,4 +478,30 @@ mod tests {
             .clip_transform(viewport)
             .abs_diff_eq(params.model_matrix(), 1e-6));
     }
+
+    #[test]
+    fn math_transform_reproduces_2d_affine_model() {
+        // The typed `math::Transform` API must be able to rebuild the legacy
+        // `translate · rotate_z · scale` model matrix that drives the GPU
+        // uniform, guarding the future render.rs migration onto `math`.
+        use crate::{Rotation, Transform, Vector3};
+
+        let center = [0.2_f32, -0.3];
+        let size = [0.5_f32, 0.75];
+        let theta = 0.4_f32;
+
+        // `a.then(b) == b * a`, so this is translate · rotate_z · scale.
+        let t = Transform::from_scale(Vector3::new(size[0], size[1], 1.0))
+            .then(Transform::from_rotation(Rotation::from_rotation_z(theta)))
+            .then(Transform::from_translation(Vector3::new(
+                center[0], center[1], 0.0,
+            )));
+
+        let expected = model_from_2d_affine(center, size, theta);
+        assert!(
+            Mat4::from_cols_array(&t.to_cols_array()).abs_diff_eq(expected, 1e-6),
+            "{:?} vs {expected:?}",
+            t.to_cols_array()
+        );
+    }
 }

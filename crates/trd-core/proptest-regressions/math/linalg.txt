@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc a869f6b8dd712fb46172f1882e20a4c6f22538a3a5b4d2c4fecdcd6d193f7e3c # shrinks to p = Point3(Vec3(-79.29265, 0.0, 0.0)), v = Vector3(Vec3(588.3406, 0.0, 0.0))
+cc 9742763ab14f7d38cff07fc84d1c37300ac63c4df33a1e1d8abfd9370e3c0e44 # shrinks to p = Point3(Vec3(0.0, 216.20451, 0.0)), q = Point3(Vec3(0.0, 484.5115, 0.0))
+cc 00b7c67fd9b1f923177f388f35c734a05cc377f96232ab49083767f26e029a21 # shrinks to p = Point3(Vec3(0.0, 0.48416916, 0.0)), v = Vector3(Vec3(0.0, 965.9462, 0.0))
+cc 760d3159a7ebc20adea2f81114f9ded5f4820a74225dd1d6d67e6b3f0e934114 # shrinks to p = Point3(Vec3(-550.125, 0.0, 0.0)), q = Point3(Vec3(-1.3989469, 0.0, 0.0))
