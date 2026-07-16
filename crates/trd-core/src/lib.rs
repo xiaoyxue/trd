@@ -10,8 +10,8 @@ mod protocol;
 mod render;
 
 pub use math::{
-    Matrix3, Matrix4, Normal3, Point2, Point3, Point4, Rotation, Scalar, ToWgsl, Transform,
-    Vector2, Vector3, Vector4, EPSILON,
+    Aabb2, Aabb3, Matrix3, Matrix4, Normal3, Point2, Point3, Point4, Rotation, Scalar, ToWgsl,
+    Transform, Vector2, Vector3, Vector4, EPSILON,
 };
 pub use output::{output_schema, tightly_pack_rgba, OutputError, OutputSession};
 pub use protocol::{

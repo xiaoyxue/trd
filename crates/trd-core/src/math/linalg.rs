@@ -36,12 +36,12 @@ macro_rules! impl_vector {
             }
             /// Wraps a glam vector.
             #[inline]
-            pub fn from_glam(v: $Inner) -> Self {
+            pub const fn from_glam(v: $Inner) -> Self {
                 Self(v)
             }
             /// Unwraps to the backing glam vector.
             #[inline]
-            pub fn into_inner(self) -> $Inner {
+            pub const fn into_inner(self) -> $Inner {
                 self.0
             }
 
@@ -276,12 +276,12 @@ macro_rules! impl_point {
             }
             /// Wraps a glam vector as a point.
             #[inline]
-            pub fn from_glam(v: $Inner) -> Self {
+            pub const fn from_glam(v: $Inner) -> Self {
                 Self(v)
             }
             /// Unwraps to the backing glam vector.
             #[inline]
-            pub fn into_inner(self) -> $Inner {
+            pub const fn into_inner(self) -> $Inner {
                 self.0
             }
 

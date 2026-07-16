@@ -5,6 +5,7 @@
 //! needs `(M⁻¹)ᵀ`) and [`Transform::inverse`] are allocation-free and can't
 //! silently recompute a near-singular inverse per call.
 
+use super::aabb::Aabb3;
 use super::linalg::{Matrix3, Matrix4, Normal3, Point3, Rotation, Vector3};
 use glam::{Mat3, Mat4};
 
@@ -187,6 +188,19 @@ impl Transform {
         Point3::from_glam(self.m.into_inner().project_point3(p.into_inner()))
     }
 
+    /// The tight axis-aligned box enclosing the transformed input box.
+    ///
+    /// Transforms the eight corners with [`Self::transform_point`] (affine, no
+    /// perspective divide) and re-encloses them — correct for the affine
+    /// model/view transforms it is used with. An empty input stays empty.
+    #[inline]
+    pub fn transform_aabb(self, aabb: Aabb3) -> Aabb3 {
+        if aabb.is_empty() {
+            return Aabb3::EMPTY;
+        }
+        Aabb3::from_points(aabb.corners().map(|c| self.transform_point(c)))
+    }
+
     /// The upper-left 3×3 linear part.
     #[inline]
     pub fn linear(self) -> Matrix3 {
@@ -210,7 +224,7 @@ impl From<Matrix4> for Transform {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::math::EPSILON;
+    use crate::math::{Aabb3, EPSILON};
     use approx::{assert_abs_diff_eq, assert_relative_eq};
     use proptest::prelude::*;
 
@@ -222,6 +236,9 @@ mod tests {
     }
     fn point3() -> impl Strategy<Value = Point3> {
         (finite(), finite(), finite()).prop_map(|(x, y, z)| Point3::new(x, y, z))
+    }
+    fn aabb3() -> impl Strategy<Value = Aabb3> {
+        (point3(), point3()).prop_map(|(a, b)| Aabb3::from_corners(a, b))
     }
 
     proptest! {
@@ -273,6 +290,43 @@ mod tests {
             let back = t.inverse().transform_point(t.transform_point(p));
             assert_abs_diff_eq!(back.into_inner(), p.into_inner(), epsilon = 1e-3);
         }
+
+        #[test]
+        fn transform_aabb_encloses_transformed_corners(
+            b in aabb3(),
+            angle in -3.0f32..3.0,
+            t_vec in vec3(),
+        ) {
+            // The transformed box must enclose every transformed corner (with a
+            // small tolerance for the corner-recompute rounding).
+            let t = Transform::from_rotation(Rotation::from_axis_angle(
+                Vector3::new(0.3, 1.0, -0.5), angle,
+            )).then(Transform::from_translation(t_vec));
+            let out = t.transform_aabb(b);
+            for c in b.corners() {
+                prop_assert!(out.expanded(1e-3).contains_point(t.transform_point(c)));
+            }
+        }
+    }
+
+    #[test]
+    fn transform_aabb_translation_is_exact() {
+        // A pure translation shifts both corners by the same vector.
+        let b = Aabb3::from_corners(Point3::new(-1.0, -2.0, -3.0), Point3::new(1.0, 2.0, 3.0));
+        let t = Transform::from_translation(Vector3::new(10.0, 20.0, 30.0));
+        let out = t.transform_aabb(b);
+        assert_abs_diff_eq!(
+            out.min().into_inner(),
+            Point3::new(9.0, 18.0, 27.0).into_inner(),
+            epsilon = EPSILON
+        );
+        assert_abs_diff_eq!(
+            out.max().into_inner(),
+            Point3::new(11.0, 22.0, 33.0).into_inner(),
+            epsilon = EPSILON
+        );
+        // Empty in, empty out.
+        assert!(t.transform_aabb(Aabb3::EMPTY).is_empty());
     }
 
     #[test]

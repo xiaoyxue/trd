@@ -34,10 +34,12 @@
 //! served by a Cargo **feature-flag scalar alias** (swap the glam backing types
 //! per build) rather than a `Scalar` generic — the public type names stay stable.
 
+mod aabb;
 mod gpu;
 mod linalg;
 mod transform;
 
+pub use aabb::{Aabb2, Aabb3};
 pub use gpu::ToWgsl;
 pub use linalg::{
     Matrix3, Matrix4, Normal3, Point2, Point3, Point4, Rotation, Vector2, Vector3, Vector4,
