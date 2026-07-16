@@ -4,7 +4,7 @@
 //! into the given texture view. Both the native batch renderer and the wasm
 //! entry point build on [`create_triangle_pipeline`].
 
-use glam::{Mat4, Vec3};
+use crate::math::{Matrix4, Vector3};
 
 /// Default clip near/far planes used when deriving a projection from camera
 /// intrinsics `K`. The hello-triangle is authored on the `z = 0` plane, so the
@@ -68,42 +68,42 @@ impl FrameParams {
 
     /// The effective 4×4 model matrix: the explicit [`FrameParams::model`] if
     /// present, else the 2D affine synthesized from `center`/`size`/`theta`.
-    pub(crate) fn model_matrix(&self) -> Mat4 {
+    pub(crate) fn model_matrix(&self) -> Matrix4 {
         match self.model {
-            Some(cols) => Mat4::from_cols_array(&cols),
+            Some(cols) => Matrix4::from_cols_array(&cols),
             None => model_from_2d_affine(self.center, self.size, self.theta),
         }
     }
 
     /// The view matrix `camera-from-world = inverse(pose)`, or identity.
-    pub(crate) fn view_matrix(&self) -> Mat4 {
+    pub(crate) fn view_matrix(&self) -> Matrix4 {
         match self.pose {
-            Some(cols) => Mat4::from_cols_array(&cols).inverse(),
-            None => Mat4::IDENTITY,
+            Some(cols) => Matrix4::from_cols_array(&cols).inverse(),
+            None => Matrix4::IDENTITY,
         }
     }
 
     /// The projection matrix derived from intrinsics `K` and the viewport, or
     /// identity when no intrinsics are supplied.
-    pub(crate) fn projection_matrix(&self, viewport: Viewport) -> Mat4 {
+    pub(crate) fn projection_matrix(&self, viewport: Viewport) -> Matrix4 {
         match self.k {
             Some(k) => projection_from_intrinsics(k, viewport),
-            None => Mat4::IDENTITY,
+            None => Matrix4::IDENTITY,
         }
     }
 
     /// The full clip transform `P · V · M` for a given viewport.
-    pub(crate) fn clip_transform(&self, viewport: Viewport) -> Mat4 {
+    pub(crate) fn clip_transform(&self, viewport: Viewport) -> Matrix4 {
         self.projection_matrix(viewport) * self.view_matrix() * self.model_matrix()
     }
 }
 
 /// Builds the 2D-affine model matrix `translate(center) · rotate_z(theta) ·
-/// scale(size)` (z untouched), the `0.0.1` transform expressed as a `Mat4`.
-pub(crate) fn model_from_2d_affine(center: [f32; 2], size: [f32; 2], theta: f32) -> Mat4 {
-    Mat4::from_translation(Vec3::new(center[0], center[1], 0.0))
-        * Mat4::from_rotation_z(theta)
-        * Mat4::from_scale(Vec3::new(size[0], size[1], 1.0))
+/// scale(size)` (z untouched), the `0.0.1` transform expressed as a [`Matrix4`].
+pub(crate) fn model_from_2d_affine(center: [f32; 2], size: [f32; 2], theta: f32) -> Matrix4 {
+    Matrix4::from_translation(Vector3::new(center[0], center[1], 0.0))
+        * Matrix4::from_rotation_z(theta)
+        * Matrix4::from_scale(Vector3::new(size[0], size[1], 1.0))
 }
 
 /// Builds a right-handed, wgpu-clip-space (`z ∈ [0, 1]`) perspective projection
@@ -115,7 +115,7 @@ pub(crate) fn model_from_2d_affine(center: [f32; 2], size: [f32; 2], theta: f32)
 /// centered principal point (`cx = W/2`, `cy = H/2`) with square pixels reduces
 /// to [`glam::Mat4::perspective_rh`]. `near`/`far` are [`DEFAULT_NEAR`]/
 /// [`DEFAULT_FAR`].
-pub(crate) fn projection_from_intrinsics(k: [f32; 9], viewport: Viewport) -> Mat4 {
+pub(crate) fn projection_from_intrinsics(k: [f32; 9], viewport: Viewport) -> Matrix4 {
     let fx = k[0];
     let fy = k[4];
     let cx = k[6];
@@ -125,7 +125,7 @@ pub(crate) fn projection_from_intrinsics(k: [f32; 9], viewport: Viewport) -> Mat
     let (n, f) = (DEFAULT_NEAR, DEFAULT_FAR);
 
     // Column-major: each row below is one column of the matrix.
-    Mat4::from_cols_array(&[
+    Matrix4::from_cols_array(&[
         2.0 * fx / w,
         0.0,
         0.0,
@@ -350,6 +350,9 @@ impl TriangleRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::math::{Point3, Rotation, Transform};
+    use approx::assert_abs_diff_eq;
+    use glam::{Mat4, Vec3, Vec4};
 
     #[test]
     fn uniform_layout_matches_wgsl_params() {
@@ -361,13 +364,13 @@ mod tests {
         };
         assert_eq!(
             Uniform::from_params(FrameParams::IDENTITY, viewport).transform,
-            Mat4::IDENTITY.to_cols_array()
+            Matrix4::IDENTITY.to_cols_array()
         );
     }
 
     #[test]
     fn identity_params_produce_identity_model() {
-        assert_eq!(FrameParams::IDENTITY.model_matrix(), Mat4::IDENTITY);
+        assert_eq!(FrameParams::IDENTITY.model_matrix(), Matrix4::IDENTITY);
     }
 
     #[test]
@@ -381,7 +384,7 @@ mod tests {
             model: Some(cols),
             ..FrameParams::IDENTITY
         };
-        assert_eq!(params.model_matrix(), Mat4::from_cols_array(&cols));
+        assert_eq!(params.model_matrix(), Matrix4::from_cols_array(&cols));
     }
 
     #[test]
@@ -391,7 +394,7 @@ mod tests {
         let center = [0.1_f32, -0.2];
         let size = [0.5_f32, 0.75];
         let theta = 1.25_f32;
-        let model = model_from_2d_affine(center, size, theta);
+        let model = Transform::from_matrix(model_from_2d_affine(center, size, theta));
 
         for base in [[0.0_f32, 0.5], [-0.5, -0.5], [0.5, -0.5]] {
             let scaled = [base[0] * size[0], base[1] * size[1]];
@@ -400,16 +403,16 @@ mod tests {
                 center[0] + c * scaled[0] - s * scaled[1],
                 center[1] + s * scaled[0] + c * scaled[1],
             ];
-            let got = model.transform_point3(Vec3::new(base[0], base[1], 0.0));
+            let got = model.transform_point(Point3::new(base[0], base[1], 0.0));
             assert!(
-                (got.x - expected[0]).abs() < 1e-6,
+                (got.x() - expected[0]).abs() < 1e-6,
                 "x: {got:?} {expected:?}"
             );
             assert!(
-                (got.y - expected[1]).abs() < 1e-6,
+                (got.y() - expected[1]).abs() < 1e-6,
                 "y: {got:?} {expected:?}"
             );
-            assert!(got.z.abs() < 1e-6, "z should stay 0: {got:?}");
+            assert!(got.z().abs() < 1e-6, "z should stay 0: {got:?}");
         }
     }
 
@@ -422,9 +425,13 @@ mod tests {
             pose: Some(pose.to_cols_array()),
             ..FrameParams::IDENTITY
         };
-        assert!(params.view_matrix().abs_diff_eq(pose.inverse(), 1e-5));
+        assert_abs_diff_eq!(
+            params.view_matrix().into_inner(),
+            pose.inverse(),
+            epsilon = 1e-5
+        );
         // No pose => identity view.
-        assert_eq!(FrameParams::IDENTITY.view_matrix(), Mat4::IDENTITY);
+        assert_eq!(FrameParams::IDENTITY.view_matrix(), Matrix4::IDENTITY);
     }
 
     #[test]
@@ -442,7 +449,7 @@ mod tests {
         let got = projection_from_intrinsics(k, viewport);
         let fov_y = 2.0 * (h / (2.0 * f)).atan();
         let expected = Mat4::perspective_rh(fov_y, w / h, DEFAULT_NEAR, DEFAULT_FAR);
-        assert!(got.abs_diff_eq(expected, 1e-4), "{got:?} vs {expected:?}");
+        assert_abs_diff_eq!(got.into_inner(), expected, epsilon = 1e-4);
     }
 
     #[test]
@@ -456,7 +463,7 @@ mod tests {
         let (w, h) = (viewport.width as f32, viewport.height as f32);
         let k = [400.0, 0.0, 0.0, 0.0, 400.0, 0.0, w / 2.0, h / 2.0, 1.0];
         let p = projection_from_intrinsics(k, viewport);
-        let clip = p * glam::Vec4::new(0.0, 0.0, -5.0, 1.0);
+        let clip = p.into_inner() * Vec4::new(0.0, 0.0, -5.0, 1.0);
         let ndc = clip.truncate() / clip.w;
         assert!(ndc.x.abs() < 1e-5 && ndc.y.abs() < 1e-5, "ndc = {ndc:?}");
     }
@@ -474,18 +481,19 @@ mod tests {
             width: 256,
             height: 256,
         };
-        assert!(params
-            .clip_transform(viewport)
-            .abs_diff_eq(params.model_matrix(), 1e-6));
+        assert_abs_diff_eq!(
+            params.clip_transform(viewport).into_inner(),
+            params.model_matrix().into_inner(),
+            epsilon = 1e-6
+        );
     }
 
     #[test]
     fn math_transform_reproduces_2d_affine_model() {
-        // The typed `math::Transform` API must be able to rebuild the legacy
+        // The typed `math::Transform` API rebuilds the legacy
         // `translate · rotate_z · scale` model matrix that drives the GPU
-        // uniform, guarding the future render.rs migration onto `math`.
-        use crate::{Rotation, Transform, Vector3};
-
+        // uniform — the quaternion `Transform` path matches the direct-trig
+        // `Matrix4` path within tolerance.
         let center = [0.2_f32, -0.3];
         let size = [0.5_f32, 0.75];
         let theta = 0.4_f32;
@@ -498,10 +506,10 @@ mod tests {
             )));
 
         let expected = model_from_2d_affine(center, size, theta);
-        assert!(
-            Mat4::from_cols_array(&t.to_cols_array()).abs_diff_eq(expected, 1e-6),
-            "{:?} vs {expected:?}",
-            t.to_cols_array()
+        assert_abs_diff_eq!(
+            t.matrix().into_inner(),
+            expected.into_inner(),
+            epsilon = 1e-6
         );
     }
 }

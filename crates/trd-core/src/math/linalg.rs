@@ -729,6 +729,14 @@ impl Matrix4 {
     pub fn from_rotation(r: Rotation) -> Self {
         Self(Mat4::from_quat(r.0))
     }
+    /// A pure rotation of `rad` radians about the `+z` axis, built directly from
+    /// trig (glam `Mat4::from_rotation_z`) — the 2D-affine path. Distinct from
+    /// [`Self::from_rotation`] (which routes through a quaternion) so it is
+    /// bit-for-bit the classic `translate · rotate_z · scale` model matrix.
+    #[inline]
+    pub fn from_rotation_z(rad: f32) -> Self {
+        Self(Mat4::from_rotation_z(rad))
+    }
     /// Lifts the 3×3 linear part into a 4×4 (zero translation).
     #[inline]
     pub fn from_mat3(m: Matrix3) -> Self {
