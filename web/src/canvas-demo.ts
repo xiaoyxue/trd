@@ -29,13 +29,16 @@ const canvasElement = canvas;
 const statusElement = status;
 
 const vec2 = new FixedSizeList(2, new Field("item", new Float32(), false));
+// Column-major 4x4 Mat4 = the triangle's model transform (protocol 0.0.2).
+const mat4 = new FixedSizeList(16, new Field("item", new Float32(), false));
 const schema = new Schema(
   [
     new Field("center", vec2, false),
     new Field("size", vec2, false),
     new Field("theta", new Float32(), false),
+    new Field("model", mat4, false),
   ],
-  new Map([["trd.protocol.version", "0.0.1"]]),
+  new Map([["trd.protocol.version", "0.0.2"]]),
 );
 
 type Frame = Readonly<{
@@ -43,6 +46,17 @@ type Frame = Readonly<{
   size: readonly [number, number];
   theta: number;
 }>;
+
+/// Column-major `translate(center) . rotate_z(theta) . scale(size)` — the same
+/// 4x4 model matrix trd-core synthesizes (glam) and the Python producer emits,
+/// so the browser sends a real protocol-0.0.2 `model` column.
+function modelMatrix(frame: Frame): number[] {
+  const c = Math.cos(frame.theta);
+  const s = Math.sin(frame.theta);
+  const [sx, sy] = frame.size;
+  const [tx, ty] = frame.center;
+  return [sx * c, sx * s, 0, 0, -sy * s, sy * c, 0, 0, 0, 0, 1, 0, tx, ty, 0, 1];
+}
 
 function frameBatch(frames: readonly Frame[]): RecordBatch {
   const center = vectorFromArray(
@@ -57,11 +71,16 @@ function frameBatch(frames: readonly Frame[]): RecordBatch {
     frames.map((frame) => frame.theta),
     new Float32(),
   );
+  const model = vectorFromArray(
+    frames.map((frame) => modelMatrix(frame)),
+    mat4,
+  );
   const centerData = center.data[0];
   const sizeData = size.data[0];
   const thetaData = theta.data[0];
+  const modelData = model.data[0];
 
-  if (!centerData || !sizeData || !thetaData) {
+  if (!centerData || !sizeData || !thetaData || !modelData) {
     throw new Error("Arrow vector construction produced no data");
   }
 
@@ -71,7 +90,7 @@ function frameBatch(frames: readonly Frame[]): RecordBatch {
       type: new Struct(schema.fields),
       length: frames.length,
       nullCount: 0,
-      children: [centerData, sizeData, thetaData],
+      children: [centerData, sizeData, thetaData, modelData],
     }),
   );
 }
