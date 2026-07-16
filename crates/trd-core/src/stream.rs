@@ -11,7 +11,9 @@ use arrow::error::ArrowError;
 use arrow::ipc::reader::StreamReader;
 use std::io::{Read, Write};
 
-use crate::protocol::{PROTOCOL_VERSION, PROTOCOL_VERSION_KEY, SUPPORTED_INPUT_VERSIONS};
+use crate::protocol::{
+    frame_rate_from_metadata, PROTOCOL_VERSION, PROTOCOL_VERSION_KEY, SUPPORTED_INPUT_VERSIONS,
+};
 use crate::render::FrameParams;
 use crate::OutputSession;
 
@@ -215,17 +217,27 @@ pub fn decode_frames(batch: &RecordBatch) -> Result<Vec<FrameParams>, StreamErro
 /// Reads an Arrow IPC frame-params stream from `input`, invoking `on_frame` for
 /// each decoded [`FrameParams`] in stream order.
 ///
-/// This is the input-side counterpart to [`run_stream`]: instead of rendering
-/// each row to an output image stream, it hands every frame to the caller — for
-/// example, a live window that renders it to a surface. It validates the
-/// protocol version and each batch's columns, types, and non-nullness via
-/// [`decode_frames`]. Returns once the stream is exhausted.
+/// Convenience wrapper over [`read_frame_stream_with_meta`] that ignores the
+/// stream's declared playback rate.
 pub fn read_frame_stream<R: Read>(
     input: R,
+    on_frame: impl FnMut(FrameParams),
+) -> Result<(), StreamError> {
+    read_frame_stream_with_meta(input, |_rate| {}, on_frame)
+}
+
+/// Like [`read_frame_stream`], but first invokes `on_meta` with the stream's
+/// declared playback rate (fps, [`crate::DEFAULT_FRAME_RATE`] when absent) as
+/// soon as the schema is known — before any frames — so a live player can pace
+/// playback by wall-clock time. Rendering logic still lives in [`decode_frames`].
+pub fn read_frame_stream_with_meta<R: Read>(
+    input: R,
+    on_meta: impl FnOnce(f64),
     mut on_frame: impl FnMut(FrameParams),
 ) -> Result<(), StreamError> {
     let reader = StreamReader::try_new(input, None)?;
     check_version(reader.schema().as_ref())?;
+    on_meta(frame_rate_from_metadata(reader.schema().metadata()));
     for batch in reader {
         let batch = batch?;
         for frame in decode_frames(&batch)? {
@@ -473,9 +485,10 @@ pub fn run_stream<R: Read, W: Write>(
 
     let reader = StreamReader::try_new(input, None)?;
     check_version(reader.schema().as_ref())?;
+    let frame_rate = frame_rate_from_metadata(reader.schema().metadata());
 
     let mut renderer = BatchRenderer::new(width, height)?;
-    let mut output_session = OutputSession::new(width, height)?;
+    let mut output_session = OutputSession::with_frame_rate(width, height, Some(frame_rate))?;
     output.write_all(&output_session.drain_new()?)?;
 
     for batch in reader {

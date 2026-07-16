@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use arrow::array::{Array, FixedSizeListArray, Float32Array, RecordBatch};
 use arrow::buffer::Buffer;
 use arrow::datatypes::{DataType, Field, Schema};
@@ -12,6 +14,25 @@ pub const PROTOCOL_VERSION_KEY: &str = "trd.protocol.version";
 /// Input schema versions this build accepts. `0.0.2` adds the optional `model`,
 /// `k`, and `pose` matrix columns; `0.0.1` streams (2D affine only) still decode.
 pub const SUPPORTED_INPUT_VERSIONS: &[&str] = &["0.0.1", "0.0.2"];
+
+/// Schema-metadata key declaring the stream's intended playback rate in frames
+/// per second. Optional and version-independent: it defines *animation speed* so
+/// that speed is a property of the data, not of a front-end's fps/refresh (see
+/// the timing model). Absent ⇒ [`DEFAULT_FRAME_RATE`].
+pub const FRAME_RATE_KEY: &str = "trd.stream.frame_rate";
+
+/// Default playback rate (fps) when a stream omits [`FRAME_RATE_KEY`].
+pub const DEFAULT_FRAME_RATE: f64 = 30.0;
+
+/// The stream's declared playback rate from schema metadata, or
+/// [`DEFAULT_FRAME_RATE`] when absent or unparsable/non-positive.
+pub fn frame_rate_from_metadata(metadata: &HashMap<String, String>) -> f64 {
+    metadata
+        .get(FRAME_RATE_KEY)
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|rate| rate.is_finite() && *rate > 0.0)
+        .unwrap_or(DEFAULT_FRAME_RATE)
+}
 
 pub type FrameBatch = Vec<FrameParams>;
 
@@ -102,6 +123,15 @@ impl InputSession {
 
     pub fn has_schema(&self) -> bool {
         self.schema_validated
+    }
+
+    /// The stream's declared playback rate (fps) once the schema has been
+    /// decoded, or `None` if no schema has arrived yet. Falls back to
+    /// [`DEFAULT_FRAME_RATE`] when the metadata key is absent.
+    pub fn frame_rate(&self) -> Option<f64> {
+        self.decoder
+            .schema()
+            .map(|schema| frame_rate_from_metadata(schema.metadata()))
     }
 
     fn require_open(&self) -> Result<(), ProtocolError> {
@@ -885,6 +915,38 @@ mod tests {
             session.push(&test_stream(&[nullable_field])),
             Err(ProtocolError::NullableField("pose"))
         ));
+    }
+
+    #[test]
+    fn frame_rate_metadata_parses_or_defaults() {
+        let rate = |value: &str| {
+            frame_rate_from_metadata(&std::collections::HashMap::from([(
+                FRAME_RATE_KEY.to_string(),
+                value.to_string(),
+            )]))
+        };
+        assert_eq!(rate("60"), 60.0);
+        assert_eq!(rate("23.976"), 23.976);
+        // Absent, unparsable, or non-positive/non-finite fall back to the default.
+        assert_eq!(
+            frame_rate_from_metadata(&std::collections::HashMap::new()),
+            DEFAULT_FRAME_RATE
+        );
+        assert_eq!(rate("not-a-number"), DEFAULT_FRAME_RATE);
+        assert_eq!(rate("0"), DEFAULT_FRAME_RATE);
+        assert_eq!(rate("-5"), DEFAULT_FRAME_RATE);
+        assert_eq!(rate("inf"), DEFAULT_FRAME_RATE);
+    }
+
+    #[test]
+    fn input_session_reports_frame_rate_after_schema() {
+        let mut session = InputSession::new();
+        assert_eq!(session.frame_rate(), None);
+        // A stream without frame_rate metadata reports the default once decoded.
+        session
+            .push(&test_stream(&[test_batch(&[FrameParams::IDENTITY])]))
+            .unwrap();
+        assert_eq!(session.frame_rate(), Some(DEFAULT_FRAME_RATE));
     }
 
     proptest::proptest! {

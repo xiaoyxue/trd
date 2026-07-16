@@ -4,6 +4,15 @@ All notable changes to the trd stream protocol are documented here. The format i
 based on [Keep a Changelog](https://keepachangelog.com/) and the protocol version
 follows `MAJOR.MINOR.PATCH`.
 
+## Unreleased
+
+### Added
+- Optional schema metadata **`trd.stream.frame_rate`** (float fps, default 30):
+  declares the stream's playback rate. Version-independent (applies to 0.0.1 and
+  0.0.2). `trd-cli` copies it into the rendered image stream so `encode.py` uses
+  it as the default GIF/WebP frame rate; `trd-app` plays at this rate (or `--fps`)
+  and, by default, presents decoupled from the monitor refresh (`--vsync` to lock).
+
 ## 0.0.2 — Current
 
 ### Added

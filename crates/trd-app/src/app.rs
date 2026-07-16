@@ -32,12 +32,18 @@ struct Cli {
     /// Initial window height in logical pixels.
     #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u32).range(1..))]
     height: u32,
-    /// Playback rate in frames per second.
-    #[arg(long, default_value_t = 30.0)]
-    fps: f32,
+    /// Playback frame rate (frames per second): sets both the animation speed
+    /// (higher = faster) and the present rate. When omitted, the stream's
+    /// declared rate (`trd.stream.frame_rate` metadata, default 30) is used.
+    #[arg(long)]
+    fps: Option<f64>,
     /// Play the stream once and hold the last frame instead of looping.
     #[arg(long)]
     once: bool,
+    /// Lock presentation to the monitor refresh (vsync). By default the app
+    /// presents at `--fps` decoupled from the refresh rate (non-vsync).
+    #[arg(long)]
+    vsync: bool,
 }
 
 /// Errors that can occur while setting up the window or GPU.
@@ -70,7 +76,7 @@ struct Gpu {
 }
 
 impl Gpu {
-    async fn new(window: Arc<Window>) -> Result<Self, AppError> {
+    async fn new(window: Arc<Window>, vsync: bool) -> Result<Self, AppError> {
         let size = window.inner_size();
         let width = size.width.max(1);
         let height = size.height.max(1);
@@ -113,9 +119,25 @@ impl Gpu {
             })
             .await?;
 
-        let config = surface
+        let mut config = surface
             .get_default_config(&adapter, width, height)
             .ok_or(AppError::SurfaceUnsupported)?;
+        // `--fps` sets the real playback/present rate, so by default we do NOT
+        // lock presentation to the monitor's refresh (vsync). Pick a non-vsync
+        // present mode when available (Mailbox is tear-free; Immediate may tear)
+        // so the app can present above/below the refresh rate; `--vsync` forces
+        // Fifo. Fifo is always supported, so it is the final fallback.
+        let supported = surface.get_capabilities(&adapter).present_modes;
+        config.present_mode = if vsync {
+            wgpu::PresentMode::Fifo
+        } else if supported.contains(&wgpu::PresentMode::Mailbox) {
+            wgpu::PresentMode::Mailbox
+        } else if supported.contains(&wgpu::PresentMode::Immediate) {
+            wgpu::PresentMode::Immediate
+        } else {
+            wgpu::PresentMode::Fifo
+        };
+        log::info!("present mode: {:?} (vsync={vsync})", config.present_mode);
         surface.configure(&device, &config);
 
         Ok(Self {
@@ -168,55 +190,77 @@ impl Gpu {
     }
 }
 
+/// A message from the stdin reader thread: the stream's declared playback rate
+/// (sent once, before any frames) followed by decoded frames.
+enum StreamMsg {
+    Rate(f64),
+    Frame(FrameParams),
+}
+
 /// The winit application: owns the GPU state and drives stream playback.
 struct App {
     gpu: Option<Gpu>,
-    /// Decoded frames arriving from the stdin reader thread.
-    rx: Receiver<FrameParams>,
+    /// Rate + frames arriving from the stdin reader thread.
+    rx: Receiver<StreamMsg>,
     /// Every frame received so far, retained so playback can loop.
     frames: Vec<FrameParams>,
-    /// Index of the next frame to display.
-    cursor: usize,
     /// The frame currently on screen (identity until the first arrives).
     current: FrameParams,
-    /// Time between displayed frames (the inverse of the target FPS).
-    frame_interval: Duration,
-    /// When the next frame should be shown.
-    next_tick: Instant,
+    /// Explicit `--fps` override; when `None`, `stream_rate` drives playback.
+    rate_override: Option<f64>,
+    /// The stream's declared playback rate (fps); `DEFAULT_FRAME_RATE` until the
+    /// reader reports the schema metadata.
+    stream_rate: f64,
+    /// Wall-clock origin for playback, set when the first frame arrives.
+    playback_start: Option<Instant>,
+    /// Index of the frame currently shown, to detect when it changes.
+    shown_index: Option<usize>,
     /// Restart from the first frame once the stream ends.
     loop_playback: bool,
     /// The reader thread has closed the channel (stream fully consumed).
     stream_done: bool,
     /// Initial window size in logical pixels.
     window_size: (u32, u32),
+    /// Whether to lock presentation to the monitor refresh (vsync / Fifo).
+    vsync: bool,
 }
 
 impl App {
     fn new(
-        rx: Receiver<FrameParams>,
+        rx: Receiver<StreamMsg>,
         window_size: (u32, u32),
-        frame_interval: Duration,
+        rate_override: Option<f64>,
         loop_playback: bool,
+        vsync: bool,
     ) -> Self {
         Self {
             gpu: None,
             rx,
             frames: Vec::new(),
-            cursor: 0,
             current: FrameParams::IDENTITY,
-            frame_interval,
-            next_tick: Instant::now(),
+            rate_override,
+            stream_rate: trd_core::DEFAULT_FRAME_RATE,
+            playback_start: None,
+            shown_index: None,
             loop_playback,
             stream_done: false,
             window_size,
+            vsync,
         }
     }
 
-    /// Moves all frames the reader thread has produced into the playback buffer.
+    /// The effective playback rate (fps): the `--fps` override, else the stream's
+    /// declared rate.
+    fn rate(&self) -> f64 {
+        self.rate_override.unwrap_or(self.stream_rate)
+    }
+
+    /// Drains the reader channel into the playback buffer and stream rate.
     fn drain_stream(&mut self) {
         loop {
             match self.rx.try_recv() {
-                Ok(params) => self.frames.push(params),
+                Ok(StreamMsg::Rate(rate)) => self.stream_rate = rate,
+                Ok(StreamMsg::Frame(params)) => self.frames.push(params),
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     self.stream_done = true;
@@ -226,29 +270,52 @@ impl App {
         }
     }
 
-    /// Advances playback by one frame, returning whether the shown frame changed.
+    /// Picks the frame for the current wall-clock time and updates `current`,
+    /// returning whether the shown frame changed. Speed is `rate()` frames/sec
+    /// regardless of how often this is called (i.e. independent of present fps).
     fn advance(&mut self) -> bool {
-        if self.cursor < self.frames.len() {
-            self.current = self.frames[self.cursor];
-            self.cursor += 1;
-            true
-        } else if self.stream_done && self.loop_playback && !self.frames.is_empty() {
-            // Caught up to the end of a finished stream: loop back to the start.
-            self.current = self.frames[0];
-            self.cursor = 1;
-            true
-        } else {
-            // Waiting for more frames (or the stream ended without looping):
-            // hold the current frame.
-            false
+        if self.frames.is_empty() {
+            return false;
         }
+        let start = *self.playback_start.get_or_insert_with(Instant::now);
+        let elapsed = start.elapsed().as_secs_f64();
+        let target = (elapsed * self.rate()).floor().max(0.0) as usize;
+
+        let index = if self.loop_playback {
+            // Only loop across a length known to be complete once the stream ends;
+            // while still streaming, clamp to what has arrived.
+            if self.stream_done {
+                target % self.frames.len()
+            } else {
+                target.min(self.frames.len() - 1)
+            }
+        } else {
+            target.min(self.frames.len() - 1)
+        };
+
+        if self.shown_index == Some(index) {
+            return false;
+        }
+        self.current = self.frames[index];
+        self.shown_index = Some(index);
+        true
     }
 
-    /// True once the stream is finished and there is nothing left to play.
+    /// The instant the next frame boundary is due, for scheduling a wakeup.
+    fn next_boundary(&self) -> Option<Instant> {
+        let start = self.playback_start?;
+        let next = self.shown_index.map_or(0, |i| i + 1) as f64;
+        Some(start + Duration::from_secs_f64(next / self.rate()))
+    }
+
+    /// True once the stream is finished and there is nothing left to play (a
+    /// non-looping stream whose last frame is already shown).
     fn idle(&self) -> bool {
         self.stream_done
-            && self.cursor >= self.frames.len()
-            && (!self.loop_playback || self.frames.is_empty())
+            && !self.loop_playback
+            && self
+                .shown_index
+                .map_or(self.frames.is_empty(), |i| i + 1 >= self.frames.len())
     }
 }
 
@@ -271,7 +338,7 @@ impl ApplicationHandler for App {
             }
         };
 
-        match pollster::block_on(Gpu::new(window.clone())) {
+        match pollster::block_on(Gpu::new(window.clone(), self.vsync)) {
             Ok(gpu) => {
                 gpu.window.request_redraw();
                 self.gpu = Some(gpu);
@@ -307,38 +374,46 @@ impl ApplicationHandler for App {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.drain_stream();
 
-        let now = Instant::now();
-        if now >= self.next_tick {
-            if self.advance() {
-                if let Some(gpu) = self.gpu.as_ref() {
-                    gpu.window.request_redraw();
-                }
+        // Select the frame for the current wall-clock time (speed = rate()),
+        // independent of how often this runs or the present/refresh rate.
+        if self.advance() {
+            if let Some(gpu) = self.gpu.as_ref() {
+                gpu.window.request_redraw();
             }
-            // Schedule from `now` (not `next_tick`) so a stall never causes a
-            // catch-up burst of frames.
-            self.next_tick = now + self.frame_interval;
         }
 
-        // Sleep until the next frame is due; go fully idle once playback is done.
+        // Sleep until the next frame boundary is due; go fully idle once a
+        // non-looping stream has shown its last frame.
         if self.idle() {
             event_loop.set_control_flow(ControlFlow::Wait);
+        } else if let Some(next) = self.next_boundary() {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(next));
         } else {
-            event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_tick));
+            // No frames yet: wait for the reader to deliver some.
+            event_loop.set_control_flow(ControlFlow::Wait);
         }
     }
 }
 
 /// Reads the Arrow IPC frame-params stream from stdin on a background thread,
-/// forwarding each decoded frame over `tx` until the stream ends.
-fn spawn_stdin_reader(tx: mpsc::Sender<FrameParams>) {
+/// forwarding the stream's declared playback rate then each decoded frame over
+/// `tx` until the stream ends.
+fn spawn_stdin_reader(tx: mpsc::Sender<StreamMsg>) {
     let spawned = std::thread::Builder::new()
         .name("trd-stdin-reader".to_string())
         .spawn(move || {
             let stdin = std::io::stdin().lock();
+            let rate_tx = tx.clone();
             // A send error just means the window closed; stop reading in that case.
-            if let Err(err) = trd_core::read_frame_stream(stdin, |params| {
-                let _ = tx.send(params);
-            }) {
+            if let Err(err) = trd_core::read_frame_stream_with_meta(
+                stdin,
+                |rate| {
+                    let _ = rate_tx.send(StreamMsg::Rate(rate));
+                },
+                |params| {
+                    let _ = tx.send(StreamMsg::Frame(params));
+                },
+            ) {
                 log::error!("input stream error: {err}");
             }
         });
@@ -355,12 +430,7 @@ pub fn run() -> Result<(), AppError> {
     .init();
 
     let cli = Cli::parse();
-    let fps = if cli.fps.is_finite() && cli.fps > 0.0 {
-        cli.fps
-    } else {
-        30.0
-    };
-    let frame_interval = Duration::from_secs_f32(1.0 / fps);
+    let rate_override = cli.fps.filter(|fps| fps.is_finite() && *fps > 0.0);
 
     let (tx, rx) = mpsc::channel();
     spawn_stdin_reader(tx);
@@ -370,7 +440,13 @@ pub fn run() -> Result<(), AppError> {
     // by waiting until the app schedules the first frame.
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let mut app = App::new(rx, (cli.width, cli.height), frame_interval, !cli.once);
+    let mut app = App::new(
+        rx,
+        (cli.width, cli.height),
+        rate_override,
+        !cli.once,
+        cli.vsync,
+    );
     event_loop.run_app(&mut app)?;
     Ok(())
 }
