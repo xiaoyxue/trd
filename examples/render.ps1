@@ -13,7 +13,7 @@
 #   examples/render.ps1 [-InputPath INPUT.jsonl] [-Output OUTPUT.gif|.webp] `
 #                       [-Width 256] [-Height 256] [-Fps 30] [-Native] [-Web]
 #   examples/render.ps1 INPUT.jsonl OUTPUT.gif 256 256 30   # positional
-# Defaults: examples/frames.jsonl  output/out.gif  256 256 30
+# Defaults: examples/frames.0.0.2.jsonl  output/out.gif  256 256 30
 #
 # By default the frame stream is rendered to a GIF/WebP via the headless trd-cli.
 # With -Native (alias -App) it is played live in the interactive trd-app window
@@ -46,7 +46,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $root = Split-Path -Parent $PSScriptRoot
-if (-not $InputPath) { $InputPath = Join-Path $PSScriptRoot 'frames.jsonl' }
+if (-not $InputPath) { $InputPath = Join-Path $PSScriptRoot 'frames.0.0.2.jsonl' }
 
 # Make the trd toolchain available the way `nix develop` does on Linux.
 $devEnv = Join-Path $root 'scripts\dev-env.ps1'

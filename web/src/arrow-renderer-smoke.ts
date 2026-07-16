@@ -183,8 +183,8 @@ if (!rejectedAfterFinish) {
 
 const table = tableFromIPC(concat(outputChunks));
 
-if (table.schema.metadata.get("trd.protocol.version") !== "0.0.1") {
-  throw new Error("output protocol version is not 0.0.1");
+if (table.schema.metadata.get("trd.protocol.version") !== "0.0.2") {
+  throw new Error("output protocol version is not 0.0.2");
 }
 
 if (table.batches.length !== 2) {

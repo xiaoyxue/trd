@@ -11,7 +11,9 @@ use arrow::error::ArrowError;
 use arrow::ipc::reader::StreamReader;
 use std::io::{Read, Write};
 
-use crate::protocol::{PROTOCOL_VERSION, PROTOCOL_VERSION_KEY};
+use crate::protocol::{
+    frame_rate_from_metadata, PROTOCOL_VERSION, PROTOCOL_VERSION_KEY, SUPPORTED_INPUT_VERSIONS,
+};
 use crate::render::FrameParams;
 use crate::OutputSession;
 
@@ -79,10 +81,10 @@ pub fn input_schema() -> Schema {
     )
 }
 
-/// If the schema declares a protocol version, require it to match.
+/// If the schema declares a protocol version, require it to be supported.
 pub fn check_version(schema: &Schema) -> Result<(), StreamError> {
     if let Some(v) = schema.metadata().get(PROTOCOL_VERSION_KEY) {
-        if v != PROTOCOL_VERSION {
+        if !SUPPORTED_INPUT_VERSIONS.contains(&v.as_str()) {
             return Err(StreamError::UnsupportedVersion(v.clone()));
         }
     }
@@ -134,8 +136,54 @@ fn read_vec2(list: &FixedSizeListArray, row: usize) -> [f32; 2] {
     [values.value(row * 2), values.value(row * 2 + 1)]
 }
 
+/// Looks up an optional `FixedSizeList<Float32>[len]` column, validating type,
+/// length, and non-nullness. Returns `None` if the column is absent (additive
+/// `0.0.2` columns are optional).
+fn optional_fixed_list<'a>(
+    batch: &'a RecordBatch,
+    name: &'static str,
+    len: i32,
+) -> Result<Option<(&'a FixedSizeListArray, &'a Float32Array)>, StreamError> {
+    let Some(column) = batch.column_by_name(name) else {
+        return Ok(None);
+    };
+    let list = column
+        .as_any()
+        .downcast_ref::<FixedSizeListArray>()
+        .filter(|list| list.value_length() == len)
+        .ok_or_else(|| StreamError::ColumnType {
+            column: name,
+            expected: "FixedSizeList<Float32>[N]",
+            actual: column.data_type().clone(),
+        })?;
+    if list.null_count() > 0 || list.values().null_count() > 0 {
+        return Err(StreamError::NullValues(name));
+    }
+    let values = list
+        .values()
+        .as_any()
+        .downcast_ref::<Float32Array>()
+        .ok_or_else(|| StreamError::ColumnType {
+            column: name,
+            expected: "FixedSizeList<Float32>[N]",
+            actual: list.values().data_type().clone(),
+        })?;
+    Ok(Some((list, values)))
+}
+
+/// Reads the `N` `f32` values of a fixed-size-list `row`.
+fn read_fixed<const N: usize>(
+    list: &FixedSizeListArray,
+    values: &Float32Array,
+    row: usize,
+) -> [f32; N] {
+    let offset = list.value_offset(row) as usize;
+    std::array::from_fn(|i| values.value(offset + i))
+}
+
 /// Decodes every row of `batch` into [`FrameParams`], validating required
 /// columns, types, and non-nullness (including the fixed-size-list children).
+/// The optional `0.0.2` `model`/`k`/`pose` matrix columns are decoded if present.
 pub fn decode_frames(batch: &RecordBatch) -> Result<Vec<FrameParams>, StreamError> {
     let center = require_vec2(batch, "center")?;
     let size = require_vec2(batch, "size")?;
@@ -151,11 +199,17 @@ pub fn decode_frames(batch: &RecordBatch) -> Result<Vec<FrameParams>, StreamErro
     if theta.null_count() > 0 {
         return Err(StreamError::NullValues("theta"));
     }
+    let model = optional_fixed_list(batch, "model", 16)?;
+    let k = optional_fixed_list(batch, "k", 9)?;
+    let pose = optional_fixed_list(batch, "pose", 16)?;
     Ok((0..batch.num_rows())
         .map(|i| FrameParams {
             center: read_vec2(center, i),
             size: read_vec2(size, i),
             theta: theta.value(i),
+            model: model.map(|(list, values)| read_fixed::<16>(list, values, i)),
+            k: k.map(|(list, values)| read_fixed::<9>(list, values, i)),
+            pose: pose.map(|(list, values)| read_fixed::<16>(list, values, i)),
         })
         .collect())
 }
@@ -163,17 +217,27 @@ pub fn decode_frames(batch: &RecordBatch) -> Result<Vec<FrameParams>, StreamErro
 /// Reads an Arrow IPC frame-params stream from `input`, invoking `on_frame` for
 /// each decoded [`FrameParams`] in stream order.
 ///
-/// This is the input-side counterpart to [`run_stream`]: instead of rendering
-/// each row to an output image stream, it hands every frame to the caller — for
-/// example, a live window that renders it to a surface. It validates the
-/// protocol version and each batch's columns, types, and non-nullness via
-/// [`decode_frames`]. Returns once the stream is exhausted.
+/// Convenience wrapper over [`read_frame_stream_with_meta`] that ignores the
+/// stream's declared playback rate.
 pub fn read_frame_stream<R: Read>(
     input: R,
+    on_frame: impl FnMut(FrameParams),
+) -> Result<(), StreamError> {
+    read_frame_stream_with_meta(input, |_rate| {}, on_frame)
+}
+
+/// Like [`read_frame_stream`], but first invokes `on_meta` with the stream's
+/// declared playback rate (fps, [`crate::DEFAULT_FRAME_RATE`] when absent) as
+/// soon as the schema is known — before any frames — so a live player can pace
+/// playback by wall-clock time. Rendering logic still lives in [`decode_frames`].
+pub fn read_frame_stream_with_meta<R: Read>(
+    input: R,
+    on_meta: impl FnOnce(f64),
     mut on_frame: impl FnMut(FrameParams),
 ) -> Result<(), StreamError> {
     let reader = StreamReader::try_new(input, None)?;
     check_version(reader.schema().as_ref())?;
+    on_meta(frame_rate_from_metadata(reader.schema().metadata()));
     for batch in reader {
         let batch = batch?;
         for frame in decode_frames(&batch)? {
@@ -270,8 +334,12 @@ impl BatchRenderer {
 
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
         let pipeline = crate::render::create_triangle_pipeline(&device, format);
-        let (uniform, bind_group) =
-            crate::render::create_params_binding(&device, &pipeline, FrameParams::IDENTITY);
+        let (uniform, bind_group) = crate::render::create_params_binding(
+            &device,
+            &pipeline,
+            FrameParams::IDENTITY,
+            crate::render::Viewport { width, height },
+        );
 
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("trd render target"),
@@ -319,7 +387,15 @@ impl BatchRenderer {
     }
 
     async fn render_async(&mut self, params: FrameParams) -> Result<Vec<u8>, StreamError> {
-        crate::render::write_params(&self.queue, &self.uniform, params);
+        crate::render::write_params(
+            &self.queue,
+            &self.uniform,
+            params,
+            crate::render::Viewport {
+                width: self.width,
+                height: self.height,
+            },
+        );
         let view = self
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -409,9 +485,10 @@ pub fn run_stream<R: Read, W: Write>(
 
     let reader = StreamReader::try_new(input, None)?;
     check_version(reader.schema().as_ref())?;
+    let frame_rate = frame_rate_from_metadata(reader.schema().metadata());
 
     let mut renderer = BatchRenderer::new(width, height)?;
-    let mut output_session = OutputSession::new(width, height)?;
+    let mut output_session = OutputSession::with_frame_rate(width, height, Some(frame_rate))?;
     output.write_all(&output_session.drain_new()?)?;
 
     for batch in reader {
@@ -468,6 +545,7 @@ mod tests {
                 center: [0.1, -0.2],
                 size: [0.5, 0.5],
                 theta: 1.25,
+                ..FrameParams::IDENTITY
             },
         ];
         let batch = build_input_batch(&frames);
@@ -485,6 +563,7 @@ mod tests {
                 center: [0.2, -0.1],
                 size: [0.5, 0.5],
                 theta: 1.0,
+                ..FrameParams::IDENTITY
             },
         ];
         let batch = build_input_batch(&frames);
@@ -624,6 +703,7 @@ mod tests {
                 center: [0.0, 0.0],
                 size: [1.0, 1.0],
                 theta: i as f32 * std::f32::consts::PI / 6.0,
+                ..FrameParams::IDENTITY
             })
             .collect();
 

@@ -6,7 +6,7 @@
 #
 # Usage:
 #   examples/render.sh [--native|--app|--web|--wasm] [INPUT.jsonl] [OUTPUT.gif|.webp] [WIDTH] [HEIGHT] [FPS]
-# Defaults: examples/frames.jsonl  output/out.gif  256 256 30
+# Defaults: examples/frames.0.0.2.jsonl  output/out.gif  256 256 30
 #
 # By default the frame stream is rendered to a GIF/WebP via the headless trd-cli.
 # With --native (alias --app) it is played live in the interactive trd-app window
@@ -35,7 +35,7 @@ done
 if [ ${#positional[@]} -gt 0 ]; then set -- "${positional[@]}"; else set --; fi
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-input="${1:-$root/examples/frames.jsonl}"
+input="${1:-$root/examples/frames.0.0.2.jsonl}"
 output="${2:-output/out.gif}"
 width="${3:-256}"
 height="${4:-256}"
