@@ -7,7 +7,7 @@
     "build:wasm": "wasm-pack build ../crates/trd-wasm --mode no-install --target web --out-dir pkg",
     "build:web": "bun build ./index.html --outdir dist",
     "build": "bun run build:wasm && bun install --frozen-lockfile && bun run build:web",
-    "dev": "bun run build && bun ./index.html --port 8080",
+    "dev": "bun run build && BUN_PORT=8080 bun ./index.html",
     "typecheck": "tsc --noEmit",
     "check": "biome ci .",
     "format": "biome format --write ."

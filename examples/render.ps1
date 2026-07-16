@@ -11,17 +11,22 @@
 #
 # Usage:
 #   examples/render.ps1 [-InputPath INPUT.jsonl] [-Output OUTPUT.gif|.webp] `
-#                       [-Width 256] [-Height 256] [-Fps 30] [-Native] [-Web]
+#                       [-Width 256] [-Height 256] [-Fps 30] `
+#                       [-CLI | -Native | -Web [-ArrowRenderer|-CanvasRenderer]]
 #   examples/render.ps1 INPUT.jsonl OUTPUT.gif 256 256 30   # positional
-# Defaults: examples/frames.jsonl  output/out.gif  256 256 30
+# Defaults: examples/frames.0.0.2.jsonl  output/out.gif  256 256 30
 #
-# By default the frame stream is rendered to a GIF/WebP via the headless trd-cli.
+# By default (or with -CLI, alias -Headless) the frame stream is rendered to a
+# GIF/WebP via the headless trd-cli.
 # With -Native (alias -App) it is played live in the interactive trd-app window
 # (trd-native); -Output is then ignored and neither uv nor ffmpeg are needed.
 # With -Web (alias -Wasm) it builds the browser (wasm) bundle with wasm-pack + bun
 # and serves web/dist, printing the machine URLs and an SSH-tunnel command. The web
 # demo generates its own Arrow frame stream in-browser, so all positional arguments
-# are ignored. Override the port with $env:PORT (default 8088); binds all interfaces.
+# are ignored. Two in-browser renderers share the bundle: -ArrowRenderer (default)
+# runs the offscreen output-stream smoke (the browser counterpart of the CLI);
+# -CanvasRenderer runs the on-screen canvas demo. Override the port with $env:PORT
+# (default 8088); binds all interfaces.
 #
 # On Windows this auto-sources scripts\dev-env.ps1 (the flake.nix devShell
 # counterpart; see README "Windows setup (without Nix)" for the one-time
@@ -38,15 +43,28 @@ param(
     [Parameter(Position = 2)][int]$Width = 256,
     [Parameter(Position = 3)][int]$Height = 256,
     [Parameter(Position = 4)][int]$Fps = 30,
+    [Alias('Headless')][switch]$CLI,
     [Alias('App')][switch]$Native,
-    [Alias('Wasm')][switch]$Web
+    [Alias('Wasm')][switch]$Web,
+    [switch]$ArrowRenderer,
+    [switch]$CanvasRenderer
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# --- Mode selection & validation ---------------------------------------------
+# The top-level modes are mutually exclusive: the default headless render
+# (explicit alias -CLI/-Headless), the live -Native window, and the browser
+# -Web/-Wasm bundle. -ArrowRenderer / -CanvasRenderer sub-select the in-browser
+# renderer and therefore apply only to -Web.
+$modeCount = @($CLI, $Native, $Web).Where({ $_ }).Count
+if ($modeCount -gt 1) { Write-Error 'error: choose only one of -CLI, -Native, -Web.' }
+if ($ArrowRenderer -and $CanvasRenderer) { Write-Error 'error: -ArrowRenderer and -CanvasRenderer are mutually exclusive.' }
+if (($ArrowRenderer -or $CanvasRenderer) -and -not $Web) { Write-Error 'error: -ArrowRenderer / -CanvasRenderer apply only to -Web/-Wasm.' }
+
 $root = Split-Path -Parent $PSScriptRoot
-if (-not $InputPath) { $InputPath = Join-Path $PSScriptRoot 'frames.jsonl' }
+if (-not $InputPath) { $InputPath = Join-Path $PSScriptRoot 'frames.0.0.2.jsonl' }
 
 # Make the trd toolchain available the way `nix develop` does on Linux.
 $devEnv = Join-Path $root 'scripts\dev-env.ps1'
@@ -68,6 +86,20 @@ if ($Web) {
 
     $port = if ($env:PORT) { $env:PORT } else { '8088' }
     $webDir = Join-Path $root 'web'
+
+    # Both browser renderers ship in one bundle; web/src/main.ts routes on the
+    # `arrow-smoke` query param, so only the opened URL differs. Default (or
+    # -ArrowRenderer) = the offscreen ArrowRenderer output-stream smoke (the
+    # browser counterpart of -CLI); -CanvasRenderer = the on-screen canvas demo.
+    if ($CanvasRenderer) {
+        $demoQuery = ''
+        $rendererLabel = 'CanvasRenderer (on-screen canvas demo)'
+    }
+    else {
+        $demoQuery = '?arrow-smoke'
+        $rendererLabel = 'ArrowRenderer (offscreen output-stream smoke)'
+    }
+
     Write-Host 'building trd web (wasm) bundle (wasm-pack + bun)...'
     Push-Location $webDir
     try {
@@ -112,14 +144,15 @@ Bun.serve({
 
     Write-Host ''
     Write-Host "trd web (wasm) server - port $port  (press Ctrl-C to stop)"
+    Write-Host "  renderer: $rendererLabel"
     Write-Host ''
-    Write-Host "  On this machine:        http://localhost:$port"
-    Write-Host "  Direct (same network):  http://${ip}:$port"
+    Write-Host "  On this machine:        http://localhost:$port$demoQuery"
+    Write-Host "  Direct (same network):  http://${ip}:$port$demoQuery"
     Write-Host ''
     Write-Host '  SSH tunnel (recommended if the port is not directly reachable):'
     Write-Host "    ssh -L ${port}:localhost:$port $user@$ip"
     Write-Host '  then open in a WebGPU browser (Chrome/Edge):'
-    Write-Host "                          http://localhost:$port"
+    Write-Host "                          http://localhost:$port$demoQuery"
     Write-Host ''
 
     try {
@@ -200,15 +233,37 @@ $work = (New-Item -ItemType Directory -Path (Join-Path ([System.IO.Path]::GetTem
 $framesArrow = Join-Path $work 'frames.arrows'
 $imagesArrow = Join-Path $work 'images.arrows'
 try {
-    # 1. Build a streaming Arrow IPC file of frame params (center/size as
-    #    FixedSizeList<f32>[2], theta as f32) from the JSONL. DuckDB does the
-    #    cast when its 'arrow' extension is available; otherwise pyarrow does.
+    # 1. Build a streaming Arrow IPC file of frame params from the JSONL: the
+    #    required 0.0.1 columns (center/size as FixedSizeList<f32>[2], theta as
+    #    f32, defaulting to the identity when absent) plus the additive 0.0.2
+    #    `model` column (FixedSizeList<f32>[16], column-major) - used verbatim if
+    #    present, else synthesized to match scripts/jsonl_to_arrow.py. DuckDB does
+    #    the cast when its 'arrow' extension is available; otherwise pyarrow does.
     if ($producer -eq 'duckdb') {
         $sql = @"
 INSTALL arrow FROM community; LOAD arrow;
 COPY (
-  SELECT center::FLOAT[2] AS center, size::FLOAT[2] AS size, theta::FLOAT AS theta
-  FROM read_json_auto('$(ConvertTo-SqlPath $InputPath)')
+  WITH raw AS (
+    SELECT
+      COALESCE(center, [0.0, 0.0]) AS c,
+      COALESCE(size, [1.0, 1.0]) AS s,
+      COALESCE(theta, 0.0) AS th,
+      model AS m
+    FROM read_json('$(ConvertTo-SqlPath $InputPath)',
+      format = 'newline_delimited',
+      columns = {center: 'DOUBLE[]', size: 'DOUBLE[]', theta: 'DOUBLE', model: 'DOUBLE[]'})
+  )
+  SELECT
+    c::FLOAT[2] AS center,
+    s::FLOAT[2] AS size,
+    th::FLOAT AS theta,
+    COALESCE(m, [
+      s[1] * cos(th), s[1] * sin(th), 0.0, 0.0,
+      -s[2] * sin(th), s[2] * cos(th), 0.0, 0.0,
+      0.0, 0.0, 1.0, 0.0,
+      c[1], c[2], 0.0, 1.0
+    ])::FLOAT[16] AS model
+  FROM raw
 ) TO '$(ConvertTo-SqlPath $framesArrow)' (FORMAT arrows);
 "@
         & duckdb -c $sql

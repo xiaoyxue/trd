@@ -11,6 +11,10 @@ import {
 } from "apache-arrow";
 import init, { CanvasRenderer } from "trd-wasm";
 import wasmUrl from "trd-wasm/trd_wasm_bg.wasm" with { type: "file" };
+// The same frame data the native CLI/window consume, so all three front-ends
+// render the identical animation from one shared source of truth. This is the
+// protocol-0.0.2 example: each row carries the triangle's 4x4 model matrix.
+import framesUrl from "../../examples/frames.0.0.2.jsonl" with { type: "file" };
 
 const canvas = document.getElementById("trd-canvas");
 const status = document.getElementById("trd-status");
@@ -26,39 +30,64 @@ const canvasElement = canvas;
 const statusElement = status;
 
 const vec2 = new FixedSizeList(2, new Field("item", new Float32(), false));
+// Column-major 4x4 Mat4 = the triangle's model transform (protocol 0.0.2).
+const mat4 = new FixedSizeList(16, new Field("item", new Float32(), false));
 const schema = new Schema(
   [
     new Field("center", vec2, false),
     new Field("size", vec2, false),
     new Field("theta", new Float32(), false),
+    new Field("model", mat4, false),
   ],
-  new Map([["trd.protocol.version", "0.0.1"]]),
+  new Map([["trd.protocol.version", "0.0.2"]]),
 );
 
-type Frame = Readonly<{
-  center: readonly [number, number];
-  size: readonly [number, number];
-  theta: number;
-}>;
+// A protocol-0.0.2 frame is just the 4x4 model matrix (16 column-major floats);
+// the legacy center/size/theta columns are still required on the wire, so they
+// are filled with the identity below.
+type Frame = Readonly<{ model: readonly number[] }>;
+
+const ZERO2: readonly [number, number] = [0, 0];
+const ONE2: readonly [number, number] = [1, 1];
+
+/// Column-major `translate(center) . rotate_z(theta) . scale(size)` — the same
+/// 4x4 model matrix trd-core synthesizes (glam) and the producer emits. Used to
+/// author the two-frame smoke batch below directly as matrices.
+function modelMatrix(
+  center: readonly [number, number],
+  size: readonly [number, number],
+  theta: number,
+): number[] {
+  const c = Math.cos(theta);
+  const s = Math.sin(theta);
+  const [sx, sy] = size;
+  const [tx, ty] = center;
+  return [sx * c, sx * s, 0, 0, -sy * s, sy * c, 0, 0, 0, 0, 1, 0, tx, ty, 0, 1];
+}
 
 function frameBatch(frames: readonly Frame[]): RecordBatch {
   const center = vectorFromArray(
-    frames.map((frame) => frame.center),
+    frames.map(() => ZERO2),
     vec2,
   );
   const size = vectorFromArray(
-    frames.map((frame) => frame.size),
+    frames.map(() => ONE2),
     vec2,
   );
   const theta = vectorFromArray(
-    frames.map((frame) => frame.theta),
+    frames.map(() => 0),
     new Float32(),
+  );
+  const model = vectorFromArray(
+    frames.map((frame) => frame.model),
+    mat4,
   );
   const centerData = center.data[0];
   const sizeData = size.data[0];
   const thetaData = theta.data[0];
+  const modelData = model.data[0];
 
-  if (!centerData || !sizeData || !thetaData) {
+  if (!centerData || !sizeData || !thetaData || !modelData) {
     throw new Error("Arrow vector construction produced no data");
   }
 
@@ -68,7 +97,7 @@ function frameBatch(frames: readonly Frame[]): RecordBatch {
       type: new Struct(schema.fields),
       length: frames.length,
       nullCount: 0,
-      children: [centerData, sizeData, thetaData],
+      children: [centerData, sizeData, thetaData, modelData],
     }),
   );
 }
@@ -90,6 +119,33 @@ function summary(name: string, values: readonly number[]) {
 
 function addMeasure(name: string, duration: number): void {
   performance.measure(name, { start: performance.now(), duration });
+}
+
+/// Loads the shared `examples/frames.0.0.2.jsonl` sequence — the same protocol
+/// 0.0.2 model-matrix data the native CLI/window render — so the browser plays
+/// the identical animation.
+async function loadFrames(): Promise<Frame[]> {
+  const response = await fetch(framesUrl);
+  if (!response.ok) {
+    throw new Error(`failed to load frames.0.0.2.jsonl: ${response.status}`);
+  }
+  const text = await response.text();
+  return text
+    .split("\n")
+    .filter((line) => line.trim().length > 0)
+    .map((line) => {
+      const row: unknown = JSON.parse(line);
+      if (
+        typeof row !== "object" ||
+        row === null ||
+        !("model" in row) ||
+        !Array.isArray((row as { model: unknown }).model) ||
+        (row as { model: unknown[] }).model.length !== 16
+      ) {
+        throw new Error(`invalid frame row (expected 16-float model): ${line}`);
+      }
+      return { model: (row as { model: number[] }).model };
+    });
 }
 
 async function run(): Promise<void> {
@@ -173,8 +229,8 @@ async function run(): Promise<void> {
 
   const smokeStart = performance.now();
   const smokeBatch = frameBatch([
-    { center: [-0.35, 0], size: [0.45, 0.45], theta: 0 },
-    { center: [0.35, 0], size: [0.45, 0.45], theta: Math.PI / 2 },
+    { model: modelMatrix([-0.35, 0], [0.45, 0.45], 0) },
+    { model: modelMatrix([0.35, 0], [0.45, 0.45], Math.PI / 2) },
   ]);
   const smokeDuration = performance.now() - smokeStart;
   generation.push(smokeDuration);
@@ -191,16 +247,21 @@ async function run(): Promise<void> {
     return;
   }
 
+  // The shared frame sequence (same as native); cycle through it, one frame per
+  // present. Speed = frame_rate carried in the data via the number of frames;
+  // pacing is the browser's requestAnimationFrame (its refresh rate) — no fps
+  // knob, matching the native "the stream is the animation" model.
+  const frames = await loadFrames();
+  if (frames.length === 0) {
+    throw new Error("shared frame stream is empty");
+  }
+
   const started = performance.now();
   let nextDeadline = started;
   let completed = 0;
 
-  async function schedule(timestamp: number): Promise<void> {
-    await appendOne({
-      center: [0, 0],
-      size: [0.8, 0.8],
-      theta: timestamp / 1000,
-    });
+  async function schedule(): Promise<void> {
+    await appendOne(frames[completed % frames.length] as Frame);
     completed += 1;
 
     if (completed === totalFrames) {
@@ -224,11 +285,11 @@ async function run(): Promise<void> {
       nextDeadline += 1000 / rate;
       const delay = Math.max(0, nextDeadline - performance.now());
       window.setTimeout(() => {
-        void schedule(performance.now()).catch(reportError);
+        void schedule().catch(reportError);
       }, delay);
     } else {
-      requestAnimationFrame((nextTimestamp) => {
-        void schedule(nextTimestamp).catch(reportError);
+      requestAnimationFrame(() => {
+        void schedule().catch(reportError);
       });
     }
   }
@@ -237,13 +298,13 @@ async function run(): Promise<void> {
     nextDeadline += 1000 / rate;
     window.setTimeout(
       () => {
-        void schedule(performance.now()).catch(reportError);
+        void schedule().catch(reportError);
       },
       Math.max(0, nextDeadline - performance.now()),
     );
   } else {
-    requestAnimationFrame((timestamp) => {
-      void schedule(timestamp).catch(reportError);
+    requestAnimationFrame(() => {
+      void schedule().catch(reportError);
     });
   }
 }

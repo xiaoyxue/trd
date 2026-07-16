@@ -32,10 +32,11 @@ Platform-agnostic wgpu logic, shared verbatim by every target:
   flight, so an animation of any length streams in constant memory.
 - **`protocol.rs`** — the cross-platform (native + wasm) incremental Arrow IPC
   decoder. `InputSession` feeds arbitrary byte chunks through `arrow`'s
-  `StreamDecoder`, validates the protocol-0.0.1 schema once, and yields one
-  `FrameBatch` (`Vec<FrameParams>`) per record batch — the browser's input path.
+  `StreamDecoder`, validates the protocol schema once (accepts `0.0.1`/`0.0.2`),
+  and yields one `FrameBatch` (`Vec<FrameParams>`) per record batch — the
+  browser's input path.
 - **`output.rs`** — the cross-platform Arrow IPC *output* serialization.
-  `OutputSession` writes the protocol-0.0.1 `r,g,b,a` `fixed_shape_tensor<u8>` stream
+  `OutputSession` writes the `r,g,b,a` `fixed_shape_tensor<u8>` stream
   incrementally (one output batch per input batch); `tightly_pack_rgba` strips GPU
   row padding. Shared by the native CLI and the browser `ArrowRenderer`.
 
@@ -65,19 +66,29 @@ Each is a *thin shell* that only supplies a render target and calls the core:
   moves Arrow bytes and schedules frames; it never touches the WebGPU API. Packaged
   as the `trd-wasm` npm library.
 
-### Stream protocol 0.0.1
+### Stream protocol
 
 Frame parameters are plain columnar data, so **any** tool that emits the input
-columns as an Arrow IPC stream can drive the renderer.
+columns as an Arrow IPC stream can drive the renderer. The current version is
+**0.0.2**; it is backward-compatible with 0.0.1.
 
 | Direction | Columns | Arrow type |
 |---|---|---|
 | **Input** (params) | `center`, `size` | `FixedSizeList<f32>[2]` |
 | | `theta` | `f32` |
+| | `model` *(opt, 0.0.2)* | `FixedSizeList<f32>[16]` (4×4 model matrix) |
+| | `k` *(opt, 0.0.2)* | `FixedSizeList<f32>[9]` (3×3 camera intrinsics) |
+| | `pose` *(opt, 0.0.2)* | `FixedSizeList<f32>[16]` (4×4 camera pose) |
 | **Output** (image) | `r`, `g`, `b`, `a` | `fixed_shape_tensor<u8>` `[H, W]` |
 
-The protocol-version metadata is optional, so DuckDB and pyarrow streams are both
-accepted as-is.
+The `0.0.2` matrix columns are **optional/additive** and drive the MVP transform
+`clip = P · V · M · (pos, 0, 1)`; a stream with none of them (or identity
+matrices) renders identically to `0.0.1`. The protocol-version metadata is
+optional, so DuckDB and pyarrow streams are both accepted as-is.
+
+**Full, versioned specification: [`docs/protocol/`](docs/protocol/)** (per-version
+schema reference + [changelog](docs/protocol/CHANGELOG.md)).
+
 
 ## Repository layout
 
@@ -88,7 +99,7 @@ accepted as-is.
 | `crates/trd-app` | native interactive window (winit + live wgpu surface) |
 | `crates/trd-wasm` | `wasm-bindgen` entry point; packaged as the `trd-wasm` npm library |
 | `web/` | bun-managed thin TypeScript wrapper that loads `trd-wasm` |
-| `examples/` | `frames.jsonl` demo + `render.sh` / `render.ps1` wrappers |
+| `examples/` | `frames.0.0.2.jsonl` (+ legacy `frames.0.0.1.jsonl`) demo + `render.sh` / `render.ps1` wrappers |
 | `scripts/jsonl_to_arrow.py` | JSONL → Arrow params stream (pyarrow; duckdb-free producer) |
 | `scripts/encode.py` | Arrow image stream → ffmpeg GIF/WebP |
 | `scripts/dev-env.ps1` | Windows dev-environment setup (the `nix develop` counterpart) |
@@ -111,7 +122,7 @@ accepted as-is.
   . .\scripts\dev-env.ps1
   ```
 
-**2. Run the demo** — renders [`examples/frames.jsonl`](examples/frames.jsonl):
+**2. Run the demo** — renders [`examples/frames.0.0.2.jsonl`](examples/frames.0.0.2.jsonl):
 
 ```sh
 # Linux / macOS / WSL
@@ -126,7 +137,16 @@ examples\render.ps1 -Native   # play live in a window
 ```
 
 > On WSL, prefix GPU commands with `WGPU_BACKEND=gl` (otherwise rendering is
-> software).
+> software). On a **native Linux GPU box that isn't NixOS** (e.g. Ubuntu), the
+> `nix develop` Vulkan loader can't reach the host GPU driver, so wrap GPU
+> commands with [nixGL](https://github.com/nix-community/nixGL):
+>
+> ```sh
+> NIXPKGS_ALLOW_UNFREE=1 nix run --impure github:nix-community/nixGL#nixGLNvidia -- \
+>   examples/render.sh            # or --native / --web; use #nixGLIntel for Intel/Mesa
+> ```
+>
+> NixOS machines don't need this (the driver is on `/run/opengl-driver`).
 
 **3. Try the web build:**
 
@@ -170,9 +190,11 @@ optional — see [the render pipeline](#the-render-pipeline).
 out. The `examples/render.*` wrappers build the whole JSONL → GIF pipeline for you:
 
 ```sh
-examples/render.sh  [INPUT.jsonl] [OUT.gif|.webp] [WIDTH] [HEIGHT] [FPS]   # Linux/macOS
-examples\render.ps1 [-InputPath]  [-Output]       [-Width] [-Height] [-Fps]  # Windows (PS7)
-# Defaults: examples/frames.jsonl → output/out.gif, 256×256 @ 30 fps
+examples/render.sh  [MODE] [INPUT.jsonl] [OUT.gif|.webp] [WIDTH] [HEIGHT] [FPS]   # Linux/macOS
+examples\render.ps1 [MODE] [-InputPath]  [-Output]       [-Width] [-Height] [-Fps]  # Windows (PS7)
+# Defaults: examples/frames.0.0.2.jsonl → output/out.gif, 256×256 @ 30 fps
+# MODE (pick one): --cli/-CLI (default: headless GIF/WebP) · --native/-Native (live window) ·
+#   --web/-Wasm (browser; --arrow-renderer/-ArrowRenderer default, or --canvas-renderer/-CanvasRenderer)
 ```
 
 On Windows the Arrow stages are handed off through a temp dir (Windows DuckDB
@@ -186,10 +208,17 @@ intermediate files:
 
 ```sh
 # producer → renderer → encoder   (duckdb-free; uses pyarrow)
-uv run --with pyarrow scripts/jsonl_to_arrow.py examples/frames.jsonl \
+uv run --with pyarrow scripts/jsonl_to_arrow.py examples/frames.0.0.2.jsonl \
   | cargo run -q -p trd-cli -- --width 256 --height 256 \
   | uv run --with pyarrow --with numpy scripts/encode.py --fps 30 -o output/out.gif
 ```
+
+The producer's `--version` flag selects the input JSONL protocol (default
+`0.0.2`). [`examples/frames.0.0.2.jsonl`](examples/frames.0.0.2.jsonl) gives each
+frame's `model` transform as a 4×4 matrix directly; the legacy
+[`examples/frames.0.0.1.jsonl`](examples/frames.0.0.1.jsonl)
+(`--version 0.0.1`) uses `center`/`size`/`theta` fields instead. Regenerate the
+0.0.2 file from the 0.0.1 one with `scripts/gen_frames.py`.
 
 - **Producer** — emits the input params stream. The wrappers use `duckdb` when its
   `arrow` community extension loads, else fall back to
@@ -205,14 +234,38 @@ uv run --with pyarrow scripts/jsonl_to_arrow.py examples/frames.jsonl \
 ```sh
 duckdb -c "INSTALL arrow FROM community; LOAD arrow;
   COPY (
-    SELECT center::FLOAT[2] AS center, size::FLOAT[2] AS size, theta::FLOAT AS theta
-    FROM read_json_auto('examples/frames.jsonl')
+    WITH raw AS (
+      SELECT
+        COALESCE(center, [0.0, 0.0]) AS c,
+        COALESCE(size, [1.0, 1.0]) AS s,
+        COALESCE(theta, 0.0) AS th,
+        model AS m
+      FROM read_json('examples/frames.0.0.2.jsonl',
+        format = 'newline_delimited',
+        columns = {center: 'DOUBLE[]', size: 'DOUBLE[]', theta: 'DOUBLE', model: 'DOUBLE[]'})
+    )
+    SELECT
+      c::FLOAT[2] AS center,
+      s::FLOAT[2] AS size,
+      th::FLOAT AS theta,
+      COALESCE(m, [
+        s[1] * cos(th), s[1] * sin(th), 0.0, 0.0,
+        -s[2] * sin(th), s[2] * cos(th), 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        c[1], c[2], 0.0, 1.0
+      ])::FLOAT[16] AS model
+    FROM raw
   ) TO '/dev/stdout' (FORMAT arrows);" \
   | cargo run -q -p trd-cli -- --width 256 --height 256 \
   | uv run --with pyarrow --with numpy scripts/encode.py --fps 30 -o output/out.gif
 ```
 
-`FORMAT arrows` (plural) is the streaming IPC format.
+`FORMAT arrows` (plural) is the streaming IPC format. The explicit `columns=`
+schema forces every column to exist (`NULL` when a row omits it), so the same
+query serves both the 0.0.1 (`center`/`size`/`theta`) and 0.0.2 (`model`) example
+data: the required 0.0.1 columns default to the identity and the additive 0.0.2
+`model` matrix is used verbatim when present, else synthesized to match
+[`scripts/jsonl_to_arrow.py`](scripts/jsonl_to_arrow.py).
 
 </details>
 
@@ -226,7 +279,7 @@ examples/render.sh --native            # Linux/macOS
 examples\render.ps1 -Native            # Windows (PowerShell 7)
 
 # …or pipe any producer straight into trd-app:
-uv run --with pyarrow scripts/jsonl_to_arrow.py examples/frames.jsonl \
+uv run --with pyarrow scripts/jsonl_to_arrow.py examples/frames.0.0.2.jsonl \
   | cargo run -q -p trd-app -- --fps 30
 ```
 
@@ -249,13 +302,20 @@ prints the machine URL plus a ready-to-copy SSH-tunnel command before serving
 since the demo generates its own frames in-browser):
 
 ```sh
-examples/render.sh --web            # build .#web, print URLs + SSH tunnel, then serve
-PORT=9000 examples/render.sh --wasm # serve on a custom port
+examples/render.sh --web                    # ArrowRenderer (default): offscreen output-stream smoke
+examples/render.sh --web --canvas-renderer  # CanvasRenderer: on-screen canvas demo
+PORT=9000 examples/render.sh --wasm         # serve on a custom port
 ```
 
 The server binds all interfaces, so browse to `http://<host-ip>:PORT` directly,
 or forward it — `ssh -L 8080:localhost:8080 <user>@<host>`, then open
 <http://localhost:8080>.
+
+Both in-browser renderers ship in one bundle ([`web/src/main.ts`](web/src/main.ts)
+routes on the `?arrow-smoke` query param), so the flag only changes which URL the
+wrapper points you at: `--arrow-renderer` (default) opens the offscreen
+`ArrowRenderer` output-stream roundtrip — the browser counterpart of the headless
+`--cli` render — while `--canvas-renderer` opens the on-screen `CanvasRenderer` demo.
 
 On Windows (no Nix), [`examples/render.ps1`](examples/render.ps1) exposes the same
 flag as `-Web` (alias `-Wasm`): it builds the bundle with `wasm-pack` + `bun`
@@ -264,13 +324,14 @@ printing the same URLs + SSH-tunnel command (`$env:PORT` overrides the port,
 default 8088; positional arguments are ignored):
 
 ```powershell
-examples\render.ps1 -Web                       # build wasm + bun bundle, print URLs, then serve
-$env:PORT = 9000; examples\render.ps1 -Wasm    # serve on a custom port
+examples\render.ps1 -Web                    # ArrowRenderer (default): offscreen output-stream smoke
+examples\render.ps1 -Web -CanvasRenderer    # CanvasRenderer: on-screen canvas demo
+$env:PORT = 9000; examples\render.ps1 -Wasm # serve on a custom port
 ```
 
 The wasm core is a standard, TypeScript-typed npm package (`nix build .#trd-wasm`,
 built with `wasm-bindgen-cli` + `wasm-opt`). `web/` imports it and drives it with
-Apache Arrow JS — the browser produces the same protocol-0.0.1 IPC stream the CLI
+Apache Arrow JS — the browser produces the same protocol-0.0.2 IPC stream the CLI
 consumes and pumps it into the renderer:
 
 ```ts
@@ -304,7 +365,7 @@ drive a fixed-rate run and log p50/p95/p99 timings (Arrow generation, `pushIpc`
 total, render-submit, and derived transfer-plus-decode) to the console.
 
 A second browser type, **`ArrowRenderer`**, is the offscreen counterpart of the CLI:
-it renders to an offscreen texture and returns the same protocol-0.0.1 Arrow **output**
+it renders to an offscreen texture and returns the same protocol-0.0.2 Arrow **output**
 stream (four `fixed_shape_tensor<u8>` channels `r,g,b,a`) instead of drawing to a canvas.
 
 ```ts
@@ -363,7 +424,7 @@ ffmpeg/duckdb/uv. It installs a missing `uv` via winget automatically (pass
 
 ```powershell
 cargo build -p trd-cli      # cargo can now link native binaries
-examples\render.ps1         # render examples\frames.jsonl → output\out.gif
+examples\render.ps1         # render examples\frames.0.0.2.jsonl → output\out.gif
 ```
 
 Notes:
@@ -388,4 +449,13 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace                 # fast; GPU tests are skipped
 cargo test --workspace -- --ignored    # GPU-gated render tests
+```
+
+The `--ignored` render tests need a real GPU adapter. On a native Linux box that
+isn't NixOS, run them through [nixGL](https://github.com/nix-community/nixGL) so
+the `nix develop` Vulkan loader finds the host driver:
+
+```sh
+NIXPKGS_ALLOW_UNFREE=1 nix run --impure github:nix-community/nixGL#nixGLNvidia -- \
+  cargo test --workspace -- --ignored   # #nixGLIntel for Intel/Mesa; WSL uses WGPU_BACKEND=gl
 ```

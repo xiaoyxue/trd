@@ -10,7 +10,7 @@ use arrow::ipc::writer::StreamWriter;
 use arrow_schema::extension::FixedShapeTensor;
 use thiserror::Error;
 
-use crate::protocol::{PROTOCOL_VERSION, PROTOCOL_VERSION_KEY};
+use crate::protocol::{FRAME_RATE_KEY, PROTOCOL_VERSION, PROTOCOL_VERSION_KEY};
 
 #[derive(Debug, Error)]
 pub enum OutputError {
@@ -130,6 +130,17 @@ fn tensor_field(name: &str, layout: OutputLayout) -> Result<Field, OutputError> 
 }
 
 pub fn output_schema(width: u32, height: u32) -> Result<Schema, OutputError> {
+    output_schema_with_frame_rate(width, height, None)
+}
+
+/// Like [`output_schema`], but also stamps the stream's playback rate
+/// (`trd.stream.frame_rate`) when `frame_rate` is `Some`, so the rendered image
+/// stream carries the same speed as the input for downstream encoders.
+pub fn output_schema_with_frame_rate(
+    width: u32,
+    height: u32,
+    frame_rate: Option<f64>,
+) -> Result<Schema, OutputError> {
     let layout = output_layout(width, height)?;
     let fields: Fields = ["r", "g", "b", "a"]
         .into_iter()
@@ -137,14 +148,15 @@ pub fn output_schema(width: u32, height: u32) -> Result<Schema, OutputError> {
         .collect::<Result<Vec<_>, _>>()?
         .into();
 
-    Ok(Schema::new(fields).with_metadata(
-        [(
-            PROTOCOL_VERSION_KEY.to_string(),
-            PROTOCOL_VERSION.to_string(),
-        )]
-        .into_iter()
-        .collect(),
-    ))
+    let mut metadata = std::collections::HashMap::from([(
+        PROTOCOL_VERSION_KEY.to_string(),
+        PROTOCOL_VERSION.to_string(),
+    )]);
+    if let Some(rate) = frame_rate {
+        metadata.insert(FRAME_RATE_KEY.to_string(), rate.to_string());
+    }
+
+    Ok(Schema::new(fields).with_metadata(metadata))
 }
 
 fn channel_column(
@@ -207,7 +219,17 @@ pub struct OutputSession {
 
 impl OutputSession {
     pub fn new(width: u32, height: u32) -> Result<Self, OutputError> {
-        let schema = Arc::new(output_schema(width, height)?);
+        Self::with_frame_rate(width, height, None)
+    }
+
+    /// Builds an output session whose schema also carries the stream playback
+    /// rate (`trd.stream.frame_rate`) when `frame_rate` is `Some`.
+    pub fn with_frame_rate(
+        width: u32,
+        height: u32,
+        frame_rate: Option<f64>,
+    ) -> Result<Self, OutputError> {
+        let schema = Arc::new(output_schema_with_frame_rate(width, height, frame_rate)?);
         let sink = OutputBytes::default();
         let writer = StreamWriter::try_new(sink.clone(), &schema)?;
 

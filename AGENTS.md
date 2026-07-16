@@ -53,6 +53,20 @@ Guidance for agents working in this repository.
   won't include them.
 - We always work on GPU machines. GPU-dependent tests are marked `#[ignore]`
   and run locally; CI skips them.
+- **Native Linux GPU (non-NixOS, e.g. Ubuntu) — use nixGL.** The dev shell's
+  `nix develop` Vulkan loader can't load the host NVIDIA/Mesa driver (its ICD
+  points at host libs the nix loader won't `dlopen`), so GPU commands fail with
+  *"No suitable graphics adapter found"*. Wrap the GPU command with
+  [nixGL](https://github.com/nix-community/nixGL) to inject a matching host
+  driver:
+  ```sh
+  # inside `nix develop`; --impure lets nixGL detect the host driver version
+  NIXPKGS_ALLOW_UNFREE=1 nix run --impure github:nix-community/nixGL#nixGLNvidia -- \
+    cargo test -p trd-core -- --ignored          # or: -- ./result/bin/trd …, render.sh, etc.
+  ```
+  `NIXPKGS_ALLOW_UNFREE=1` is required for the NVIDIA driver; use `#nixGLIntel`
+  for Intel/Mesa. NixOS machines don't need this (the driver is on
+  `/run/opengl-driver`); WSL uses `WGPU_BACKEND=gl` instead (see below).
 - **WSL2 GPU:** NVIDIA ships no native Linux Vulkan ICD for WSL, so the Vulkan
   backend falls back to software (llvmpipe) and Mesa's `dzn` (Vulkan-on-D3D12)
   crashes at device creation. Use `WGPU_BACKEND=gl` for real GPU rendering via
