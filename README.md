@@ -99,7 +99,7 @@ schema reference + [changelog](docs/protocol/CHANGELOG.md)).
 | `crates/trd-app` | native interactive window (winit + live wgpu surface) |
 | `crates/trd-wasm` | `wasm-bindgen` entry point; packaged as the `trd-wasm` npm library |
 | `web/` | bun-managed thin TypeScript wrapper that loads `trd-wasm` |
-| `examples/` | `frames.jsonl` demo + `render.sh` / `render.ps1` wrappers |
+| `examples/` | `frames.0.0.2.jsonl` (+ legacy `frames.0.0.1.jsonl`) demo + `render.sh` / `render.ps1` wrappers |
 | `scripts/jsonl_to_arrow.py` | JSONL → Arrow params stream (pyarrow; duckdb-free producer) |
 | `scripts/encode.py` | Arrow image stream → ffmpeg GIF/WebP |
 | `scripts/dev-env.ps1` | Windows dev-environment setup (the `nix develop` counterpart) |
@@ -122,7 +122,7 @@ schema reference + [changelog](docs/protocol/CHANGELOG.md)).
   . .\scripts\dev-env.ps1
   ```
 
-**2. Run the demo** — renders [`examples/frames.jsonl`](examples/frames.jsonl):
+**2. Run the demo** — renders [`examples/frames.0.0.2.jsonl`](examples/frames.0.0.2.jsonl):
 
 ```sh
 # Linux / macOS / WSL
@@ -183,7 +183,7 @@ out. The `examples/render.*` wrappers build the whole JSONL → GIF pipeline for
 ```sh
 examples/render.sh  [INPUT.jsonl] [OUT.gif|.webp] [WIDTH] [HEIGHT] [FPS]   # Linux/macOS
 examples\render.ps1 [-InputPath]  [-Output]       [-Width] [-Height] [-Fps]  # Windows (PS7)
-# Defaults: examples/frames.jsonl → output/out.gif, 256×256 @ 30 fps
+# Defaults: examples/frames.0.0.2.jsonl → output/out.gif, 256×256 @ 30 fps
 ```
 
 On Windows the Arrow stages are handed off through a temp dir (Windows DuckDB
@@ -197,10 +197,17 @@ intermediate files:
 
 ```sh
 # producer → renderer → encoder   (duckdb-free; uses pyarrow)
-uv run --with pyarrow scripts/jsonl_to_arrow.py examples/frames.jsonl \
+uv run --with pyarrow scripts/jsonl_to_arrow.py examples/frames.0.0.2.jsonl \
   | cargo run -q -p trd-cli -- --width 256 --height 256 \
   | uv run --with pyarrow --with numpy scripts/encode.py --fps 30 -o output/out.gif
 ```
+
+The producer's `--version` flag selects the input JSONL protocol (default
+`0.0.2`). [`examples/frames.0.0.2.jsonl`](examples/frames.0.0.2.jsonl) gives each
+frame's `model` transform as a 4×4 matrix directly; the legacy
+[`examples/frames.0.0.1.jsonl`](examples/frames.0.0.1.jsonl)
+(`--version 0.0.1`) uses `center`/`size`/`theta` fields instead. Regenerate the
+0.0.2 file from the 0.0.1 one with `scripts/gen_frames.py`.
 
 - **Producer** — emits the input params stream. The wrappers use `duckdb` when its
   `arrow` community extension loads, else fall back to
@@ -217,7 +224,7 @@ uv run --with pyarrow scripts/jsonl_to_arrow.py examples/frames.jsonl \
 duckdb -c "INSTALL arrow FROM community; LOAD arrow;
   COPY (
     SELECT center::FLOAT[2] AS center, size::FLOAT[2] AS size, theta::FLOAT AS theta
-    FROM read_json_auto('examples/frames.jsonl')
+    FROM read_json_auto('examples/frames.0.0.1.jsonl')
   ) TO '/dev/stdout' (FORMAT arrows);" \
   | cargo run -q -p trd-cli -- --width 256 --height 256 \
   | uv run --with pyarrow --with numpy scripts/encode.py --fps 30 -o output/out.gif
@@ -237,7 +244,7 @@ examples/render.sh --native            # Linux/macOS
 examples\render.ps1 -Native            # Windows (PowerShell 7)
 
 # …or pipe any producer straight into trd-app:
-uv run --with pyarrow scripts/jsonl_to_arrow.py examples/frames.jsonl \
+uv run --with pyarrow scripts/jsonl_to_arrow.py examples/frames.0.0.2.jsonl \
   | cargo run -q -p trd-app -- --fps 30
 ```
 
@@ -374,7 +381,7 @@ ffmpeg/duckdb/uv. It installs a missing `uv` via winget automatically (pass
 
 ```powershell
 cargo build -p trd-cli      # cargo can now link native binaries
-examples\render.ps1         # render examples\frames.jsonl → output\out.gif
+examples\render.ps1         # render examples\frames.0.0.2.jsonl → output\out.gif
 ```
 
 Notes:

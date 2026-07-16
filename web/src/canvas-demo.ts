@@ -12,8 +12,9 @@ import {
 import init, { CanvasRenderer } from "trd-wasm";
 import wasmUrl from "trd-wasm/trd_wasm_bg.wasm" with { type: "file" };
 // The same frame data the native CLI/window consume, so all three front-ends
-// render the identical animation from one shared source of truth.
-import framesUrl from "../../examples/frames.jsonl" with { type: "file" };
+// render the identical animation from one shared source of truth. This is the
+// protocol-0.0.2 example: each row carries the triangle's 4x4 model matrix.
+import framesUrl from "../../examples/frames.0.0.2.jsonl" with { type: "file" };
 
 const canvas = document.getElementById("trd-canvas");
 const status = document.getElementById("trd-status");
@@ -41,38 +42,44 @@ const schema = new Schema(
   new Map([["trd.protocol.version", "0.0.2"]]),
 );
 
-type Frame = Readonly<{
-  center: readonly [number, number];
-  size: readonly [number, number];
-  theta: number;
-}>;
+// A protocol-0.0.2 frame is just the 4x4 model matrix (16 column-major floats);
+// the legacy center/size/theta columns are still required on the wire, so they
+// are filled with the identity below.
+type Frame = Readonly<{ model: readonly number[] }>;
+
+const ZERO2: readonly [number, number] = [0, 0];
+const ONE2: readonly [number, number] = [1, 1];
 
 /// Column-major `translate(center) . rotate_z(theta) . scale(size)` — the same
-/// 4x4 model matrix trd-core synthesizes (glam) and the Python producer emits,
-/// so the browser sends a real protocol-0.0.2 `model` column.
-function modelMatrix(frame: Frame): number[] {
-  const c = Math.cos(frame.theta);
-  const s = Math.sin(frame.theta);
-  const [sx, sy] = frame.size;
-  const [tx, ty] = frame.center;
+/// 4x4 model matrix trd-core synthesizes (glam) and the producer emits. Used to
+/// author the two-frame smoke batch below directly as matrices.
+function modelMatrix(
+  center: readonly [number, number],
+  size: readonly [number, number],
+  theta: number,
+): number[] {
+  const c = Math.cos(theta);
+  const s = Math.sin(theta);
+  const [sx, sy] = size;
+  const [tx, ty] = center;
   return [sx * c, sx * s, 0, 0, -sy * s, sy * c, 0, 0, 0, 0, 1, 0, tx, ty, 0, 1];
 }
 
 function frameBatch(frames: readonly Frame[]): RecordBatch {
   const center = vectorFromArray(
-    frames.map((frame) => frame.center),
+    frames.map(() => ZERO2),
     vec2,
   );
   const size = vectorFromArray(
-    frames.map((frame) => frame.size),
+    frames.map(() => ONE2),
     vec2,
   );
   const theta = vectorFromArray(
-    frames.map((frame) => frame.theta),
+    frames.map(() => 0),
     new Float32(),
   );
   const model = vectorFromArray(
-    frames.map((frame) => modelMatrix(frame)),
+    frames.map((frame) => frame.model),
     mat4,
   );
   const centerData = center.data[0];
@@ -114,12 +121,13 @@ function addMeasure(name: string, duration: number): void {
   performance.measure(name, { start: performance.now(), duration });
 }
 
-/// Loads the shared `examples/frames.jsonl` frame sequence — the same input data
-/// the native CLI/window render — so the browser plays the identical animation.
+/// Loads the shared `examples/frames.0.0.2.jsonl` sequence — the same protocol
+/// 0.0.2 model-matrix data the native CLI/window render — so the browser plays
+/// the identical animation.
 async function loadFrames(): Promise<Frame[]> {
   const response = await fetch(framesUrl);
   if (!response.ok) {
-    throw new Error(`failed to load frames.jsonl: ${response.status}`);
+    throw new Error(`failed to load frames.0.0.2.jsonl: ${response.status}`);
   }
   const text = await response.text();
   return text
@@ -130,14 +138,13 @@ async function loadFrames(): Promise<Frame[]> {
       if (
         typeof row !== "object" ||
         row === null ||
-        !("center" in row) ||
-        !("size" in row) ||
-        !("theta" in row)
+        !("model" in row) ||
+        !Array.isArray((row as { model: unknown }).model) ||
+        (row as { model: unknown[] }).model.length !== 16
       ) {
-        throw new Error(`invalid frame row: ${line}`);
+        throw new Error(`invalid frame row (expected 16-float model): ${line}`);
       }
-      const frame = row as Frame;
-      return { center: frame.center, size: frame.size, theta: frame.theta };
+      return { model: (row as { model: number[] }).model };
     });
 }
 
@@ -222,8 +229,8 @@ async function run(): Promise<void> {
 
   const smokeStart = performance.now();
   const smokeBatch = frameBatch([
-    { center: [-0.35, 0], size: [0.45, 0.45], theta: 0 },
-    { center: [0.35, 0], size: [0.45, 0.45], theta: Math.PI / 2 },
+    { model: modelMatrix([-0.35, 0], [0.45, 0.45], 0) },
+    { model: modelMatrix([0.35, 0], [0.45, 0.45], Math.PI / 2) },
   ]);
   const smokeDuration = performance.now() - smokeStart;
   generation.push(smokeDuration);
