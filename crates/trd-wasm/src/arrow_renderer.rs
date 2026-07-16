@@ -205,8 +205,14 @@ impl ArrowRenderer {
                 label: Some("trd ArrowRenderer frame"),
             });
 
-        self.triangle
-            .encode(&self.queue, &mut encoder, &view, params);
+        self.triangle.encode(
+            &self.queue,
+            &mut encoder,
+            &view,
+            params,
+            self.width,
+            self.height,
+        );
 
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {

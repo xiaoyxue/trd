@@ -1,11 +1,9 @@
 // Parametric hello-triangle. Base positions/colors are generated from the
-// vertex index (no vertex buffer); each vertex is scaled, rotated, then
-// translated by the per-frame params uniform.
+// vertex index (no vertex buffer); each base vertex is transformed by the
+// per-frame clip transform `P·V·M` (`clip = transform * (pos, 0, 1)`).
 
 struct Params {
-    center: vec2<f32>,
-    size: vec2<f32>,
-    theta: f32,
+    transform: mat4x4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -28,17 +26,8 @@ fn vs_main(@builtin(vertex_index) index: u32) -> VsOut {
         vec3<f32>(0.0, 0.0, 1.0),
     );
 
-    let base = positions[index] * params.size;
-    let c = cos(params.theta);
-    let s = sin(params.theta);
-    let rotated = vec2<f32>(
-        c * base.x - s * base.y,
-        s * base.x + c * base.y,
-    );
-    let p = params.center + rotated;
-
     var out: VsOut;
-    out.position = vec4<f32>(p, 0.0, 1.0);
+    out.position = params.transform * vec4<f32>(positions[index], 0.0, 1.0);
     out.color = colors[index];
     return out;
 }

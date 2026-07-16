@@ -121,8 +121,14 @@ impl CanvasRenderer {
                                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                                     label: Some("trd canvas frame"),
                                 });
-                        self.renderer
-                            .encode(&self.queue, &mut encoder, &view, frame);
+                        self.renderer.encode(
+                            &self.queue,
+                            &mut encoder,
+                            &view,
+                            frame,
+                            self.config.width,
+                            self.config.height,
+                        );
                         self.queue.submit(Some(encoder.finish()));
                         self.queue.present(acquired.texture);
                         if acquired.reconfigure_after_present {

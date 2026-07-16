@@ -6,8 +6,13 @@ use arrow::ipc::reader::StreamDecoder;
 
 use crate::FrameParams;
 
-pub const PROTOCOL_VERSION: &str = "0.0.1";
+pub const PROTOCOL_VERSION: &str = "0.0.2";
 pub const PROTOCOL_VERSION_KEY: &str = "trd.protocol.version";
+
+/// Input schema versions this build accepts. `0.0.2` adds the optional `model`,
+/// `k`, and `pose` matrix columns; `0.0.1` streams (2D affine only) still decode.
+pub const SUPPORTED_INPUT_VERSIONS: &[&str] = &["0.0.1", "0.0.2"];
+
 pub type FrameBatch = Vec<FrameParams>;
 
 #[derive(Debug, thiserror::Error)]
@@ -152,7 +157,7 @@ impl Default for InputSession {
 
 fn validate_schema(schema: &Schema) -> Result<(), ProtocolError> {
     if let Some(version) = schema.metadata().get(PROTOCOL_VERSION_KEY) {
-        if version != PROTOCOL_VERSION {
+        if !SUPPORTED_INPUT_VERSIONS.contains(&version.as_str()) {
             return Err(ProtocolError::UnsupportedVersion(version.clone()));
         }
     }
@@ -174,16 +179,40 @@ fn validate_schema(schema: &Schema) -> Result<(), ProtocolError> {
             .field_with_name("theta")
             .map_err(|_| ProtocolError::MissingColumn("theta"))?,
         "theta",
-    )
+    )?;
+
+    // `0.0.2` matrix columns are optional (additive): validate only if present.
+    if let Ok(field) = schema.field_with_name("model") {
+        validate_fixed_f32_list(field, "model", 16)?;
+    }
+    if let Ok(field) = schema.field_with_name("k") {
+        validate_fixed_f32_list(field, "k", 9)?;
+    }
+    if let Ok(field) = schema.field_with_name("pose") {
+        validate_fixed_f32_list(field, "pose", 16)?;
+    }
+    Ok(())
 }
 
 fn validate_vec2_field(field: &Field, name: &'static str) -> Result<(), ProtocolError> {
+    validate_fixed_f32_list(field, name, 2)
+}
+
+/// Validates that `field` is a non-nullable `FixedSizeList<Float32>[len]` with a
+/// non-nullable child.
+fn validate_fixed_f32_list(
+    field: &Field,
+    name: &'static str,
+    len: i32,
+) -> Result<(), ProtocolError> {
     if field.is_nullable() {
         return Err(ProtocolError::NullableField(name));
     }
 
     match field.data_type() {
-        DataType::FixedSizeList(item, 2) if item.data_type() == &DataType::Float32 => {
+        DataType::FixedSizeList(item, actual_len)
+            if *actual_len == len && item.data_type() == &DataType::Float32 =>
+        {
             if item.is_nullable() {
                 Err(ProtocolError::NullableChild(name))
             } else {
@@ -192,9 +221,19 @@ fn validate_vec2_field(field: &Field, name: &'static str) -> Result<(), Protocol
         }
         actual => Err(ProtocolError::ColumnType {
             column: name,
-            expected: "FixedSizeList<Float32>[2]",
+            expected: fixed_f32_list_expectation(len),
             actual: actual.clone(),
         }),
+    }
+}
+
+/// The `expected` label for a `FixedSizeList<Float32>[len]` column error.
+fn fixed_f32_list_expectation(len: i32) -> &'static str {
+    match len {
+        2 => "FixedSizeList<Float32>[2]",
+        9 => "FixedSizeList<Float32>[9]",
+        16 => "FixedSizeList<Float32>[16]",
+        _ => "FixedSizeList<Float32>[N]",
     }
 }
 
@@ -248,6 +287,11 @@ fn decode_batch(batch: &RecordBatch) -> Result<FrameBatch, ProtocolError> {
             actual: size.values().data_type().clone(),
         })?;
 
+    // Optional `0.0.2` matrix columns (validated + null-checked only if present).
+    let model = optional_fixed_list(batch, "model", 16)?;
+    let k = optional_fixed_list(batch, "k", 9)?;
+    let pose = optional_fixed_list(batch, "pose", 16)?;
+
     Ok((0..batch.num_rows())
         .map(|row| {
             let center_offset = center.value_offset(row) as usize;
@@ -262,9 +306,62 @@ fn decode_batch(batch: &RecordBatch) -> Result<FrameBatch, ProtocolError> {
                     size_values.value(size_offset + 1),
                 ],
                 theta: theta.value(row),
+                model: model.map(|(list, values)| read_fixed::<16>(list, values, row)),
+                k: k.map(|(list, values)| read_fixed::<9>(list, values, row)),
+                pose: pose.map(|(list, values)| read_fixed::<16>(list, values, row)),
             }
         })
         .collect())
+}
+
+/// Looks up an optional `FixedSizeList<Float32>[len]` column, validating its
+/// type, list length, and non-nullness. Returns `None` if the column is absent.
+fn optional_fixed_list<'a>(
+    batch: &'a RecordBatch,
+    name: &'static str,
+    len: i32,
+) -> Result<Option<(&'a FixedSizeListArray, &'a Float32Array)>, ProtocolError> {
+    let Some(column) = batch.column_by_name(name) else {
+        return Ok(None);
+    };
+    let list = column
+        .as_any()
+        .downcast_ref::<FixedSizeListArray>()
+        .ok_or_else(|| ProtocolError::ColumnType {
+            column: name,
+            expected: fixed_f32_list_expectation(len),
+            actual: column.data_type().clone(),
+        })?;
+    if list.value_length() != len {
+        return Err(ProtocolError::ColumnType {
+            column: name,
+            expected: fixed_f32_list_expectation(len),
+            actual: list.data_type().clone(),
+        });
+    }
+    if list.null_count() > 0 || list.values().null_count() > 0 {
+        return Err(ProtocolError::NullValues(name));
+    }
+    let values = list
+        .values()
+        .as_any()
+        .downcast_ref::<Float32Array>()
+        .ok_or_else(|| ProtocolError::ColumnType {
+            column: name,
+            expected: fixed_f32_list_expectation(len),
+            actual: list.values().data_type().clone(),
+        })?;
+    Ok(Some((list, values)))
+}
+
+/// Reads the `N` `f32` values of a fixed-size-list `row`.
+fn read_fixed<const N: usize>(
+    list: &FixedSizeListArray,
+    values: &Float32Array,
+    row: usize,
+) -> [f32; N] {
+    let offset = list.value_offset(row) as usize;
+    std::array::from_fn(|i| values.value(offset + i))
 }
 
 fn require_vec2<'a>(
@@ -478,6 +575,7 @@ mod tests {
                 center: [0.25, -0.5],
                 size: [0.75, 0.5],
                 theta: 1.0,
+                ..FrameParams::IDENTITY
             },
         ];
         let bytes = test_stream(&[test_batch(&expected)]);
@@ -498,6 +596,7 @@ mod tests {
             center: [0.5, 0.0],
             size: [0.25, 0.75],
             theta: 0.5,
+            ..FrameParams::IDENTITY
         }];
         let bytes = test_stream(&[test_batch(&first), test_batch(&second)]);
         let mut session = InputSession::new();
@@ -624,5 +723,164 @@ mod tests {
             finished.finish(),
             Err(ProtocolError::SessionFinished)
         ));
+    }
+
+    // ---- protocol 0.0.2 matrix columns (model / k / pose) ----
+
+    fn fixed_list_field(name: &str, len: i32, nullable: bool, child_nullable: bool) -> Field {
+        Field::new(
+            name,
+            DataType::FixedSizeList(
+                Arc::new(Field::new("item", DataType::Float32, child_nullable)),
+                len,
+            ),
+            nullable,
+        )
+    }
+
+    /// Builds a batch of `rows.len()` identity frames plus one extra fixed-size
+    /// list column (`name`) whose row `i` holds `rows[i]`.
+    fn batch_with_matrix(
+        version: Option<&str>,
+        name: &str,
+        len: i32,
+        rows: &[Vec<f32>],
+        nullable: bool,
+        child_nullable: bool,
+    ) -> RecordBatch {
+        let n = rows.len();
+        let item = Arc::new(Field::new("item", DataType::Float32, false));
+        let center = FixedSizeListArray::new(
+            item.clone(),
+            2,
+            Arc::new(Float32Array::from(vec![0.0_f32; n * 2])),
+            None,
+        );
+        let size = FixedSizeListArray::new(
+            item.clone(),
+            2,
+            Arc::new(Float32Array::from(vec![1.0_f32; n * 2])),
+            None,
+        );
+        let theta = Float32Array::from(vec![0.0_f32; n]);
+        let flat: Vec<f32> = rows.iter().flatten().copied().collect();
+        let matrix = FixedSizeListArray::new(
+            Arc::new(Field::new("item", DataType::Float32, child_nullable)),
+            len,
+            Arc::new(Float32Array::from(flat)),
+            None,
+        );
+
+        let mut metadata = std::collections::HashMap::new();
+        if let Some(version) = version {
+            metadata.insert(PROTOCOL_VERSION_KEY.to_owned(), version.to_owned());
+        }
+        let schema = Arc::new(
+            Schema::new(vec![
+                vec2_field("center", false, false),
+                vec2_field("size", false, false),
+                Field::new("theta", DataType::Float32, false),
+                fixed_list_field(name, len, nullable, child_nullable),
+            ])
+            .with_metadata(metadata),
+        );
+
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(center),
+                Arc::new(size),
+                Arc::new(theta),
+                Arc::new(matrix),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn accepts_supported_versions_and_rejects_unknown() {
+        for version in ["0.0.1", "0.0.2"] {
+            let mut session = InputSession::new();
+            session.push(&version_stream(version)).unwrap();
+            session.finish().unwrap();
+        }
+        let mut session = InputSession::new();
+        assert!(matches!(
+            session.push(&version_stream("0.0.3")),
+            Err(ProtocolError::UnsupportedVersion(v)) if v == "0.0.3"
+        ));
+    }
+
+    #[test]
+    fn decodes_matrix_columns_column_major() {
+        // Asymmetric values so a transpose or stride bug can't hide.
+        let model_row: Vec<f32> = (1..=16).map(|v| v as f32).collect();
+        let k_row: Vec<f32> = (1..=9).map(|v| v as f32 * 0.5).collect();
+        let pose_row: Vec<f32> = (1..=16).map(|v| -(v as f32)).collect();
+
+        let model_batch = batch_with_matrix(
+            Some("0.0.2"),
+            "model",
+            16,
+            &[model_row.clone()],
+            false,
+            false,
+        );
+        let k_batch = batch_with_matrix(Some("0.0.2"), "k", 9, &[k_row.clone()], false, false);
+        let pose_batch =
+            batch_with_matrix(Some("0.0.2"), "pose", 16, &[pose_row.clone()], false, false);
+
+        let model = decode_batch(&model_batch).unwrap();
+        assert_eq!(
+            model[0].model,
+            Some(<[f32; 16]>::try_from(model_row).unwrap())
+        );
+        assert_eq!(model[0].k, None);
+
+        let k = decode_batch(&k_batch).unwrap();
+        assert_eq!(k[0].k, Some(<[f32; 9]>::try_from(k_row).unwrap()));
+
+        let pose = decode_batch(&pose_batch).unwrap();
+        assert_eq!(pose[0].pose, Some(<[f32; 16]>::try_from(pose_row).unwrap()));
+    }
+
+    #[test]
+    fn rejects_wrong_size_matrix_column() {
+        // A `model` column declared as length 9 (not 16) is a schema error, and
+        // the session becomes terminal.
+        let bad = batch_with_matrix(Some("0.0.2"), "model", 9, &[vec![0.0; 9]], false, false);
+        let mut session = InputSession::new();
+        assert!(matches!(
+            session.push(&test_stream(&[bad])),
+            Err(ProtocolError::ColumnType {
+                column: "model",
+                ..
+            })
+        ));
+        assert!(matches!(
+            session.push(&[]),
+            Err(ProtocolError::SessionFailed)
+        ));
+    }
+
+    #[test]
+    fn validate_if_present_rejects_nullable_matrix_column() {
+        let nullable_field =
+            batch_with_matrix(Some("0.0.2"), "pose", 16, &[vec![0.0; 16]], true, false);
+        let mut session = InputSession::new();
+        assert!(matches!(
+            session.push(&test_stream(&[nullable_field])),
+            Err(ProtocolError::NullableField("pose"))
+        ));
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn model_column_roundtrips(values in proptest::collection::vec(-1000.0_f32..1000.0, 16)) {
+            let batch = batch_with_matrix(Some("0.0.2"), "model", 16, &[values.clone()], false, false);
+            let decoded = decode_batch(&batch).unwrap();
+            let expected = <[f32; 16]>::try_from(values).unwrap();
+            proptest::prop_assert_eq!(decoded[0].model, Some(expected));
+        }
     }
 }

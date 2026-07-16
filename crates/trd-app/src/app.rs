@@ -154,7 +154,15 @@ impl Gpu {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        trd_core::render_triangle(&self.device, &self.queue, &view, self.config.format, params);
+        trd_core::render_triangle(
+            &self.device,
+            &self.queue,
+            &view,
+            self.config.format,
+            params,
+            self.config.width,
+            self.config.height,
+        );
 
         self.queue.present(frame);
     }
