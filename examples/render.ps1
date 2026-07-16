@@ -200,15 +200,37 @@ $work = (New-Item -ItemType Directory -Path (Join-Path ([System.IO.Path]::GetTem
 $framesArrow = Join-Path $work 'frames.arrows'
 $imagesArrow = Join-Path $work 'images.arrows'
 try {
-    # 1. Build a streaming Arrow IPC file of frame params (center/size as
-    #    FixedSizeList<f32>[2], theta as f32) from the JSONL. DuckDB does the
-    #    cast when its 'arrow' extension is available; otherwise pyarrow does.
+    # 1. Build a streaming Arrow IPC file of frame params from the JSONL: the
+    #    required 0.0.1 columns (center/size as FixedSizeList<f32>[2], theta as
+    #    f32, defaulting to the identity when absent) plus the additive 0.0.2
+    #    `model` column (FixedSizeList<f32>[16], column-major) - used verbatim if
+    #    present, else synthesized to match scripts/jsonl_to_arrow.py. DuckDB does
+    #    the cast when its 'arrow' extension is available; otherwise pyarrow does.
     if ($producer -eq 'duckdb') {
         $sql = @"
 INSTALL arrow FROM community; LOAD arrow;
 COPY (
-  SELECT center::FLOAT[2] AS center, size::FLOAT[2] AS size, theta::FLOAT AS theta
-  FROM read_json_auto('$(ConvertTo-SqlPath $InputPath)')
+  WITH raw AS (
+    SELECT
+      COALESCE(center, [0.0, 0.0]) AS c,
+      COALESCE(size, [1.0, 1.0]) AS s,
+      COALESCE(theta, 0.0) AS th,
+      model AS m
+    FROM read_json('$(ConvertTo-SqlPath $InputPath)',
+      format = 'newline_delimited',
+      columns = {center: 'DOUBLE[]', size: 'DOUBLE[]', theta: 'DOUBLE', model: 'DOUBLE[]'})
+  )
+  SELECT
+    c::FLOAT[2] AS center,
+    s::FLOAT[2] AS size,
+    th::FLOAT AS theta,
+    COALESCE(m, [
+      s[1] * cos(th), s[1] * sin(th), 0.0, 0.0,
+      -s[2] * sin(th), s[2] * cos(th), 0.0, 0.0,
+      0.0, 0.0, 1.0, 0.0,
+      c[1], c[2], 0.0, 1.0
+    ])::FLOAT[16] AS model
+  FROM raw
 ) TO '$(ConvertTo-SqlPath $framesArrow)' (FORMAT arrows);
 "@
         & duckdb -c $sql

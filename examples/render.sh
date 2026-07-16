@@ -104,12 +104,37 @@ else
   exit 1
 fi
 
-# DuckDB reads the JSONL, casts the [x,y] arrays to fixed-size FLOAT[2]
-# (Arrow FixedSizeList<f32>[2]), and streams Arrow IPC (FORMAT arrows) to stdout.
+# DuckDB reads the JSONL and streams Arrow IPC (FORMAT arrows) to stdout. It emits
+# the required 0.0.1 columns (center/size as FixedSizeList<f32>[2], theta as f32,
+# defaulting to the identity when a row omits them) plus the additive 0.0.2 `model`
+# column (FixedSizeList<f32>[16], column-major): a row's explicit `model` is used
+# verbatim, else synthesized as translate(center).rotate_z(theta).scale(size) to
+# match scripts/jsonl_to_arrow.py. The explicit `columns=` schema makes every
+# column exist (NULL when a row omits it), so one query renders both the 0.0.1
+# (center/size/theta) and 0.0.2 (model) example data.
 sql="INSTALL arrow FROM community; LOAD arrow;
   COPY (
-    SELECT center::FLOAT[2] AS center, size::FLOAT[2] AS size, theta::FLOAT AS theta
-    FROM read_json_auto('$sql_input')
+    WITH raw AS (
+      SELECT
+        COALESCE(center, [0.0, 0.0]) AS c,
+        COALESCE(size, [1.0, 1.0]) AS s,
+        COALESCE(theta, 0.0) AS th,
+        model AS m
+      FROM read_json('$sql_input',
+        format = 'newline_delimited',
+        columns = {center: 'DOUBLE[]', size: 'DOUBLE[]', theta: 'DOUBLE', model: 'DOUBLE[]'})
+    )
+    SELECT
+      c::FLOAT[2] AS center,
+      s::FLOAT[2] AS size,
+      th::FLOAT AS theta,
+      COALESCE(m, [
+        s[1] * cos(th), s[1] * sin(th), 0.0, 0.0,
+        -s[2] * sin(th), s[2] * cos(th), 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        c[1], c[2], 0.0, 1.0
+      ])::FLOAT[16] AS model
+    FROM raw
   ) TO '/dev/stdout' (FORMAT arrows);"
 
 # Emit the Arrow IPC frame stream on stdout via the chosen producer.

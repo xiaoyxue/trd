@@ -223,14 +223,38 @@ frame's `model` transform as a 4×4 matrix directly; the legacy
 ```sh
 duckdb -c "INSTALL arrow FROM community; LOAD arrow;
   COPY (
-    SELECT center::FLOAT[2] AS center, size::FLOAT[2] AS size, theta::FLOAT AS theta
-    FROM read_json_auto('examples/frames.0.0.1.jsonl')
+    WITH raw AS (
+      SELECT
+        COALESCE(center, [0.0, 0.0]) AS c,
+        COALESCE(size, [1.0, 1.0]) AS s,
+        COALESCE(theta, 0.0) AS th,
+        model AS m
+      FROM read_json('examples/frames.0.0.2.jsonl',
+        format = 'newline_delimited',
+        columns = {center: 'DOUBLE[]', size: 'DOUBLE[]', theta: 'DOUBLE', model: 'DOUBLE[]'})
+    )
+    SELECT
+      c::FLOAT[2] AS center,
+      s::FLOAT[2] AS size,
+      th::FLOAT AS theta,
+      COALESCE(m, [
+        s[1] * cos(th), s[1] * sin(th), 0.0, 0.0,
+        -s[2] * sin(th), s[2] * cos(th), 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        c[1], c[2], 0.0, 1.0
+      ])::FLOAT[16] AS model
+    FROM raw
   ) TO '/dev/stdout' (FORMAT arrows);" \
   | cargo run -q -p trd-cli -- --width 256 --height 256 \
   | uv run --with pyarrow --with numpy scripts/encode.py --fps 30 -o output/out.gif
 ```
 
-`FORMAT arrows` (plural) is the streaming IPC format.
+`FORMAT arrows` (plural) is the streaming IPC format. The explicit `columns=`
+schema forces every column to exist (`NULL` when a row omits it), so the same
+query serves both the 0.0.1 (`center`/`size`/`theta`) and 0.0.2 (`model`) example
+data: the required 0.0.1 columns default to the identity and the additive 0.0.2
+`model` matrix is used verbatim when present, else synthesized to match
+[`scripts/jsonl_to_arrow.py`](scripts/jsonl_to_arrow.py).
 
 </details>
 
