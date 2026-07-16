@@ -32,10 +32,11 @@ Platform-agnostic wgpu logic, shared verbatim by every target:
   flight, so an animation of any length streams in constant memory.
 - **`protocol.rs`** — the cross-platform (native + wasm) incremental Arrow IPC
   decoder. `InputSession` feeds arbitrary byte chunks through `arrow`'s
-  `StreamDecoder`, validates the protocol-0.0.1 schema once, and yields one
-  `FrameBatch` (`Vec<FrameParams>`) per record batch — the browser's input path.
+  `StreamDecoder`, validates the protocol schema once (accepts `0.0.1`/`0.0.2`),
+  and yields one `FrameBatch` (`Vec<FrameParams>`) per record batch — the
+  browser's input path.
 - **`output.rs`** — the cross-platform Arrow IPC *output* serialization.
-  `OutputSession` writes the protocol-0.0.1 `r,g,b,a` `fixed_shape_tensor<u8>` stream
+  `OutputSession` writes the `r,g,b,a` `fixed_shape_tensor<u8>` stream
   incrementally (one output batch per input batch); `tightly_pack_rgba` strips GPU
   row padding. Shared by the native CLI and the browser `ArrowRenderer`.
 
@@ -65,19 +66,29 @@ Each is a *thin shell* that only supplies a render target and calls the core:
   moves Arrow bytes and schedules frames; it never touches the WebGPU API. Packaged
   as the `trd-wasm` npm library.
 
-### Stream protocol 0.0.1
+### Stream protocol
 
 Frame parameters are plain columnar data, so **any** tool that emits the input
-columns as an Arrow IPC stream can drive the renderer.
+columns as an Arrow IPC stream can drive the renderer. The current version is
+**0.0.2**; it is backward-compatible with 0.0.1.
 
 | Direction | Columns | Arrow type |
 |---|---|---|
 | **Input** (params) | `center`, `size` | `FixedSizeList<f32>[2]` |
 | | `theta` | `f32` |
+| | `model` *(opt, 0.0.2)* | `FixedSizeList<f32>[16]` (4×4 model matrix) |
+| | `k` *(opt, 0.0.2)* | `FixedSizeList<f32>[9]` (3×3 camera intrinsics) |
+| | `pose` *(opt, 0.0.2)* | `FixedSizeList<f32>[16]` (4×4 camera pose) |
 | **Output** (image) | `r`, `g`, `b`, `a` | `fixed_shape_tensor<u8>` `[H, W]` |
 
-The protocol-version metadata is optional, so DuckDB and pyarrow streams are both
-accepted as-is.
+The `0.0.2` matrix columns are **optional/additive** and drive the MVP transform
+`clip = P · V · M · (pos, 0, 1)`; a stream with none of them (or identity
+matrices) renders identically to `0.0.1`. The protocol-version metadata is
+optional, so DuckDB and pyarrow streams are both accepted as-is.
+
+**Full, versioned specification: [`docs/protocol/`](docs/protocol/)** (per-version
+schema reference + [changelog](docs/protocol/CHANGELOG.md)).
+
 
 ## Repository layout
 
