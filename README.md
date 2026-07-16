@@ -288,7 +288,7 @@ $env:PORT = 9000; examples\render.ps1 -Wasm    # serve on a custom port
 
 The wasm core is a standard, TypeScript-typed npm package (`nix build .#trd-wasm`,
 built with `wasm-bindgen-cli` + `wasm-opt`). `web/` imports it and drives it with
-Apache Arrow JS — the browser produces the same protocol-0.0.1 IPC stream the CLI
+Apache Arrow JS — the browser produces the same protocol-0.0.2 IPC stream the CLI
 consumes and pumps it into the renderer:
 
 ```ts
@@ -322,7 +322,7 @@ drive a fixed-rate run and log p50/p95/p99 timings (Arrow generation, `pushIpc`
 total, render-submit, and derived transfer-plus-decode) to the console.
 
 A second browser type, **`ArrowRenderer`**, is the offscreen counterpart of the CLI:
-it renders to an offscreen texture and returns the same protocol-0.0.1 Arrow **output**
+it renders to an offscreen texture and returns the same protocol-0.0.2 Arrow **output**
 stream (four `fixed_shape_tensor<u8>` channels `r,g,b,a`) instead of drawing to a canvas.
 
 ```ts
