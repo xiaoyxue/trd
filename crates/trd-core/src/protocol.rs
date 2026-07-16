@@ -822,13 +822,26 @@ mod tests {
             Some("0.0.2"),
             "model",
             16,
-            &[model_row.clone()],
+            std::slice::from_ref(&model_row),
             false,
             false,
         );
-        let k_batch = batch_with_matrix(Some("0.0.2"), "k", 9, &[k_row.clone()], false, false);
-        let pose_batch =
-            batch_with_matrix(Some("0.0.2"), "pose", 16, &[pose_row.clone()], false, false);
+        let k_batch = batch_with_matrix(
+            Some("0.0.2"),
+            "k",
+            9,
+            std::slice::from_ref(&k_row),
+            false,
+            false,
+        );
+        let pose_batch = batch_with_matrix(
+            Some("0.0.2"),
+            "pose",
+            16,
+            std::slice::from_ref(&pose_row),
+            false,
+            false,
+        );
 
         let model = decode_batch(&model_batch).unwrap();
         assert_eq!(
@@ -877,7 +890,7 @@ mod tests {
     proptest::proptest! {
         #[test]
         fn model_column_roundtrips(values in proptest::collection::vec(-1000.0_f32..1000.0, 16)) {
-            let batch = batch_with_matrix(Some("0.0.2"), "model", 16, &[values.clone()], false, false);
+            let batch = batch_with_matrix(Some("0.0.2"), "model", 16, std::slice::from_ref(&values), false, false);
             let decoded = decode_batch(&batch).unwrap();
             let expected = <[f32; 16]>::try_from(values).unwrap();
             proptest::prop_assert_eq!(decoded[0].model, Some(expected));
