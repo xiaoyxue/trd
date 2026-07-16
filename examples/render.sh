@@ -5,34 +5,60 @@
 #   JSONL --(Arrow IPC: duckdb or pyarrow)--> trd --(tensors)--> ffmpeg
 #
 # Usage:
-#   examples/render.sh [--native|--app|--web|--wasm] [INPUT.jsonl] [OUTPUT.gif|.webp] [WIDTH] [HEIGHT] [FPS]
+#   examples/render.sh [--cli | --native | --web [--arrow-renderer|--canvas-renderer]] \
+#                      [INPUT.jsonl] [OUTPUT.gif|.webp] [WIDTH] [HEIGHT] [FPS]
 # Defaults: examples/frames.0.0.2.jsonl  output/out.gif  256 256 30
 #
-# By default the frame stream is rendered to a GIF/WebP via the headless trd-cli.
+# By default (or with --cli, alias --headless) the frame stream is rendered to a
+# GIF/WebP via the headless trd-cli.
 # With --native (alias --app) it is played live in the interactive trd-app window
 # (trd-native); OUTPUT is then ignored and neither uv nor ffmpeg are needed.
 # With --web (alias --wasm) it builds the browser (wasm) bundle via nix and serves
 # it, printing the URLs and an SSH-tunnel command. The web demo generates its own
-# Arrow frame stream in-browser, so all positional arguments are ignored. Override
-# the port with PORT (default 8080); the server binds all interfaces.
+# Arrow frame stream in-browser, so all positional arguments are ignored. Two
+# in-browser renderers share the bundle: --arrow-renderer (default) runs the
+# offscreen output-stream smoke (the browser counterpart of the CLI);
+# --canvas-renderer runs the on-screen canvas demo. Override the port with PORT
+# (default 8080); the server binds all interfaces.
 #
 # Run from `nix develop`. The Arrow frame stream is built with duckdb's 'arrow'
 # community extension when it loads, otherwise with pyarrow (via uv/python3).
 # On WSL, prefix with WGPU_BACKEND=gl for GPU rendering (else it uses software).
 set -euo pipefail
 
-# Extract the optional --native/--app and --web/--wasm flags; rest are positional.
+# Extract the optional mode flags (--cli/--native/--web) and the --web renderer
+# sub-flags (--arrow-renderer/--canvas-renderer); the rest are positional.
+cli=0
 native=0
 web=0
+arrow_renderer=0
+canvas_renderer=0
 positional=()
 for arg in "$@"; do
   case "$arg" in
+    --cli|--headless) cli=1 ;;
     --native|--app) native=1 ;;
     --web|--wasm) web=1 ;;
+    --arrow-renderer) arrow_renderer=1 ;;
+    --canvas-renderer) canvas_renderer=1 ;;
     *) positional+=("$arg") ;;
   esac
 done
 if [ ${#positional[@]} -gt 0 ]; then set -- "${positional[@]}"; else set --; fi
+
+# Modes are mutually exclusive; the renderer sub-flags apply only to --web.
+if [ $((cli + native + web)) -gt 1 ]; then
+  echo "error: choose only one of --cli, --native, --web" >&2
+  exit 1
+fi
+if [ "$arrow_renderer" -eq 1 ] && [ "$canvas_renderer" -eq 1 ]; then
+  echo "error: --arrow-renderer and --canvas-renderer are mutually exclusive" >&2
+  exit 1
+fi
+if { [ "$arrow_renderer" -eq 1 ] || [ "$canvas_renderer" -eq 1 ]; } && [ "$web" -ne 1 ]; then
+  echo "error: --arrow-renderer / --canvas-renderer apply only to --web/--wasm" >&2
+  exit 1
+fi
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 input="${1:-$root/examples/frames.0.0.2.jsonl}"
@@ -69,20 +95,33 @@ if [ "$web" -eq 1 ]; then
   ip="$(hostname -I 2>/dev/null | awk '{print $1; exit}')"
   [ -n "$ip" ] || ip="<server-ip>"
 
+  # Both browser renderers ship in one bundle; web/src/main.ts routes on the
+  # `arrow-smoke` query param, so only the opened URL differs. Default (or
+  # --arrow-renderer) = the offscreen ArrowRenderer output-stream smoke (the
+  # browser counterpart of --cli); --canvas-renderer = the on-screen canvas demo.
+  if [ "$canvas_renderer" -eq 1 ]; then
+    demo_query=""
+    renderer_label="CanvasRenderer (on-screen canvas demo)"
+  else
+    demo_query="?arrow-smoke"
+    renderer_label="ArrowRenderer (offscreen output-stream smoke)"
+  fi
+
   echo "building trd web (wasm) bundle via nix (.#web)…" >&2
   (cd "$root" && nix build --no-link ".#web")
 
   cat <<EOF
 
 trd web (wasm) server — port $port  (press Ctrl-C to stop)
+  renderer: $renderer_label
 
-  On this machine:        http://localhost:$port
-  Direct (same network):  http://$ip:$port
+  On this machine:        http://localhost:$port$demo_query
+  Direct (same network):  http://$ip:$port$demo_query
 
   SSH tunnel (recommended if the port is not directly reachable):
     ssh -L $port:localhost:$port $user@$ip
   then open in a WebGPU browser (Chrome/Edge):
-                          http://localhost:$port
+                          http://localhost:$port$demo_query
 
 EOF
 

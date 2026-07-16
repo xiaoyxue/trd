@@ -190,9 +190,11 @@ optional — see [the render pipeline](#the-render-pipeline).
 out. The `examples/render.*` wrappers build the whole JSONL → GIF pipeline for you:
 
 ```sh
-examples/render.sh  [INPUT.jsonl] [OUT.gif|.webp] [WIDTH] [HEIGHT] [FPS]   # Linux/macOS
-examples\render.ps1 [-InputPath]  [-Output]       [-Width] [-Height] [-Fps]  # Windows (PS7)
+examples/render.sh  [MODE] [INPUT.jsonl] [OUT.gif|.webp] [WIDTH] [HEIGHT] [FPS]   # Linux/macOS
+examples\render.ps1 [MODE] [-InputPath]  [-Output]       [-Width] [-Height] [-Fps]  # Windows (PS7)
 # Defaults: examples/frames.0.0.2.jsonl → output/out.gif, 256×256 @ 30 fps
+# MODE (pick one): --cli/-CLI (default: headless GIF/WebP) · --native/-Native (live window) ·
+#   --web/-Wasm (browser; --arrow-renderer/-ArrowRenderer default, or --canvas-renderer/-CanvasRenderer)
 ```
 
 On Windows the Arrow stages are handed off through a temp dir (Windows DuckDB
@@ -300,13 +302,20 @@ prints the machine URL plus a ready-to-copy SSH-tunnel command before serving
 since the demo generates its own frames in-browser):
 
 ```sh
-examples/render.sh --web            # build .#web, print URLs + SSH tunnel, then serve
-PORT=9000 examples/render.sh --wasm # serve on a custom port
+examples/render.sh --web                    # ArrowRenderer (default): offscreen output-stream smoke
+examples/render.sh --web --canvas-renderer  # CanvasRenderer: on-screen canvas demo
+PORT=9000 examples/render.sh --wasm         # serve on a custom port
 ```
 
 The server binds all interfaces, so browse to `http://<host-ip>:PORT` directly,
 or forward it — `ssh -L 8080:localhost:8080 <user>@<host>`, then open
 <http://localhost:8080>.
+
+Both in-browser renderers ship in one bundle ([`web/src/main.ts`](web/src/main.ts)
+routes on the `?arrow-smoke` query param), so the flag only changes which URL the
+wrapper points you at: `--arrow-renderer` (default) opens the offscreen
+`ArrowRenderer` output-stream roundtrip — the browser counterpart of the headless
+`--cli` render — while `--canvas-renderer` opens the on-screen `CanvasRenderer` demo.
 
 On Windows (no Nix), [`examples/render.ps1`](examples/render.ps1) exposes the same
 flag as `-Web` (alias `-Wasm`): it builds the bundle with `wasm-pack` + `bun`
@@ -315,8 +324,9 @@ printing the same URLs + SSH-tunnel command (`$env:PORT` overrides the port,
 default 8088; positional arguments are ignored):
 
 ```powershell
-examples\render.ps1 -Web                       # build wasm + bun bundle, print URLs, then serve
-$env:PORT = 9000; examples\render.ps1 -Wasm    # serve on a custom port
+examples\render.ps1 -Web                    # ArrowRenderer (default): offscreen output-stream smoke
+examples\render.ps1 -Web -CanvasRenderer    # CanvasRenderer: on-screen canvas demo
+$env:PORT = 9000; examples\render.ps1 -Wasm # serve on a custom port
 ```
 
 The wasm core is a standard, TypeScript-typed npm package (`nix build .#trd-wasm`,

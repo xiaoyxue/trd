@@ -11,17 +11,22 @@
 #
 # Usage:
 #   examples/render.ps1 [-InputPath INPUT.jsonl] [-Output OUTPUT.gif|.webp] `
-#                       [-Width 256] [-Height 256] [-Fps 30] [-Native] [-Web]
+#                       [-Width 256] [-Height 256] [-Fps 30] `
+#                       [-CLI | -Native | -Web [-ArrowRenderer|-CanvasRenderer]]
 #   examples/render.ps1 INPUT.jsonl OUTPUT.gif 256 256 30   # positional
 # Defaults: examples/frames.0.0.2.jsonl  output/out.gif  256 256 30
 #
-# By default the frame stream is rendered to a GIF/WebP via the headless trd-cli.
+# By default (or with -CLI, alias -Headless) the frame stream is rendered to a
+# GIF/WebP via the headless trd-cli.
 # With -Native (alias -App) it is played live in the interactive trd-app window
 # (trd-native); -Output is then ignored and neither uv nor ffmpeg are needed.
 # With -Web (alias -Wasm) it builds the browser (wasm) bundle with wasm-pack + bun
 # and serves web/dist, printing the machine URLs and an SSH-tunnel command. The web
 # demo generates its own Arrow frame stream in-browser, so all positional arguments
-# are ignored. Override the port with $env:PORT (default 8088); binds all interfaces.
+# are ignored. Two in-browser renderers share the bundle: -ArrowRenderer (default)
+# runs the offscreen output-stream smoke (the browser counterpart of the CLI);
+# -CanvasRenderer runs the on-screen canvas demo. Override the port with $env:PORT
+# (default 8088); binds all interfaces.
 #
 # On Windows this auto-sources scripts\dev-env.ps1 (the flake.nix devShell
 # counterpart; see README "Windows setup (without Nix)" for the one-time
@@ -38,12 +43,25 @@ param(
     [Parameter(Position = 2)][int]$Width = 256,
     [Parameter(Position = 3)][int]$Height = 256,
     [Parameter(Position = 4)][int]$Fps = 30,
+    [Alias('Headless')][switch]$CLI,
     [Alias('App')][switch]$Native,
-    [Alias('Wasm')][switch]$Web
+    [Alias('Wasm')][switch]$Web,
+    [switch]$ArrowRenderer,
+    [switch]$CanvasRenderer
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+# --- Mode selection & validation ---------------------------------------------
+# The top-level modes are mutually exclusive: the default headless render
+# (explicit alias -CLI/-Headless), the live -Native window, and the browser
+# -Web/-Wasm bundle. -ArrowRenderer / -CanvasRenderer sub-select the in-browser
+# renderer and therefore apply only to -Web.
+$modeCount = @($CLI, $Native, $Web).Where({ $_ }).Count
+if ($modeCount -gt 1) { Write-Error 'error: choose only one of -CLI, -Native, -Web.' }
+if ($ArrowRenderer -and $CanvasRenderer) { Write-Error 'error: -ArrowRenderer and -CanvasRenderer are mutually exclusive.' }
+if (($ArrowRenderer -or $CanvasRenderer) -and -not $Web) { Write-Error 'error: -ArrowRenderer / -CanvasRenderer apply only to -Web/-Wasm.' }
 
 $root = Split-Path -Parent $PSScriptRoot
 if (-not $InputPath) { $InputPath = Join-Path $PSScriptRoot 'frames.0.0.2.jsonl' }
@@ -68,6 +86,20 @@ if ($Web) {
 
     $port = if ($env:PORT) { $env:PORT } else { '8088' }
     $webDir = Join-Path $root 'web'
+
+    # Both browser renderers ship in one bundle; web/src/main.ts routes on the
+    # `arrow-smoke` query param, so only the opened URL differs. Default (or
+    # -ArrowRenderer) = the offscreen ArrowRenderer output-stream smoke (the
+    # browser counterpart of -CLI); -CanvasRenderer = the on-screen canvas demo.
+    if ($CanvasRenderer) {
+        $demoQuery = ''
+        $rendererLabel = 'CanvasRenderer (on-screen canvas demo)'
+    }
+    else {
+        $demoQuery = '?arrow-smoke'
+        $rendererLabel = 'ArrowRenderer (offscreen output-stream smoke)'
+    }
+
     Write-Host 'building trd web (wasm) bundle (wasm-pack + bun)...'
     Push-Location $webDir
     try {
@@ -112,14 +144,15 @@ Bun.serve({
 
     Write-Host ''
     Write-Host "trd web (wasm) server - port $port  (press Ctrl-C to stop)"
+    Write-Host "  renderer: $rendererLabel"
     Write-Host ''
-    Write-Host "  On this machine:        http://localhost:$port"
-    Write-Host "  Direct (same network):  http://${ip}:$port"
+    Write-Host "  On this machine:        http://localhost:$port$demoQuery"
+    Write-Host "  Direct (same network):  http://${ip}:$port$demoQuery"
     Write-Host ''
     Write-Host '  SSH tunnel (recommended if the port is not directly reachable):'
     Write-Host "    ssh -L ${port}:localhost:$port $user@$ip"
     Write-Host '  then open in a WebGPU browser (Chrome/Edge):'
-    Write-Host "                          http://localhost:$port"
+    Write-Host "                          http://localhost:$port$demoQuery"
     Write-Host ''
 
     try {
