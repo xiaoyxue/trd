@@ -137,7 +137,16 @@ examples\render.ps1 -Native   # play live in a window
 ```
 
 > On WSL, prefix GPU commands with `WGPU_BACKEND=gl` (otherwise rendering is
-> software).
+> software). On a **native Linux GPU box that isn't NixOS** (e.g. Ubuntu), the
+> `nix develop` Vulkan loader can't reach the host GPU driver, so wrap GPU
+> commands with [nixGL](https://github.com/nix-community/nixGL):
+>
+> ```sh
+> NIXPKGS_ALLOW_UNFREE=1 nix run --impure github:nix-community/nixGL#nixGLNvidia -- \
+>   examples/render.sh            # or --native / --web; use #nixGLIntel for Intel/Mesa
+> ```
+>
+> NixOS machines don't need this (the driver is on `/run/opengl-driver`).
 
 **3. Try the web build:**
 
@@ -430,4 +439,13 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace                 # fast; GPU tests are skipped
 cargo test --workspace -- --ignored    # GPU-gated render tests
+```
+
+The `--ignored` render tests need a real GPU adapter. On a native Linux box that
+isn't NixOS, run them through [nixGL](https://github.com/nix-community/nixGL) so
+the `nix develop` Vulkan loader finds the host driver:
+
+```sh
+NIXPKGS_ALLOW_UNFREE=1 nix run --impure github:nix-community/nixGL#nixGLNvidia -- \
+  cargo test --workspace -- --ignored   # #nixGLIntel for Intel/Mesa; WSL uses WGPU_BACKEND=gl
 ```
