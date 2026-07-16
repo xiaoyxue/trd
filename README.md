@@ -34,6 +34,10 @@ Platform-agnostic wgpu logic, shared verbatim by every target:
   decoder. `InputSession` feeds arbitrary byte chunks through `arrow`'s
   `StreamDecoder`, validates the protocol-0.0.1 schema once, and yields one
   `FrameBatch` (`Vec<FrameParams>`) per record batch — the browser's input path.
+- **`output.rs`** — the cross-platform Arrow IPC *output* serialization.
+  `OutputSession` writes the protocol-0.0.1 `r,g,b,a` `fixed_shape_tensor<u8>` stream
+  incrementally (one output batch per input batch); `tightly_pack_rgba` strips GPU
+  row padding. Shared by the native CLI and the browser `ArrowRenderer`.
 
 ### The three consumers
 
@@ -298,6 +302,26 @@ The demo animates one Arrow one-row batch per frame. Two query flags help testin
 `#trd-status[data-rows-rendered="2"]`); `?benchmarkRate=60` / `?benchmarkRate=120`
 drive a fixed-rate run and log p50/p95/p99 timings (Arrow generation, `pushIpc`
 total, render-submit, and derived transfer-plus-decode) to the console.
+
+A second browser type, **`ArrowRenderer`**, is the offscreen counterpart of the CLI:
+it renders to an offscreen texture and returns the same protocol-0.0.1 Arrow **output**
+stream (four `fixed_shape_tensor<u8>` channels `r,g,b,a`) instead of drawing to a canvas.
+
+```ts
+import init, { ArrowRenderer } from "trd-wasm";
+
+await init({ module_or_path: wasmUrl });
+const arrow = await ArrowRenderer.create(width, height);
+const outChunk = await arrow.pushIpc(inputIpcChunk); // new output IPC bytes
+const eos = arrow.finish();                           // output EOS
+```
+
+Input is one persistent Arrow IPC stream (arbitrary chunk boundaries); `pushIpc`
+returns only newly produced output bytes, one output record batch per input batch,
+with the schema on the first productive result; `finish()` emits EOS; calls after
+`finish()` reject. The `?arrow-smoke` flag runs an in-page roundtrip that feeds a
+two-batch input through `ArrowRenderer` and validates the decoded output
+(sets `document.body[data-arrow-smoke="pass"]`).
 
 (The `web` wasm-bindgen target is used because bun does not instantiate the
 `bundler` target's ESM-imported wasm.)

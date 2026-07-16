@@ -4,6 +4,10 @@ use std::fmt::Display;
 
 use wasm_bindgen::prelude::*;
 
+mod arrow_renderer;
+
+pub use arrow_renderer::ArrowRenderer;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CanvasState {
     Open,
@@ -29,7 +33,7 @@ pub struct CanvasRenderer {
     state: CanvasState,
 }
 
-fn js_error(message: impl Display) -> JsValue {
+pub(crate) fn js_error(message: impl Display) -> JsValue {
     js_sys::Error::new(&message.to_string()).into()
 }
 

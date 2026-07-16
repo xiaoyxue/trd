@@ -4,9 +4,11 @@
 //! Native and web entry points are thin wrappers that only provide a render
 //! target and call into this crate.
 
+mod output;
 mod protocol;
 mod render;
 
+pub use output::{output_schema, tightly_pack_rgba, OutputError, OutputSession};
 pub use protocol::{
     FrameBatch, InputSession, ProtocolError, PROTOCOL_VERSION, PROTOCOL_VERSION_KEY,
 };
@@ -15,9 +17,7 @@ pub use render::{create_triangle_pipeline, render_triangle, FrameParams, Triangl
 #[cfg(not(target_arch = "wasm32"))]
 mod stream;
 #[cfg(not(target_arch = "wasm32"))]
-pub use stream::{
-    decode_frames, input_schema, output_schema, read_frame_stream, run_stream, StreamError,
-};
+pub use stream::{decode_frames, input_schema, read_frame_stream, run_stream, StreamError};
 
 /// Returns the project greeting used by the CLI and web entry points.
 pub fn greeting() -> String {
