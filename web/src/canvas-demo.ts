@@ -11,6 +11,9 @@ import {
 } from "apache-arrow";
 import init, { CanvasRenderer } from "trd-wasm";
 import wasmUrl from "trd-wasm/trd_wasm_bg.wasm" with { type: "file" };
+// The same frame data the native CLI/window consume, so all three front-ends
+// render the identical animation from one shared source of truth.
+import framesUrl from "../../examples/frames.jsonl" with { type: "file" };
 
 const canvas = document.getElementById("trd-canvas");
 const status = document.getElementById("trd-status");
@@ -90,6 +93,33 @@ function summary(name: string, values: readonly number[]) {
 
 function addMeasure(name: string, duration: number): void {
   performance.measure(name, { start: performance.now(), duration });
+}
+
+/// Loads the shared `examples/frames.jsonl` frame sequence — the same input data
+/// the native CLI/window render — so the browser plays the identical animation.
+async function loadFrames(): Promise<Frame[]> {
+  const response = await fetch(framesUrl);
+  if (!response.ok) {
+    throw new Error(`failed to load frames.jsonl: ${response.status}`);
+  }
+  const text = await response.text();
+  return text
+    .split("\n")
+    .filter((line) => line.trim().length > 0)
+    .map((line) => {
+      const row: unknown = JSON.parse(line);
+      if (
+        typeof row !== "object" ||
+        row === null ||
+        !("center" in row) ||
+        !("size" in row) ||
+        !("theta" in row)
+      ) {
+        throw new Error(`invalid frame row: ${line}`);
+      }
+      const frame = row as Frame;
+      return { center: frame.center, size: frame.size, theta: frame.theta };
+    });
 }
 
 async function run(): Promise<void> {
@@ -191,16 +221,21 @@ async function run(): Promise<void> {
     return;
   }
 
+  // The shared frame sequence (same as native); cycle through it, one frame per
+  // present. Speed = frame_rate carried in the data via the number of frames;
+  // pacing is the browser's requestAnimationFrame (its refresh rate) — no fps
+  // knob, matching the native "the stream is the animation" model.
+  const frames = await loadFrames();
+  if (frames.length === 0) {
+    throw new Error("shared frame stream is empty");
+  }
+
   const started = performance.now();
   let nextDeadline = started;
   let completed = 0;
 
-  async function schedule(timestamp: number): Promise<void> {
-    await appendOne({
-      center: [0, 0],
-      size: [0.8, 0.8],
-      theta: timestamp / 1000,
-    });
+  async function schedule(): Promise<void> {
+    await appendOne(frames[completed % frames.length] as Frame);
     completed += 1;
 
     if (completed === totalFrames) {
@@ -224,11 +259,11 @@ async function run(): Promise<void> {
       nextDeadline += 1000 / rate;
       const delay = Math.max(0, nextDeadline - performance.now());
       window.setTimeout(() => {
-        void schedule(performance.now()).catch(reportError);
+        void schedule().catch(reportError);
       }, delay);
     } else {
-      requestAnimationFrame((nextTimestamp) => {
-        void schedule(nextTimestamp).catch(reportError);
+      requestAnimationFrame(() => {
+        void schedule().catch(reportError);
       });
     }
   }
@@ -237,13 +272,13 @@ async function run(): Promise<void> {
     nextDeadline += 1000 / rate;
     window.setTimeout(
       () => {
-        void schedule(performance.now()).catch(reportError);
+        void schedule().catch(reportError);
       },
       Math.max(0, nextDeadline - performance.now()),
     );
   } else {
-    requestAnimationFrame((timestamp) => {
-      void schedule(timestamp).catch(reportError);
+    requestAnimationFrame(() => {
+      void schedule().catch(reportError);
     });
   }
 }
