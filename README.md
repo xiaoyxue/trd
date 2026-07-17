@@ -39,6 +39,13 @@ Platform-agnostic wgpu logic, shared verbatim by every target:
   `OutputSession` writes the `r,g,b,a` `fixed_shape_tensor<u8>` stream
   incrementally (one output batch per input batch); `tightly_pack_rgba` strips GPU
   row padding. Shared by the native CLI and the browser `ArrowRenderer`.
+- **`math/`** — the typed homogeneous linear-algebra layer over glam:
+  `Vector2/3/4`, `Point2/3/4`, `Normal3`, `Matrix3/4`, `Rotation` (unit
+  quaternion), `Transform`, and `Aabb2/3`. Zero-cost `#[repr(transparent)]`
+  newtypes with **private** inner fields that enforce affine-space rules
+  (`point − point → vector`, no `point + point`) the raw glam types can't.
+  Column-major, right-handed, clip `z ∈ [0, 1]`; `render.rs`'s MVP transforms
+  are built on it and its `ToWgsl` layout keeps the GPU `Uniform` byte-identical.
 
 ### The three consumers
 

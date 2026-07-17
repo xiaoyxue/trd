@@ -9,6 +9,16 @@ Guidance for agents working in this repository.
   in the browser (compiled to wasm).
 - **JS/TS is a thin bootstrap wrapper only.** Do not call the WebGPU API
   directly from JavaScript; all rendering logic lives in Rust.
+- **Typed math lives in `crates/trd-core/src/math/`** — homogeneous linear
+  algebra (`Vector`/`Point`/`Normal`/`Matrix`/`Rotation`/`Transform`/`Aabb`) as
+  zero-cost `#[repr(transparent)]` newtypes over glam with **private** inner
+  fields that enforce affine-space rules the raw glam types can't (`point −
+  point → vector`, no `point + point`). The crate conventions — column-major,
+  right-handed, clip `z ∈ [0, 1]`, `a.then(b) == b * a`, f32 radians — live in
+  `math/mod.rs`. `render.rs`'s MVP transforms build on it; keep the GPU
+  `Uniform` byte-identical when touching them. Native SIMD (SSE2/NEON) is
+  automatic; wasm SIMD is enabled via `-C target-feature=+simd128` in
+  `.cargo/config.toml`.
 - **Vertical slicing.** Each increment threads the whole stack and is
   independently end-to-end verifiable.
 - Major input data is columnar (Apache Arrow tables) with simple glue logic.

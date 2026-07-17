@@ -10,7 +10,7 @@ wgpu = "30"
 log = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
 thiserror = "2"
-glam = "0.30"
+glam = { version = "0.30", features = ["bytemuck", "approx", "libm"] }
 arrow = { version = "59", default-features = false, features = ["ipc", "canonical_extension_types"] }
 arrow-schema = { version = "59", default-features = false, features = ["canonical_extension_types"] }
 
@@ -19,3 +19,4 @@ pollster = "0.4"
 
 [dev-dependencies]
 proptest = "1"
+approx = "0.5"
