@@ -1,0 +1,11 @@
+# Enable wasm SIMD (128-bit) so glam uses its `simd128` code paths in the
+# browser build instead of falling back to scalar math (see #32 "SIMD &
+# performance" / #24). Native targets already get SSE2/NEON from glam
+# automatically, so no host-side flags are needed here.
+#
+# This is target-scoped, so it applies to both local
+# `cargo build --target wasm32-unknown-unknown` and the crane/nix wasm build,
+# without affecting native builds. wasm SIMD is baseline in all current
+# evergreen browsers and is understood by `wasm-opt`.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+simd128"]
