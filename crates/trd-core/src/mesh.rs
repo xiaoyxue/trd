@@ -23,9 +23,10 @@
 //! per-vertex and per-index data nested inside list columns: `position`
 //! `List<FixedSizeList<Float32>[3]>` (required), an optional `color`
 //! `List<FixedSizeList<Float32>[3]>`, and an optional `index` `List<UInt32>`
-//! (absent ⇒ a non-indexed triangle list). The first row is decoded (multi-mesh
-//! scenes are future work). It yields the same canonical [`Mesh`] as the OBJ
-//! path, so both authoring routes agree.
+//! (absent ⇒ a non-indexed triangle list). [`Mesh::from_arrow_all`] decodes
+//! every row (one mesh each) for multi-mesh scenes; [`Mesh::from_arrow`] decodes
+//! just the first row. It yields the same canonical [`Mesh`] as the OBJ path, so
+//! both authoring routes agree.
 
 use crate::math::{Aabb3, Point3, Transform, Vector3, EPSILON};
 use crate::render::{Mesh, Vertex};
@@ -172,15 +173,30 @@ impl Mesh {
     /// `List<FixedSizeList<Float32>[3]>` (defaults to white), and an optional
     /// `index` `List<UInt32>` (absent ⇒ the vertices are a non-indexed triangle
     /// list, so their count must be a multiple of three). The **first row** is
-    /// decoded. Produces the same [`Mesh`] as [`Mesh::from_obj`] for equivalent
-    /// geometry.
+    /// decoded; use [`Mesh::from_arrow_all`] to decode every row. Produces the
+    /// same [`Mesh`] as [`Mesh::from_obj`] for equivalent geometry.
     pub fn from_arrow(batch: &RecordBatch) -> Result<Mesh, MeshError> {
         if batch.num_rows() == 0 {
             return Err(MeshError::Empty);
         }
-        // One row = one mesh; decode the first (multi-mesh scenes are future work).
-        let row = 0;
+        Self::from_arrow_row(batch, 0)
+    }
 
+    /// Decodes **every** row of an Arrow mesh table into one [`Mesh`] each,
+    /// preserving row order so a stream's draw list can reference meshes by row
+    /// index. Returns [`MeshError::Empty`] for a zero-row table.
+    pub fn from_arrow_all(batch: &RecordBatch) -> Result<Vec<Mesh>, MeshError> {
+        if batch.num_rows() == 0 {
+            return Err(MeshError::Empty);
+        }
+        (0..batch.num_rows())
+            .map(|row| Self::from_arrow_row(batch, row))
+            .collect()
+    }
+
+    /// Decodes a single `row` of an Arrow mesh table into a [`Mesh`]. Shared by
+    /// [`Mesh::from_arrow`] (row 0) and [`Mesh::from_arrow_all`] (all rows).
+    fn from_arrow_row(batch: &RecordBatch, row: usize) -> Result<Mesh, MeshError> {
         let position_list = require_list(batch, "position")?;
         if position_list.is_null(row) {
             return Err(MeshError::NullValues("position"));
