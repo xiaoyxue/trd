@@ -23,8 +23,8 @@ pub use protocol::{
     FRAME_RATE_KEY, PROTOCOL_VERSION, PROTOCOL_VERSION_KEY,
 };
 pub use render::{
-    create_mesh_pipeline, create_triangle_pipeline, render_triangle, FrameParams, Mesh,
-    MeshRenderer, TriangleRenderer, Vertex, Viewport,
+    create_mesh_pipeline, create_triangle_pipeline, render_triangle, CameraFormError, FrameParams,
+    Mesh, MeshRenderer, TriangleRenderer, Vertex, Viewport,
 };
 
 #[cfg(not(target_arch = "wasm32"))]

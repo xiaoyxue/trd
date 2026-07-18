@@ -31,7 +31,7 @@
 //! lives in and the `aspect` ratio.
 
 use crate::math::{Aabb3, Point3, Transform, Vector3, EPSILON};
-use crate::render::{projection_from_intrinsics, Viewport};
+use crate::render::{projection_from_intrinsics, Viewport, DEFAULT_FAR, DEFAULT_NEAR};
 
 /// The default vertical field of view for the framing camera: `45°`.
 pub const DEFAULT_FOV_Y: f32 = std::f32::consts::FRAC_PI_4;
@@ -195,6 +195,55 @@ impl Camera {
 
         let view = Transform::look_at_rh(eye, center, up);
         let projection = Transform::perspective_rh(fov_y, aspect, near, far);
+        Self::from_gl(view, projection, viewport)
+    }
+
+    /// A **CG-style** perspective camera looking from `eye` toward the `target`
+    /// point, with `up`, a vertical field of view `fov_y` (radians), and the
+    /// target `viewport` (whose aspect drives the projection).
+    ///
+    /// This is the ergonomic look-at constructor complementing [`Camera::from_cv`]
+    /// (CV `K`/pose) and [`Camera::from_gl`] (raw GL matrices). Uses the default
+    /// clip planes ([`DEFAULT_NEAR`]/[`DEFAULT_FAR`]); use [`Camera::look_at_with`]
+    /// to override them.
+    #[inline]
+    pub fn look_at(
+        eye: Point3,
+        target: Point3,
+        up: Vector3,
+        fov_y: f32,
+        viewport: Viewport,
+    ) -> Self {
+        Self::look_at_with(eye, target, up, fov_y, viewport, DEFAULT_NEAR, DEFAULT_FAR)
+    }
+
+    /// Like [`Camera::look_at`] but the view direction is given as a **forward
+    /// vector** `direction` (the camera looks along it from `eye`) instead of a
+    /// look-at point — i.e. `target = eye + direction`. `direction` need not be
+    /// unit length.
+    #[inline]
+    pub fn look_towards(
+        eye: Point3,
+        direction: Vector3,
+        up: Vector3,
+        fov_y: f32,
+        viewport: Viewport,
+    ) -> Self {
+        Self::look_at(eye, eye + direction, up, fov_y, viewport)
+    }
+
+    /// [`Camera::look_at`] with explicit clip planes `near`/`far`.
+    pub fn look_at_with(
+        eye: Point3,
+        target: Point3,
+        up: Vector3,
+        fov_y: f32,
+        viewport: Viewport,
+        near: f32,
+        far: f32,
+    ) -> Self {
+        let view = Transform::look_at_rh(eye, target, up);
+        let projection = Transform::perspective_rh(fov_y, viewport.aspect(), near, far);
         Self::from_gl(view, projection, viewport)
     }
 }
@@ -361,5 +410,67 @@ mod tests {
             .to_cols_array()
             .iter()
             .all(|x| x.is_finite()));
+    }
+
+    #[test]
+    fn look_at_puts_target_at_ndc_origin() {
+        // The look-at point projects to the principal point (NDC x,y origin).
+        let vp = viewport();
+        let target = Point3::new(1.0, 2.0, -3.0);
+        let cam = Camera::look_at(
+            Point3::new(4.0, 2.0, 1.0),
+            target,
+            Vector3::Y,
+            DEFAULT_FOV_Y,
+            vp,
+        );
+        let ndc = cam.view_projection().project_point(target);
+        assert!(
+            ndc.x().abs() < 1e-4 && ndc.y().abs() < 1e-4,
+            "ndc = {ndc:?}"
+        );
+    }
+
+    #[test]
+    fn look_towards_matches_look_at_along_direction() {
+        // `look_towards(eye, dir)` equals `look_at(eye, eye + dir)`.
+        let vp = viewport();
+        let eye = Point3::new(0.0, 0.5, 5.0);
+        let dir = Vector3::new(0.1, -0.2, -1.0);
+        let a = Camera::look_towards(eye, dir, Vector3::Y, DEFAULT_FOV_Y, vp);
+        let b = Camera::look_at(eye, eye + dir, Vector3::Y, DEFAULT_FOV_Y, vp);
+        for (x, y) in a
+            .view_projection()
+            .to_cols_array()
+            .iter()
+            .zip(b.view_projection().to_cols_array().iter())
+        {
+            assert_abs_diff_eq!(x, y, epsilon = 1e-6);
+        }
+    }
+
+    #[test]
+    fn look_at_cg_lowers_to_cv_losslessly_in_xy() {
+        // A CG look-at camera, lowered to CV (K + pose) and rebuilt, projects the
+        // same NDC x,y (near/far differ only if overridden; defaults match).
+        let vp = viewport();
+        let cam = Camera::look_at(
+            Point3::new(2.0, 1.0, 4.0),
+            Point3::new(0.0, 0.0, 0.0),
+            Vector3::Y,
+            DEFAULT_FOV_Y,
+            vp,
+        );
+        let cv = Camera::from_cv(cam.to_intrinsics(), cam.to_pose(), vp);
+        for p in [
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(0.5, -0.3, 0.2),
+            Point3::new(-0.4, 0.6, -0.7),
+        ] {
+            let a = cam.view_projection().project_point(p);
+            let b = cv.view_projection().project_point(p);
+            assert_abs_diff_eq!(a.x(), b.x(), epsilon = 1e-3);
+            assert_abs_diff_eq!(a.y(), b.y(), epsilon = 1e-3);
+        }
     }
 }

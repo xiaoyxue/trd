@@ -20,7 +20,7 @@ use crate::math::Matrix4;
 use crate::protocol::{
     frame_rate_from_metadata, PROTOCOL_VERSION, PROTOCOL_VERSION_KEY, SUPPORTED_INPUT_VERSIONS,
 };
-use crate::render::{FrameParams, Mesh, MeshRenderer};
+use crate::render::{CameraFormError, FrameParams, Mesh, MeshRenderer};
 use crate::OutputSession;
 
 /// Errors from decoding, validating, rendering, or encoding a trd stream.
@@ -45,6 +45,17 @@ pub enum StreamError {
     /// A required input column contains null values (protocol requires non-null).
     #[error("input column `{0}` contains null values")]
     NullValues(&'static str),
+    /// The stream mixes the CV (`k`/`pose`) and CG (`eye`/`target`/`direction`/
+    /// `fovy`) camera forms; exactly one must be used.
+    #[error(
+        "conflicting camera forms: use either CV (`k`/`pose`) or CG \
+         (`eye`/`target`/`direction`/`fovy`), not both"
+    )]
+    ConflictingCameraForms,
+    /// The CG camera form is incomplete (an `eye` without a look
+    /// `target`/`direction`, or vice versa).
+    #[error("incomplete CG camera: `eye` requires a look `target`/`direction` (and vice versa)")]
+    IncompleteCameraForm,
     /// The requested image dimensions are invalid or too large.
     #[error("invalid image dimensions {width}x{height}: {reason}")]
     InvalidDimensions {
@@ -190,9 +201,42 @@ fn read_fixed<const N: usize>(
     std::array::from_fn(|i| values.value(offset + i))
 }
 
+/// Looks up an optional non-null `Float32` scalar column, validating its type.
+/// Returns `None` if the column is absent (additive `0.0.3` camera columns).
+fn optional_f32<'a>(
+    batch: &'a RecordBatch,
+    name: &'static str,
+) -> Result<Option<&'a Float32Array>, StreamError> {
+    let Some(column) = batch.column_by_name(name) else {
+        return Ok(None);
+    };
+    let array = column
+        .as_any()
+        .downcast_ref::<Float32Array>()
+        .ok_or_else(|| StreamError::ColumnType {
+            column: name,
+            expected: "Float32",
+            actual: column.data_type().clone(),
+        })?;
+    if array.null_count() > 0 {
+        return Err(StreamError::NullValues(name));
+    }
+    Ok(Some(array))
+}
+
+/// Maps a [`CameraFormError`] onto the stream error type.
+fn camera_form_error(error: CameraFormError) -> StreamError {
+    match error {
+        CameraFormError::Conflicting => StreamError::ConflictingCameraForms,
+        CameraFormError::Incomplete => StreamError::IncompleteCameraForm,
+    }
+}
+
 /// Decodes every row of `batch` into [`FrameParams`], validating required
 /// columns, types, and non-nullness (including the fixed-size-list children).
-/// The optional `0.0.2` `model`/`k`/`pose` matrix columns are decoded if present.
+/// The optional `0.0.2` `model`/`k`/`pose` matrix columns and the `0.0.3` CG
+/// camera columns (`eye`/`target`/`direction`/`up`/`fovy`/`aspect`/`znear`/
+/// `zfar`) are decoded if present.
 pub fn decode_frames(batch: &RecordBatch) -> Result<Vec<FrameParams>, StreamError> {
     let center = require_vec2(batch, "center")?;
     let size = require_vec2(batch, "size")?;
@@ -211,16 +255,36 @@ pub fn decode_frames(batch: &RecordBatch) -> Result<Vec<FrameParams>, StreamErro
     let model = optional_fixed_list(batch, "model", 16)?;
     let k = optional_fixed_list(batch, "k", 9)?;
     let pose = optional_fixed_list(batch, "pose", 16)?;
-    Ok((0..batch.num_rows())
-        .map(|i| FrameParams {
-            center: read_vec2(center, i),
-            size: read_vec2(size, i),
-            theta: theta.value(i),
-            model: model.map(|(list, values)| read_fixed::<16>(list, values, i)),
-            k: k.map(|(list, values)| read_fixed::<9>(list, values, i)),
-            pose: pose.map(|(list, values)| read_fixed::<16>(list, values, i)),
+    let eye = optional_fixed_list(batch, "eye", 3)?;
+    let target = optional_fixed_list(batch, "target", 3)?;
+    let direction = optional_fixed_list(batch, "direction", 3)?;
+    let up = optional_fixed_list(batch, "up", 3)?;
+    let fovy = optional_f32(batch, "fovy")?;
+    let aspect = optional_f32(batch, "aspect")?;
+    let znear = optional_f32(batch, "znear")?;
+    let zfar = optional_f32(batch, "zfar")?;
+    (0..batch.num_rows())
+        .map(|i| {
+            let frame = FrameParams {
+                center: read_vec2(center, i),
+                size: read_vec2(size, i),
+                theta: theta.value(i),
+                model: model.map(|(list, values)| read_fixed::<16>(list, values, i)),
+                k: k.map(|(list, values)| read_fixed::<9>(list, values, i)),
+                pose: pose.map(|(list, values)| read_fixed::<16>(list, values, i)),
+                eye: eye.map(|(list, values)| read_fixed::<3>(list, values, i)),
+                target: target.map(|(list, values)| read_fixed::<3>(list, values, i)),
+                direction: direction.map(|(list, values)| read_fixed::<3>(list, values, i)),
+                up: up.map(|(list, values)| read_fixed::<3>(list, values, i)),
+                fovy: fovy.map(|a| a.value(i)),
+                aspect: aspect.map(|a| a.value(i)),
+                znear: znear.map(|a| a.value(i)),
+                zfar: zfar.map(|a| a.value(i)),
+            };
+            frame.check_camera_form().map_err(camera_form_error)?;
+            Ok(frame)
         })
-        .collect())
+        .collect()
 }
 
 /// Reads an Arrow IPC frame-params stream from `input`, invoking `on_frame` for
@@ -606,6 +670,99 @@ mod tests {
         let batch = build_input_batch(&frames);
         let decoded = decode_frames(&batch).unwrap();
         assert_eq!(decoded, frames);
+    }
+
+    /// A non-null `FixedSizeList<Float32>[len]` column from flat values.
+    fn list_col(len: i32, flat: Vec<f32>) -> ArrayRef {
+        Arc::new(FixedSizeListArray::new(
+            Arc::new(Field::new("item", DataType::Float32, false)),
+            len,
+            Arc::new(Float32Array::from(flat)),
+            None,
+        )) as ArrayRef
+    }
+
+    /// Builds a one-row batch of identity center/size/theta plus the given extra
+    /// `(field, column)` pairs.
+    fn camera_batch(extra: Vec<(Field, ArrayRef)>) -> RecordBatch {
+        let vec2 = |name| {
+            Field::new(
+                name,
+                DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, false)), 2),
+                false,
+            )
+        };
+        let mut fields = vec![
+            vec2("center"),
+            vec2("size"),
+            Field::new("theta", DataType::Float32, false),
+        ];
+        let mut columns: Vec<ArrayRef> = vec![
+            list_col(2, vec![0.0, 0.0]),
+            list_col(2, vec![1.0, 1.0]),
+            Arc::new(Float32Array::from(vec![0.0_f32])) as ArrayRef,
+        ];
+        for (field, column) in extra {
+            fields.push(field);
+            columns.push(column);
+        }
+        let schema = Arc::new(Schema::new(fields));
+        RecordBatch::try_new(schema, columns).unwrap()
+    }
+
+    #[test]
+    fn decodes_cg_camera_columns() {
+        let list3 = |name| {
+            Field::new(
+                name,
+                DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, false)), 3),
+                false,
+            )
+        };
+        let batch = camera_batch(vec![
+            (list3("eye"), list_col(3, vec![1.0, 2.0, 3.0])),
+            (list3("target"), list_col(3, vec![0.1, 0.2, 0.3])),
+            (
+                Field::new("fovy", DataType::Float32, false),
+                Arc::new(Float32Array::from(vec![0.9_f32])) as ArrayRef,
+            ),
+        ]);
+        let frames = decode_frames(&batch).unwrap();
+        assert_eq!(frames[0].eye, Some([1.0, 2.0, 3.0]));
+        assert_eq!(frames[0].target, Some([0.1, 0.2, 0.3]));
+        assert_eq!(frames[0].fovy, Some(0.9));
+    }
+
+    #[test]
+    fn rejects_incomplete_and_conflicting_camera_forms() {
+        let list_field = |name, len| {
+            Field::new(
+                name,
+                DataType::FixedSizeList(
+                    Arc::new(Field::new("item", DataType::Float32, false)),
+                    len,
+                ),
+                false,
+            )
+        };
+        // `eye` alone is incomplete.
+        let incomplete = camera_batch(vec![(
+            list_field("eye", 3),
+            list_col(3, vec![1.0, 2.0, 3.0]),
+        )]);
+        assert!(matches!(
+            decode_frames(&incomplete),
+            Err(StreamError::IncompleteCameraForm)
+        ));
+        // CV `k` mixed with CG `eye` is conflicting.
+        let conflicting = camera_batch(vec![
+            (list_field("k", 9), list_col(9, vec![1.0; 9])),
+            (list_field("eye", 3), list_col(3, vec![1.0, 2.0, 3.0])),
+        ]);
+        assert!(matches!(
+            decode_frames(&conflicting),
+            Err(StreamError::ConflictingCameraForms)
+        ));
     }
 
     #[test]
