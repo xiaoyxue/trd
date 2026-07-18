@@ -18,7 +18,10 @@ pub use protocol::{
     frame_rate_from_metadata, FrameBatch, InputSession, ProtocolError, DEFAULT_FRAME_RATE,
     FRAME_RATE_KEY, PROTOCOL_VERSION, PROTOCOL_VERSION_KEY,
 };
-pub use render::{create_triangle_pipeline, render_triangle, FrameParams, TriangleRenderer};
+pub use render::{
+    create_mesh_pipeline, create_triangle_pipeline, render_triangle, FrameParams, Mesh,
+    MeshRenderer, TriangleRenderer, Vertex,
+};
 
 #[cfg(not(target_arch = "wasm32"))]
 mod stream;

@@ -1,8 +1,8 @@
 //! Shared, platform-agnostic parametric triangle rendering.
 //!
 //! [`render_triangle`] draws the hello-triangle transformed by [`FrameParams`]
-//! into the given texture view. Both the native batch renderer and the wasm
-//! entry point build on [`create_triangle_pipeline`].
+//! into the given texture view. [`MeshRenderer`] draws the same triangle through
+//! the vertex/index-buffer path used by the native batch renderer.
 
 use crate::math::{Matrix4, Vector3};
 
@@ -161,6 +161,68 @@ impl Uniform {
     }
 }
 
+/// A mesh vertex consumed by `mesh.wgsl`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct Vertex {
+    pub position: [f32; 3],
+    pub color: [f32; 3],
+}
+
+impl Vertex {
+    const ATTRIBUTES: [wgpu::VertexAttribute; 2] = [
+        wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Float32x3,
+            offset: 0,
+            shader_location: 0,
+        },
+        wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Float32x3,
+            offset: 12,
+            shader_location: 1,
+        },
+    ];
+
+    /// Returns the vertex buffer layout expected by `mesh.wgsl`.
+    pub const fn layout() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &Self::ATTRIBUTES,
+        }
+    }
+}
+
+/// Canonical indexed mesh container.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Mesh {
+    pub vertices: Vec<Vertex>,
+    pub indices: Vec<u32>,
+}
+
+impl Mesh {
+    /// The legacy hello-triangle expressed as a 3-vertex indexed mesh.
+    pub fn hello_triangle() -> Self {
+        Self {
+            vertices: vec![
+                Vertex {
+                    position: [0.0, 0.5, 0.0],
+                    color: [1.0, 0.0, 0.0],
+                },
+                Vertex {
+                    position: [-0.5, -0.5, 0.0],
+                    color: [0.0, 1.0, 0.0],
+                },
+                Vertex {
+                    position: [0.5, -0.5, 0.0],
+                    color: [0.0, 0.0, 1.0],
+                },
+            ],
+            indices: vec![0, 1, 2],
+        }
+    }
+}
+
 /// Builds the triangle render pipeline for `format` using an auto bind-group
 /// layout (group 0, binding 0 = the params uniform).
 pub fn create_triangle_pipeline(
@@ -176,6 +238,36 @@ pub fn create_triangle_pipeline(
             entry_point: Some("vs_main"),
             compilation_options: Default::default(),
             buffers: &[],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            compilation_options: Default::default(),
+            targets: &[Some(format.into())],
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+/// Builds the indexed mesh render pipeline for `format` using an auto bind-group
+/// layout (group 0, binding 0 = the params uniform).
+pub fn create_mesh_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::include_wgsl!("mesh.wgsl"));
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("trd mesh pipeline"),
+        layout: None,
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            compilation_options: Default::default(),
+            buffers: &[Some(Vertex::layout())],
         },
         fragment: Some(wgpu::FragmentState {
             module: &shader,
@@ -218,8 +310,9 @@ pub(crate) fn create_params_binding(
 
 /// Writes `params` (projected for `viewport`) into an existing uniform buffer.
 ///
-/// Shared by the native `BatchRenderer` and the persistent [`TriangleRenderer`],
-/// which reuse one uniform buffer across frames instead of rebuilding it.
+/// Shared by the native `BatchRenderer`, [`TriangleRenderer`], and
+/// [`MeshRenderer`], which reuse one uniform buffer across frames instead of
+/// rebuilding it.
 pub(crate) fn write_params(
     queue: &wgpu::Queue,
     buffer: &wgpu::Buffer,
@@ -347,6 +440,95 @@ impl TriangleRenderer {
     }
 }
 
+/// Persistent indexed mesh renderer: owns one pipeline, uniform buffer, bind
+/// group, vertex buffer, and index buffer, and encodes a single frame into a
+/// caller-provided encoder and view.
+pub struct MeshRenderer {
+    pipeline: wgpu::RenderPipeline,
+    uniform: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    index_count: u32,
+}
+
+impl MeshRenderer {
+    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat, mesh: &Mesh) -> Self {
+        use wgpu::util::DeviceExt;
+
+        let pipeline = create_mesh_pipeline(device, format);
+        // The identity params ignore the viewport (no intrinsics); each `encode`
+        // supplies the real target dimensions.
+        let (uniform, bind_group) = create_params_binding(
+            device,
+            &pipeline,
+            FrameParams::IDENTITY,
+            Viewport {
+                width: 1,
+                height: 1,
+            },
+        );
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("trd mesh vertex buffer"),
+            contents: bytemuck::cast_slice(&mesh.vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("trd mesh index buffer"),
+            contents: bytemuck::cast_slice(&mesh.indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        let index_count =
+            u32::try_from(mesh.indices.len()).expect("mesh index count exceeds u32::MAX");
+
+        Self {
+            pipeline,
+            uniform,
+            bind_group,
+            vertex_buffer,
+            index_buffer,
+            index_count,
+        }
+    }
+
+    /// Encodes one indexed-mesh frame. `width`/`height` are the target's pixel
+    /// dimensions, used to project camera intrinsics (`FrameParams::k`); they
+    /// have no effect on the identity/2D-affine path.
+    pub fn encode(
+        &self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        params: FrameParams,
+        width: u32,
+        height: u32,
+    ) {
+        write_params(queue, &self.uniform, params, Viewport { width, height });
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("trd mesh pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+        pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        pass.draw_indexed(0..self.index_count, 0, 0..1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,6 +548,46 @@ mod tests {
             Uniform::from_params(FrameParams::IDENTITY, viewport).transform,
             Matrix4::IDENTITY.to_cols_array()
         );
+    }
+
+    #[test]
+    fn vertex_layout_matches_wgsl_inputs() {
+        assert_eq!(std::mem::size_of::<Vertex>(), 24);
+        assert_eq!(std::mem::align_of::<Vertex>(), 4);
+
+        let layout = Vertex::layout();
+        assert_eq!(layout.array_stride, 24);
+        assert_eq!(layout.step_mode, wgpu::VertexStepMode::Vertex);
+        assert_eq!(layout.attributes.len(), 2);
+        assert_eq!(layout.attributes[0].offset, 0);
+        assert_eq!(layout.attributes[0].shader_location, 0);
+        assert_eq!(layout.attributes[0].format, wgpu::VertexFormat::Float32x3);
+        assert_eq!(layout.attributes[1].offset, 12);
+        assert_eq!(layout.attributes[1].shader_location, 1);
+        assert_eq!(layout.attributes[1].format, wgpu::VertexFormat::Float32x3);
+    }
+
+    #[test]
+    fn hello_triangle_mesh_matches_shader_constants() {
+        let mesh = Mesh::hello_triangle();
+        assert_eq!(
+            mesh.vertices,
+            vec![
+                Vertex {
+                    position: [0.0, 0.5, 0.0],
+                    color: [1.0, 0.0, 0.0],
+                },
+                Vertex {
+                    position: [-0.5, -0.5, 0.0],
+                    color: [0.0, 1.0, 0.0],
+                },
+                Vertex {
+                    position: [0.5, -0.5, 0.0],
+                    color: [0.0, 0.0, 1.0],
+                },
+            ]
+        );
+        assert_eq!(mesh.indices, vec![0, 1, 2]);
     }
 
     #[test]
@@ -511,5 +733,142 @@ mod tests {
             expected.into_inner(),
             epsilon = 1e-6
         );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn render_with_readback(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        format: wgpu::TextureFormat,
+        width: u32,
+        height: u32,
+        encode: impl FnOnce(&wgpu::Queue, &mut wgpu::CommandEncoder, &wgpu::TextureView),
+    ) -> Vec<u8> {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("trd render test target"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let unpadded = width * 4;
+        let padded_bytes_per_row = unpadded.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("trd render test readback"),
+            size: u64::from(padded_bytes_per_row) * u64::from(height),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("trd render test encoder"),
+        });
+        encode(queue, &mut encoder, &view);
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &staging,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_bytes_per_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit(Some(encoder.finish()));
+
+        let slice = staging.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("GPU poll failed");
+        rx.recv()
+            .expect("map_async callback dropped")
+            .expect("GPU readback failed");
+
+        let pixels = {
+            let mapped = slice.get_mapped_range().expect("buffer mapped after poll");
+            crate::tightly_pack_rgba(&mapped, width, height, padded_bytes_per_row)
+                .expect("GPU row unpack failed")
+        };
+        staging.unmap();
+        pixels
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn test_device() -> (wgpu::Device, wgpu::Queue) {
+        let instance =
+            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions::default())
+            .await
+            .expect("GPU adapter required");
+        adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("trd mesh continuity test device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::downlevel_defaults(),
+                experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                memory_hints: wgpu::MemoryHints::MemoryUsage,
+                trace: wgpu::Trace::Off,
+            })
+            .await
+            .expect("request_device failed")
+    }
+
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn mesh_renderer_matches_triangle_renderer_pixels() {
+        let (device, queue) = pollster::block_on(test_device());
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let (width, height) = (64, 64);
+        let triangle = TriangleRenderer::new(&device, format);
+        let mesh = MeshRenderer::new(&device, format, &Mesh::hello_triangle());
+
+        let triangle_pixels = render_with_readback(
+            &device,
+            &queue,
+            format,
+            width,
+            height,
+            |queue, encoder, view| {
+                triangle.encode(queue, encoder, view, FrameParams::IDENTITY, width, height);
+            },
+        );
+        let mesh_pixels = render_with_readback(
+            &device,
+            &queue,
+            format,
+            width,
+            height,
+            |queue, encoder, view| {
+                mesh.encode(queue, encoder, view, FrameParams::IDENTITY, width, height);
+            },
+        );
+
+        assert_eq!(mesh_pixels, triangle_pixels);
     }
 }
