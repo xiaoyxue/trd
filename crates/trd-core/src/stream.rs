@@ -14,7 +14,7 @@ use std::io::{Read, Write};
 use crate::protocol::{
     frame_rate_from_metadata, PROTOCOL_VERSION, PROTOCOL_VERSION_KEY, SUPPORTED_INPUT_VERSIONS,
 };
-use crate::render::FrameParams;
+use crate::render::{FrameParams, Mesh, MeshRenderer};
 use crate::OutputSession;
 
 /// Errors from decoding, validating, rendering, or encoding a trd stream.
@@ -277,9 +277,7 @@ fn check_dimensions(width: u32, height: u32) -> Result<u32, StreamError> {
 pub struct BatchRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    pipeline: wgpu::RenderPipeline,
-    uniform: wgpu::Buffer,
-    bind_group: wgpu::BindGroup,
+    renderer: MeshRenderer,
     texture: wgpu::Texture,
     staging: wgpu::Buffer,
     width: u32,
@@ -333,13 +331,7 @@ impl BatchRenderer {
         }
 
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-        let pipeline = crate::render::create_triangle_pipeline(&device, format);
-        let (uniform, bind_group) = crate::render::create_params_binding(
-            &device,
-            &pipeline,
-            FrameParams::IDENTITY,
-            crate::render::Viewport { width, height },
-        );
+        let renderer = MeshRenderer::new(&device, format, &Mesh::hello_triangle());
 
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("trd render target"),
@@ -369,9 +361,7 @@ impl BatchRenderer {
         Ok(Self {
             device,
             queue,
-            pipeline,
-            uniform,
-            bind_group,
+            renderer,
             texture,
             staging,
             width,
@@ -387,15 +377,6 @@ impl BatchRenderer {
     }
 
     async fn render_async(&mut self, params: FrameParams) -> Result<Vec<u8>, StreamError> {
-        crate::render::write_params(
-            &self.queue,
-            &self.uniform,
-            params,
-            crate::render::Viewport {
-                width: self.width,
-                height: self.height,
-            },
-        );
         let view = self
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -405,27 +386,14 @@ impl BatchRenderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("trd frame"),
             });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("trd frame pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &self.bind_group, &[]);
-            pass.draw(0..3, 0..1);
-        }
+        self.renderer.encode(
+            &self.queue,
+            &mut encoder,
+            &view,
+            params,
+            self.width,
+            self.height,
+        );
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.texture,
