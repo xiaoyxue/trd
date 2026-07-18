@@ -13,7 +13,30 @@ follows `MAJOR.MINOR.PATCH`.
   it as the default GIF/WebP frame rate; `trd-app` plays at this rate (or `--fps`)
   and, by default, presents decoupled from the monitor refresh (`--vsync` to lock).
 
-## 0.0.2 — Current
+## 0.0.3 — Current
+
+### Added
+- Optional **leading mesh Arrow stream**, concatenated before the params stream
+  (`[mesh][params]`) — the epic's "multiple tables + glue logic". One row = one
+  mesh, geometry nested in list columns: **`position`** and optional **`color`**
+  as `List<FixedSizeList<Float32>[3]>`, optional **`index`** as `List<UInt32>`.
+  Decoded by `Mesh::from_arrow` and drawn with `draw_indexed`.
+- **Multi-stream framing** with schema sniffing: a first stream carrying a
+  `position` column is a mesh table (decode + upload, then render the following
+  params stream); otherwise the input is a legacy params-only stream (renders the
+  hello-triangle).
+- **Scale-to-fit preview transform**: a loaded mesh renders centered at the world
+  origin and uniformly scaled to a reasonable size (`s = target / max_extent`),
+  composed beneath the per-frame `model`. Producer helper `scripts/obj_to_arrow.py`
+  encodes an OBJ into the mesh stream.
+
+### Compatibility
+- **Backward-compatible with 0.0.2 and 0.0.1.** A params-only stream (no leading
+  mesh) renders identically. Decoders accept `{0.0.1, 0.0.2, 0.0.3}`. Only the
+  native path decodes a mesh-first stream today; the wasm path (mesh-first
+  handling) is tracked separately.
+
+## 0.0.2 — Superseded
 
 ### Added
 - Optional input column **`model`**: `FixedSizeList<Float32>[16]`, a column-major
