@@ -1,36 +1,75 @@
-//! Wavefront `.obj` loading into the canonical [`Mesh`], plus mesh bounds.
+//! Loading meshes into the canonical [`Mesh`] — from Wavefront `.obj` text
+//! (#36) and from a columnar Arrow mesh table (#37) — plus mesh bounds and the
+//! preview model transform.
 //!
 //! OBJ is trd's **default** authorable mesh format (#36). Rather than hand-roll
 //! a parser, we normalize OBJ into the canonical [`Mesh`] via the popular,
 //! pure-Rust [`tobj`] loader (wasm-compatible) — following the repo convention
 //! that each mesh format is decoded by its own established loader crate. The
-//! same [`Mesh`] is produced by the GPU path (#35) and the Arrow decoder (#37),
-//! so all mesh sources converge on one in-memory type.
+//! same [`Mesh`] is produced by the GPU path (#35), the OBJ loader, and the
+//! Arrow decoder, so all mesh sources converge on one in-memory type.
 //!
-//! We load with triangulation + a single index buffer, and read the common
-//! `v x y z r g b` **vertex-color extension** (via [`tobj::Mesh::vertex_color`])
-//! so colored OBJ vertices survive; uncolored meshes default to white. Normals
-//! and texture coordinates are ignored for now (reserved for shading / #20).
-//! Parsing is from an in-memory buffer (no file I/O), so it works natively and
-//! on wasm.
+//! For OBJ we load with triangulation + a single index buffer, and read the
+//! common `v x y z r g b` **vertex-color extension** (via
+//! [`tobj::Mesh::vertex_color`]) so colored OBJ vertices survive; uncolored
+//! meshes default to white. Normals and texture coordinates are ignored for now
+//! (reserved for shading / #20). Parsing is from an in-memory buffer (no file
+//! I/O), so it works natively and on wasm.
+//!
+//! [`Mesh::from_arrow`] decodes the (typically static) **mesh Arrow table** the
+//! stream protocol carries (#37). Because Arrow requires every column in a
+//! record batch to have the same length — while a mesh has a different number of
+//! vertices and indices — each row of the table is **one whole mesh**, with the
+//! per-vertex and per-index data nested inside list columns: `position`
+//! `List<FixedSizeList<Float32>[3]>` (required), an optional `color`
+//! `List<FixedSizeList<Float32>[3]>`, and an optional `index` `List<UInt32>`
+//! (absent ⇒ a non-indexed triangle list). The first row is decoded (multi-mesh
+//! scenes are future work). It yields the same canonical [`Mesh`] as the OBJ
+//! path, so both authoring routes agree.
 
-use crate::math::{Aabb3, Point3};
+use crate::math::{Aabb3, Point3, Transform, Vector3, EPSILON};
 use crate::render::{Mesh, Vertex};
+use arrow::array::{Array, FixedSizeListArray, Float32Array, ListArray, RecordBatch, UInt32Array};
+use arrow::datatypes::DataType;
 use std::io::Cursor;
 
-/// Vertex color used when an OBJ mesh has no `v x y z r g b` vertex colors.
+/// Vertex color used when a mesh source carries no per-vertex color.
 const DEFAULT_COLOR: [f32; 3] = [1.0, 1.0, 1.0];
 
-/// Errors produced while loading a Wavefront `.obj` into a [`Mesh`].
+/// Default target size (world units, largest AABB extent) for
+/// [`Mesh::preview_transform`] — "a reasonable size" for arbitrary-unit assets.
+pub const DEFAULT_PREVIEW_TARGET: f32 = 2.0;
+
+/// Errors produced while loading a mesh into the canonical [`Mesh`].
 #[derive(Debug, thiserror::Error)]
 pub enum MeshError {
     /// The underlying `tobj` loader rejected the OBJ (bad index, malformed
     /// coordinate, unreadable buffer, …).
     #[error("failed to parse OBJ: {0}")]
     Obj(#[from] tobj::LoadError),
-    /// The OBJ parsed but produced no geometry (no vertices, or no faces).
-    #[error("OBJ mesh is empty (no vertices or no faces)")]
+    /// The mesh parsed but produced no geometry (no vertices, or no faces).
+    #[error("mesh is empty (no vertices or no faces)")]
     Empty,
+    /// An Arrow mesh table is missing a required column.
+    #[error("mesh table is missing required column `{0}`")]
+    MissingColumn(&'static str),
+    /// An Arrow mesh column has an unexpected Arrow type.
+    #[error("mesh column `{column}` has type {actual:?}, expected {expected}")]
+    ColumnType {
+        column: &'static str,
+        expected: &'static str,
+        actual: DataType,
+    },
+    /// An Arrow mesh column that must be non-null contains null values.
+    #[error("mesh column `{0}` contains null values")]
+    NullValues(&'static str),
+    /// An `index` entry references a vertex beyond the `position` column.
+    #[error("mesh index {index} is out of range (only {vertex_count} vertices)")]
+    IndexOutOfRange { index: u32, vertex_count: usize },
+    /// A non-indexed mesh table's vertex count is not a multiple of three, so it
+    /// cannot be a triangle list.
+    #[error("non-indexed mesh has {vertex_count} vertices, not a multiple of 3")]
+    NonTriangleList { vertex_count: usize },
 }
 
 impl Mesh {
@@ -101,6 +140,239 @@ impl Mesh {
     pub fn center(&self) -> Point3 {
         self.aabb().center()
     }
+
+    /// A uniform **preview model transform** that centers the mesh's AABB at the
+    /// world origin and scales it to fit `target` world units along its largest
+    /// extent: `scale(s) · translate(−center)`, `s = target / max_extent`.
+    ///
+    /// Applied as the default model matrix (#41) so an arbitrary-unit asset
+    /// (e.g. `bunny.obj`) renders **centered and at a reasonable size** rather
+    /// than off-screen or tiny (#37/#44). The scale is uniform (isotropic); a
+    /// degenerate (zero-extent) mesh keeps unit scale. Compose a per-frame
+    /// rotation on the left for a turntable (`rotate.then(...)` is wrong; use
+    /// `preview.then(rotate)` — rotation applied after centering+scaling).
+    pub fn preview_transform(&self, target: f32) -> Transform {
+        let aabb = self.aabb();
+        let center = aabb.center().to_array();
+        let size = aabb.size();
+        let max_extent = size.x().max(size.y()).max(size.z());
+        let scale = if max_extent > EPSILON {
+            target / max_extent
+        } else {
+            1.0
+        };
+        Transform::from_translation(Vector3::new(-center[0], -center[1], -center[2]))
+            .then(Transform::from_scale(Vector3::new(scale, scale, scale)))
+    }
+
+    /// Decodes a columnar **Arrow mesh table** into the canonical [`Mesh`] (#37).
+    ///
+    /// Each row of the table is one mesh (see the module docs): a required
+    /// `position` `List<FixedSizeList<Float32>[3]>` column, an optional `color`
+    /// `List<FixedSizeList<Float32>[3]>` (defaults to white), and an optional
+    /// `index` `List<UInt32>` (absent ⇒ the vertices are a non-indexed triangle
+    /// list, so their count must be a multiple of three). The **first row** is
+    /// decoded. Produces the same [`Mesh`] as [`Mesh::from_obj`] for equivalent
+    /// geometry.
+    pub fn from_arrow(batch: &RecordBatch) -> Result<Mesh, MeshError> {
+        if batch.num_rows() == 0 {
+            return Err(MeshError::Empty);
+        }
+        // One row = one mesh; decode the first (multi-mesh scenes are future work).
+        let row = 0;
+
+        let position_list = require_list(batch, "position")?;
+        if position_list.is_null(row) {
+            return Err(MeshError::NullValues("position"));
+        }
+        let position_ref = position_list.value(row);
+        let position = fixed_f32_list(&position_ref, "position", 3)?;
+        if position.null_count() > 0 || position.values().null_count() > 0 {
+            return Err(MeshError::NullValues("position"));
+        }
+        let vertex_count = position.len();
+        if vertex_count == 0 {
+            return Err(MeshError::Empty);
+        }
+        let position_values = fixed_list_f32_values(position, "position")?;
+        let position_base = position.value_offset(0) as usize;
+
+        let color_ref = match batch.column_by_name("color") {
+            Some(column) => {
+                let list = as_list(column, "color")?;
+                if list.is_null(row) {
+                    None
+                } else {
+                    Some(list.value(row))
+                }
+            }
+            None => None,
+        };
+        let color = match &color_ref {
+            Some(color_ref) => {
+                let color = fixed_f32_list(color_ref, "color", 3)?;
+                if color.len() != vertex_count {
+                    return Err(MeshError::ColumnType {
+                        column: "color",
+                        expected: "one color per vertex",
+                        actual: color.data_type().clone(),
+                    });
+                }
+                if color.null_count() > 0 || color.values().null_count() > 0 {
+                    return Err(MeshError::NullValues("color"));
+                }
+                let values = fixed_list_f32_values(color, "color")?;
+                Some((color.value_offset(0) as usize, values))
+            }
+            None => None,
+        };
+
+        let vertices: Vec<Vertex> = (0..vertex_count)
+            .map(|i| {
+                let po = position_base + i * 3;
+                let position = [
+                    position_values.value(po),
+                    position_values.value(po + 1),
+                    position_values.value(po + 2),
+                ];
+                let color = match color {
+                    Some((base, values)) => {
+                        let co = base + i * 3;
+                        [values.value(co), values.value(co + 1), values.value(co + 2)]
+                    }
+                    None => DEFAULT_COLOR,
+                };
+                Vertex { position, color }
+            })
+            .collect();
+
+        let indices = decode_indices(batch, row, vertex_count)?;
+        if indices.is_empty() {
+            return Err(MeshError::Empty);
+        }
+        Ok(Mesh { vertices, indices })
+    }
+}
+
+/// Decodes the optional `index` `List<UInt32>` column at `row`, or synthesizes a
+/// non-indexed triangle list `[0, 1, …, vertex_count)` when absent/null.
+/// Validates every index is in range and (for the non-indexed case) that the
+/// vertex count is a multiple of three.
+fn decode_indices(
+    batch: &RecordBatch,
+    row: usize,
+    vertex_count: usize,
+) -> Result<Vec<u32>, MeshError> {
+    let list = match batch.column_by_name("index") {
+        Some(column) => as_list(column, "index")?,
+        None => return synthesize_triangle_list(vertex_count),
+    };
+    if list.is_null(row) {
+        return synthesize_triangle_list(vertex_count);
+    }
+    let values_ref = list.value(row);
+    let array = values_ref
+        .as_any()
+        .downcast_ref::<UInt32Array>()
+        .ok_or_else(|| MeshError::ColumnType {
+            column: "index",
+            expected: "List<UInt32>",
+            actual: list.data_type().clone(),
+        })?;
+    if array.null_count() > 0 {
+        return Err(MeshError::NullValues("index"));
+    }
+    let indices: Vec<u32> = array.values().to_vec();
+    for &index in &indices {
+        if index as usize >= vertex_count {
+            return Err(MeshError::IndexOutOfRange {
+                index,
+                vertex_count,
+            });
+        }
+    }
+    Ok(indices)
+}
+
+/// A non-indexed triangle list `[0, 1, …, vertex_count)`, valid only when the
+/// vertex count is a multiple of three.
+fn synthesize_triangle_list(vertex_count: usize) -> Result<Vec<u32>, MeshError> {
+    if !vertex_count.is_multiple_of(3) {
+        return Err(MeshError::NonTriangleList { vertex_count });
+    }
+    Ok((0..vertex_count as u32).collect())
+}
+
+/// Looks up a required `List<…>` column.
+fn require_list<'a>(
+    batch: &'a RecordBatch,
+    name: &'static str,
+) -> Result<&'a ListArray, MeshError> {
+    let column = batch
+        .column_by_name(name)
+        .ok_or(MeshError::MissingColumn(name))?;
+    as_list(column, name)
+}
+
+/// Downcasts `column` to a [`ListArray`].
+fn as_list<'a>(
+    column: &'a arrow::array::ArrayRef,
+    name: &'static str,
+) -> Result<&'a ListArray, MeshError> {
+    column
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .ok_or_else(|| MeshError::ColumnType {
+            column: name,
+            expected: "List<…>",
+            actual: column.data_type().clone(),
+        })
+}
+
+/// Downcasts a list row's values to a `FixedSizeList<Float32>[len]`, erroring on
+/// a type or list-length mismatch.
+fn fixed_f32_list<'a>(
+    values: &'a arrow::array::ArrayRef,
+    name: &'static str,
+    len: i32,
+) -> Result<&'a FixedSizeListArray, MeshError> {
+    let expected = if len == 3 {
+        "List<FixedSizeList<Float32>[3]>"
+    } else {
+        "List<FixedSizeList<Float32>[N]>"
+    };
+    let list = values
+        .as_any()
+        .downcast_ref::<FixedSizeListArray>()
+        .ok_or_else(|| MeshError::ColumnType {
+            column: name,
+            expected,
+            actual: values.data_type().clone(),
+        })?;
+    if list.value_length() != len || list.values().data_type() != &DataType::Float32 {
+        return Err(MeshError::ColumnType {
+            column: name,
+            expected,
+            actual: list.data_type().clone(),
+        });
+    }
+    Ok(list)
+}
+
+/// Downcasts a validated `FixedSizeList<Float32>` array's child to a
+/// [`Float32Array`].
+fn fixed_list_f32_values<'a>(
+    list: &'a FixedSizeListArray,
+    name: &'static str,
+) -> Result<&'a Float32Array, MeshError> {
+    list.values()
+        .as_any()
+        .downcast_ref::<Float32Array>()
+        .ok_or_else(|| MeshError::ColumnType {
+            column: name,
+            expected: "FixedSizeList<Float32>[N]",
+            actual: list.values().data_type().clone(),
+        })
 }
 
 #[cfg(test)]
@@ -247,5 +519,284 @@ f 1 2 3
         assert_eq!(aabb.min(), Point3::new(-0.5, -0.5, 0.0));
         assert_eq!(aabb.max(), Point3::new(0.5, 0.5, 0.0));
         assert_eq!(mesh.center(), Point3::new(0.0, 0.0, 0.0));
+    }
+
+    // ---- Arrow mesh table (#37) ----
+
+    use arrow::array::{
+        ArrayRef, FixedSizeListArray, Float32Array, ListArray, RecordBatch, UInt32Array,
+    };
+    use arrow::buffer::OffsetBuffer;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use std::sync::Arc;
+
+    /// The `FixedSizeList<Float32>[stride]` element type of a geometry column.
+    fn fsl_type(stride: i32) -> DataType {
+        DataType::FixedSizeList(
+            Arc::new(Field::new("item", DataType::Float32, false)),
+            stride,
+        )
+    }
+
+    /// A single-row `List<FixedSizeList<Float32>[stride]>` array holding one
+    /// mesh's flat, row-major values.
+    fn geometry_column(values: Vec<f32>, stride: i32) -> ArrayRef {
+        let child = Arc::new(Field::new("item", DataType::Float32, false));
+        let fsl =
+            FixedSizeListArray::new(child, stride, Arc::new(Float32Array::from(values)), None);
+        let field = Arc::new(Field::new("item", fsl_type(stride), false));
+        let offsets = OffsetBuffer::from_lengths([fsl.len()]);
+        Arc::new(ListArray::new(field, offsets, Arc::new(fsl), None))
+    }
+
+    /// A single-row `List<UInt32>` array holding one mesh's indices.
+    fn index_column(indices: Vec<u32>) -> ArrayRef {
+        let field = Arc::new(Field::new("item", DataType::UInt32, false));
+        let values = UInt32Array::from(indices);
+        let offsets = OffsetBuffer::from_lengths([values.len()]);
+        Arc::new(ListArray::new(field, offsets, Arc::new(values), None))
+    }
+
+    /// Builds a one-row mesh `RecordBatch` from flat positions, optional flat
+    /// colors, and optional indices.
+    fn mesh_batch(
+        positions: Vec<f32>,
+        colors: Option<Vec<f32>>,
+        indices: Option<Vec<u32>>,
+    ) -> RecordBatch {
+        let list_of_fsl =
+            |stride: i32| DataType::List(Arc::new(Field::new("item", fsl_type(stride), false)));
+        let mut fields: Vec<Field> = vec![Field::new("position", list_of_fsl(3), false)];
+        let mut columns: Vec<ArrayRef> = vec![geometry_column(positions, 3)];
+        if let Some(colors) = colors {
+            fields.push(Field::new("color", list_of_fsl(3), false));
+            columns.push(geometry_column(colors, 3));
+        }
+        if let Some(indices) = indices {
+            fields.push(Field::new(
+                "index",
+                DataType::List(Arc::new(Field::new("item", DataType::UInt32, false))),
+                false,
+            ));
+            columns.push(index_column(indices));
+        }
+        RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap()
+    }
+
+    #[test]
+    fn arrow_quad_matches_obj_quad() {
+        // The same geometry via Arrow and OBJ must yield an identical Mesh.
+        let batch = mesh_batch(
+            vec![
+                -0.5, -0.5, 0.0, // v0
+                0.5, -0.5, 0.0, // v1
+                0.5, 0.5, 0.0, // v2
+                -0.5, 0.5, 0.0, // v3
+            ],
+            None,
+            Some(vec![0, 1, 2, 0, 2, 3]),
+        );
+        let arrow_mesh = Mesh::from_arrow(&batch).unwrap();
+        assert_eq!(arrow_mesh, Mesh::from_obj(QUAD_OBJ).unwrap());
+    }
+
+    #[test]
+    fn arrow_colors_are_decoded() {
+        let batch = mesh_batch(
+            vec![0.0, 0.5, 0.0, -0.5, -0.5, 0.0, 0.5, -0.5, 0.0],
+            Some(vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]),
+            Some(vec![0, 1, 2]),
+        );
+        let mesh = Mesh::from_arrow(&batch).unwrap();
+        assert_eq!(mesh, Mesh::hello_triangle());
+    }
+
+    #[test]
+    fn arrow_without_color_defaults_white() {
+        let batch = mesh_batch(
+            vec![0.0, 0.5, 0.0, -0.5, -0.5, 0.0, 0.5, -0.5, 0.0],
+            None,
+            Some(vec![0, 1, 2]),
+        );
+        let mesh = Mesh::from_arrow(&batch).unwrap();
+        assert!(mesh.vertices.iter().all(|v| v.color == DEFAULT_COLOR));
+    }
+
+    #[test]
+    fn arrow_without_index_is_non_indexed_triangle_list() {
+        // 3 vertices, no index column ⇒ implicit [0, 1, 2].
+        let batch = mesh_batch(
+            vec![0.0, 0.5, 0.0, -0.5, -0.5, 0.0, 0.5, -0.5, 0.0],
+            None,
+            None,
+        );
+        let mesh = Mesh::from_arrow(&batch).unwrap();
+        assert_eq!(mesh.indices, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn arrow_non_indexed_needs_multiple_of_three() {
+        let batch = mesh_batch(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0], None, None);
+        assert!(matches!(
+            Mesh::from_arrow(&batch),
+            Err(MeshError::NonTriangleList { vertex_count: 2 })
+        ));
+    }
+
+    #[test]
+    fn arrow_index_out_of_range_errors() {
+        let batch = mesh_batch(
+            vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            None,
+            Some(vec![0, 1, 3]),
+        );
+        assert!(matches!(
+            Mesh::from_arrow(&batch),
+            Err(MeshError::IndexOutOfRange {
+                index: 3,
+                vertex_count: 3
+            })
+        ));
+    }
+
+    #[test]
+    fn arrow_missing_position_errors() {
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "index",
+                DataType::List(Arc::new(Field::new("item", DataType::UInt32, false))),
+                false,
+            )])),
+            vec![index_column(vec![0, 1, 2])],
+        )
+        .unwrap();
+        assert!(matches!(
+            Mesh::from_arrow(&batch),
+            Err(MeshError::MissingColumn("position"))
+        ));
+    }
+
+    #[test]
+    fn arrow_wrong_position_type_errors() {
+        // position as a list of `[2]` lists, not `[3]`.
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "position",
+                DataType::List(Arc::new(Field::new("item", fsl_type(2), false))),
+                false,
+            )])),
+            vec![geometry_column(vec![0.0, 0.0, 1.0, 0.0], 2)],
+        )
+        .unwrap();
+        assert!(matches!(
+            Mesh::from_arrow(&batch),
+            Err(MeshError::ColumnType {
+                column: "position",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn arrow_wrong_index_type_errors() {
+        // index as a list of Float32, not UInt32.
+        let position = DataType::List(Arc::new(Field::new("item", fsl_type(3), false)));
+        let float_list = DataType::List(Arc::new(Field::new("item", DataType::Float32, false)));
+        let idx_field = Arc::new(Field::new("item", DataType::Float32, false));
+        let idx_values = Float32Array::from(vec![0.0, 1.0, 2.0]);
+        let idx = ListArray::new(
+            idx_field,
+            OffsetBuffer::from_lengths([idx_values.len()]),
+            Arc::new(idx_values),
+            None,
+        );
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("position", position, false),
+                Field::new("index", float_list, false),
+            ])),
+            vec![
+                geometry_column(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0], 3),
+                Arc::new(idx),
+            ],
+        )
+        .unwrap();
+        assert!(matches!(
+            Mesh::from_arrow(&batch),
+            Err(MeshError::ColumnType {
+                column: "index",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn arrow_empty_is_empty_error() {
+        // A batch with zero rows (no meshes) is empty.
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "position",
+                DataType::List(Arc::new(Field::new("item", fsl_type(3), false))),
+                false,
+            )])),
+            vec![Arc::new(ListArray::new_null(
+                Arc::new(Field::new("item", fsl_type(3), false)),
+                0,
+            ))],
+        )
+        .unwrap();
+        assert!(matches!(Mesh::from_arrow(&batch), Err(MeshError::Empty)));
+    }
+
+    // ---- preview transform (#37) ----
+
+    #[test]
+    fn preview_transform_centers_and_scales_to_target() {
+        // A 4-unit-wide box centered at (10, 0, 0): after the preview transform
+        // its center is at the origin and its largest extent spans `target`.
+        let mesh = Mesh {
+            vertices: vec![
+                Vertex {
+                    position: [8.0, -1.0, -0.5],
+                    color: DEFAULT_COLOR,
+                },
+                Vertex {
+                    position: [12.0, 1.0, 0.5],
+                    color: DEFAULT_COLOR,
+                },
+            ],
+            indices: vec![0, 1, 0],
+        };
+        let target = 2.0;
+        let t = mesh.preview_transform(target);
+        // Center maps to origin.
+        let c = t.transform_point(Point3::new(10.0, 0.0, 0.0));
+        assert!(
+            c.to_array().iter().all(|v| v.abs() < 1e-5),
+            "center = {c:?}"
+        );
+        // The transformed AABB's largest extent equals `target`.
+        let out = t.transform_aabb(mesh.aabb());
+        let size = out.size();
+        let max_extent = size.x().max(size.y()).max(size.z());
+        assert!(
+            (max_extent - target).abs() < 1e-5,
+            "max_extent = {max_extent}"
+        );
+    }
+
+    #[test]
+    fn preview_transform_degenerate_mesh_keeps_unit_scale() {
+        let mesh = Mesh {
+            vertices: vec![Vertex {
+                position: [3.0, 3.0, 3.0],
+                color: DEFAULT_COLOR,
+            }],
+            indices: vec![0],
+        };
+        let t = mesh.preview_transform(2.0);
+        // A single point has zero extent → unit scale, only the centering shift.
+        let moved = t.transform_point(Point3::new(3.0, 3.0, 3.0));
+        assert!(moved.to_array().iter().all(|v| v.abs() < 1e-5));
     }
 }

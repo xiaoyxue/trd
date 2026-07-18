@@ -1,7 +1,12 @@
-//! Native-only Arrow streaming protocol (trd protocol 0.0.1).
+//! Native-only Arrow streaming protocol (trd protocol 0.0.3).
 //!
-//! Input: one row per frame (`center`, `size`, `theta`). Output: one row per
-//! frame, four `fixed_shape_tensor<u8>` channels `r,g,b,a` of shape `[H, W]`.
+//! Input is one or two concatenated Arrow IPC streams on stdin. A `0.0.3` stream
+//! is `[mesh][params]`: a leading **mesh** table (one row = one mesh, decoded by
+//! [`Mesh::from_arrow`]) followed by the **params** stream (one row per frame:
+//! `center`, `size`, `theta`, + optional `model`/`k`/`pose`). A legacy
+//! `0.0.1`/`0.0.2` stream is just the params stream and renders the built-in
+//! hello-triangle. Output: one row per frame, four `fixed_shape_tensor<u8>`
+//! channels `r,g,b,a` of shape `[H, W]`.
 
 use std::sync::Arc;
 
@@ -11,6 +16,7 @@ use arrow::error::ArrowError;
 use arrow::ipc::reader::StreamReader;
 use std::io::{Read, Write};
 
+use crate::math::Matrix4;
 use crate::protocol::{
     frame_rate_from_metadata, PROTOCOL_VERSION, PROTOCOL_VERSION_KEY, SUPPORTED_INPUT_VERSIONS,
 };
@@ -52,6 +58,9 @@ pub enum StreamError {
     /// GPU rendering failed.
     #[error("render error: {0}")]
     Render(String),
+    /// The leading mesh table could not be decoded into a [`Mesh`].
+    #[error("mesh decode error: {0}")]
+    Mesh(#[from] crate::MeshError),
     #[error(transparent)]
     Output(#[from] crate::OutputError),
 }
@@ -287,12 +296,33 @@ pub struct BatchRenderer {
 
 impl BatchRenderer {
     /// Builds the GPU context (instance/adapter/device/pipeline/target/readback)
-    /// once for a fixed `width` x `height`.
+    /// once for a fixed `width` x `height`, rendering the built-in hello-triangle.
     pub fn new(width: u32, height: u32) -> Result<Self, StreamError> {
-        pollster::block_on(Self::new_async(width, height))
+        pollster::block_on(Self::new_async(
+            width,
+            height,
+            &Mesh::hello_triangle(),
+            Matrix4::IDENTITY,
+        ))
     }
 
-    async fn new_async(width: u32, height: u32) -> Result<Self, StreamError> {
+    /// Like [`BatchRenderer::new`] but renders `mesh` (the leading mesh table of
+    /// a `0.0.3` stream), applying its [`Mesh::preview_transform`] (center +
+    /// uniform scale-to-fit) beneath the per-frame model so an arbitrary-unit
+    /// asset renders centered and at a reasonable size.
+    pub fn with_mesh(width: u32, height: u32, mesh: &Mesh) -> Result<Self, StreamError> {
+        let base_model = mesh
+            .preview_transform(crate::DEFAULT_PREVIEW_TARGET)
+            .matrix();
+        pollster::block_on(Self::new_async(width, height, mesh, base_model))
+    }
+
+    async fn new_async(
+        width: u32,
+        height: u32,
+        mesh: &Mesh,
+        base_model: Matrix4,
+    ) -> Result<Self, StreamError> {
         // Guard against zero / overflow before allocating (device limits below).
         check_dimensions(width, height)?;
 
@@ -331,7 +361,7 @@ impl BatchRenderer {
         }
 
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-        let renderer = MeshRenderer::new(&device, format, &Mesh::hello_triangle());
+        let renderer = MeshRenderer::with_base_model(&device, format, mesh, base_model);
 
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("trd render target"),
@@ -438,28 +468,46 @@ impl BatchRenderer {
     }
 }
 
-/// Reads an Arrow IPC stream of frame params from `input`, renders each row,
-/// and writes an Arrow IPC stream of `fixed_shape_tensor` images to `output`.
-/// Output batch boundaries mirror input batches (one batch in flight).
-pub fn run_stream<R: Read, W: Write>(
-    input: R,
-    mut output: W,
+/// True if `schema` is a **mesh table** (has a `position` column) — used to tell
+/// a leading `0.0.3` mesh stream apart from the params stream that follows it (or
+/// a legacy params-only stream).
+fn is_mesh_schema(schema: &Schema) -> bool {
+    schema.fields().iter().any(|f| f.name() == "position")
+}
+
+/// Reads the leading mesh stream, decoding its first row into a [`Mesh`], then
+/// **drains the rest of the stream through its end-of-stream marker** so the
+/// underlying reader is positioned at the start of the following params stream.
+/// The reader must be unbuffered (as [`StreamReader::try_new`] produces) so it
+/// does not over-read past the mesh stream's EOS into the params stream.
+fn read_single_mesh<R: Read>(reader: &mut StreamReader<R>) -> Result<Mesh, StreamError> {
+    let mut mesh = None;
+    for batch in reader.by_ref() {
+        let batch = batch?;
+        if mesh.is_none() {
+            mesh = Some(Mesh::from_arrow(&batch)?);
+        }
+    }
+    mesh.ok_or(StreamError::Mesh(crate::MeshError::Empty))
+}
+
+/// Renders every frame of the `params` batch stream to `output`, one Arrow
+/// output batch per input batch. Shared by both the mesh-first and legacy paths.
+fn render_params<I, W>(
+    params: I,
+    mut renderer: BatchRenderer,
+    frame_rate: f64,
     width: u32,
     height: u32,
-) -> Result<(), StreamError> {
-    // Validate dimensions up front so schema construction (which multiplies
-    // width*height) can't overflow before BatchRenderer's guard runs.
-    check_dimensions(width, height)?;
-
-    let reader = StreamReader::try_new(input, None)?;
-    check_version(reader.schema().as_ref())?;
-    let frame_rate = frame_rate_from_metadata(reader.schema().metadata());
-
-    let mut renderer = BatchRenderer::new(width, height)?;
+    mut output: W,
+) -> Result<(), StreamError>
+where
+    I: Iterator<Item = Result<RecordBatch, ArrowError>>,
+    W: Write,
+{
     let mut output_session = OutputSession::with_frame_rate(width, height, Some(frame_rate))?;
     output.write_all(&output_session.drain_new()?)?;
-
-    for batch in reader {
+    for batch in params {
         let batch = batch?;
         let frames = decode_frames(&batch)?;
         let planes: Vec<Vec<u8>> = frames
@@ -472,6 +520,45 @@ pub fn run_stream<R: Read, W: Write>(
     output_session.finish()?;
     output.write_all(&output_session.drain_new()?)?;
     Ok(())
+}
+
+/// Reads a trd input stream, renders each frame, and writes an Arrow IPC stream
+/// of `fixed_shape_tensor` images to `output`. Output batch boundaries mirror
+/// input batches (one batch in flight).
+///
+/// A `0.0.3` stream is `[mesh][params]`: the leading mesh table is decoded once
+/// (via [`Mesh::from_arrow`]) and uploaded, then the following params stream
+/// drives per-frame rendering. A legacy `0.0.1`/`0.0.2` params-only stream
+/// renders the built-in hello-triangle. The two are told apart by sniffing the
+/// first stream's schema ([`is_mesh_schema`]).
+pub fn run_stream<R: Read, W: Write>(
+    input: R,
+    output: W,
+    width: u32,
+    height: u32,
+) -> Result<(), StreamError> {
+    // Validate dimensions up front so schema construction (which multiplies
+    // width*height) can't overflow before BatchRenderer's guard runs.
+    check_dimensions(width, height)?;
+
+    let mut first = StreamReader::try_new(input, None)?;
+    check_version(first.schema().as_ref())?;
+
+    if is_mesh_schema(first.schema().as_ref()) {
+        // 0.0.3 mesh-first: decode + upload the mesh, then render the params
+        // stream that follows it in the same byte stream.
+        let mesh = read_single_mesh(&mut first)?;
+        let renderer = BatchRenderer::with_mesh(width, height, &mesh)?;
+        let params = StreamReader::try_new(first.get_mut(), None)?;
+        check_version(params.schema().as_ref())?;
+        let frame_rate = frame_rate_from_metadata(params.schema().metadata());
+        render_params(params, renderer, frame_rate, width, height, output)
+    } else {
+        // Legacy params-only stream → built-in hello-triangle.
+        let renderer = BatchRenderer::new(width, height)?;
+        let frame_rate = frame_rate_from_metadata(first.schema().metadata());
+        render_params(first, renderer, frame_rate, width, height, output)
+    }
 }
 
 #[cfg(test)]
@@ -744,5 +831,161 @@ mod tests {
         let last_row = frames.len() - 2;
         let differs = (0..pixels).any(|i| row0(&r, 0, i) != row0(&last, last_row, i));
         assert!(differs, "rotation should change pixels across frames");
+    }
+
+    // ---- 0.0.3 two-stream [mesh][params] framing ----
+
+    /// Serializes a mesh as a one-row Arrow IPC **mesh stream** (nested list
+    /// columns: `position`/`color` `List<FixedSizeList<Float32>[3]>`, `index`
+    /// `List<UInt32>`), tagged with the 0.0.3 protocol version.
+    fn write_mesh_stream(buf: &mut Vec<u8>, mesh: &Mesh) {
+        use arrow::array::{ListArray, UInt32Array};
+        use arrow::buffer::OffsetBuffer;
+
+        let fsl_type =
+            DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, false)), 3);
+        let geometry = |flat: Vec<f32>| -> ArrayRef {
+            let fsl = FixedSizeListArray::new(
+                Arc::new(Field::new("item", DataType::Float32, false)),
+                3,
+                Arc::new(Float32Array::from(flat)),
+                None,
+            );
+            let field = Arc::new(Field::new("item", fsl_type.clone(), false));
+            let offsets = OffsetBuffer::from_lengths([fsl.len()]);
+            Arc::new(ListArray::new(field, offsets, Arc::new(fsl), None))
+        };
+        let positions: Vec<f32> = mesh.vertices.iter().flat_map(|v| v.position).collect();
+        let colors: Vec<f32> = mesh.vertices.iter().flat_map(|v| v.color).collect();
+        let idx_values = UInt32Array::from(mesh.indices.clone());
+        let index: ArrayRef = Arc::new(ListArray::new(
+            Arc::new(Field::new("item", DataType::UInt32, false)),
+            OffsetBuffer::from_lengths([idx_values.len()]),
+            Arc::new(idx_values),
+            None,
+        ));
+
+        let list_of_fsl = DataType::List(Arc::new(Field::new("item", fsl_type.clone(), false)));
+        let schema = Schema::new(vec![
+            Field::new("position", list_of_fsl.clone(), false),
+            Field::new("color", list_of_fsl, false),
+            Field::new(
+                "index",
+                DataType::List(Arc::new(Field::new("item", DataType::UInt32, false))),
+                false,
+            ),
+        ])
+        .with_metadata(
+            [(
+                PROTOCOL_VERSION_KEY.to_string(),
+                PROTOCOL_VERSION.to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let batch = RecordBatch::try_new(
+            Arc::new(schema.clone()),
+            vec![geometry(positions), geometry(colors), index],
+        )
+        .unwrap();
+        let mut wr = StreamWriter::try_new(buf, &schema).unwrap();
+        wr.write(&batch).unwrap();
+        wr.finish().unwrap();
+    }
+
+    /// Serializes frames as an Arrow IPC **params stream**.
+    fn write_params_stream(buf: &mut Vec<u8>, frames: &[FrameParams]) {
+        let batch = build_input_batch(frames);
+        let mut wr = StreamWriter::try_new(buf, &input_schema()).unwrap();
+        wr.write(&batch).unwrap();
+        wr.finish().unwrap();
+    }
+
+    #[test]
+    fn two_stream_mesh_then_params_split_and_decode() {
+        use std::io::Cursor;
+
+        // Build a concatenated [mesh][params] byte stream in memory.
+        let mesh = Mesh::hello_triangle();
+        let frames = vec![
+            FrameParams::IDENTITY,
+            FrameParams {
+                theta: 1.0,
+                ..FrameParams::IDENTITY
+            },
+        ];
+        let mut bytes = Vec::new();
+        write_mesh_stream(&mut bytes, &mesh);
+        write_params_stream(&mut bytes, &frames);
+
+        // The framing helpers must recover the mesh, then the params that follow
+        // it in the same byte stream (the mesh reader must not over-read).
+        let mut first = StreamReader::try_new(Cursor::new(bytes), None).unwrap();
+        assert!(is_mesh_schema(first.schema().as_ref()));
+        let decoded_mesh = read_single_mesh(&mut first).unwrap();
+        assert_eq!(decoded_mesh, mesh);
+
+        let params = StreamReader::try_new(first.get_mut(), None).unwrap();
+        assert!(!is_mesh_schema(params.schema().as_ref()));
+        let mut decoded = Vec::new();
+        for batch in params {
+            decoded.extend(decode_frames(&batch.unwrap()).unwrap());
+        }
+        assert_eq!(decoded, frames);
+    }
+
+    #[test]
+    fn legacy_params_only_stream_has_no_mesh_schema() {
+        let mut bytes = Vec::new();
+        write_params_stream(&mut bytes, &[FrameParams::IDENTITY]);
+        let reader = StreamReader::try_new(bytes.as_slice(), None).unwrap();
+        assert!(!is_mesh_schema(reader.schema().as_ref()));
+    }
+
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    fn run_stream_renders_mesh_first_stream() {
+        let (w, h) = (32u32, 32u32);
+        // A full-screen quad as the leading mesh; two params frames follow.
+        let mesh =
+            Mesh::from_obj("v -1 -1 0\nv 1 -1 0\nv 1 1 0\nv -1 1 0\nf 1 2 3\nf 1 3 4\n").unwrap();
+        let frames = vec![
+            FrameParams::IDENTITY,
+            FrameParams {
+                theta: 0.5,
+                ..FrameParams::IDENTITY
+            },
+        ];
+        let mut input_bytes = Vec::new();
+        write_mesh_stream(&mut input_bytes, &mesh);
+        write_params_stream(&mut input_bytes, &frames);
+
+        let mut output_bytes = Vec::new();
+        run_stream(&input_bytes[..], &mut output_bytes, w, h).unwrap();
+
+        let reader = StreamReader::try_new(&output_bytes[..], None).unwrap();
+        let batches = reader.collect::<Result<Vec<_>, _>>().unwrap();
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, frames.len());
+
+        // The white quad covers the frame, so the center pixel must be lit.
+        let get = |batch: &RecordBatch, name: &str| -> U8List {
+            batch
+                .column_by_name(name)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<U8List>()
+                .unwrap()
+                .clone()
+        };
+        let r = get(&batches[0], "r");
+        let center = (h as usize / 2) * w as usize + w as usize / 2;
+        let value = r
+            .value(0)
+            .as_any()
+            .downcast_ref::<UInt8Array>()
+            .unwrap()
+            .value(center);
+        assert!(value > 0, "mesh quad should cover the center pixel");
     }
 }

@@ -8,12 +8,15 @@ use arrow::ipc::reader::StreamDecoder;
 
 use crate::FrameParams;
 
-pub const PROTOCOL_VERSION: &str = "0.0.2";
+pub const PROTOCOL_VERSION: &str = "0.0.3";
 pub const PROTOCOL_VERSION_KEY: &str = "trd.protocol.version";
 
-/// Input schema versions this build accepts. `0.0.2` adds the optional `model`,
-/// `k`, and `pose` matrix columns; `0.0.1` streams (2D affine only) still decode.
-pub const SUPPORTED_INPUT_VERSIONS: &[&str] = &["0.0.1", "0.0.2"];
+/// Input schema versions this build accepts. `0.0.3` adds an optional leading
+/// **mesh** Arrow stream (concatenated before the params stream); `0.0.2` adds
+/// the optional `model`, `k`, and `pose` matrix columns; `0.0.1` streams (2D
+/// affine only) still decode. The params stream itself is unchanged since
+/// `0.0.2`; the version bump marks the multi-stream framing.
+pub const SUPPORTED_INPUT_VERSIONS: &[&str] = &["0.0.1", "0.0.2", "0.0.3"];
 
 /// Schema-metadata key declaring the stream's intended playback rate in frames
 /// per second. Optional and version-independent: it defines *animation speed* so
@@ -829,15 +832,15 @@ mod tests {
 
     #[test]
     fn accepts_supported_versions_and_rejects_unknown() {
-        for version in ["0.0.1", "0.0.2"] {
+        for version in ["0.0.1", "0.0.2", "0.0.3"] {
             let mut session = InputSession::new();
             session.push(&version_stream(version)).unwrap();
             session.finish().unwrap();
         }
         let mut session = InputSession::new();
         assert!(matches!(
-            session.push(&version_stream("0.0.3")),
-            Err(ProtocolError::UnsupportedVersion(v)) if v == "0.0.3"
+            session.push(&version_stream("0.0.4")),
+            Err(ProtocolError::UnsupportedVersion(v)) if v == "0.0.4"
         ));
     }
 

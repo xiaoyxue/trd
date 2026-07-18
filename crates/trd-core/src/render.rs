@@ -108,7 +108,16 @@ impl FrameParams {
 
     /// The full clip transform `P · V · M` for a given viewport.
     pub(crate) fn clip_transform(&self, viewport: Viewport) -> Matrix4 {
-        self.projection_matrix(viewport) * self.view_matrix() * self.model_matrix()
+        self.clip_transform_with_base(viewport, Matrix4::IDENTITY)
+    }
+
+    /// The clip transform `P · V · M · base`, where `base` is a model-space
+    /// pre-transform applied before the per-frame model. Used by the mesh path to
+    /// apply a mesh's [`crate::Mesh::preview_transform`] (center + scale-to-fit)
+    /// beneath the per-frame `model` (e.g. a turntable rotation), so an
+    /// arbitrary-unit asset renders centered and at a reasonable size.
+    pub(crate) fn clip_transform_with_base(&self, viewport: Viewport, base: Matrix4) -> Matrix4 {
+        self.projection_matrix(viewport) * self.view_matrix() * self.model_matrix() * base
     }
 }
 
@@ -174,6 +183,14 @@ impl Uniform {
     fn from_params(params: FrameParams, viewport: Viewport) -> Self {
         Uniform {
             transform: params.clip_transform(viewport).to_cols_array(),
+        }
+    }
+
+    fn from_params_with_base(params: FrameParams, viewport: Viewport, base: Matrix4) -> Self {
+        Uniform {
+            transform: params
+                .clip_transform_with_base(viewport, base)
+                .to_cols_array(),
         }
     }
 }
@@ -343,6 +360,22 @@ pub(crate) fn write_params(
     );
 }
 
+/// Like [`write_params`] but pre-multiplies `base` beneath the per-frame model
+/// (see [`FrameParams::clip_transform_with_base`]).
+pub(crate) fn write_params_with_base(
+    queue: &wgpu::Queue,
+    buffer: &wgpu::Buffer,
+    params: FrameParams,
+    viewport: Viewport,
+    base: Matrix4,
+) {
+    queue.write_buffer(
+        buffer,
+        0,
+        bytemuck::bytes_of(&Uniform::from_params_with_base(params, viewport, base)),
+    );
+}
+
 /// Draws the transformed triangle into `view`, clearing to black first.
 ///
 /// `width`/`height` are the target's pixel dimensions, used to project camera
@@ -467,10 +500,26 @@ pub struct MeshRenderer {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     index_count: u32,
+    base_model: Matrix4,
 }
 
 impl MeshRenderer {
+    /// Builds a renderer for `mesh` with no base model (vertices are drawn in
+    /// their own coordinates). Use [`MeshRenderer::with_base_model`] to apply a
+    /// preview/normalization transform beneath the per-frame model.
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat, mesh: &Mesh) -> Self {
+        Self::with_base_model(device, format, mesh, Matrix4::IDENTITY)
+    }
+
+    /// Like [`MeshRenderer::new`] but pre-multiplies `base_model` beneath every
+    /// frame's model (see [`FrameParams::clip_transform_with_base`]) — used to
+    /// apply a mesh's [`crate::Mesh::preview_transform`] (center + scale-to-fit).
+    pub fn with_base_model(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        mesh: &Mesh,
+        base_model: Matrix4,
+    ) -> Self {
         use wgpu::util::DeviceExt;
 
         let pipeline = create_mesh_pipeline(device, format);
@@ -505,6 +554,7 @@ impl MeshRenderer {
             vertex_buffer,
             index_buffer,
             index_count,
+            base_model,
         }
     }
 
@@ -520,7 +570,13 @@ impl MeshRenderer {
         width: u32,
         height: u32,
     ) {
-        write_params(queue, &self.uniform, params, Viewport { width, height });
+        write_params_with_base(
+            queue,
+            &self.uniform,
+            params,
+            Viewport { width, height },
+            self.base_model,
+        );
 
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("trd mesh pass"),
