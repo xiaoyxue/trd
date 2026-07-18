@@ -49,10 +49,24 @@ pub struct FrameParams {
 
 /// The render target's pixel dimensions, needed to turn pixel-space camera
 /// intrinsics `K` into a clip-space projection.
+///
+/// The viewport is a **size** (not a matrix baked into the MVP): it supplies the
+/// pixel units that `K`'s `fx,fy,cx,cy` live in and the `aspect` ratio for a
+/// projection. The NDC→pixel mapping (including the y-flip) is applied by the
+/// render target / readback, matching the shipped pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Viewport {
+pub struct Viewport {
     pub width: u32,
     pub height: u32,
+}
+
+impl Viewport {
+    /// The width/height aspect ratio (`>= 1` for landscape), guarding a zero
+    /// height by treating each dimension as at least one pixel.
+    #[inline]
+    pub fn aspect(self) -> f32 {
+        self.width.max(1) as f32 / self.height.max(1) as f32
+    }
 }
 
 impl FrameParams {
@@ -107,16 +121,19 @@ pub(crate) fn model_from_2d_affine(center: [f32; 2], size: [f32; 2], theta: f32)
 }
 
 /// Builds a right-handed, wgpu-clip-space (`z ∈ [0, 1]`) perspective projection
-/// from a pinhole intrinsics matrix `K` (column-major: `fx = k[0]`, `fy = k[4]`,
-/// `cx = k[6]`, `cy = k[7]`) and the target viewport.
+/// from a pinhole intrinsics matrix `K` (column-major: `fx = k[0]`, skew
+/// `s = k[3]`, `fy = k[4]`, `cx = k[6]`, `cy = k[7]`) and the target viewport.
 ///
 /// Conventions (to be validated visually / refined in the camera slice #18):
 /// `K` shares NDC orientation (x right, y up, camera looking down `-z`); a
-/// centered principal point (`cx = W/2`, `cy = H/2`) with square pixels reduces
-/// to [`glam::Mat4::perspective_rh`]. `near`/`far` are [`DEFAULT_NEAR`]/
-/// [`DEFAULT_FAR`].
+/// centered principal point (`cx = W/2`, `cy = H/2`) with square pixels and no
+/// skew reduces to [`glam::Mat4::perspective_rh`]. Skew `s` shears the
+/// projection (couples camera-`y` into clip-`x`). `near`/`far` are
+/// [`DEFAULT_NEAR`]/[`DEFAULT_FAR`]. This is the exact inverse of
+/// [`crate::Camera::to_intrinsics`], so `K ⇄ projection` round-trips losslessly.
 pub(crate) fn projection_from_intrinsics(k: [f32; 9], viewport: Viewport) -> Matrix4 {
     let fx = k[0];
+    let s = k[3];
     let fy = k[4];
     let cx = k[6];
     let cy = k[7];
@@ -130,7 +147,7 @@ pub(crate) fn projection_from_intrinsics(k: [f32; 9], viewport: Viewport) -> Mat
         0.0,
         0.0,
         0.0,
-        0.0,
+        2.0 * s / w,
         2.0 * fy / h,
         0.0,
         0.0,
