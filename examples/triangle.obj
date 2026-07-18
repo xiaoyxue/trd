@@ -1,0 +1,7 @@
+# trd hello-triangle as a Wavefront OBJ.
+# Uses the `v x y z r g b` vertex-color extension so this file reproduces
+# `Mesh::hello_triangle()` exactly (positions, per-vertex colors, and winding).
+v 0.0 0.5 0.0 1.0 0.0 0.0
+v -0.5 -0.5 0.0 0.0 1.0 0.0
+v 0.5 -0.5 0.0 0.0 0.0 1.0
+f 1 2 3

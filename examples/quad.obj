@@ -1,0 +1,7 @@
+# trd unit quad in the z = 0 plane (two triangles), white.
+# The polygon face `f 1 2 3 4` fan-triangulates to indices [0,1,2, 0,2,3].
+v -0.5 -0.5 0.0
+v 0.5 -0.5 0.0
+v 0.5 0.5 0.0
+v -0.5 0.5 0.0
+f 1 2 3 4
