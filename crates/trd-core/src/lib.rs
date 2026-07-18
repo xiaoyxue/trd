@@ -4,12 +4,14 @@
 //! Native and web entry points are thin wrappers that only provide a render
 //! target and call into this crate.
 
+mod camera;
 mod math;
 mod mesh;
 mod output;
 mod protocol;
 mod render;
 
+pub use camera::{Camera, DEFAULT_FIT_MARGIN, DEFAULT_FOV_Y, DEFAULT_VIEW_DIR};
 pub use math::{
     Aabb2, Aabb3, Matrix3, Matrix4, Normal3, Point2, Point3, Point4, Rotation, Scalar, ToWgsl,
     Transform, Vector2, Vector3, Vector4, EPSILON,
@@ -22,7 +24,7 @@ pub use protocol::{
 };
 pub use render::{
     create_mesh_pipeline, create_triangle_pipeline, render_triangle, FrameParams, Mesh,
-    MeshRenderer, TriangleRenderer, Vertex,
+    MeshRenderer, TriangleRenderer, Vertex, Viewport,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
