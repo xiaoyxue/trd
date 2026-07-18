@@ -13,6 +13,10 @@ thiserror = "2"
 glam = { version = "0.30", features = ["bytemuck", "approx", "libm"] }
 arrow = { version = "59", default-features = false, features = ["ipc", "canonical_extension_types"] }
 arrow-schema = { version = "59", default-features = false, features = ["canonical_extension_types"] }
+# OBJ is trd's default mesh format; `tobj` is the popular pure-Rust loader
+# (wasm-compatible). `default-features = false` drops the `ahash` feature for a
+# leaner wasm build (falls back to std hashing).
+tobj = { version = "4", default-features = false }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 pollster = "0.4"
