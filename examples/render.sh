@@ -158,6 +158,25 @@ else
   exit 1
 fi
 
+# DuckDB's producer only understands the 0.0.1/0.0.2 columns (center/size/theta/
+# model); its SQL silently DROPS the additive 0.0.3 camera (eye/target/direction/
+# up/k/pose/fovy/aspect/znear/zfar) and instanced draw-list (draws) columns. If
+# the input carries any of those, fall back to the pyarrow producer (which emits
+# them) so the camera/draw data actually reaches trd — otherwise an authored
+# camera is lost and trd renders with the identity camera (z-clipping).
+if [ "$producer" = duckdb ] \
+  && grep -Eq '"(eye|target|direction|up|k|pose|fovy|aspect|znear|zfar|draws)"[[:space:]]*:' "$input"; then
+  if command -v uv >/dev/null 2>&1; then
+    producer=uv
+  elif command -v python3 >/dev/null 2>&1 && python3 -c 'import pyarrow' >/dev/null 2>&1; then
+    producer=python3
+  else
+    echo "error: '$input' carries 0.0.3 camera/draw columns that DuckDB cannot emit;" >&2
+    echo "install uv or python3 with pyarrow to render it" >&2
+    exit 1
+  fi
+fi
+
 # DuckDB reads the JSONL and streams Arrow IPC (FORMAT arrows) to stdout. It emits
 # the required 0.0.1 columns (center/size as FixedSizeList<f32>[2], theta as f32,
 # defaulting to the identity when a row omits them) plus the additive 0.0.2 `model`
