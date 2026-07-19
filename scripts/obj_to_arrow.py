@@ -1,27 +1,31 @@
 #!/usr/bin/env python3
-"""Convert a Wavefront ``.obj`` mesh to a trd **mesh** Arrow IPC stream (0.0.3).
+"""Convert one or more Wavefront ``.obj`` meshes to a trd **mesh** Arrow IPC
+stream (0.0.3).
 
 A trd 0.0.3 input stream is two concatenated Arrow IPC streams — ``[mesh][params]``
 — so a mesh table is authored by this script and the per-frame params by
 ``scripts/jsonl_to_arrow.py``; ``examples/render.sh --mesh`` concatenates them.
 
 Because Arrow requires every column of a record batch to have the same length —
-while a mesh has a different number of vertices and indices — the mesh travels as
+while a mesh has a different number of vertices and indices — each mesh travels as
 **one row = one mesh**, with the per-vertex/per-index data nested in list columns
-(matching ``trd_core::Mesh::from_arrow``):
+(matching ``trd_core::Mesh::from_arrow_all``):
 
   * ``position`` — ``List<FixedSizeList<Float32>[3]>`` (x, y, z), required.
   * ``color``    — ``List<FixedSizeList<Float32>[3]>``, optional; emitted only when
-                   the OBJ carries the ``v x y z r g b`` vertex-color extension.
+                   *every* mesh carries the ``v x y z r g b`` vertex-color extension.
   * ``index``    — ``List<UInt32>`` triangle list (faces triangulated by a fan).
 
-Only ``v`` (positions, with optional trailing r g b) and ``f`` (faces) are read;
-normals/texcoords are ignored. Face vertex references use the position index only
-(``a/b/c`` → ``a``); negative indices are relative to the current vertex count.
+Passing several ``.obj`` files produces a **multi-row** mesh table (one row per
+file, in order); a stream's per-frame ``draw_mesh`` list references these meshes
+by 0-based row index. Only ``v`` (positions, with optional trailing r g b) and
+``f`` (faces) are read; normals/texcoords are ignored. Face vertex references use
+the position index only (``a/b/c`` → ``a``); negative indices are relative to the
+current vertex count.
 
 Run via:
-  uv run --with pyarrow scripts/obj_to_arrow.py assets/meshes/bunny.obj   # -> stdout
-  python scripts/obj_to_arrow.py examples/quad.obj -o quad.mesh.arrows    # -> file
+  uv run --with pyarrow scripts/obj_to_arrow.py assets/meshes/bunny.obj      # -> stdout
+  python scripts/obj_to_arrow.py a.obj b.obj -o scene.mesh.arrows            # 2-mesh table
 """
 import argparse
 import sys
@@ -69,19 +73,23 @@ def parse_obj(text):
     return positions, colors, indices
 
 
-def mesh_batch(positions, colors, indices):
-    """Build the one-row nested-list mesh ``RecordBatch``."""
+def mesh_batch(meshes):
+    """Build the nested-list mesh ``RecordBatch`` — one row per mesh.
+
+    ``meshes`` is a list of ``(positions, colors, indices)`` tuples. The optional
+    ``color`` column is emitted only when *every* mesh carries vertex colors.
+    """
     f32 = pa.float32()
     vec3 = pa.list_(f32, 3)  # FixedSizeList<Float32>[3]
     geom_type = pa.list_(vec3)  # List<FixedSizeList<Float32>[3]>
     index_type = pa.list_(pa.uint32())  # List<UInt32>
 
-    columns = [pa.array([positions], type=geom_type)]
+    columns = [pa.array([m[0] for m in meshes], type=geom_type)]
     fields = [("position", geom_type)]
-    if colors:
-        columns.append(pa.array([colors], type=geom_type))
+    if all(m[1] for m in meshes):
+        columns.append(pa.array([m[1] for m in meshes], type=geom_type))
         fields.append(("color", geom_type))
-    columns.append(pa.array([indices], type=index_type))
+    columns.append(pa.array([m[2] for m in meshes], type=index_type))
     fields.append(("index", index_type))
 
     schema = pa.schema(fields, metadata={PROTOCOL_VERSION_KEY: PROTOCOL_VERSION})
@@ -90,16 +98,19 @@ def mesh_batch(positions, colors, indices):
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("input", help="Wavefront .obj mesh file")
+    ap.add_argument("input", nargs="+", help="Wavefront .obj mesh file(s), one row per file")
     ap.add_argument("-o", "--output", default="-", help="output path ('-' = stdout)")
     args = ap.parse_args()
 
-    with open(args.input, encoding="utf-8") as f:
-        positions, colors, indices = parse_obj(f.read())
-    if not positions or not indices:
-        sys.exit(f"error: {args.input} has no triangles (need `v` and `f` lines)")
+    meshes = []
+    for path in args.input:
+        with open(path, encoding="utf-8") as f:
+            positions, colors, indices = parse_obj(f.read())
+        if not positions or not indices:
+            sys.exit(f"error: {path} has no triangles (need `v` and `f` lines)")
+        meshes.append((positions, colors, indices))
 
-    schema, batch = mesh_batch(positions, colors, indices)
+    schema, batch = mesh_batch(meshes)
 
     sink = sys.stdout.buffer if args.output == "-" else open(args.output, "wb")
     try:
