@@ -17,6 +17,10 @@ struct Cli {
     /// Output image height in pixels.
     #[arg(long, default_value_t = 256, value_parser = clap::value_parser!(u32).range(1..))]
     height: u32,
+    /// Render meshes as an edge wireframe (line list) instead of filled
+    /// triangles.
+    #[arg(long)]
+    wireframe: bool,
 }
 
 fn main() -> Result<(), trd_core::StreamError> {
@@ -26,9 +30,14 @@ fn main() -> Result<(), trd_core::StreamError> {
     .init();
 
     let cli = Cli::parse();
+    let mode = if cli.wireframe {
+        trd_core::RenderMode::Wireframe
+    } else {
+        trd_core::RenderMode::Filled
+    };
     let stdin = io::stdin().lock();
     let stdout = io::stdout().lock();
-    trd_core::run_stream(stdin, stdout, cli.width, cli.height)?;
+    trd_core::run_stream(stdin, stdout, cli.width, cli.height, mode)?;
     io::stdout().flush()?;
     Ok(())
 }
