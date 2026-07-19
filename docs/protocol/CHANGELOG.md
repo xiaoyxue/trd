@@ -29,6 +29,21 @@ follows `MAJOR.MINOR.PATCH`.
   origin and uniformly scaled to a reasonable size (`s = target / max_extent`),
   composed beneath the per-frame `model`. Producer helper `scripts/obj_to_arrow.py`
   encodes an OBJ into the mesh stream.
+- **Per-frame camera**, resolved in precedence order: a **CV** camera from the
+  `k` (3×3 intrinsics) + `pose` (4×4 camera-to-world) columns (view = `inverse(pose)`),
+  else a **CG** look-at from `eye` + `target` (or `eye` + `direction`) with `up`,
+  `fovy`, `aspect`, `znear`, `zfar`. Absent any camera column, an identity view and
+  default perspective are used. Camera columns are optional and per-row (one row =
+  one frame), so a stream can animate the camera alongside the model.
+- **Per-frame instanced draw list** for multi-mesh scenes: optional parallel
+  columns **`draw_mesh`** (`List<UInt32>`, 0-based indices into the leading mesh
+  table) and **`draw_model`** (`List<FixedSizeList<Float32>[16]>`, per-instance 4×4
+  models composed beneath each mesh's preview transform). The two lists must be
+  equal length per row. A frame with a draw list renders each referenced mesh at
+  its own model in one instanced batch; a frame without one falls back to drawing
+  the single mesh with the frame's `model`. (`scripts/jsonl_to_arrow.py` accepts a
+  convenience `"draws": [{"mesh", "model"}, …]` JSONL form and emits the two
+  Arrow columns when every row provides it.)
 
 ### Compatibility
 - **Backward-compatible with 0.0.2 and 0.0.1.** A params-only stream (no leading

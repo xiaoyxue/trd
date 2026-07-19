@@ -13,6 +13,20 @@ use crate::math::{Matrix4, Point3, Transform, Vector3};
 pub(crate) const DEFAULT_NEAR: f32 = 0.1;
 pub(crate) const DEFAULT_FAR: f32 = 1000.0;
 
+/// RGB color of the optional AABB overlay box (bright green), chosen to stand
+/// out against the default white mesh. See [`MeshRenderer::set_show_aabb`].
+pub(crate) const AABB_COLOR: [f32; 3] = [0.0, 1.0, 0.0];
+
+/// The 12 edges of an axis-aligned box as a `LineList` index buffer, indexing
+/// the 8 corners in the order produced by [`crate::math::Aabb3::corners`]
+/// (bit 0 = x, bit 1 = y, bit 2 = z of `(lo, hi)`): 4 bottom (`z=lo`) edges, 4
+/// top (`z=hi`) edges, then the 4 vertical edges.
+pub(crate) const AABB_EDGE_INDICES: [u32; 24] = [
+    0, 1, 1, 3, 3, 2, 2, 0, // bottom face (z = lo)
+    4, 5, 5, 7, 7, 6, 6, 4, // top face (z = hi)
+    0, 4, 1, 5, 2, 6, 3, 7, // vertical edges
+];
+
 /// Per-frame transform parameters for the triangle.
 ///
 /// The base triangle vertices `p_i` are transformed by the full MVP chain
@@ -732,6 +746,12 @@ struct MeshGpu {
     index_count: u32,
     edge_buffer: wgpu::Buffer,
     edge_count: u32,
+    /// AABB overlay (#42): 8 corner vertices (mesh-local coords, [`AABB_COLOR`])
+    /// and their 12-edge `LineList` index buffer, drawn beneath the same
+    /// per-instance model as the mesh so the box tracks it exactly.
+    aabb_vertex_buffer: wgpu::Buffer,
+    aabb_edge_buffer: wgpu::Buffer,
+    aabb_edge_count: u32,
     base_model: Matrix4,
 }
 
@@ -758,12 +778,39 @@ fn upload_mesh(device: &wgpu::Device, mesh: &Mesh, base_model: Matrix4) -> MeshG
     });
     let edge_count = u32::try_from(edges.len()).expect("mesh edge index count exceeds u32::MAX");
 
+    // AABB overlay box: the mesh's own bounding box (mesh-local coords) as 8
+    // colored corner vertices + a 12-edge line list. Built once per mesh; drawn
+    // only when the renderer's `show_aabb` is set.
+    let aabb_vertices: Vec<Vertex> = mesh
+        .aabb()
+        .corners()
+        .iter()
+        .map(|c| Vertex {
+            position: c.to_array(),
+            color: AABB_COLOR,
+        })
+        .collect();
+    let aabb_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("trd mesh aabb vertex buffer"),
+        contents: bytemuck::cast_slice(&aabb_vertices),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+    let aabb_edge_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("trd mesh aabb edge buffer"),
+        contents: bytemuck::cast_slice(&AABB_EDGE_INDICES),
+        usage: wgpu::BufferUsages::INDEX,
+    });
+    let aabb_edge_count = AABB_EDGE_INDICES.len() as u32;
+
     MeshGpu {
         vertex_buffer,
         index_buffer,
         index_count,
         edge_buffer,
         edge_count,
+        aabb_vertex_buffer,
+        aabb_edge_buffer,
+        aabb_edge_count,
         base_model,
     }
 }
@@ -788,6 +835,9 @@ pub struct MeshRenderer {
     pipeline: wgpu::RenderPipeline,
     wireframe_pipeline: wgpu::RenderPipeline,
     mode: RenderMode,
+    /// When set, each drawn instance's mesh AABB is overlaid as a colored
+    /// wireframe box (see [`MeshRenderer::set_show_aabb`]).
+    show_aabb: bool,
     uniform: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     meshes: Vec<MeshGpu>,
@@ -882,6 +932,7 @@ impl MeshRenderer {
             pipeline,
             wireframe_pipeline,
             mode: RenderMode::default(),
+            show_aabb: false,
             uniform,
             bind_group,
             meshes: gpu_meshes,
@@ -899,6 +950,14 @@ impl MeshRenderer {
     /// The current [`RenderMode`].
     pub fn mode(&self) -> RenderMode {
         self.mode
+    }
+
+    /// Enables/disables the AABB overlay (#42): when set, every drawn instance's
+    /// mesh axis-aligned bounding box is drawn as an [`AABB_COLOR`] wireframe box
+    /// (via the `LineList` pipeline, regardless of the active [`RenderMode`]),
+    /// beneath the same per-instance model so the box tracks the mesh exactly.
+    pub fn set_show_aabb(&mut self, show: bool) {
+        self.show_aabb = show;
     }
 
     /// The number of meshes this renderer can draw; valid [`Draw::mesh_id`]s are
@@ -979,7 +1038,7 @@ impl MeshRenderer {
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
-        for (mesh_id, start, count) in ranges {
+        for &(mesh_id, start, count) in &ranges {
             let mesh = &self.meshes[mesh_id];
             let (index_buffer, index_count) = match self.mode {
                 RenderMode::Filled => (&mesh.index_buffer, mesh.index_count),
@@ -988,6 +1047,21 @@ impl MeshRenderer {
             pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
             pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..index_count, 0, start..start + count);
+        }
+
+        // AABB overlay: redraw each mesh's bounding box as colored lines over the
+        // same instance ranges (reusing the instance buffer bound at slot 1), so
+        // the box tracks the mesh through its per-instance model. Always uses the
+        // LineList pipeline, independent of the active RenderMode. Drawn after the
+        // meshes so the box (no depth buffer in this path) stays visible on top.
+        if self.show_aabb {
+            pass.set_pipeline(&self.wireframe_pipeline);
+            for &(mesh_id, start, count) in &ranges {
+                let mesh = &self.meshes[mesh_id];
+                pass.set_vertex_buffer(0, mesh.aabb_vertex_buffer.slice(..));
+                pass.set_index_buffer(mesh.aabb_edge_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..mesh.aabb_edge_count, 0, start..start + count);
+            }
         }
     }
 }
@@ -1664,6 +1738,65 @@ mod tests {
             (wire[centroid], wire[centroid + 1], wire[centroid + 2]),
             (0, 0, 0),
             "wireframe centroid must be background"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn mesh_renderer_aabb_overlay_draws_green_box() {
+        let (device, queue) = pollster::block_on(test_device());
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let (width, height) = (64, 64);
+        let mut mesh = MeshRenderer::new(&device, format, &Mesh::hello_triangle());
+        let draws = [Draw {
+            mesh_id: 0,
+            model: Matrix4::IDENTITY.to_cols_array(),
+        }];
+
+        let plain = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
+            mesh.encode(
+                q,
+                e,
+                v,
+                FrameParams::IDENTITY,
+                &draws,
+                Viewport { width, height },
+            );
+        });
+
+        mesh.set_show_aabb(true);
+        let with_box = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
+            mesh.encode(
+                q,
+                e,
+                v,
+                FrameParams::IDENTITY,
+                &draws,
+                Viewport { width, height },
+            );
+        });
+
+        assert_ne!(plain, with_box, "AABB overlay must change the image");
+
+        // The overlay must light pure-green pixels (R≈0, G>0, B≈0) that are not
+        // present without it — the box drawn in AABB_COLOR = [0, 1, 0].
+        let pure_green = |px: &[u8]| -> usize {
+            (0..(width * height) as usize)
+                .filter(|i| {
+                    let b = i * 4;
+                    px[b] == 0 && px[b + 1] > 0 && px[b + 2] == 0
+                })
+                .count()
+        };
+        assert_eq!(
+            pure_green(&plain),
+            0,
+            "no green box expected without the overlay"
+        );
+        assert!(
+            pure_green(&with_box) > 0,
+            "AABB overlay must light green box pixels"
         );
     }
 }

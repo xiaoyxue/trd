@@ -43,7 +43,7 @@ the classic video-player model:
 |---|---|---|
 | [0.0.1](./0.0.1.md) | Superseded | 2D affine per frame (`center`, `size`, `theta`) → RGBA tensor images. |
 | [0.0.2](./0.0.2.md) | Superseded | Adds optional `model` (4×4), `k` (3×3 intrinsics), `pose` (4×4) matrix columns (the MVP + camera). Backward-compatible with 0.0.1. |
-| [0.0.3](./0.0.3.md) | Current | Adds an optional leading **mesh** Arrow stream (`[mesh][params]` framing) with nested-list geometry, plus the scale-to-fit preview transform. Backward-compatible with 0.0.2. |
+| [0.0.3](./0.0.3.md) | Current | Adds an optional leading **mesh** Arrow stream (`[mesh][params]` framing) with nested-list geometry and the scale-to-fit preview transform, a full **camera** (CV `k`/`pose` or CG `eye`/`target`/`direction`/`up`/`fovy`/`aspect`/`znear`/`zfar`), and a per-frame instanced **draw list** (`draw_mesh`/`draw_model` list columns) for multi-mesh scenes. Backward-compatible with 0.0.2. |
 
 See [`CHANGELOG.md`](./CHANGELOG.md) for the per-version deltas.
 

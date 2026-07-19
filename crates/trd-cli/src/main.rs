@@ -21,6 +21,10 @@ struct Cli {
     /// triangles.
     #[arg(long)]
     wireframe: bool,
+    /// Overlay each drawn mesh's axis-aligned bounding box as a green
+    /// wireframe box.
+    #[arg(long)]
+    aabb: bool,
 }
 
 fn main() -> Result<(), trd_core::StreamError> {
@@ -37,7 +41,7 @@ fn main() -> Result<(), trd_core::StreamError> {
     };
     let stdin = io::stdin().lock();
     let stdout = io::stdout().lock();
-    trd_core::run_stream(stdin, stdout, cli.width, cli.height, mode)?;
+    trd_core::run_stream(stdin, stdout, cli.width, cli.height, mode, cli.aabb)?;
     io::stdout().flush()?;
     Ok(())
 }

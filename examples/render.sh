@@ -6,7 +6,7 @@
 #
 # Usage:
 #   examples/render.sh [--cli | --native | --web [--arrow-renderer|--canvas-renderer]] \
-#                      [--mesh OBJ]... [--wireframe] [INPUT.jsonl] [OUTPUT.gif|.webp] [WIDTH] [HEIGHT] [FPS]
+#                      [--mesh OBJ]... [--wireframe] [--aabb] [INPUT.jsonl] [OUTPUT.gif|.webp] [WIDTH] [HEIGHT] [FPS]
 # Defaults: examples/frames.0.0.2.jsonl  output/out.gif  256 256 30
 #
 # By default (or with --cli, alias --headless) the frame stream is rendered to a
@@ -25,6 +25,9 @@
 # (--mesh needs pyarrow via uv/python3 and is ignored by --web.)
 # With --wireframe (--cli only) trd draws mesh edges as a line list instead of
 # filled triangles (protocol #38); combine with --mesh for a wireframe asset.
+# With --aabb (--cli only) trd overlays each drawn mesh's axis-aligned bounding
+# box as a green wireframe box (#42); combine with --mesh (e.g. add --aabb to the
+# bunny turntable to see its box track the rotation).
 # With --web (alias --wasm) it builds the browser (wasm) bundle via nix and serves
 # it, printing the URLs and an SSH-tunnel command. The web demo generates its own
 # Arrow frame stream in-browser, so all positional arguments are ignored. Two
@@ -48,6 +51,7 @@ web=0
 arrow_renderer=0
 canvas_renderer=0
 wireframe=0
+aabb=0
 meshes=()
 positional=()
 while [ $# -gt 0 ]; do
@@ -58,6 +62,7 @@ while [ $# -gt 0 ]; do
     --arrow-renderer) arrow_renderer=1 ;;
     --canvas-renderer) canvas_renderer=1 ;;
     --wireframe) wireframe=1 ;;
+    --aabb) aabb=1 ;;
     --mesh) shift; meshes+=("${1:?--mesh requires an OBJ path}") ;;
     --mesh=*) meshes+=("${1#--mesh=}") ;;
     *) positional+=("$1") ;;
@@ -260,8 +265,10 @@ else
   mkdir -p "$(dirname "$output")"
   wireframe_flag=()
   [ "$wireframe" -eq 1 ] && wireframe_flag=(--wireframe)
+  aabb_flag=()
+  [ "$aabb" -eq 1 ] && aabb_flag=(--aabb)
   stream \
-    | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-cli -- --width "$width" --height "$height" "${wireframe_flag[@]}" \
+    | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-cli -- --width "$width" --height "$height" "${wireframe_flag[@]}" "${aabb_flag[@]}" \
     | uv run --with pyarrow --with numpy "$root/scripts/encode.py" --fps "$fps" -o "$output"
   echo "wrote $output (${width}x${height}, ${fps}fps) from $input"
 fi
