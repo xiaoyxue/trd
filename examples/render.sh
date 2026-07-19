@@ -6,8 +6,10 @@
 #
 # Usage:
 #   examples/render.sh [--cli | --native | --web [--arrow-renderer|--canvas-renderer]] \
-#                      [--mesh OBJ] [INPUT.jsonl] [OUTPUT.gif|.webp] [WIDTH] [HEIGHT] [FPS]
+#                      [--mesh OBJ]... [--wireframe] [--aabb] [INPUT.jsonl] [OUTPUT.gif|.webp] [WIDTH] [HEIGHT] [FPS]
 # Defaults: examples/frames.0.0.2.jsonl  output/out.gif  256 256 30
+# Run with no arguments (or -h/--help) to print the flag guidance and exit; pass
+# --cli to render the default demo.
 #
 # By default (or with --cli, alias --headless) the frame stream is rendered to a
 # GIF/WebP via the headless trd-cli.
@@ -17,8 +19,17 @@
 # (scripts/obj_to_arrow.py encodes the OBJ) concatenated with the params stream,
 # so trd renders the loaded mesh (centered + uniformly scaled to fit) driven by
 # INPUT.jsonl. Try: examples/render.sh --mesh assets/meshes/bunny.obj \
-# examples/frames.turntable.jsonl output/bunny.gif. (--mesh needs pyarrow via
-# uv/python3 and is ignored by --web.)
+# examples/frames.turntable.jsonl output/bunny.gif. --mesh is repeatable: pass it
+# several times to load several meshes (one table row each, in order); a frame's
+# `draws` list then references them by 0-based index. Try the two-mesh demo:
+# examples/render.sh --cli --wireframe --mesh assets/meshes/bunny.obj \
+# --mesh examples/cube.obj examples/frames.multimesh.jsonl output/scene.gif.
+# (--mesh needs pyarrow via uv/python3 and is ignored by --web.)
+# With --wireframe (--cli only) trd draws mesh edges as a line list instead of
+# filled triangles (protocol #38); combine with --mesh for a wireframe asset.
+# With --aabb (--cli only) trd overlays each drawn mesh's axis-aligned bounding
+# box as a green wireframe box (#42); combine with --mesh (e.g. add --aabb to the
+# bunny turntable to see its box track the rotation).
 # With --web (alias --wasm) it builds the browser (wasm) bundle via nix and serves
 # it, printing the URLs and an SSH-tunnel command. The web demo generates its own
 # Arrow frame stream in-browser, so all positional arguments are ignored. Two
@@ -32,25 +43,78 @@
 # On WSL, prefix with WGPU_BACKEND=gl for GPU rendering (else it uses software).
 set -euo pipefail
 
+# Print flag guidance (shown for a bare invocation or -h/--help).
+usage() {
+  cat <<'USAGE'
+render.sh — render a trd JSONL frame-parameter file to a GIF/WebP (or play/serve it).
+
+Usage:
+  examples/render.sh [MODE] [CONTENT FLAGS] [INPUT.jsonl] [OUTPUT.gif|.webp] [WIDTH] [HEIGHT] [FPS]
+
+Defaults: INPUT=examples/frames.0.0.2.jsonl  OUTPUT=output/out.gif  WIDTH=256  HEIGHT=256  FPS=30
+
+MODE (pick one; default --cli):
+  --cli, --headless   Render to a GIF/WebP via the headless trd-cli (default).
+  --native, --app     Play live in the interactive trd-app window (OUTPUT ignored).
+  --web, --wasm       Build the browser (wasm) bundle and serve it (positional args ignored).
+                        --arrow-renderer   offscreen output-stream smoke (default)
+                        --canvas-renderer  on-screen canvas demo
+
+CONTENT FLAGS (--cli only):
+  --mesh OBJ          Load OBJ as a protocol 0.0.3 mesh (centered + scaled to fit).
+                      Repeatable: pass several times to load several meshes (row 0,
+                      1, …); a frame's `draws` list references them by index.
+  --wireframe         Draw mesh edges as a line list instead of filled triangles (#38).
+  --aabb              Overlay each mesh's axis-aligned bounding box as a green box (#42).
+
+  -h, --help          Show this guidance and exit.
+
+Examples:
+  examples/render.sh --cli                                   # default demo → output/out.gif
+  examples/render.sh --native                                # play the default demo live
+  examples/render.sh --cli --aabb --mesh assets/meshes/bunny.obj \
+    examples/frames.turntable.jsonl output/bunny.gif 1024 1024 24
+  examples/render.sh --cli --wireframe --aabb \
+    --mesh assets/meshes/bunny.obj --mesh examples/cube.obj \
+    examples/frames.multimesh.jsonl output/scene.gif 1024 1024 24
+  examples/render.sh --web                                   # build + serve the wasm demo
+
+Run from `nix develop`. On WSL, prefix with WGPU_BACKEND=gl for GPU rendering.
+USAGE
+}
+
+# A bare invocation (no arguments at all) prints the flag guidance and exits,
+# rather than silently rendering the default demo — pass --cli to run it.
+if [ $# -eq 0 ]; then
+  usage
+  exit 0
+fi
+
 # Extract the optional mode flags (--cli/--native/--web), the --web renderer
-# sub-flags (--arrow-renderer/--canvas-renderer), and an optional --mesh <obj>
-# that prepends a mesh Arrow stream (0.0.3 [mesh][params]); the rest are positional.
+# sub-flags (--arrow-renderer/--canvas-renderer), and repeatable --mesh <obj>
+# flags that prepend a mesh Arrow stream (0.0.3 [mesh][params]); the rest are
+# positional.
 cli=0
 native=0
 web=0
 arrow_renderer=0
 canvas_renderer=0
-mesh=""
+wireframe=0
+aabb=0
+meshes=()
 positional=()
 while [ $# -gt 0 ]; do
   case "$1" in
+    -h|--help) usage; exit 0 ;;
     --cli|--headless) cli=1 ;;
     --native|--app) native=1 ;;
     --web|--wasm) web=1 ;;
     --arrow-renderer) arrow_renderer=1 ;;
     --canvas-renderer) canvas_renderer=1 ;;
-    --mesh) shift; mesh="${1:?--mesh requires an OBJ path}" ;;
-    --mesh=*) mesh="${1#--mesh=}" ;;
+    --wireframe) wireframe=1 ;;
+    --aabb) aabb=1 ;;
+    --mesh) shift; meshes+=("${1:?--mesh requires an OBJ path}") ;;
+    --mesh=*) meshes+=("${1#--mesh=}") ;;
     *) positional+=("$1") ;;
   esac
   shift
@@ -154,6 +218,25 @@ else
   exit 1
 fi
 
+# DuckDB's producer only understands the 0.0.1/0.0.2 columns (center/size/theta/
+# model); its SQL silently DROPS the additive 0.0.3 camera (eye/target/direction/
+# up/k/pose/fovy/aspect/znear/zfar) and instanced draw-list (draws) columns. If
+# the input carries any of those, fall back to the pyarrow producer (which emits
+# them) so the camera/draw data actually reaches trd — otherwise an authored
+# camera is lost and trd renders with the identity camera (z-clipping).
+if [ "$producer" = duckdb ] \
+  && grep -Eq '"(eye|target|direction|up|k|pose|fovy|aspect|znear|zfar|draws)"[[:space:]]*:' "$input"; then
+  if command -v uv >/dev/null 2>&1; then
+    producer=uv
+  elif command -v python3 >/dev/null 2>&1 && python3 -c 'import pyarrow' >/dev/null 2>&1; then
+    producer=python3
+  else
+    echo "error: '$input' carries 0.0.3 camera/draw columns that DuckDB cannot emit;" >&2
+    echo "install uv or python3 with pyarrow to render it" >&2
+    exit 1
+  fi
+fi
+
 # DuckDB reads the JSONL and streams Arrow IPC (FORMAT arrows) to stdout. It emits
 # the required 0.0.1 columns (center/size as FixedSizeList<f32>[2], theta as f32,
 # defaulting to the identity when a row omits them) plus the additive 0.0.2 `model`
@@ -196,18 +279,20 @@ frames() {
   esac
 }
 
-# When rendering a loaded mesh (--mesh), pick a pyarrow-capable Python to encode
-# the OBJ into the leading mesh Arrow stream (duckdb can't author the nested-list
-# mesh table). scripts/obj_to_arrow.py emits a 0.0.3 mesh table; it is
-# concatenated *before* the params stream so trd reads [mesh][params].
+# When rendering loaded meshes (--mesh, repeatable), pick a pyarrow-capable
+# Python to encode the OBJ(s) into the leading mesh Arrow stream (duckdb can't
+# author the nested-list mesh table). scripts/obj_to_arrow.py emits a 0.0.3 mesh
+# table with **one row per --mesh** (in the order given); it is concatenated
+# *before* the params stream so trd reads [mesh][params]. A frame's `draws` list
+# references these meshes by 0-based index (mesh 0 = first --mesh).
 mesh_producer=""
-if [ -n "$mesh" ]; then
+if [ ${#meshes[@]} -gt 0 ]; then
   if command -v uv >/dev/null 2>&1; then
     mesh_producer=uv
   elif command -v python3 >/dev/null 2>&1 && python3 -c 'import pyarrow' >/dev/null 2>&1; then
     mesh_producer=python3
   else
-    echo "error: --mesh needs uv or python3 with pyarrow to encode $mesh" >&2
+    echo "error: --mesh needs uv or python3 with pyarrow to encode ${meshes[*]}" >&2
     exit 1
   fi
 fi
@@ -215,8 +300,8 @@ fi
 # The full trd input stream: the optional leading mesh table, then the params.
 stream() {
   case "$mesh_producer" in
-    uv) uv run --with pyarrow "$root/scripts/obj_to_arrow.py" "$mesh" ;;
-    python3) python3 "$root/scripts/obj_to_arrow.py" "$mesh" ;;
+    uv) uv run --with pyarrow "$root/scripts/obj_to_arrow.py" "${meshes[@]}" ;;
+    python3) python3 "$root/scripts/obj_to_arrow.py" "${meshes[@]}" ;;
   esac
   frames
 }
@@ -228,8 +313,12 @@ if [ "$native" -eq 1 ]; then
   echo "streamed $input to the trd-app window (${width}x${height}, ${fps}fps)"
 else
   mkdir -p "$(dirname "$output")"
+  wireframe_flag=()
+  [ "$wireframe" -eq 1 ] && wireframe_flag=(--wireframe)
+  aabb_flag=()
+  [ "$aabb" -eq 1 ] && aabb_flag=(--aabb)
   stream \
-    | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-cli -- --width "$width" --height "$height" \
+    | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-cli -- --width "$width" --height "$height" "${wireframe_flag[@]}" "${aabb_flag[@]}" \
     | uv run --with pyarrow --with numpy "$root/scripts/encode.py" --fps "$fps" -o "$output"
   echo "wrote $output (${width}x${height}, ${fps}fps) from $input"
 fi

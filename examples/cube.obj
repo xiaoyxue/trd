@@ -1,0 +1,18 @@
+# trd unit cube centered at the origin (side 1, spanning ±0.5), white.
+# 8 vertices, 6 quad faces; each `f a b c d` fan-triangulates to two triangles.
+# Used by examples/frames.multimesh.jsonl as mesh 1 alongside the bunny (mesh 0)
+# to demo the protocol 0.0.3 multi-mesh draw list.
+v -0.5 -0.5 -0.5
+v  0.5 -0.5 -0.5
+v  0.5  0.5 -0.5
+v -0.5  0.5 -0.5
+v -0.5 -0.5  0.5
+v  0.5 -0.5  0.5
+v  0.5  0.5  0.5
+v -0.5  0.5  0.5
+f 1 2 3 4
+f 5 6 7 8
+f 1 5 8 4
+f 2 6 7 3
+f 4 8 7 3
+f 1 5 6 2

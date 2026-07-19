@@ -25,7 +25,7 @@ use crate::math::Matrix4;
 use crate::protocol::{
     frame_rate_from_metadata, PROTOCOL_VERSION, PROTOCOL_VERSION_KEY, SUPPORTED_INPUT_VERSIONS,
 };
-use crate::render::{CameraFormError, Draw, FrameParams, Mesh, MeshRenderer};
+use crate::render::{CameraFormError, Draw, FrameParams, Mesh, MeshRenderer, RenderMode};
 use crate::OutputSession;
 
 /// Errors from decoding, validating, rendering, or encoding a trd stream.
@@ -587,6 +587,17 @@ impl BatchRenderer {
         self.renderer.mesh_count()
     }
 
+    /// Sets the [`RenderMode`] (filled or wireframe) applied to later `render`s.
+    pub fn set_mode(&mut self, mode: RenderMode) {
+        self.renderer.set_mode(mode);
+    }
+
+    /// Enables/disables the per-instance AABB overlay box (see
+    /// [`MeshRenderer::set_show_aabb`]).
+    pub fn set_show_aabb(&mut self, show: bool) {
+        self.renderer.set_show_aabb(show);
+    }
+
     /// Renders `params` with the given per-frame instance `draws` and returns
     /// tightly-packed row-major RGBA bytes (`width*height*4`).
     pub fn render(&mut self, params: FrameParams, draws: &[Draw]) -> Result<Vec<u8>, StreamError> {
@@ -756,6 +767,8 @@ pub fn run_stream<R: Read, W: Write>(
     output: W,
     width: u32,
     height: u32,
+    mode: RenderMode,
+    show_aabb: bool,
 ) -> Result<(), StreamError> {
     // Validate dimensions up front so schema construction (which multiplies
     // width*height) can't overflow before BatchRenderer's guard runs.
@@ -768,14 +781,18 @@ pub fn run_stream<R: Read, W: Write>(
         // 0.0.3 mesh-first: decode + upload the mesh table (one mesh per row),
         // then render the params stream that follows it in the same byte stream.
         let meshes = read_meshes(&mut first)?;
-        let renderer = BatchRenderer::with_meshes(width, height, &meshes)?;
+        let mut renderer = BatchRenderer::with_meshes(width, height, &meshes)?;
+        renderer.set_mode(mode);
+        renderer.set_show_aabb(show_aabb);
         let params = StreamReader::try_new(first.get_mut(), None)?;
         check_version(params.schema().as_ref())?;
         let frame_rate = frame_rate_from_metadata(params.schema().metadata());
         render_params(params, renderer, frame_rate, width, height, output)
     } else {
         // Legacy params-only stream → built-in hello-triangle.
-        let renderer = BatchRenderer::new(width, height)?;
+        let mut renderer = BatchRenderer::new(width, height)?;
+        renderer.set_mode(mode);
+        renderer.set_show_aabb(show_aabb);
         let frame_rate = frame_rate_from_metadata(first.schema().metadata());
         render_params(first, renderer, frame_rate, width, height, output)
     }
@@ -1239,7 +1256,15 @@ mod tests {
         }
 
         let mut output_bytes = Vec::new();
-        run_stream(&input_bytes[..], &mut output_bytes, w, h).unwrap();
+        run_stream(
+            &input_bytes[..],
+            &mut output_bytes,
+            w,
+            h,
+            RenderMode::Filled,
+            false,
+        )
+        .unwrap();
 
         // Decode output and assert per-frame invariants.
         let reader = StreamReader::try_new(&output_bytes[..], None).unwrap();
@@ -1425,7 +1450,15 @@ mod tests {
         write_params_stream(&mut input_bytes, &frames);
 
         let mut output_bytes = Vec::new();
-        run_stream(&input_bytes[..], &mut output_bytes, w, h).unwrap();
+        run_stream(
+            &input_bytes[..],
+            &mut output_bytes,
+            w,
+            h,
+            RenderMode::Filled,
+            false,
+        )
+        .unwrap();
 
         let reader = StreamReader::try_new(&output_bytes[..], None).unwrap();
         let batches = reader.collect::<Result<Vec<_>, _>>().unwrap();

@@ -166,6 +166,35 @@ impl Mesh {
             .then(Transform::from_scale(Vector3::new(scale, scale, scale)))
     }
 
+    /// Derives a deduplicated **edge** index buffer for wireframe rendering
+    /// (#38): each triangle `(a, b, c)` of the index buffer contributes its
+    /// three undirected edges `(a,b)`, `(b,c)`, `(c,a)`, normalized to
+    /// `(min, max)` and deduped so an edge shared by two triangles is emitted
+    /// once. The result is flattened as **two indices per line** — a
+    /// `PrimitiveTopology::LineList` index buffer over the same vertex buffer.
+    ///
+    /// A `LineList` edge buffer is preferred over `PolygonMode::Line`, which
+    /// needs `Features::POLYGON_MODE_LINE` that WebGPU does not guarantee, so
+    /// this stays portable across native and wasm. Pure (GPU-free) and
+    /// unit-testable. Assumes a triangle list (`indices.len()` a multiple of 3,
+    /// as every [`Mesh`] constructor guarantees); a trailing partial triangle,
+    /// if any, is ignored.
+    pub fn edge_indices(&self) -> Vec<u32> {
+        use std::collections::HashSet;
+        let mut seen: HashSet<(u32, u32)> = HashSet::new();
+        let mut edges: Vec<u32> = Vec::new();
+        for tri in self.indices.chunks_exact(3) {
+            for &(a, b) in &[(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+                let key = if a <= b { (a, b) } else { (b, a) };
+                if seen.insert(key) {
+                    edges.push(key.0);
+                    edges.push(key.1);
+                }
+            }
+        }
+        edges
+    }
+
     /// Decodes a columnar **Arrow mesh table** into the canonical [`Mesh`] (#37).
     ///
     /// Each row of the table is one mesh (see the module docs): a required
@@ -427,6 +456,41 @@ f 1 2 3 4
         assert_eq!(mesh.indices, vec![0, 1, 2, 0, 2, 3]);
         // No color extension → all white.
         assert!(mesh.vertices.iter().all(|v| v.color == DEFAULT_COLOR));
+    }
+
+    /// Collects an edge index buffer into a set of undirected `(min, max)` pairs.
+    fn edge_set(edges: &[u32]) -> std::collections::BTreeSet<(u32, u32)> {
+        assert_eq!(edges.len() % 2, 0, "edge buffer must be pairs of indices");
+        edges
+            .chunks_exact(2)
+            .map(|e| (e[0].min(e[1]), e[0].max(e[1])))
+            .collect()
+    }
+
+    #[test]
+    fn edge_indices_single_triangle_yields_three_edges() {
+        let mesh = Mesh::hello_triangle();
+        let edges = mesh.edge_indices();
+        assert_eq!(edges.len(), 6, "3 edges × 2 indices");
+        assert_eq!(
+            edge_set(&edges),
+            [(0, 1), (1, 2), (0, 2)].into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn edge_indices_quad_dedups_shared_diagonal() {
+        // Two triangles [0,1,2] + [0,2,3] share the diagonal edge (0,2), so the
+        // quad has 5 unique edges (4 sides + 1 diagonal), not 6.
+        let mesh = Mesh::from_obj(QUAD_OBJ).expect("quad parses");
+        let edges = mesh.edge_indices();
+        assert_eq!(edges.len(), 10, "5 unique edges × 2 indices");
+        assert_eq!(
+            edge_set(&edges),
+            [(0, 1), (1, 2), (0, 2), (2, 3), (0, 3)]
+                .into_iter()
+                .collect()
+        );
     }
 
     #[test]

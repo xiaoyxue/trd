@@ -13,6 +13,20 @@ use crate::math::{Matrix4, Point3, Transform, Vector3};
 pub(crate) const DEFAULT_NEAR: f32 = 0.1;
 pub(crate) const DEFAULT_FAR: f32 = 1000.0;
 
+/// RGB color of the optional AABB overlay box (bright green), chosen to stand
+/// out against the default white mesh. See [`MeshRenderer::set_show_aabb`].
+pub(crate) const AABB_COLOR: [f32; 3] = [0.0, 1.0, 0.0];
+
+/// The 12 edges of an axis-aligned box as a `LineList` index buffer, indexing
+/// the 8 corners in the order produced by [`crate::math::Aabb3::corners`]
+/// (bit 0 = x, bit 1 = y, bit 2 = z of `(lo, hi)`): 4 bottom (`z=lo`) edges, 4
+/// top (`z=hi`) edges, then the 4 vertical edges.
+pub(crate) const AABB_EDGE_INDICES: [u32; 24] = [
+    0, 1, 1, 3, 3, 2, 2, 0, // bottom face (z = lo)
+    4, 5, 5, 7, 7, 6, 6, 4, // top face (z = hi)
+    0, 4, 1, 5, 2, 6, 3, 7, // vertical edges
+];
+
 /// Per-frame transform parameters for the triangle.
 ///
 /// The base triangle vertices `p_i` are transformed by the full MVP chain
@@ -429,15 +443,59 @@ pub fn create_triangle_pipeline(
 }
 
 /// Builds the indexed mesh render pipeline for `format` using an auto bind-group
-/// layout (group 0, binding 0 = the params uniform).
+/// layout (group 0, binding 0 = the params uniform), drawn as filled triangles.
 pub fn create_mesh_pipeline(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
 ) -> wgpu::RenderPipeline {
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("trd mesh pipeline layout"),
+        bind_group_layouts: &[Some(&create_mesh_bind_group_layout(device))],
+        immediate_size: 0,
+    });
+    create_mesh_pipeline_with(
+        device,
+        format,
+        &layout,
+        wgpu::PrimitiveTopology::TriangleList,
+    )
+}
+
+/// The explicit bind-group layout shared by every mesh pipeline (group 0,
+/// binding 0 = the camera `P·V` uniform, vertex-stage visible). Making it
+/// explicit (rather than auto-derived per pipeline) lets the filled and
+/// wireframe pipelines share **one** layout, so a single params bind group is
+/// valid for both regardless of the active [`RenderMode`].
+pub(crate) fn create_mesh_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("trd mesh bind group layout"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }],
+    })
+}
+
+/// Builds an indexed mesh pipeline for `format` and `topology` (filled
+/// `TriangleList` or wireframe `LineList`) over the shared explicit `layout`.
+/// Both topologies use the same `mesh.wgsl` (the vertex shader only transforms
+/// positions; line rasterization needs no extra WebGPU features).
+fn create_mesh_pipeline_with(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    layout: &wgpu::PipelineLayout,
+    topology: wgpu::PrimitiveTopology,
+) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::include_wgsl!("mesh.wgsl"));
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("trd mesh pipeline"),
-        layout: None,
+        layout: Some(layout),
         vertex: wgpu::VertexState {
             module: &shader,
             entry_point: Some("vs_main"),
@@ -450,7 +508,10 @@ pub fn create_mesh_pipeline(
             compilation_options: Default::default(),
             targets: &[Some(format.into())],
         }),
-        primitive: wgpu::PrimitiveState::default(),
+        primitive: wgpu::PrimitiveState {
+            topology,
+            ..Default::default()
+        },
         depth_stencil: None,
         multisample: wgpu::MultisampleState::default(),
         multiview_mask: None,
@@ -483,9 +544,32 @@ pub(crate) fn create_params_binding(
     (buffer, bind_group)
 }
 
-/// Writes `params` (projected for `viewport`) into an existing uniform buffer.
-///
-/// Shared by the native `BatchRenderer`, [`TriangleRenderer`], and
+/// Creates the camera `P·V` uniform buffer + bind group over an **explicit**
+/// bind-group layout (shared by the filled and wireframe mesh pipelines),
+/// initialised to `params`'s view-projection for `viewport`. Used by
+/// [`MeshRenderer`], whose two pipelines must share one bind group.
+pub(crate) fn create_view_proj_binding(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    params: FrameParams,
+    viewport: Viewport,
+) -> (wgpu::Buffer, wgpu::BindGroup) {
+    use wgpu::util::DeviceExt;
+    let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("trd view-proj uniform"),
+        contents: bytemuck::bytes_of(&Uniform::view_proj(params, viewport)),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("trd view-proj bind group"),
+        layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: buffer.as_entire_binding(),
+        }],
+    });
+    (buffer, bind_group)
+}
 /// [`MeshRenderer`], which reuse one uniform buffer across frames instead of
 /// rebuilding it.
 pub(crate) fn write_params(
@@ -630,6 +714,19 @@ impl TriangleRenderer {
     }
 }
 
+/// How a [`MeshRenderer`] rasterizes its meshes: solid filled triangles, or an
+/// edge **wireframe** (`LineList` over the derived [`crate::Mesh::edge_indices`]
+/// buffer). Default is [`RenderMode::Filled`]; wireframe (#38) is opt-in via
+/// [`MeshRenderer::set_mode`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RenderMode {
+    /// Draw triangles filled (the mesh's triangle index buffer).
+    #[default]
+    Filled,
+    /// Draw only triangle edges as lines (the deduped edge index buffer).
+    Wireframe,
+}
+
 /// A single instance placement in a frame's draw list: which mesh to draw
 /// (index into the renderer's mesh list) and the per-instance model matrix
 /// (column-major), applied beneath that mesh's base (preview) model.
@@ -639,12 +736,22 @@ pub struct Draw {
     pub model: [f32; 16],
 }
 
-/// A mesh uploaded to the GPU: its vertex/index buffers plus the base (preview)
-/// model pre-multiplied beneath every per-frame instance model.
+/// A mesh uploaded to the GPU: its vertex buffer, the filled **triangle** index
+/// buffer, the deduped **edge** (`LineList`) index buffer for wireframe (#38),
+/// and the base (preview) model pre-multiplied beneath every per-frame instance
+/// model.
 struct MeshGpu {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     index_count: u32,
+    edge_buffer: wgpu::Buffer,
+    edge_count: u32,
+    /// AABB overlay (#42): 8 corner vertices (mesh-local coords, [`AABB_COLOR`])
+    /// and their 12-edge `LineList` index buffer, drawn beneath the same
+    /// per-instance model as the mesh so the box tracks it exactly.
+    aabb_vertex_buffer: wgpu::Buffer,
+    aabb_edge_buffer: wgpu::Buffer,
+    aabb_edge_count: u32,
     base_model: Matrix4,
 }
 
@@ -662,10 +769,48 @@ fn upload_mesh(device: &wgpu::Device, mesh: &Mesh, base_model: Matrix4) -> MeshG
         usage: wgpu::BufferUsages::INDEX,
     });
     let index_count = u32::try_from(mesh.indices.len()).expect("mesh index count exceeds u32::MAX");
+
+    let edges = mesh.edge_indices();
+    let edge_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("trd mesh edge buffer"),
+        contents: bytemuck::cast_slice(&edges),
+        usage: wgpu::BufferUsages::INDEX,
+    });
+    let edge_count = u32::try_from(edges.len()).expect("mesh edge index count exceeds u32::MAX");
+
+    // AABB overlay box: the mesh's own bounding box (mesh-local coords) as 8
+    // colored corner vertices + a 12-edge line list. Built once per mesh; drawn
+    // only when the renderer's `show_aabb` is set.
+    let aabb_vertices: Vec<Vertex> = mesh
+        .aabb()
+        .corners()
+        .iter()
+        .map(|c| Vertex {
+            position: c.to_array(),
+            color: AABB_COLOR,
+        })
+        .collect();
+    let aabb_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("trd mesh aabb vertex buffer"),
+        contents: bytemuck::cast_slice(&aabb_vertices),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+    let aabb_edge_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("trd mesh aabb edge buffer"),
+        contents: bytemuck::cast_slice(&AABB_EDGE_INDICES),
+        usage: wgpu::BufferUsages::INDEX,
+    });
+    let aabb_edge_count = AABB_EDGE_INDICES.len() as u32;
+
     MeshGpu {
         vertex_buffer,
         index_buffer,
         index_count,
+        edge_buffer,
+        edge_count,
+        aabb_vertex_buffer,
+        aabb_edge_buffer,
+        aabb_edge_count,
         base_model,
     }
 }
@@ -679,13 +824,20 @@ fn create_instance_buffer(device: &wgpu::Device, capacity: u32) -> wgpu::Buffer 
     })
 }
 
-/// Persistent indexed mesh renderer. Owns one pipeline, a camera (`P·V`) uniform
-/// buffer + bind group, a set of GPU meshes (each with a base/preview model),
-/// and a growable per-instance model-matrix buffer. Each `encode` draws a
-/// frame's variable-length instance list, grouped by mesh so every mesh's
-/// index buffer is drawn once over a contiguous instance range.
+/// Persistent indexed mesh renderer. Owns a filled (`TriangleList`) and a
+/// wireframe (`LineList`) pipeline sharing one bind-group layout, a camera
+/// (`P·V`) uniform buffer + bind group, a set of GPU meshes (each with a
+/// base/preview model + triangle and edge index buffers), and a growable
+/// per-instance model-matrix buffer. Each `encode` draws a frame's
+/// variable-length instance list in the active [`RenderMode`], grouped by mesh
+/// so every mesh's index buffer is drawn once over a contiguous instance range.
 pub struct MeshRenderer {
     pipeline: wgpu::RenderPipeline,
+    wireframe_pipeline: wgpu::RenderPipeline,
+    mode: RenderMode,
+    /// When set, each drawn instance's mesh AABB is overlaid as a colored
+    /// wireframe box (see [`MeshRenderer::set_show_aabb`]).
+    show_aabb: bool,
     uniform: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     meshes: Vec<MeshGpu>,
@@ -737,12 +889,31 @@ impl MeshRenderer {
             "meshes and base_models must have equal length"
         );
 
-        let pipeline = create_mesh_pipeline(device, format);
+        // One explicit bind-group layout shared by both pipelines, so the single
+        // params bind group is valid whichever RenderMode is active.
+        let bind_group_layout = create_mesh_bind_group_layout(device);
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("trd mesh pipeline layout"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
+        let pipeline = create_mesh_pipeline_with(
+            device,
+            format,
+            &pipeline_layout,
+            wgpu::PrimitiveTopology::TriangleList,
+        );
+        let wireframe_pipeline = create_mesh_pipeline_with(
+            device,
+            format,
+            &pipeline_layout,
+            wgpu::PrimitiveTopology::LineList,
+        );
         // The identity params ignore the viewport (no intrinsics); each `encode`
         // supplies the real target dimensions.
-        let (uniform, bind_group) = create_params_binding(
+        let (uniform, bind_group) = create_view_proj_binding(
             device,
-            &pipeline,
+            &bind_group_layout,
             FrameParams::IDENTITY,
             Viewport {
                 width: 1,
@@ -759,6 +930,9 @@ impl MeshRenderer {
 
         Self {
             pipeline,
+            wireframe_pipeline,
+            mode: RenderMode::default(),
+            show_aabb: false,
             uniform,
             bind_group,
             meshes: gpu_meshes,
@@ -766,6 +940,24 @@ impl MeshRenderer {
             instance_capacity,
             device: device.clone(),
         }
+    }
+
+    /// Sets the [`RenderMode`] (filled or wireframe) applied by later `encode`s.
+    pub fn set_mode(&mut self, mode: RenderMode) {
+        self.mode = mode;
+    }
+
+    /// The current [`RenderMode`].
+    pub fn mode(&self) -> RenderMode {
+        self.mode
+    }
+
+    /// Enables/disables the AABB overlay (#42): when set, every drawn instance's
+    /// mesh axis-aligned bounding box is drawn as an [`AABB_COLOR`] wireframe box
+    /// (via the `LineList` pipeline, regardless of the active [`RenderMode`]),
+    /// beneath the same per-instance model so the box tracks the mesh exactly.
+    pub fn set_show_aabb(&mut self, show: bool) {
+        self.show_aabb = show;
     }
 
     /// The number of meshes this renderer can draw; valid [`Draw::mesh_id`]s are
@@ -839,14 +1031,37 @@ impl MeshRenderer {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        pass.set_pipeline(&self.pipeline);
+        let pipeline = match self.mode {
+            RenderMode::Filled => &self.pipeline,
+            RenderMode::Wireframe => &self.wireframe_pipeline,
+        };
+        pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
-        for (mesh_id, start, count) in ranges {
+        for &(mesh_id, start, count) in &ranges {
             let mesh = &self.meshes[mesh_id];
+            let (index_buffer, index_count) = match self.mode {
+                RenderMode::Filled => (&mesh.index_buffer, mesh.index_count),
+                RenderMode::Wireframe => (&mesh.edge_buffer, mesh.edge_count),
+            };
             pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-            pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..mesh.index_count, 0, start..start + count);
+            pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..index_count, 0, start..start + count);
+        }
+
+        // AABB overlay: redraw each mesh's bounding box as colored lines over the
+        // same instance ranges (reusing the instance buffer bound at slot 1), so
+        // the box tracks the mesh through its per-instance model. Always uses the
+        // LineList pipeline, independent of the active RenderMode. Drawn after the
+        // meshes so the box (no depth buffer in this path) stays visible on top.
+        if self.show_aabb {
+            pass.set_pipeline(&self.wireframe_pipeline);
+            for &(mesh_id, start, count) in &ranges {
+                let mesh = &self.meshes[mesh_id];
+                pass.set_vertex_buffer(0, mesh.aabb_vertex_buffer.slice(..));
+                pass.set_index_buffer(mesh.aabb_edge_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..mesh.aabb_edge_count, 0, start..start + count);
+            }
         }
     }
 }
@@ -1446,6 +1661,142 @@ mod tests {
         assert!(
             has_color_in(2 * width / 3..width),
             "right instance is missing"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn mesh_renderer_wireframe_lights_edges_only() {
+        let (device, queue) = pollster::block_on(test_device());
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let (width, height) = (64, 64);
+        let mut mesh = MeshRenderer::new(&device, format, &Mesh::hello_triangle());
+        let draws = [Draw {
+            mesh_id: 0,
+            model: Matrix4::IDENTITY.to_cols_array(),
+        }];
+
+        assert_eq!(mesh.mode(), RenderMode::Filled);
+        let filled = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
+            mesh.encode(
+                q,
+                e,
+                v,
+                FrameParams::IDENTITY,
+                &draws,
+                Viewport { width, height },
+            );
+        });
+
+        mesh.set_mode(RenderMode::Wireframe);
+        assert_eq!(mesh.mode(), RenderMode::Wireframe);
+        let wire = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
+            mesh.encode(
+                q,
+                e,
+                v,
+                FrameParams::IDENTITY,
+                &draws,
+                Viewport { width, height },
+            );
+        });
+
+        assert_ne!(filled, wire, "wireframe must differ from filled");
+
+        let lit = |px: &[u8]| -> usize {
+            (0..(width * height) as usize)
+                .filter(|i| {
+                    let b = i * 4;
+                    px[b] > 0 || px[b + 1] > 0 || px[b + 2] > 0
+                })
+                .count()
+        };
+        let (filled_lit, wire_lit) = (lit(&filled), lit(&wire));
+        assert!(wire_lit > 0, "wireframe must light its edges");
+        assert!(
+            wire_lit < filled_lit,
+            "wireframe ({wire_lit}) must light fewer pixels than filled ({filled_lit})"
+        );
+
+        // The triangle's centroid is interior: filled there, background in
+        // wireframe (no edge crosses the center of mass).
+        let centroid = {
+            let v = &Mesh::hello_triangle().vertices;
+            let cx = (v[0].position[0] + v[1].position[0] + v[2].position[0]) / 3.0;
+            let cy = (v[0].position[1] + v[1].position[1] + v[2].position[1]) / 3.0;
+            // NDC (clip, y-up) -> pixel (y-down).
+            let px = ((cx * 0.5 + 0.5) * width as f32).round() as u32;
+            let py = ((1.0 - (cy * 0.5 + 0.5)) * height as f32).round() as u32;
+            ((py.min(height - 1) * width + px.min(width - 1)) * 4) as usize
+        };
+        assert!(
+            filled[centroid] > 0 || filled[centroid + 1] > 0 || filled[centroid + 2] > 0,
+            "filled centroid must be lit"
+        );
+        assert_eq!(
+            (wire[centroid], wire[centroid + 1], wire[centroid + 2]),
+            (0, 0, 0),
+            "wireframe centroid must be background"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn mesh_renderer_aabb_overlay_draws_green_box() {
+        let (device, queue) = pollster::block_on(test_device());
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let (width, height) = (64, 64);
+        let mut mesh = MeshRenderer::new(&device, format, &Mesh::hello_triangle());
+        let draws = [Draw {
+            mesh_id: 0,
+            model: Matrix4::IDENTITY.to_cols_array(),
+        }];
+
+        let plain = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
+            mesh.encode(
+                q,
+                e,
+                v,
+                FrameParams::IDENTITY,
+                &draws,
+                Viewport { width, height },
+            );
+        });
+
+        mesh.set_show_aabb(true);
+        let with_box = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
+            mesh.encode(
+                q,
+                e,
+                v,
+                FrameParams::IDENTITY,
+                &draws,
+                Viewport { width, height },
+            );
+        });
+
+        assert_ne!(plain, with_box, "AABB overlay must change the image");
+
+        // The overlay must light pure-green pixels (R≈0, G>0, B≈0) that are not
+        // present without it — the box drawn in AABB_COLOR = [0, 1, 0].
+        let pure_green = |px: &[u8]| -> usize {
+            (0..(width * height) as usize)
+                .filter(|i| {
+                    let b = i * 4;
+                    px[b] == 0 && px[b + 1] > 0 && px[b + 2] == 0
+                })
+                .count()
+        };
+        assert_eq!(
+            pure_green(&plain),
+            0,
+            "no green box expected without the overlay"
+        );
+        assert!(
+            pure_green(&with_box) > 0,
+            "AABB overlay must light green box pixels"
         );
     }
 }
