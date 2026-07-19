@@ -250,6 +250,7 @@ map straight onto `trd-cli`:
 | `--mesh <obj>` | Prepend a mesh Arrow stream (protocol 0.0.3 `[mesh][params]`) built from `<obj>` by [`scripts/obj_to_arrow.py`](scripts/obj_to_arrow.py); the mesh renders centered + scaled-to-fit, driven by the params `INPUT.jsonl`. **Repeatable** — pass `--mesh` several times to load several meshes (one table row each, in order); a frame's `draws` list then references them by 0-based index. Needs pyarrow (via uv/python3). |
 | `--wireframe` | Draw mesh **edges** as a line list (`trd --wireframe`) instead of filled triangles (protocol #38). Reveals topology; on a dense asset (e.g. the ~70k-tri bunny) the edges read as a fine mesh. |
 | `--aabb` | Overlay each drawn mesh instance's **axis-aligned bounding box** as a green (`[0, 1, 0]`) wireframe box (`trd --aabb`, #42). The box uses the *same* per-instance model as the mesh, so it tracks the mesh through the preview + per-frame transforms. Combine freely with `--wireframe`. |
+| `--axes` | Overlay a **coordinate-axes gizmo** (X=red, Y=green, Z=blue lines) at the world origin (`trd --axes`, #42), under the camera `P·V` with an identity model, marking the world frame the camera looks at. |
 
 ```sh
 # Single bunny turntable, filled, with its bounding box:
@@ -262,8 +263,35 @@ examples/render.sh --cli --wireframe --aabb \
   examples/frames.multimesh.jsonl output/scene.gif 1024 1024 24
 ```
 
-Both flags are also raw `trd-cli` flags, so any producer pipeline can use them:
-`… | trd --width 1024 --height 1024 --wireframe --aabb | …`.
+These flags are also raw `trd-cli` flags, so any producer pipeline can use them:
+`… | trd --width 1024 --height 1024 --wireframe --aabb --axes | …`.
+
+#### Dolly-camera turntable capstone (#49)
+
+[`examples/bunny_dolly.py`](examples/bunny_dolly.py) authors the **same** 45°
+bird's-eye *dolly* camera **twice** — once in the **CG** form (`eye`/`target`/
+`up` + `fovy`/`aspect`) and once in the **CV** form (pinhole `K` + camera-to-world
+`pose`) — as two JSONL streams. The camera looks at the world origin from a fixed
+direction while only its **distance** oscillates (`dist = mid + amp·sin(2π·i/N)`,
+a dolly, not an orbit/zoom); the bunny Y-spins via each frame's `model`. Both
+forms decode to the *same* `P·V` (the script asserts this numerically before
+writing) and render **identically** — verified at 1024² to differ by at most
+**0.0054 % of pixels** per frame (a thin edge margin from the `f32`
+`inverse(pose)` path; the spec permits a tiny tolerance).
+
+```sh
+python examples/bunny_dolly.py            # writes frames.bunny_dolly.{cg,cv}.jsonl (1024²)
+
+# Render each form and compare — the two GIFs are visually indistinguishable:
+examples/render.sh --cli --wireframe --mesh assets/meshes/bunny.obj \
+  examples/frames.bunny_dolly.cg.jsonl output/bunny_dolly_cg.gif 1024 1024 24
+examples/render.sh --cli --wireframe --mesh assets/meshes/bunny.obj \
+  examples/frames.bunny_dolly.cv.jsonl output/bunny_dolly_cv.gif 1024 1024 24
+```
+
+The CV `K` is in **pixel** units, so the CV stream is authored for a specific
+square resolution (`--width`/`--height`, default 1024²) and must be rendered at
+that resolution to match the CG stream.
 
 #### The render pipeline
 

@@ -598,6 +598,12 @@ impl BatchRenderer {
         self.renderer.set_show_aabb(show);
     }
 
+    /// Enables/disables the coordinate-axes overlay gizmo (see
+    /// [`MeshRenderer::set_show_axes`]).
+    pub fn set_show_axes(&mut self, show: bool) {
+        self.renderer.set_show_axes(show);
+    }
+
     /// Renders `params` with the given per-frame instance `draws` and returns
     /// tightly-packed row-major RGBA bytes (`width*height*4`).
     pub fn render(&mut self, params: FrameParams, draws: &[Draw]) -> Result<Vec<u8>, StreamError> {
@@ -769,6 +775,7 @@ pub fn run_stream<R: Read, W: Write>(
     height: u32,
     mode: RenderMode,
     show_aabb: bool,
+    show_axes: bool,
 ) -> Result<(), StreamError> {
     // Validate dimensions up front so schema construction (which multiplies
     // width*height) can't overflow before BatchRenderer's guard runs.
@@ -784,6 +791,7 @@ pub fn run_stream<R: Read, W: Write>(
         let mut renderer = BatchRenderer::with_meshes(width, height, &meshes)?;
         renderer.set_mode(mode);
         renderer.set_show_aabb(show_aabb);
+        renderer.set_show_axes(show_axes);
         let params = StreamReader::try_new(first.get_mut(), None)?;
         check_version(params.schema().as_ref())?;
         let frame_rate = frame_rate_from_metadata(params.schema().metadata());
@@ -793,6 +801,7 @@ pub fn run_stream<R: Read, W: Write>(
         let mut renderer = BatchRenderer::new(width, height)?;
         renderer.set_mode(mode);
         renderer.set_show_aabb(show_aabb);
+        renderer.set_show_axes(show_axes);
         let frame_rate = frame_rate_from_metadata(first.schema().metadata());
         render_params(first, renderer, frame_rate, width, height, output)
     }
@@ -1263,6 +1272,7 @@ mod tests {
             h,
             RenderMode::Filled,
             false,
+            false,
         )
         .unwrap();
 
@@ -1456,6 +1466,7 @@ mod tests {
             w,
             h,
             RenderMode::Filled,
+            false,
             false,
         )
         .unwrap();
