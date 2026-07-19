@@ -27,6 +27,19 @@ Platform-agnostic wgpu logic, shared verbatim by every target:
   params)` draws one parametric triangle (`FrameParams` = `center`, `size`,
   `theta`) into *any* `wgpu::TextureView`. That one function is why the same code
   targets an offscreen texture, a window swapchain, or a browser canvas.
+- **`DrawableObject` + `Scene` (`render.rs`)** — the base interface for every
+  primitive the renderer can draw (#41). `DrawableObject` is a small `Copy` enum —
+  `Mesh { mesh_id, model, mode }` (filled or **wireframe** mode), `AabbBox {
+  mesh_id, model }`, and `CoordinateAxes { model }` — where geometry (GPU buffers)
+  is owned once by the renderer's decode-once mesh store and each variant carries
+  only *which* primitive to draw plus its per-frame model. A `Scene = Vec<
+  DrawableObject>` is rebuilt each frame; `MeshRenderer::encode` walks it once,
+  binds the shared `P·V·M` uniform, buckets the drawables (filled meshes → wireframe
+  meshes → AABB boxes → axes) into one instance buffer, and records the draws — with
+  **no per-type branching** in any front-end. A single-object frame is the
+  degenerate one-element scene, so there is no special case. Wireframe is a *mode*
+  of the mesh drawable, not a separate primitive; the AABB box and axes gizmo are
+  core-side additions to the scene (not wire columns).
 - **`stream.rs`** — the native Arrow IPC filter: `read_frame_stream` decodes the
   input frames; `run_stream` is the CLI filter. Only one record batch is ever in
   flight, so an animation of any length streams in constant memory.

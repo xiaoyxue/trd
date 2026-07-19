@@ -21,6 +21,16 @@ Guidance for agents working in this repository.
   `.cargo/config.toml`.
 - **Vertical slicing.** Each increment threads the whole stack and is
   independently end-to-end verifiable.
+- **Everything the renderer draws is a `DrawableObject`** (`render.rs`, #41): a
+  small `Copy` enum (`Mesh { mesh_id, model, mode }` | `AabbBox { mesh_id, model }`
+  | `CoordinateAxes { model }`) — the single base interface for every primitive.
+  The renderer owns geometry once (decode-once mesh store + shared gizmo buffers);
+  a drawable is just a light handle naming *which* primitive + its per-frame model.
+  `MeshRenderer::encode` always walks a `Scene` (`= Vec<DrawableObject>`, rebuilt
+  per frame) with **no per-type branching**; a single-object frame is the
+  degenerate one-element scene. Add a new primitive by adding an enum variant, not
+  by bolting flags onto the renderer. Wireframe is a *mode* of `Mesh`, not a
+  separate variant.
 - Major input data is columnar (Apache Arrow tables) with simple glue logic.
 
 ## Toolchain

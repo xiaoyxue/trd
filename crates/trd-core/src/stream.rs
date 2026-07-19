@@ -25,7 +25,9 @@ use crate::math::Matrix4;
 use crate::protocol::{
     frame_rate_from_metadata, PROTOCOL_VERSION, PROTOCOL_VERSION_KEY, SUPPORTED_INPUT_VERSIONS,
 };
-use crate::render::{CameraFormError, Draw, FrameParams, Mesh, MeshRenderer, RenderMode};
+use crate::render::{
+    CameraFormError, Draw, DrawableObject, FrameParams, Mesh, MeshRenderer, RenderMode,
+};
 use crate::OutputSession;
 
 /// Errors from decoding, validating, rendering, or encoding a trd stream.
@@ -469,6 +471,13 @@ pub struct BatchRenderer {
     width: u32,
     height: u32,
     padded_bytes_per_row: u32,
+    /// Render mode (filled/wireframe) applied to every mesh drawable this
+    /// renderer builds into its per-frame [`Scene`](crate::Scene).
+    mode: RenderMode,
+    /// Whether to add a [`DrawableObject::AabbBox`] gizmo per drawn instance.
+    show_aabb: bool,
+    /// Whether to add a single origin [`DrawableObject::CoordinateAxes`] gizmo.
+    show_axes: bool,
 }
 
 impl BatchRenderer {
@@ -579,6 +588,9 @@ impl BatchRenderer {
             width,
             height,
             padded_bytes_per_row,
+            mode: RenderMode::Filled,
+            show_aabb: false,
+            show_axes: false,
         })
     }
 
@@ -589,19 +601,26 @@ impl BatchRenderer {
 
     /// Sets the [`RenderMode`] (filled or wireframe) applied to later `render`s.
     pub fn set_mode(&mut self, mode: RenderMode) {
-        self.renderer.set_mode(mode);
+        self.mode = mode;
     }
 
-    /// Enables/disables the per-instance AABB overlay box (see
-    /// [`MeshRenderer::set_show_aabb`]).
+    /// Enables/disables the per-instance AABB overlay box: when on, each drawn
+    /// instance also contributes a [`DrawableObject::AabbBox`] to the scene.
     pub fn set_show_aabb(&mut self, show: bool) {
-        self.renderer.set_show_aabb(show);
+        self.show_aabb = show;
     }
 
-    /// Enables/disables the coordinate-axes overlay gizmo (see
-    /// [`MeshRenderer::set_show_axes`]).
+    /// Enables/disables the origin coordinate-axes overlay gizmo: when on, the
+    /// scene gains a single [`DrawableObject::CoordinateAxes`] at the world
+    /// origin.
     pub fn set_show_axes(&mut self, show: bool) {
-        self.renderer.set_show_axes(show);
+        self.show_axes = show;
+    }
+
+    /// Builds the per-frame [`Scene`](crate::Scene) from a wire `draws` list and
+    /// this renderer's mode/overlay flags (delegates to [`build_scene`]).
+    fn build_scene(&self, draws: &[Draw]) -> Vec<DrawableObject> {
+        build_scene(draws, self.mode, self.show_aabb, self.show_axes)
     }
 
     /// Renders `params` with the given per-frame instance `draws` and returns
@@ -615,6 +634,7 @@ impl BatchRenderer {
         params: FrameParams,
         draws: &[Draw],
     ) -> Result<Vec<u8>, StreamError> {
+        let scene = self.build_scene(draws);
         let view = self
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -629,7 +649,7 @@ impl BatchRenderer {
             &mut encoder,
             &view,
             params,
-            draws,
+            &scene,
             crate::render::Viewport {
                 width: self.width,
                 height: self.height,
@@ -677,6 +697,43 @@ impl BatchRenderer {
         self.staging.unmap();
         Ok(pixels)
     }
+}
+
+/// Builds a per-frame [`Scene`](crate::Scene) from a wire `draws` list plus the
+/// render `mode` and overlay flags. Each draw becomes one
+/// [`DrawableObject::Mesh`] in `mode`; with `show_aabb`, each also emits a
+/// tracking [`DrawableObject::AabbBox`]; with `show_axes`, one origin
+/// [`DrawableObject::CoordinateAxes`] is appended. The order (all meshes, then
+/// all boxes, then axes) matches the renderer's draw buckets so output is
+/// pixel-identical to the pre-scene, flag-driven path.
+fn build_scene(
+    draws: &[Draw],
+    mode: RenderMode,
+    show_aabb: bool,
+    show_axes: bool,
+) -> Vec<DrawableObject> {
+    let mut scene = Vec::with_capacity(draws.len() * (1 + usize::from(show_aabb)) + 1);
+    for draw in draws {
+        scene.push(DrawableObject::Mesh {
+            mesh_id: draw.mesh_id,
+            model: draw.model,
+            mode,
+        });
+    }
+    if show_aabb {
+        for draw in draws {
+            scene.push(DrawableObject::AabbBox {
+                mesh_id: draw.mesh_id,
+                model: draw.model,
+            });
+        }
+    }
+    if show_axes {
+        scene.push(DrawableObject::CoordinateAxes {
+            model: Matrix4::IDENTITY.to_cols_array(),
+        });
+    }
+    scene
 }
 
 /// True if `schema` is a **mesh table** (has a `position` column) — used to tell
@@ -1096,6 +1153,87 @@ mod tests {
             decode_draws(&with_mesh_only),
             Err(StreamError::MissingColumn("draw_model"))
         ));
+    }
+
+    #[test]
+    fn build_scene_maps_draws_and_overlays_in_bucket_order() {
+        // #41: the draw list + mode/overlay flags become an ordered `Scene` of
+        // `DrawableObject`s — one Mesh per draw (in `mode`), then one AabbBox per
+        // draw when enabled, then a single origin CoordinateAxes when enabled.
+        let a = [1.0f32; 16];
+        let b = [2.0f32; 16];
+        let draws = [
+            Draw {
+                mesh_id: 0,
+                model: a,
+            },
+            Draw {
+                mesh_id: 1,
+                model: b,
+            },
+        ];
+
+        // Plain filled: exactly one Mesh drawable per draw, no gizmos.
+        assert_eq!(
+            build_scene(&draws, RenderMode::Filled, false, false),
+            vec![
+                DrawableObject::Mesh {
+                    mesh_id: 0,
+                    model: a,
+                    mode: RenderMode::Filled,
+                },
+                DrawableObject::Mesh {
+                    mesh_id: 1,
+                    model: b,
+                    mode: RenderMode::Filled,
+                },
+            ]
+        );
+
+        // Wireframe propagates the mode to every mesh drawable.
+        assert_eq!(
+            build_scene(&draws, RenderMode::Wireframe, false, false),
+            vec![
+                DrawableObject::Mesh {
+                    mesh_id: 0,
+                    model: a,
+                    mode: RenderMode::Wireframe,
+                },
+                DrawableObject::Mesh {
+                    mesh_id: 1,
+                    model: b,
+                    mode: RenderMode::Wireframe,
+                },
+            ]
+        );
+
+        // Both overlays: meshes, then a tracking box per draw, then one gizmo.
+        assert_eq!(
+            build_scene(&draws, RenderMode::Filled, true, true),
+            vec![
+                DrawableObject::Mesh {
+                    mesh_id: 0,
+                    model: a,
+                    mode: RenderMode::Filled,
+                },
+                DrawableObject::Mesh {
+                    mesh_id: 1,
+                    model: b,
+                    mode: RenderMode::Filled,
+                },
+                DrawableObject::AabbBox {
+                    mesh_id: 0,
+                    model: a,
+                },
+                DrawableObject::AabbBox {
+                    mesh_id: 1,
+                    model: b,
+                },
+                DrawableObject::CoordinateAxes {
+                    model: Matrix4::IDENTITY.to_cols_array(),
+                },
+            ]
+        );
     }
 
     #[test]
