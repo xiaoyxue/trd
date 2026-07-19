@@ -35,12 +35,14 @@
 #
 # Dolly-camera capstone (#49): examples/bunny_dolly.py authors the same 45°
 # bird's-eye *dolly* camera twice — CG (eye/target/fovy) and CV (K + pose) — as
-# two JSONL streams that render identically (verified to <0.01% pixels). Render
-# each with --wireframe --mesh assets/meshes/bunny.obj and compare:
-#   python examples/bunny_dolly.py
-#   examples/render.sh --cli --wireframe --mesh assets/meshes/bunny.obj \
+# two JSONL streams that render identically (verified to <0.01% pixels).
+# render.sh runs this producer automatically: pass frames.bunny_dolly.cg.jsonl
+# (or .cv.jsonl) as INPUT and, if it is missing, it is generated on the fly — no
+# manual pre-step. Render with --wireframe --aabb --axes --mesh assets/meshes/
+# bunny.obj and compare the two forms:
+#   examples/render.sh --cli --wireframe --aabb --axes --mesh assets/meshes/bunny.obj \
 #     examples/frames.bunny_dolly.cg.jsonl output/bunny_dolly_cg.gif 1024 1024 24
-#   examples/render.sh --cli --wireframe --mesh assets/meshes/bunny.obj \
+#   examples/render.sh --cli --wireframe --aabb --axes --mesh assets/meshes/bunny.obj \
 #     examples/frames.bunny_dolly.cv.jsonl output/bunny_dolly_cv.gif 1024 1024 24
 # With --web (alias --wasm) it builds the browser (wasm) bundle via nix and serves
 # it, printing the URLs and an SSH-tunnel command. The web demo generates its own
@@ -91,7 +93,7 @@ Examples:
     --mesh assets/meshes/bunny.obj --mesh examples/cube.obj \
     examples/frames.multimesh.jsonl output/scene.gif 1024 1024 24
   examples/render.sh --cli --wireframe --axes --aabb --mesh assets/meshes/bunny.obj \
-    examples/frames.bunny_dolly.cg.jsonl output/bunny_dolly.gif 1024 1024 24  # dolly capstone (#49)
+    examples/frames.bunny_dolly.cg.jsonl output/bunny_dolly.gif 1024 1024 24  # dolly capstone (#49; auto-generates the frames)
   examples/render.sh --web                                   # build + serve the wasm demo
 
 Run from `nix develop`. On WSL, prefix with WGPU_BACKEND=gl for GPU rendering.
@@ -160,6 +162,28 @@ height="${4:-256}"
 fps="${5:-30}"
 # DuckDB SQL string literals escape a single quote by doubling it.
 sql_input=${input//\'/\'\'}
+
+# examples/bunny_dolly.py authors the 45° bird's-eye *dolly* camera capstone (#49)
+# as two JSONL streams — CG (eye/target/fovy) and CV (K + pose) — that render
+# identically. If the requested INPUT is one of its outputs
+# (frames.bunny_dolly.{cg,cv}.jsonl) and it is not present yet, generate it now
+# via the (pure-stdlib) producer so the demo renders without a manual pre-step.
+case "$input" in
+  *frames.bunny_dolly.cg.jsonl|*frames.bunny_dolly.cv.jsonl)
+    if [ ! -f "$input" ]; then
+      prefix=${input%.cg.jsonl}; prefix=${prefix%.cv.jsonl}
+      echo "generating dolly frames via examples/bunny_dolly.py (--out-prefix $prefix)…" >&2
+      if command -v python3 >/dev/null 2>&1; then
+        python3 "$root/examples/bunny_dolly.py" --out-prefix "$prefix" >&2
+      elif command -v uv >/dev/null 2>&1; then
+        uv run --python 3.12 "$root/examples/bunny_dolly.py" --out-prefix "$prefix" >&2
+      else
+        echo "error: need python3 (or uv) to run examples/bunny_dolly.py" >&2
+        exit 1
+      fi
+    fi
+    ;;
+esac
 
 # The web path builds/serves via nix; native needs only cargo; the GIF path also
 # needs ffmpeg (and uv for encoding).
