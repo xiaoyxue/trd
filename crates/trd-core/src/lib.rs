@@ -24,7 +24,8 @@ pub use protocol::{
 };
 pub use render::{
     create_mesh_pipeline, create_triangle_pipeline, render_triangle, CameraFormError, Draw,
-    FrameParams, Mesh, MeshRenderer, RenderMode, TriangleRenderer, Vertex, Viewport,
+    DrawableObject, FrameParams, Mesh, MeshRenderer, RenderMode, Scene, TriangleRenderer, Vertex,
+    Viewport,
 };
 
 #[cfg(not(target_arch = "wasm32"))]

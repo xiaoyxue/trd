@@ -40,6 +40,10 @@ pub(crate) const AXES_COLORS: [[f32; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0],
 /// visible just outside the silhouette.
 pub(crate) const AXES_LENGTH: f32 = 1.5;
 
+/// Number of `LineList` vertices in the coordinate-axes gizmo (three lines →
+/// six vertices), drawn non-indexed. See [`axes_vertices`].
+pub(crate) const AXES_VERTEX_COUNT: u32 = 6;
+
 /// The six vertices of the coordinate-axes gizmo as a `LineList`: three lines
 /// from the world origin along +X, +Y, +Z, each colored per [`AXES_COLORS`].
 /// Drawn non-indexed (`draw(0..6, ..)`) under the camera `P·V` with an identity
@@ -773,14 +777,55 @@ pub enum RenderMode {
     Wireframe,
 }
 
-/// A single instance placement in a frame's draw list: which mesh to draw
-/// (index into the renderer's mesh list) and the per-instance model matrix
-/// (column-major), applied beneath that mesh's base (preview) model.
+/// A single instance placement decoded from a frame's protocol draw list
+/// (`draw_mesh` / `draw_model`): which mesh to draw (index into the leading mesh
+/// table) and the per-instance model matrix (column-major), applied beneath that
+/// mesh's base (preview) model. This is the *wire* representation; the renderer
+/// composes it (plus core gizmos) into a [`Scene`] of [`DrawableObject`]s.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Draw {
     pub mesh_id: u32,
     pub model: [f32; 16],
 }
+
+/// The base interface for every primitive the renderer can draw (#41). A
+/// `DrawableObject` is a light, `Copy` handle: geometry (GPU buffers) is owned
+/// once by the renderer's decode-once store (meshes keyed by id, plus the shared
+/// gizmo geometry), and each variant carries only *which* primitive to draw and
+/// its per-frame model. The renderer and [`Scene`] only ever see
+/// `DrawableObject`s and never special-case a concrete primitive type.
+///
+/// Wireframe is a render *mode* of the [`DrawableObject::Mesh`] primitive (not a
+/// separate variant); the coordinate axes and the AABB box are genuinely
+/// distinct line-topology primitives.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DrawableObject {
+    /// A decoded mesh (id = row index in the leading mesh table) placed by
+    /// `model` and drawn in `mode` (filled or wireframe). `model` is the
+    /// per-frame draw model; the renderer pre-multiplies the mesh's base
+    /// (preview) model beneath it (`effective = model · base`).
+    Mesh {
+        mesh_id: u32,
+        model: [f32; 16],
+        mode: RenderMode,
+    },
+    /// The axis-aligned bounding-box wireframe of mesh `mesh_id` (#42), placed by
+    /// the same `model` as the mesh instance it boxes (the renderer applies that
+    /// mesh's base model beneath `model` too), so the box tracks the mesh
+    /// exactly. Reuses the mesh's precomputed corner geometry.
+    AabbBox { mesh_id: u32, model: [f32; 16] },
+    /// The world-orientation coordinate gizmo (#42): three lines from the origin
+    /// along +X/+Y/+Z, colored red/green/blue. Placed by `model` (identity marks
+    /// the world origin); not tied to any mesh, so no base model is applied.
+    CoordinateAxes { model: [f32; 16] },
+}
+
+/// A frame's ordered list of [`DrawableObject`]s the renderer walks and encodes
+/// under the one shared camera `P·V` uniform. The wire authors the mesh draws
+/// (the protocol 0.0.3 draw list); the core adds gizmo drawables (axes, AABB
+/// boxes). A single-mesh frame is the degenerate one-element scene — the
+/// renderer always iterates a `Scene`, with no single-object special case.
+pub type Scene = Vec<DrawableObject>;
 
 /// A mesh uploaded to the GPU: its vertex buffer, the filled **triangle** index
 /// buffer, the deduped **edge** (`LineList`) index buffer for wireframe (#38),
@@ -870,30 +915,67 @@ fn create_instance_buffer(device: &wgpu::Device, capacity: u32) -> wgpu::Buffer 
     })
 }
 
+/// Which geometry a [`DrawCommand`] binds. The `usize` is a mesh id (index into
+/// [`MeshRenderer::meshes`]); `Axes` uses the renderer's shared gizmo geometry.
+enum DrawKind {
+    /// Filled triangles of a mesh (its triangle index buffer + filled pipeline).
+    Filled(usize),
+    /// Edge lines of a mesh (its deduped edge index buffer + line pipeline).
+    Wireframe(usize),
+    /// A mesh's AABB box (its precomputed corner geometry + line pipeline).
+    Aabb(usize),
+    /// The coordinate-axes gizmo (shared vertex buffer, non-indexed line draw).
+    Axes,
+}
+
+/// One instanced draw recorded while walking a [`Scene`]: the geometry to bind
+/// ([`DrawKind`]) and the contiguous instance-buffer range to draw it over.
+struct DrawCommand {
+    kind: DrawKind,
+    start: u32,
+    count: u32,
+}
+
+/// Appends `bucket`'s instance models to `instances` and, when non-empty,
+/// records a [`DrawCommand`] over the appended range. Grouping same-geometry
+/// instances into one range preserves GPU instancing.
+fn push_command(
+    instances: &mut Vec<InstanceRaw>,
+    commands: &mut Vec<DrawCommand>,
+    kind: DrawKind,
+    bucket: &[InstanceRaw],
+) {
+    if bucket.is_empty() {
+        return;
+    }
+    let start = instances.len() as u32;
+    instances.extend_from_slice(bucket);
+    commands.push(DrawCommand {
+        kind,
+        start,
+        count: bucket.len() as u32,
+    });
+}
+
 /// Persistent indexed mesh renderer. Owns a filled (`TriangleList`) and a
 /// wireframe (`LineList`) pipeline sharing one bind-group layout, a camera
-/// (`P·V`) uniform buffer + bind group, a set of GPU meshes (each with a
-/// base/preview model + triangle and edge index buffers), and a growable
-/// per-instance model-matrix buffer. Each `encode` draws a frame's
-/// variable-length instance list in the active [`RenderMode`], grouped by mesh
-/// so every mesh's index buffer is drawn once over a contiguous instance range.
+/// (`P·V`) uniform buffer + bind group, a decode-once store of GPU meshes (each
+/// with a base/preview model + triangle, edge and AABB-box index buffers), the
+/// shared coordinate-axes gizmo geometry, and a growable per-instance
+/// model-matrix buffer. Each [`MeshRenderer::encode`] draws a frame's
+/// [`Scene`] — an ordered list of [`DrawableObject`]s — grouping instances by
+/// geometry so each buffer is drawn once over a contiguous instance range. The
+/// renderer holds no mode/overlay state: what to draw is entirely the scene.
 pub struct MeshRenderer {
     pipeline: wgpu::RenderPipeline,
     wireframe_pipeline: wgpu::RenderPipeline,
-    mode: RenderMode,
-    /// When set, each drawn instance's mesh AABB is overlaid as a colored
-    /// wireframe box (see [`MeshRenderer::set_show_aabb`]).
-    show_aabb: bool,
-    /// When set, a coordinate-axes gizmo (X/Y/Z = red/green/blue) is overlaid
-    /// at the world origin (see [`MeshRenderer::set_show_axes`]).
-    show_axes: bool,
     uniform: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     meshes: Vec<MeshGpu>,
-    /// The coordinate-axes gizmo geometry (six `LineList` vertices) and its
-    /// single identity per-instance model, drawn when `show_axes` is set.
+    /// The coordinate-axes gizmo geometry (six `LineList` vertices); each
+    /// [`DrawableObject::CoordinateAxes`] draws it under its own model, supplied
+    /// through the shared instance buffer.
     axes_vertex_buffer: wgpu::Buffer,
-    axes_instance_buffer: wgpu::Buffer,
     instance_buffer: wgpu::Buffer,
     instance_capacity: u32,
     /// Retained so `encode` can grow the instance buffer on demand without the
@@ -923,7 +1005,7 @@ impl MeshRenderer {
     }
 
     /// Builds a renderer over several meshes, each with its own base (preview)
-    /// model. Per-frame [`Draw`]s reference these meshes by index.
+    /// model. A frame's [`Scene`] references these meshes by id (row index).
     ///
     /// Panics if `meshes` is empty or `meshes`/`base_models` differ in length.
     pub fn with_meshes(
@@ -983,76 +1065,47 @@ impl MeshRenderer {
         let instance_capacity = (meshes.len() as u32).max(1);
         let instance_buffer = create_instance_buffer(device, instance_capacity);
 
-        // Coordinate-axes gizmo: six LineList vertices at the world origin and a
-        // single identity instance model (the gizmo marks the world frame, so it
-        // is not tied to any mesh's per-instance placement).
+        // Coordinate-axes gizmo: six LineList vertices at the world origin. Each
+        // CoordinateAxes drawable draws them under its own model, supplied via
+        // the shared instance buffer (so the gizmo is not tied to a fixed model).
         let axes_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("trd axes vertex buffer"),
             contents: bytemuck::cast_slice(&axes_vertices()),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let axes_instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("trd axes instance buffer"),
-            contents: bytemuck::cast_slice(&[InstanceRaw {
-                model: Matrix4::IDENTITY.to_cols_array(),
-            }]),
             usage: wgpu::BufferUsages::VERTEX,
         });
 
         Self {
             pipeline,
             wireframe_pipeline,
-            mode: RenderMode::default(),
-            show_aabb: false,
-            show_axes: false,
             uniform,
             bind_group,
             meshes: gpu_meshes,
             axes_vertex_buffer,
-            axes_instance_buffer,
             instance_buffer,
             instance_capacity,
             device: device.clone(),
         }
     }
 
-    /// Sets the [`RenderMode`] (filled or wireframe) applied by later `encode`s.
-    pub fn set_mode(&mut self, mode: RenderMode) {
-        self.mode = mode;
-    }
-
-    /// The current [`RenderMode`].
-    pub fn mode(&self) -> RenderMode {
-        self.mode
-    }
-
-    /// Enables/disables the AABB overlay (#42): when set, every drawn instance's
-    /// mesh axis-aligned bounding box is drawn as an [`AABB_COLOR`] wireframe box
-    /// (via the `LineList` pipeline, regardless of the active [`RenderMode`]),
-    /// beneath the same per-instance model so the box tracks the mesh exactly.
-    pub fn set_show_aabb(&mut self, show: bool) {
-        self.show_aabb = show;
-    }
-
-    /// Enables/disables the coordinate-axes overlay (#42): when set, a gizmo of
-    /// three `LineList` axes (X = red, Y = green, Z = blue; see [`AXES_COLORS`])
-    /// of length [`AXES_LENGTH`] is drawn from the world origin under the camera
-    /// `P·V` (identity model), regardless of the active [`RenderMode`], marking
-    /// the world coordinate frame. Drawn after the meshes so it stays visible.
-    pub fn set_show_axes(&mut self, show: bool) {
-        self.show_axes = show;
-    }
-
-    /// The number of meshes this renderer can draw; valid [`Draw::mesh_id`]s are
-    /// in `0..mesh_count()`.
+    /// The number of meshes this renderer can draw; valid mesh ids in a
+    /// [`DrawableObject::Mesh`]/[`DrawableObject::AabbBox`] are in
+    /// `0..mesh_count()`.
     pub fn mesh_count(&self) -> usize {
         self.meshes.len()
     }
 
-    /// Encodes one frame's instance list. `viewport` gives the target's pixel
+    /// Encodes one frame's [`Scene`] — an ordered list of [`DrawableObject`]s —
+    /// under the shared camera `P·V` uniform. `viewport` gives the target's pixel
     /// dimensions, used to project camera intrinsics (`FrameParams::k`).
-    /// Instances are grouped by [`Draw::mesh_id`]; each draw's per-frame model
-    /// is pre-multiplied over its mesh's base model (`effective = model · base`).
+    ///
+    /// Instances are grouped by geometry so each buffer is drawn once over a
+    /// contiguous instance range: [`DrawableObject::Mesh`] by `(mesh_id, mode)`
+    /// (its model pre-multiplied over the mesh base model, `effective = model ·
+    /// base`), [`DrawableObject::AabbBox`] by `mesh_id` (same `model · base` as
+    /// the mesh it boxes), and [`DrawableObject::CoordinateAxes`] under its own
+    /// model. Gizmo overlays (AABB boxes, axes) are composited after all mesh
+    /// geometry so they stay visible (this path has no depth buffer).
+    ///
     /// Out-of-range `mesh_id`s are skipped (callers should validate first).
     pub fn encode(
         &mut self,
@@ -1060,35 +1113,83 @@ impl MeshRenderer {
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
         params: FrameParams,
-        draws: &[Draw],
+        scene: &[DrawableObject],
         viewport: Viewport,
     ) {
         write_view_proj(queue, &self.uniform, params, viewport);
 
-        // Bucket instances by mesh so each index buffer is drawn once over a
-        // contiguous instance range.
-        let mut per_mesh: Vec<Vec<InstanceRaw>> = vec![Vec::new(); self.meshes.len()];
-        for draw in draws {
-            let Some(bucket) = per_mesh.get_mut(draw.mesh_id as usize) else {
-                continue;
-            };
-            let base = self.meshes[draw.mesh_id as usize].base_model;
-            let effective = Matrix4::from_cols_array(&draw.model) * base;
-            bucket.push(InstanceRaw {
-                model: effective.to_cols_array(),
-            });
+        // Walk the scene once, bucketing each drawable's instance model by the
+        // geometry it draws so same-geometry instances share one draw call.
+        let mesh_count = self.meshes.len();
+        let mut filled: Vec<Vec<InstanceRaw>> = vec![Vec::new(); mesh_count];
+        let mut wireframe: Vec<Vec<InstanceRaw>> = vec![Vec::new(); mesh_count];
+        let mut aabb: Vec<Vec<InstanceRaw>> = vec![Vec::new(); mesh_count];
+        let mut axes: Vec<InstanceRaw> = Vec::new();
+
+        for object in scene {
+            match *object {
+                DrawableObject::Mesh {
+                    mesh_id,
+                    model,
+                    mode,
+                } => {
+                    let Some(mesh) = self.meshes.get(mesh_id as usize) else {
+                        continue;
+                    };
+                    let effective = Matrix4::from_cols_array(&model) * mesh.base_model;
+                    let instance = InstanceRaw {
+                        model: effective.to_cols_array(),
+                    };
+                    match mode {
+                        RenderMode::Filled => filled[mesh_id as usize].push(instance),
+                        RenderMode::Wireframe => wireframe[mesh_id as usize].push(instance),
+                    }
+                }
+                DrawableObject::AabbBox { mesh_id, model } => {
+                    let Some(mesh) = self.meshes.get(mesh_id as usize) else {
+                        continue;
+                    };
+                    let effective = Matrix4::from_cols_array(&model) * mesh.base_model;
+                    aabb[mesh_id as usize].push(InstanceRaw {
+                        model: effective.to_cols_array(),
+                    });
+                }
+                DrawableObject::CoordinateAxes { model } => {
+                    axes.push(InstanceRaw { model });
+                }
+            }
         }
 
-        let mut instances: Vec<InstanceRaw> = Vec::with_capacity(draws.len());
-        let mut ranges: Vec<(usize, u32, u32)> = Vec::new();
-        for (mesh_id, bucket) in per_mesh.iter().enumerate() {
-            if bucket.is_empty() {
-                continue;
-            }
-            let start = instances.len() as u32;
-            instances.extend_from_slice(bucket);
-            ranges.push((mesh_id, start, bucket.len() as u32));
+        // Flatten every instance model into one buffer, recording a draw command
+        // per non-empty group. Order = filled meshes, wireframe meshes, then the
+        // gizmo overlays (AABB boxes, then axes) on top.
+        let mut instances: Vec<InstanceRaw> = Vec::with_capacity(scene.len());
+        let mut commands: Vec<DrawCommand> = Vec::new();
+        for (mesh_id, bucket) in filled.iter().enumerate() {
+            push_command(
+                &mut instances,
+                &mut commands,
+                DrawKind::Filled(mesh_id),
+                bucket,
+            );
         }
+        for (mesh_id, bucket) in wireframe.iter().enumerate() {
+            push_command(
+                &mut instances,
+                &mut commands,
+                DrawKind::Wireframe(mesh_id),
+                bucket,
+            );
+        }
+        for (mesh_id, bucket) in aabb.iter().enumerate() {
+            push_command(
+                &mut instances,
+                &mut commands,
+                DrawKind::Aabb(mesh_id),
+                bucket,
+            );
+        }
+        push_command(&mut instances, &mut commands, DrawKind::Axes, &axes);
 
         if instances.len() as u32 > self.instance_capacity {
             self.instance_capacity = (instances.len() as u32).next_power_of_two();
@@ -1114,48 +1215,41 @@ impl MeshRenderer {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        let pipeline = match self.mode {
-            RenderMode::Filled => &self.pipeline,
-            RenderMode::Wireframe => &self.wireframe_pipeline,
-        };
-        pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
-        for &(mesh_id, start, count) in &ranges {
-            let mesh = &self.meshes[mesh_id];
-            let (index_buffer, index_count) = match self.mode {
-                RenderMode::Filled => (&mesh.index_buffer, mesh.index_count),
-                RenderMode::Wireframe => (&mesh.edge_buffer, mesh.edge_count),
-            };
-            pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-            pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..index_count, 0, start..start + count);
-        }
-
-        // AABB overlay: redraw each mesh's bounding box as colored lines over the
-        // same instance ranges (reusing the instance buffer bound at slot 1), so
-        // the box tracks the mesh through its per-instance model. Always uses the
-        // LineList pipeline, independent of the active RenderMode. Drawn after the
-        // meshes so the box (no depth buffer in this path) stays visible on top.
-        if self.show_aabb {
-            pass.set_pipeline(&self.wireframe_pipeline);
-            for &(mesh_id, start, count) in &ranges {
-                let mesh = &self.meshes[mesh_id];
-                pass.set_vertex_buffer(0, mesh.aabb_vertex_buffer.slice(..));
-                pass.set_index_buffer(mesh.aabb_edge_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..mesh.aabb_edge_count, 0, start..start + count);
+        for command in &commands {
+            let range = command.start..command.start + command.count;
+            match command.kind {
+                DrawKind::Filled(mesh_id) => {
+                    let mesh = &self.meshes[mesh_id];
+                    pass.set_pipeline(&self.pipeline);
+                    pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                    pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..mesh.index_count, 0, range);
+                }
+                DrawKind::Wireframe(mesh_id) => {
+                    let mesh = &self.meshes[mesh_id];
+                    pass.set_pipeline(&self.wireframe_pipeline);
+                    pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                    pass.set_index_buffer(mesh.edge_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..mesh.edge_count, 0, range);
+                }
+                DrawKind::Aabb(mesh_id) => {
+                    let mesh = &self.meshes[mesh_id];
+                    pass.set_pipeline(&self.wireframe_pipeline);
+                    pass.set_vertex_buffer(0, mesh.aabb_vertex_buffer.slice(..));
+                    pass.set_index_buffer(
+                        mesh.aabb_edge_buffer.slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
+                    pass.draw_indexed(0..mesh.aabb_edge_count, 0, range);
+                }
+                DrawKind::Axes => {
+                    pass.set_pipeline(&self.wireframe_pipeline);
+                    pass.set_vertex_buffer(0, self.axes_vertex_buffer.slice(..));
+                    pass.draw(0..AXES_VERTEX_COUNT, range);
+                }
             }
-        }
-
-        // Coordinate-axes overlay: three colored lines from the world origin,
-        // drawn once under the camera P·V with an identity per-instance model
-        // (slot 1 rebound to the dedicated single-instance axes buffer). Always
-        // the LineList pipeline; drawn last so the gizmo stays visible on top.
-        if self.show_axes {
-            pass.set_pipeline(&self.wireframe_pipeline);
-            pass.set_vertex_buffer(0, self.axes_vertex_buffer.slice(..));
-            pass.set_vertex_buffer(1, self.axes_instance_buffer.slice(..));
-            pass.draw(0..6, 0..1);
         }
     }
 }
@@ -1665,9 +1759,10 @@ mod tests {
                 triangle.encode(queue, encoder, view, FrameParams::IDENTITY, width, height);
             },
         );
-        let draws = [Draw {
+        let scene = [DrawableObject::Mesh {
             mesh_id: 0,
             model: Matrix4::IDENTITY.to_cols_array(),
+            mode: RenderMode::Filled,
         }];
         let mesh_pixels = render_with_readback(
             &device,
@@ -1681,7 +1776,7 @@ mod tests {
                     encoder,
                     view,
                     FrameParams::IDENTITY,
-                    &draws,
+                    &scene,
                     Viewport { width, height },
                 );
             },
@@ -1700,9 +1795,10 @@ mod tests {
         let mut mesh = MeshRenderer::new(&device, format, &Mesh::hello_triangle());
 
         // One centered instance vs. two instances translated to opposite sides.
-        let single = [Draw {
+        let single = [DrawableObject::Mesh {
             mesh_id: 0,
             model: Matrix4::IDENTITY.to_cols_array(),
+            mode: RenderMode::Filled,
         }];
         let single_px = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
             mesh.encode(
@@ -1716,13 +1812,15 @@ mod tests {
         });
 
         let two = [
-            Draw {
+            DrawableObject::Mesh {
                 mesh_id: 0,
                 model: Matrix4::from_translation(Vector3::new(-0.4, 0.0, 0.0)).to_cols_array(),
+                mode: RenderMode::Filled,
             },
-            Draw {
+            DrawableObject::Mesh {
                 mesh_id: 0,
                 model: Matrix4::from_translation(Vector3::new(0.4, 0.0, 0.0)).to_cols_array(),
+                mode: RenderMode::Filled,
             },
         ];
         let two_px = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
@@ -1766,32 +1864,36 @@ mod tests {
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
         let (width, height) = (64, 64);
         let mut mesh = MeshRenderer::new(&device, format, &Mesh::hello_triangle());
-        let draws = [Draw {
+        let model = Matrix4::IDENTITY.to_cols_array();
+        let filled_scene = [DrawableObject::Mesh {
             mesh_id: 0,
-            model: Matrix4::IDENTITY.to_cols_array(),
+            model,
+            mode: RenderMode::Filled,
+        }];
+        let wire_scene = [DrawableObject::Mesh {
+            mesh_id: 0,
+            model,
+            mode: RenderMode::Wireframe,
         }];
 
-        assert_eq!(mesh.mode(), RenderMode::Filled);
         let filled = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
             mesh.encode(
                 q,
                 e,
                 v,
                 FrameParams::IDENTITY,
-                &draws,
+                &filled_scene,
                 Viewport { width, height },
             );
         });
 
-        mesh.set_mode(RenderMode::Wireframe);
-        assert_eq!(mesh.mode(), RenderMode::Wireframe);
         let wire = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
             mesh.encode(
                 q,
                 e,
                 v,
                 FrameParams::IDENTITY,
-                &draws,
+                &wire_scene,
                 Viewport { width, height },
             );
         });
@@ -1843,10 +1945,20 @@ mod tests {
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
         let (width, height) = (64, 64);
         let mut mesh = MeshRenderer::new(&device, format, &Mesh::hello_triangle());
-        let draws = [Draw {
+        let model = Matrix4::IDENTITY.to_cols_array();
+        let plain_scene = [DrawableObject::Mesh {
             mesh_id: 0,
-            model: Matrix4::IDENTITY.to_cols_array(),
+            model,
+            mode: RenderMode::Filled,
         }];
+        let box_scene = [
+            DrawableObject::Mesh {
+                mesh_id: 0,
+                model,
+                mode: RenderMode::Filled,
+            },
+            DrawableObject::AabbBox { mesh_id: 0, model },
+        ];
 
         let plain = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
             mesh.encode(
@@ -1854,19 +1966,18 @@ mod tests {
                 e,
                 v,
                 FrameParams::IDENTITY,
-                &draws,
+                &plain_scene,
                 Viewport { width, height },
             );
         });
 
-        mesh.set_show_aabb(true);
         let with_box = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
             mesh.encode(
                 q,
                 e,
                 v,
                 FrameParams::IDENTITY,
-                &draws,
+                &box_scene,
                 Viewport { width, height },
             );
         });
@@ -1902,10 +2013,22 @@ mod tests {
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
         let (width, height) = (64, 64);
         let mut mesh = MeshRenderer::new(&device, format, &Mesh::hello_triangle());
-        let draws = [Draw {
+        let model = Matrix4::IDENTITY.to_cols_array();
+        let plain_scene = [DrawableObject::Mesh {
             mesh_id: 0,
-            model: Matrix4::IDENTITY.to_cols_array(),
+            model,
+            mode: RenderMode::Filled,
         }];
+        let axes_scene = [
+            DrawableObject::Mesh {
+                mesh_id: 0,
+                model,
+                mode: RenderMode::Filled,
+            },
+            DrawableObject::CoordinateAxes {
+                model: Matrix4::IDENTITY.to_cols_array(),
+            },
+        ];
 
         let plain = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
             mesh.encode(
@@ -1913,19 +2036,18 @@ mod tests {
                 e,
                 v,
                 FrameParams::IDENTITY,
-                &draws,
+                &plain_scene,
                 Viewport { width, height },
             );
         });
 
-        mesh.set_show_axes(true);
         let with_axes = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
             mesh.encode(
                 q,
                 e,
                 v,
                 FrameParams::IDENTITY,
-                &draws,
+                &axes_scene,
                 Viewport { width, height },
             );
         });
@@ -1953,6 +2075,92 @@ mod tests {
         assert!(
             count(&with_axes, pure_green) > count(&plain, pure_green),
             "Y axis must add pure-green pixels"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn scene_composes_all_drawable_kinds_together() {
+        // #41: every primitive is a `DrawableObject`, and the renderer walks a
+        // single heterogeneous `Scene` with no per-type branching. A scene mixing
+        // a filled mesh, a wireframe mesh, an AABB box, and the axes gizmo must
+        // render all of them at once — the filled mesh alone lights fewer pixels
+        // than the full composed scene, and the green box + RGB axes appear.
+        let (device, queue) = pollster::block_on(test_device());
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let (width, height) = (64, 64);
+        let mut mesh = MeshRenderer::new(&device, format, &Mesh::hello_triangle());
+        let model = Matrix4::IDENTITY.to_cols_array();
+
+        let filled_only = [DrawableObject::Mesh {
+            mesh_id: 0,
+            model,
+            mode: RenderMode::Filled,
+        }];
+        let composed = [
+            DrawableObject::Mesh {
+                mesh_id: 0,
+                model,
+                mode: RenderMode::Filled,
+            },
+            DrawableObject::Mesh {
+                mesh_id: 0,
+                model,
+                mode: RenderMode::Wireframe,
+            },
+            DrawableObject::AabbBox { mesh_id: 0, model },
+            DrawableObject::CoordinateAxes {
+                model: Matrix4::IDENTITY.to_cols_array(),
+            },
+        ];
+
+        let filled_px = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
+            mesh.encode(
+                q,
+                e,
+                v,
+                FrameParams::IDENTITY,
+                &filled_only,
+                Viewport { width, height },
+            );
+        });
+        let composed_px =
+            render_with_readback(&device, &queue, format, width, height, |q, e, v| {
+                mesh.encode(
+                    q,
+                    e,
+                    v,
+                    FrameParams::IDENTITY,
+                    &composed,
+                    Viewport { width, height },
+                );
+            });
+
+        assert_ne!(
+            filled_px, composed_px,
+            "the composed scene must differ from the filled mesh alone"
+        );
+
+        // The AABB box (pure green) and the axes gizmo (pure red +X line) are
+        // both present only in the composed scene.
+        let count = |px: &[u8], pred: fn(u8, u8, u8) -> bool| -> usize {
+            (0..(width * height) as usize)
+                .filter(|i| {
+                    let b = i * 4;
+                    pred(px[b], px[b + 1], px[b + 2])
+                })
+                .count()
+        };
+        let pure_green = |r: u8, g: u8, b: u8| r == 0 && g > 0 && b == 0;
+        let pure_red = |r: u8, g: u8, b: u8| r > 0 && g == 0 && b == 0;
+        assert!(
+            count(&composed_px, pure_green) > 0,
+            "AABB box must light green pixels in the composed scene"
+        );
+        assert!(
+            count(&composed_px, pure_red) > count(&filled_px, pure_red),
+            "axes gizmo must add pure-red pixels in the composed scene"
         );
     }
 }
