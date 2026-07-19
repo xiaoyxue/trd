@@ -27,6 +27,53 @@ pub(crate) const AABB_EDGE_INDICES: [u32; 24] = [
     0, 4, 1, 5, 2, 6, 3, 7, // vertical edges
 ];
 
+/// RGB colors of the coordinate-axes overlay gizmo (#42): X = red, Y = green,
+/// Z = blue — the conventional right-handed axis coloring. See
+/// [`MeshRenderer::set_show_axes`].
+pub(crate) const AXES_COLORS: [[f32; 3]; 3] =
+    [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+
+/// World-space length of each coordinate axis in the overlay gizmo. The mesh
+/// preview transform ([`crate::Mesh::preview_transform`]) fits a mesh's largest
+/// extent to [`crate::mesh::DEFAULT_PREVIEW_TARGET`] world units (so a centered
+/// mesh spans about `[-1, 1]` on its largest axis); a length of `1.5` reaches
+/// from the world origin out past that half-extent, keeping the axis tips
+/// visible just outside the silhouette.
+pub(crate) const AXES_LENGTH: f32 = 1.5;
+
+/// The six vertices of the coordinate-axes gizmo as a `LineList`: three lines
+/// from the world origin along +X, +Y, +Z, each colored per [`AXES_COLORS`].
+/// Drawn non-indexed (`draw(0..6, ..)`) under the camera `P·V` with an identity
+/// per-instance model, so the gizmo marks the world origin/frame.
+pub(crate) const fn axes_vertices() -> [Vertex; 6] {
+    [
+        Vertex {
+            position: [0.0, 0.0, 0.0],
+            color: AXES_COLORS[0],
+        },
+        Vertex {
+            position: [AXES_LENGTH, 0.0, 0.0],
+            color: AXES_COLORS[0],
+        },
+        Vertex {
+            position: [0.0, 0.0, 0.0],
+            color: AXES_COLORS[1],
+        },
+        Vertex {
+            position: [0.0, AXES_LENGTH, 0.0],
+            color: AXES_COLORS[1],
+        },
+        Vertex {
+            position: [0.0, 0.0, 0.0],
+            color: AXES_COLORS[2],
+        },
+        Vertex {
+            position: [0.0, 0.0, AXES_LENGTH],
+            color: AXES_COLORS[2],
+        },
+    ]
+}
+
 /// Per-frame transform parameters for the triangle.
 ///
 /// The base triangle vertices `p_i` are transformed by the full MVP chain
@@ -838,9 +885,16 @@ pub struct MeshRenderer {
     /// When set, each drawn instance's mesh AABB is overlaid as a colored
     /// wireframe box (see [`MeshRenderer::set_show_aabb`]).
     show_aabb: bool,
+    /// When set, a coordinate-axes gizmo (X/Y/Z = red/green/blue) is overlaid
+    /// at the world origin (see [`MeshRenderer::set_show_axes`]).
+    show_axes: bool,
     uniform: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     meshes: Vec<MeshGpu>,
+    /// The coordinate-axes gizmo geometry (six `LineList` vertices) and its
+    /// single identity per-instance model, drawn when `show_axes` is set.
+    axes_vertex_buffer: wgpu::Buffer,
+    axes_instance_buffer: wgpu::Buffer,
     instance_buffer: wgpu::Buffer,
     instance_capacity: u32,
     /// Retained so `encode` can grow the instance buffer on demand without the
@@ -879,6 +933,8 @@ impl MeshRenderer {
         meshes: &[Mesh],
         base_models: &[Matrix4],
     ) -> Self {
+        use wgpu::util::DeviceExt;
+
         assert!(
             !meshes.is_empty(),
             "MeshRenderer requires at least one mesh"
@@ -928,14 +984,33 @@ impl MeshRenderer {
         let instance_capacity = (meshes.len() as u32).max(1);
         let instance_buffer = create_instance_buffer(device, instance_capacity);
 
+        // Coordinate-axes gizmo: six LineList vertices at the world origin and a
+        // single identity instance model (the gizmo marks the world frame, so it
+        // is not tied to any mesh's per-instance placement).
+        let axes_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("trd axes vertex buffer"),
+            contents: bytemuck::cast_slice(&axes_vertices()),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let axes_instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("trd axes instance buffer"),
+            contents: bytemuck::cast_slice(&[InstanceRaw {
+                model: Matrix4::IDENTITY.to_cols_array(),
+            }]),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
         Self {
             pipeline,
             wireframe_pipeline,
             mode: RenderMode::default(),
             show_aabb: false,
+            show_axes: false,
             uniform,
             bind_group,
             meshes: gpu_meshes,
+            axes_vertex_buffer,
+            axes_instance_buffer,
             instance_buffer,
             instance_capacity,
             device: device.clone(),
@@ -958,6 +1033,15 @@ impl MeshRenderer {
     /// beneath the same per-instance model so the box tracks the mesh exactly.
     pub fn set_show_aabb(&mut self, show: bool) {
         self.show_aabb = show;
+    }
+
+    /// Enables/disables the coordinate-axes overlay (#42): when set, a gizmo of
+    /// three `LineList` axes (X = red, Y = green, Z = blue; see [`AXES_COLORS`])
+    /// of length [`AXES_LENGTH`] is drawn from the world origin under the camera
+    /// `P·V` (identity model), regardless of the active [`RenderMode`], marking
+    /// the world coordinate frame. Drawn after the meshes so it stays visible.
+    pub fn set_show_axes(&mut self, show: bool) {
+        self.show_axes = show;
     }
 
     /// The number of meshes this renderer can draw; valid [`Draw::mesh_id`]s are
@@ -1062,6 +1146,17 @@ impl MeshRenderer {
                 pass.set_index_buffer(mesh.aabb_edge_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..mesh.aabb_edge_count, 0, start..start + count);
             }
+        }
+
+        // Coordinate-axes overlay: three colored lines from the world origin,
+        // drawn once under the camera P·V with an identity per-instance model
+        // (slot 1 rebound to the dedicated single-instance axes buffer). Always
+        // the LineList pipeline; drawn last so the gizmo stays visible on top.
+        if self.show_axes {
+            pass.set_pipeline(&self.wireframe_pipeline);
+            pass.set_vertex_buffer(0, self.axes_vertex_buffer.slice(..));
+            pass.set_vertex_buffer(1, self.axes_instance_buffer.slice(..));
+            pass.draw(0..6, 0..1);
         }
     }
 }
@@ -1797,6 +1892,68 @@ mod tests {
         assert!(
             pure_green(&with_box) > 0,
             "AABB overlay must light green box pixels"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn mesh_renderer_axes_overlay_draws_rgb_gizmo() {
+        let (device, queue) = pollster::block_on(test_device());
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let (width, height) = (64, 64);
+        let mut mesh = MeshRenderer::new(&device, format, &Mesh::hello_triangle());
+        let draws = [Draw {
+            mesh_id: 0,
+            model: Matrix4::IDENTITY.to_cols_array(),
+        }];
+
+        let plain = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
+            mesh.encode(
+                q,
+                e,
+                v,
+                FrameParams::IDENTITY,
+                &draws,
+                Viewport { width, height },
+            );
+        });
+
+        mesh.set_show_axes(true);
+        let with_axes = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
+            mesh.encode(
+                q,
+                e,
+                v,
+                FrameParams::IDENTITY,
+                &draws,
+                Viewport { width, height },
+            );
+        });
+
+        assert_ne!(plain, with_axes, "axes overlay must change the image");
+
+        // Under the identity camera the +X axis draws a pure-red horizontal line
+        // and the +Y axis a pure-green vertical line from the center; both must
+        // add colored pixels beyond whatever the filled triangle already lit.
+        let count = |px: &[u8], pred: fn(u8, u8, u8) -> bool| -> usize {
+            (0..(width * height) as usize)
+                .filter(|i| {
+                    let b = i * 4;
+                    pred(px[b], px[b + 1], px[b + 2])
+                })
+                .count()
+        };
+        let pure_red = |r: u8, g: u8, b: u8| r > 0 && g == 0 && b == 0;
+        let pure_green = |r: u8, g: u8, b: u8| r == 0 && g > 0 && b == 0;
+
+        assert!(
+            count(&with_axes, pure_red) > count(&plain, pure_red),
+            "X axis must add pure-red pixels"
+        );
+        assert!(
+            count(&with_axes, pure_green) > count(&plain, pure_green),
+            "Y axis must add pure-green pixels"
         );
     }
 }

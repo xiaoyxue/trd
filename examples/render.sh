@@ -6,7 +6,7 @@
 #
 # Usage:
 #   examples/render.sh [--cli | --native | --web [--arrow-renderer|--canvas-renderer]] \
-#                      [--mesh OBJ]... [--wireframe] [--aabb] [INPUT.jsonl] [OUTPUT.gif|.webp] [WIDTH] [HEIGHT] [FPS]
+#                      [--mesh OBJ]... [--wireframe] [--aabb] [--axes] [INPUT.jsonl] [OUTPUT.gif|.webp] [WIDTH] [HEIGHT] [FPS]
 # Defaults: examples/frames.0.0.2.jsonl  output/out.gif  256 256 30
 # Run with no arguments (or -h/--help) to print the flag guidance and exit; pass
 # --cli to render the default demo.
@@ -30,6 +30,8 @@
 # With --aabb (--cli only) trd overlays each drawn mesh's axis-aligned bounding
 # box as a green wireframe box (#42); combine with --mesh (e.g. add --aabb to the
 # bunny turntable to see its box track the rotation).
+# With --axes (--cli only) trd overlays a coordinate-axes gizmo (X=red, Y=green,
+# Z=blue) at the world origin (#42), marking the world frame the camera looks at.
 # With --web (alias --wasm) it builds the browser (wasm) bundle via nix and serves
 # it, printing the URLs and an SSH-tunnel command. The web demo generates its own
 # Arrow frame stream in-browser, so all positional arguments are ignored. Two
@@ -66,6 +68,7 @@ CONTENT FLAGS (--cli only):
                       1, …); a frame's `draws` list references them by index.
   --wireframe         Draw mesh edges as a line list instead of filled triangles (#38).
   --aabb              Overlay each mesh's axis-aligned bounding box as a green box (#42).
+  --axes              Overlay a coordinate-axes gizmo (X=red, Y=green, Z=blue) at the origin (#42).
 
   -h, --help          Show this guidance and exit.
 
@@ -101,6 +104,7 @@ arrow_renderer=0
 canvas_renderer=0
 wireframe=0
 aabb=0
+axes=0
 meshes=()
 positional=()
 while [ $# -gt 0 ]; do
@@ -113,6 +117,7 @@ while [ $# -gt 0 ]; do
     --canvas-renderer) canvas_renderer=1 ;;
     --wireframe) wireframe=1 ;;
     --aabb) aabb=1 ;;
+    --axes) axes=1 ;;
     --mesh) shift; meshes+=("${1:?--mesh requires an OBJ path}") ;;
     --mesh=*) meshes+=("${1#--mesh=}") ;;
     *) positional+=("$1") ;;
@@ -317,8 +322,10 @@ else
   [ "$wireframe" -eq 1 ] && wireframe_flag=(--wireframe)
   aabb_flag=()
   [ "$aabb" -eq 1 ] && aabb_flag=(--aabb)
+  axes_flag=()
+  [ "$axes" -eq 1 ] && axes_flag=(--axes)
   stream \
-    | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-cli -- --width "$width" --height "$height" "${wireframe_flag[@]}" "${aabb_flag[@]}" \
+    | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-cli -- --width "$width" --height "$height" "${wireframe_flag[@]}" "${aabb_flag[@]}" "${axes_flag[@]}" \
     | uv run --with pyarrow --with numpy "$root/scripts/encode.py" --fps "$fps" -o "$output"
   echo "wrote $output (${width}x${height}, ${fps}fps) from $input"
 fi
