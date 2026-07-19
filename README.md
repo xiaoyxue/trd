@@ -32,8 +32,9 @@ Platform-agnostic wgpu logic, shared verbatim by every target:
   flight, so an animation of any length streams in constant memory.
 - **`protocol.rs`** — the cross-platform (native + wasm) incremental Arrow IPC
   decoder. `InputSession` feeds arbitrary byte chunks through `arrow`'s
-  `StreamDecoder`, validates the protocol schema once (accepts `0.0.1`/`0.0.2`),
-  and yields one `FrameBatch` (`Vec<FrameParams>`) per record batch — the
+  `StreamDecoder`, validates the protocol schema once (accepts
+  `0.0.1`/`0.0.2`/`0.0.3`), and yields one `FrameBatch` (`Vec<FrameParams>`) per
+  record batch — the
   browser's input path.
 - **`output.rs`** — the cross-platform Arrow IPC *output* serialization.
   `OutputSession` writes the `r,g,b,a` `fixed_shape_tensor<u8>` stream
@@ -77,7 +78,7 @@ Each is a *thin shell* that only supplies a render target and calls the core:
 
 Frame parameters are plain columnar data, so **any** tool that emits the input
 columns as an Arrow IPC stream can drive the renderer. The current version is
-**0.0.2**; it is backward-compatible with 0.0.1.
+**0.0.3**; it is backward-compatible with 0.0.2 and 0.0.1.
 
 | Direction | Columns | Arrow type |
 |---|---|---|
@@ -86,12 +87,22 @@ columns as an Arrow IPC stream can drive the renderer. The current version is
 | | `model` *(opt, 0.0.2)* | `FixedSizeList<f32>[16]` (4×4 model matrix) |
 | | `k` *(opt, 0.0.2)* | `FixedSizeList<f32>[9]` (3×3 camera intrinsics) |
 | | `pose` *(opt, 0.0.2)* | `FixedSizeList<f32>[16]` (4×4 camera pose) |
+| **Input** (mesh, *opt, 0.0.3*) | `position`, `color` | `List<FixedSizeList<f32>[3]>` |
+| | `index` | `List<u32>` |
 | **Output** (image) | `r`, `g`, `b`, `a` | `fixed_shape_tensor<u8>` `[H, W]` |
 
 The `0.0.2` matrix columns are **optional/additive** and drive the MVP transform
 `clip = P · V · M · (pos, 0, 1)`; a stream with none of them (or identity
 matrices) renders identically to `0.0.1`. The protocol-version metadata is
 optional, so DuckDB and pyarrow streams are both accepted as-is.
+
+**0.0.3** adds an optional leading **mesh** Arrow stream, concatenated before the
+params stream (`[mesh][params]`): one row per mesh, geometry in nested list
+columns. The native path decodes it (`Mesh::from_arrow`), uploads it, and renders
+it **centered and uniformly scaled to fit** (a `base_model` beneath the per-frame
+`model`), driven by the following params. A params-only stream (no leading mesh)
+still renders the built-in hello-triangle. Encode an OBJ with
+`scripts/obj_to_arrow.py`; `examples/render.sh --mesh <obj>` wires it end-to-end.
 
 **Full, versioned specification: [`docs/protocol/`](docs/protocol/)** (per-version
 schema reference + [changelog](docs/protocol/CHANGELOG.md)).

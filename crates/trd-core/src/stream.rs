@@ -1,20 +1,31 @@
-//! Native-only Arrow streaming protocol (trd protocol 0.0.1).
+//! Native-only Arrow streaming protocol (trd protocol 0.0.3).
 //!
-//! Input: one row per frame (`center`, `size`, `theta`). Output: one row per
-//! frame, four `fixed_shape_tensor<u8>` channels `r,g,b,a` of shape `[H, W]`.
+//! Input is one or two concatenated Arrow IPC streams on stdin. A `0.0.3` stream
+//! is `[mesh][params]`: a leading **mesh** table (one row = one mesh, all rows
+//! decoded by [`Mesh::from_arrow_all`]) followed by the **params** stream (one
+//! row per frame: `center`, `size`, `theta`, + optional camera columns
+//! `model`/`k`/`pose`/`eye`/`target`/`direction`/`up`/`fovy`/`aspect`/`znear`/
+//! `zfar`, + an optional per-frame instanced draw list `draw_mesh`
+//! (`List<UInt32>`) / `draw_model` (`List<FixedSizeList<Float32>[16]>`) placing
+//! instances of the loaded meshes). When the draw list is absent, one instance
+//! of mesh 0 is placed by the frame's own model. A legacy `0.0.1`/`0.0.2` stream
+//! is just the params stream and renders the built-in hello-triangle. Output:
+//! one row per frame, four `fixed_shape_tensor<u8>` channels `r,g,b,a` of shape
+//! `[H, W]`.
 
 use std::sync::Arc;
 
-use arrow::array::{Array, FixedSizeListArray, Float32Array, RecordBatch};
+use arrow::array::{Array, FixedSizeListArray, Float32Array, ListArray, RecordBatch, UInt32Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::error::ArrowError;
 use arrow::ipc::reader::StreamReader;
 use std::io::{Read, Write};
 
+use crate::math::Matrix4;
 use crate::protocol::{
     frame_rate_from_metadata, PROTOCOL_VERSION, PROTOCOL_VERSION_KEY, SUPPORTED_INPUT_VERSIONS,
 };
-use crate::render::{FrameParams, Mesh, MeshRenderer};
+use crate::render::{CameraFormError, Draw, FrameParams, Mesh, MeshRenderer};
 use crate::OutputSession;
 
 /// Errors from decoding, validating, rendering, or encoding a trd stream.
@@ -39,6 +50,31 @@ pub enum StreamError {
     /// A required input column contains null values (protocol requires non-null).
     #[error("input column `{0}` contains null values")]
     NullValues(&'static str),
+    /// The stream mixes the CV (`k`/`pose`) and CG (`eye`/`target`/`direction`/
+    /// `fovy`) camera forms; exactly one must be used.
+    #[error(
+        "conflicting camera forms: use either CV (`k`/`pose`) or CG \
+         (`eye`/`target`/`direction`/`fovy`), not both"
+    )]
+    ConflictingCameraForms,
+    /// The CG camera form is incomplete (an `eye` without a look
+    /// `target`/`direction`, or vice versa).
+    #[error("incomplete CG camera: `eye` requires a look `target`/`direction` (and vice versa)")]
+    IncompleteCameraForm,
+    /// A frame's per-instance `draw_mesh` and `draw_model` lists differ in
+    /// length; each drawn instance needs exactly one mesh id and one model.
+    #[error(
+        "frame {row}: draw_mesh has {mesh_len} entries but draw_model has {model_len} \
+         (each instance needs one mesh id and one model)"
+    )]
+    MismatchedDrawLists {
+        row: usize,
+        mesh_len: usize,
+        model_len: usize,
+    },
+    /// A draw references a mesh index outside the uploaded mesh set.
+    #[error("draw references mesh index {mesh_id} but only {mesh_count} mesh(es) are loaded")]
+    MeshIndexOutOfRange { mesh_id: u32, mesh_count: usize },
     /// The requested image dimensions are invalid or too large.
     #[error("invalid image dimensions {width}x{height}: {reason}")]
     InvalidDimensions {
@@ -52,6 +88,9 @@ pub enum StreamError {
     /// GPU rendering failed.
     #[error("render error: {0}")]
     Render(String),
+    /// The leading mesh table could not be decoded into a [`Mesh`].
+    #[error("mesh decode error: {0}")]
+    Mesh(#[from] crate::MeshError),
     #[error(transparent)]
     Output(#[from] crate::OutputError),
 }
@@ -181,9 +220,42 @@ fn read_fixed<const N: usize>(
     std::array::from_fn(|i| values.value(offset + i))
 }
 
+/// Looks up an optional non-null `Float32` scalar column, validating its type.
+/// Returns `None` if the column is absent (additive `0.0.3` camera columns).
+fn optional_f32<'a>(
+    batch: &'a RecordBatch,
+    name: &'static str,
+) -> Result<Option<&'a Float32Array>, StreamError> {
+    let Some(column) = batch.column_by_name(name) else {
+        return Ok(None);
+    };
+    let array = column
+        .as_any()
+        .downcast_ref::<Float32Array>()
+        .ok_or_else(|| StreamError::ColumnType {
+            column: name,
+            expected: "Float32",
+            actual: column.data_type().clone(),
+        })?;
+    if array.null_count() > 0 {
+        return Err(StreamError::NullValues(name));
+    }
+    Ok(Some(array))
+}
+
+/// Maps a [`CameraFormError`] onto the stream error type.
+fn camera_form_error(error: CameraFormError) -> StreamError {
+    match error {
+        CameraFormError::Conflicting => StreamError::ConflictingCameraForms,
+        CameraFormError::Incomplete => StreamError::IncompleteCameraForm,
+    }
+}
+
 /// Decodes every row of `batch` into [`FrameParams`], validating required
 /// columns, types, and non-nullness (including the fixed-size-list children).
-/// The optional `0.0.2` `model`/`k`/`pose` matrix columns are decoded if present.
+/// The optional `0.0.2` `model`/`k`/`pose` matrix columns and the `0.0.3` CG
+/// camera columns (`eye`/`target`/`direction`/`up`/`fovy`/`aspect`/`znear`/
+/// `zfar`) are decoded if present.
 pub fn decode_frames(batch: &RecordBatch) -> Result<Vec<FrameParams>, StreamError> {
     let center = require_vec2(batch, "center")?;
     let size = require_vec2(batch, "size")?;
@@ -202,16 +274,130 @@ pub fn decode_frames(batch: &RecordBatch) -> Result<Vec<FrameParams>, StreamErro
     let model = optional_fixed_list(batch, "model", 16)?;
     let k = optional_fixed_list(batch, "k", 9)?;
     let pose = optional_fixed_list(batch, "pose", 16)?;
-    Ok((0..batch.num_rows())
-        .map(|i| FrameParams {
-            center: read_vec2(center, i),
-            size: read_vec2(size, i),
-            theta: theta.value(i),
-            model: model.map(|(list, values)| read_fixed::<16>(list, values, i)),
-            k: k.map(|(list, values)| read_fixed::<9>(list, values, i)),
-            pose: pose.map(|(list, values)| read_fixed::<16>(list, values, i)),
+    let eye = optional_fixed_list(batch, "eye", 3)?;
+    let target = optional_fixed_list(batch, "target", 3)?;
+    let direction = optional_fixed_list(batch, "direction", 3)?;
+    let up = optional_fixed_list(batch, "up", 3)?;
+    let fovy = optional_f32(batch, "fovy")?;
+    let aspect = optional_f32(batch, "aspect")?;
+    let znear = optional_f32(batch, "znear")?;
+    let zfar = optional_f32(batch, "zfar")?;
+    (0..batch.num_rows())
+        .map(|i| {
+            let frame = FrameParams {
+                center: read_vec2(center, i),
+                size: read_vec2(size, i),
+                theta: theta.value(i),
+                model: model.map(|(list, values)| read_fixed::<16>(list, values, i)),
+                k: k.map(|(list, values)| read_fixed::<9>(list, values, i)),
+                pose: pose.map(|(list, values)| read_fixed::<16>(list, values, i)),
+                eye: eye.map(|(list, values)| read_fixed::<3>(list, values, i)),
+                target: target.map(|(list, values)| read_fixed::<3>(list, values, i)),
+                direction: direction.map(|(list, values)| read_fixed::<3>(list, values, i)),
+                up: up.map(|(list, values)| read_fixed::<3>(list, values, i)),
+                fovy: fovy.map(|a| a.value(i)),
+                aspect: aspect.map(|a| a.value(i)),
+                znear: znear.map(|a| a.value(i)),
+                zfar: zfar.map(|a| a.value(i)),
+            };
+            frame.check_camera_form().map_err(camera_form_error)?;
+            Ok(frame)
         })
-        .collect())
+        .collect()
+}
+
+/// Decodes the optional per-frame **instanced draw list** columns `draw_mesh`
+/// (`List<UInt32>`) and `draw_model` (`List<FixedSizeList<Float32>[16]>`) into
+/// one `Vec<Draw>` per row. Returns `Some(rows)` when both columns are present,
+/// or `None` when neither is (legacy single-object streams). Having exactly one
+/// of the pair is an error, as is a per-row length mismatch between them.
+fn decode_draws(batch: &RecordBatch) -> Result<Option<Vec<Vec<Draw>>>, StreamError> {
+    let mesh_col = batch.column_by_name("draw_mesh");
+    let model_col = batch.column_by_name("draw_model");
+    let (mesh_col, model_col) = match (mesh_col, model_col) {
+        (None, None) => return Ok(None),
+        (Some(m), Some(n)) => (m, n),
+        (Some(_), None) => return Err(StreamError::MissingColumn("draw_model")),
+        (None, Some(_)) => return Err(StreamError::MissingColumn("draw_mesh")),
+    };
+
+    let mesh_list = mesh_col
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .ok_or_else(|| StreamError::ColumnType {
+            column: "draw_mesh",
+            expected: "List<UInt32>",
+            actual: mesh_col.data_type().clone(),
+        })?;
+    let model_list = model_col
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .ok_or_else(|| StreamError::ColumnType {
+            column: "draw_model",
+            expected: "List<FixedSizeList<Float32>[16]>",
+            actual: model_col.data_type().clone(),
+        })?;
+    if mesh_list.null_count() > 0 {
+        return Err(StreamError::NullValues("draw_mesh"));
+    }
+    if model_list.null_count() > 0 {
+        return Err(StreamError::NullValues("draw_model"));
+    }
+
+    let mut rows = Vec::with_capacity(batch.num_rows());
+    for row in 0..batch.num_rows() {
+        let ids_ref = mesh_list.value(row);
+        let ids = ids_ref
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .ok_or_else(|| StreamError::ColumnType {
+                column: "draw_mesh",
+                expected: "List<UInt32>",
+                actual: ids_ref.data_type().clone(),
+            })?;
+        if ids.null_count() > 0 {
+            return Err(StreamError::NullValues("draw_mesh"));
+        }
+
+        let models_ref = model_list.value(row);
+        let models = models_ref
+            .as_any()
+            .downcast_ref::<FixedSizeListArray>()
+            .filter(|list| list.value_length() == 16)
+            .ok_or_else(|| StreamError::ColumnType {
+                column: "draw_model",
+                expected: "FixedSizeList<Float32>[16]",
+                actual: models_ref.data_type().clone(),
+            })?;
+        if models.null_count() > 0 || models.values().null_count() > 0 {
+            return Err(StreamError::NullValues("draw_model"));
+        }
+        if ids.len() != models.len() {
+            return Err(StreamError::MismatchedDrawLists {
+                row,
+                mesh_len: ids.len(),
+                model_len: models.len(),
+            });
+        }
+        let model_values = models
+            .values()
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .ok_or_else(|| StreamError::ColumnType {
+                column: "draw_model",
+                expected: "FixedSizeList<Float32>[16]",
+                actual: models.values().data_type().clone(),
+            })?;
+
+        let draws = (0..ids.len())
+            .map(|j| Draw {
+                mesh_id: ids.value(j),
+                model: read_fixed::<16>(models, model_values, j),
+            })
+            .collect();
+        rows.push(draws);
+    }
+    Ok(Some(rows))
 }
 
 /// Reads an Arrow IPC frame-params stream from `input`, invoking `on_frame` for
@@ -287,12 +473,38 @@ pub struct BatchRenderer {
 
 impl BatchRenderer {
     /// Builds the GPU context (instance/adapter/device/pipeline/target/readback)
-    /// once for a fixed `width` x `height`.
+    /// once for a fixed `width` x `height`, rendering the built-in hello-triangle.
     pub fn new(width: u32, height: u32) -> Result<Self, StreamError> {
-        pollster::block_on(Self::new_async(width, height))
+        pollster::block_on(Self::new_async(
+            width,
+            height,
+            &[Mesh::hello_triangle()],
+            &[Matrix4::IDENTITY],
+        ))
     }
 
-    async fn new_async(width: u32, height: u32) -> Result<Self, StreamError> {
+    /// Like [`BatchRenderer::new`] but renders the `meshes` of a `0.0.3` stream's
+    /// leading mesh table, applying each mesh's [`Mesh::preview_transform`]
+    /// (center + uniform scale-to-fit) beneath its per-frame model so an
+    /// arbitrary-unit asset renders centered and at a reasonable size. Per-frame
+    /// draw lists place instances of these meshes by index.
+    pub fn with_meshes(width: u32, height: u32, meshes: &[Mesh]) -> Result<Self, StreamError> {
+        let base_models: Vec<Matrix4> = meshes
+            .iter()
+            .map(|mesh| {
+                mesh.preview_transform(crate::DEFAULT_PREVIEW_TARGET)
+                    .matrix()
+            })
+            .collect();
+        pollster::block_on(Self::new_async(width, height, meshes, &base_models))
+    }
+
+    async fn new_async(
+        width: u32,
+        height: u32,
+        meshes: &[Mesh],
+        base_models: &[Matrix4],
+    ) -> Result<Self, StreamError> {
         // Guard against zero / overflow before allocating (device limits below).
         check_dimensions(width, height)?;
 
@@ -331,7 +543,7 @@ impl BatchRenderer {
         }
 
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-        let renderer = MeshRenderer::new(&device, format, &Mesh::hello_triangle());
+        let renderer = MeshRenderer::with_meshes(&device, format, meshes, base_models);
 
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("trd render target"),
@@ -370,13 +582,22 @@ impl BatchRenderer {
         })
     }
 
-    /// Renders `params` and returns tightly-packed row-major RGBA bytes
-    /// (`width*height*4`).
-    pub fn render(&mut self, params: FrameParams) -> Result<Vec<u8>, StreamError> {
-        pollster::block_on(self.render_async(params))
+    /// The number of loaded meshes; valid [`Draw::mesh_id`]s are `0..mesh_count`.
+    pub fn mesh_count(&self) -> usize {
+        self.renderer.mesh_count()
     }
 
-    async fn render_async(&mut self, params: FrameParams) -> Result<Vec<u8>, StreamError> {
+    /// Renders `params` with the given per-frame instance `draws` and returns
+    /// tightly-packed row-major RGBA bytes (`width*height*4`).
+    pub fn render(&mut self, params: FrameParams, draws: &[Draw]) -> Result<Vec<u8>, StreamError> {
+        pollster::block_on(self.render_async(params, draws))
+    }
+
+    async fn render_async(
+        &mut self,
+        params: FrameParams,
+        draws: &[Draw],
+    ) -> Result<Vec<u8>, StreamError> {
         let view = self
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -391,8 +612,11 @@ impl BatchRenderer {
             &mut encoder,
             &view,
             params,
-            self.width,
-            self.height,
+            draws,
+            crate::render::Viewport {
+                width: self.width,
+                height: self.height,
+            },
         );
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
@@ -438,33 +662,77 @@ impl BatchRenderer {
     }
 }
 
-/// Reads an Arrow IPC stream of frame params from `input`, renders each row,
-/// and writes an Arrow IPC stream of `fixed_shape_tensor` images to `output`.
-/// Output batch boundaries mirror input batches (one batch in flight).
-pub fn run_stream<R: Read, W: Write>(
-    input: R,
-    mut output: W,
+/// True if `schema` is a **mesh table** (has a `position` column) — used to tell
+/// a leading `0.0.3` mesh stream apart from the params stream that follows it (or
+/// a legacy params-only stream).
+fn is_mesh_schema(schema: &Schema) -> bool {
+    schema.fields().iter().any(|f| f.name() == "position")
+}
+
+/// Reads the leading mesh stream, decoding **every** row of its batches into a
+/// `Vec<Mesh>` (one mesh per row, in order), then **drains the rest of the
+/// stream through its end-of-stream marker** so the underlying reader is
+/// positioned at the start of the following params stream. The reader must be
+/// unbuffered (as [`StreamReader::try_new`] produces) so it does not over-read
+/// past the mesh stream's EOS into the params stream.
+fn read_meshes<R: Read>(reader: &mut StreamReader<R>) -> Result<Vec<Mesh>, StreamError> {
+    let mut meshes = Vec::new();
+    for batch in reader.by_ref() {
+        let batch = batch?;
+        if batch.num_rows() > 0 {
+            meshes.extend(Mesh::from_arrow_all(&batch)?);
+        }
+    }
+    if meshes.is_empty() {
+        return Err(StreamError::Mesh(crate::MeshError::Empty));
+    }
+    Ok(meshes)
+}
+
+/// Renders every frame of the `params` batch stream to `output`, one Arrow
+/// output batch per input batch. Shared by both the mesh-first and legacy paths.
+fn render_params<I, W>(
+    params: I,
+    mut renderer: BatchRenderer,
+    frame_rate: f64,
     width: u32,
     height: u32,
-) -> Result<(), StreamError> {
-    // Validate dimensions up front so schema construction (which multiplies
-    // width*height) can't overflow before BatchRenderer's guard runs.
-    check_dimensions(width, height)?;
-
-    let reader = StreamReader::try_new(input, None)?;
-    check_version(reader.schema().as_ref())?;
-    let frame_rate = frame_rate_from_metadata(reader.schema().metadata());
-
-    let mut renderer = BatchRenderer::new(width, height)?;
+    mut output: W,
+) -> Result<(), StreamError>
+where
+    I: Iterator<Item = Result<RecordBatch, ArrowError>>,
+    W: Write,
+{
     let mut output_session = OutputSession::with_frame_rate(width, height, Some(frame_rate))?;
     output.write_all(&output_session.drain_new()?)?;
-
-    for batch in reader {
+    let mesh_count = renderer.mesh_count();
+    for batch in params {
         let batch = batch?;
         let frames = decode_frames(&batch)?;
+        // Optional per-frame instanced draw list; absent ⇒ one instance of mesh 0
+        // placed by the frame's own model (legacy single-object behavior).
+        let draw_lists = decode_draws(&batch)?;
         let planes: Vec<Vec<u8>> = frames
             .iter()
-            .map(|p| renderer.render(*p))
+            .enumerate()
+            .map(|(i, params)| {
+                let draws: Vec<Draw> = match &draw_lists {
+                    Some(rows) => rows[i].clone(),
+                    None => vec![Draw {
+                        mesh_id: 0,
+                        model: params.model_matrix().to_cols_array(),
+                    }],
+                };
+                for draw in &draws {
+                    if draw.mesh_id as usize >= mesh_count {
+                        return Err(StreamError::MeshIndexOutOfRange {
+                            mesh_id: draw.mesh_id,
+                            mesh_count,
+                        });
+                    }
+                }
+                renderer.render(*params, &draws)
+            })
             .collect::<Result<_, _>>()?;
         output_session.write_rgba_batch(&planes)?;
         output.write_all(&output_session.drain_new()?)?;
@@ -472,6 +740,45 @@ pub fn run_stream<R: Read, W: Write>(
     output_session.finish()?;
     output.write_all(&output_session.drain_new()?)?;
     Ok(())
+}
+
+/// Reads a trd input stream, renders each frame, and writes an Arrow IPC stream
+/// of `fixed_shape_tensor` images to `output`. Output batch boundaries mirror
+/// input batches (one batch in flight).
+///
+/// A `0.0.3` stream is `[mesh][params]`: the leading mesh table is decoded once
+/// (via [`Mesh::from_arrow`]) and uploaded, then the following params stream
+/// drives per-frame rendering. A legacy `0.0.1`/`0.0.2` params-only stream
+/// renders the built-in hello-triangle. The two are told apart by sniffing the
+/// first stream's schema ([`is_mesh_schema`]).
+pub fn run_stream<R: Read, W: Write>(
+    input: R,
+    output: W,
+    width: u32,
+    height: u32,
+) -> Result<(), StreamError> {
+    // Validate dimensions up front so schema construction (which multiplies
+    // width*height) can't overflow before BatchRenderer's guard runs.
+    check_dimensions(width, height)?;
+
+    let mut first = StreamReader::try_new(input, None)?;
+    check_version(first.schema().as_ref())?;
+
+    if is_mesh_schema(first.schema().as_ref()) {
+        // 0.0.3 mesh-first: decode + upload the mesh table (one mesh per row),
+        // then render the params stream that follows it in the same byte stream.
+        let meshes = read_meshes(&mut first)?;
+        let renderer = BatchRenderer::with_meshes(width, height, &meshes)?;
+        let params = StreamReader::try_new(first.get_mut(), None)?;
+        check_version(params.schema().as_ref())?;
+        let frame_rate = frame_rate_from_metadata(params.schema().metadata());
+        render_params(params, renderer, frame_rate, width, height, output)
+    } else {
+        // Legacy params-only stream → built-in hello-triangle.
+        let renderer = BatchRenderer::new(width, height)?;
+        let frame_rate = frame_rate_from_metadata(first.schema().metadata());
+        render_params(first, renderer, frame_rate, width, height, output)
+    }
 }
 
 #[cfg(test)]
@@ -519,6 +826,250 @@ mod tests {
         let batch = build_input_batch(&frames);
         let decoded = decode_frames(&batch).unwrap();
         assert_eq!(decoded, frames);
+    }
+
+    /// A non-null `FixedSizeList<Float32>[len]` column from flat values.
+    fn list_col(len: i32, flat: Vec<f32>) -> ArrayRef {
+        Arc::new(FixedSizeListArray::new(
+            Arc::new(Field::new("item", DataType::Float32, false)),
+            len,
+            Arc::new(Float32Array::from(flat)),
+            None,
+        )) as ArrayRef
+    }
+
+    /// Builds a one-row batch of identity center/size/theta plus the given extra
+    /// `(field, column)` pairs.
+    fn camera_batch(extra: Vec<(Field, ArrayRef)>) -> RecordBatch {
+        let vec2 = |name| {
+            Field::new(
+                name,
+                DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, false)), 2),
+                false,
+            )
+        };
+        let mut fields = vec![
+            vec2("center"),
+            vec2("size"),
+            Field::new("theta", DataType::Float32, false),
+        ];
+        let mut columns: Vec<ArrayRef> = vec![
+            list_col(2, vec![0.0, 0.0]),
+            list_col(2, vec![1.0, 1.0]),
+            Arc::new(Float32Array::from(vec![0.0_f32])) as ArrayRef,
+        ];
+        for (field, column) in extra {
+            fields.push(field);
+            columns.push(column);
+        }
+        let schema = Arc::new(Schema::new(fields));
+        RecordBatch::try_new(schema, columns).unwrap()
+    }
+
+    #[test]
+    fn decodes_cg_camera_columns() {
+        let list3 = |name| {
+            Field::new(
+                name,
+                DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, false)), 3),
+                false,
+            )
+        };
+        let batch = camera_batch(vec![
+            (list3("eye"), list_col(3, vec![1.0, 2.0, 3.0])),
+            (list3("target"), list_col(3, vec![0.1, 0.2, 0.3])),
+            (
+                Field::new("fovy", DataType::Float32, false),
+                Arc::new(Float32Array::from(vec![0.9_f32])) as ArrayRef,
+            ),
+        ]);
+        let frames = decode_frames(&batch).unwrap();
+        assert_eq!(frames[0].eye, Some([1.0, 2.0, 3.0]));
+        assert_eq!(frames[0].target, Some([0.1, 0.2, 0.3]));
+        assert_eq!(frames[0].fovy, Some(0.9));
+    }
+
+    #[test]
+    fn rejects_incomplete_and_conflicting_camera_forms() {
+        let list_field = |name, len| {
+            Field::new(
+                name,
+                DataType::FixedSizeList(
+                    Arc::new(Field::new("item", DataType::Float32, false)),
+                    len,
+                ),
+                false,
+            )
+        };
+        // `eye` alone is incomplete.
+        let incomplete = camera_batch(vec![(
+            list_field("eye", 3),
+            list_col(3, vec![1.0, 2.0, 3.0]),
+        )]);
+        assert!(matches!(
+            decode_frames(&incomplete),
+            Err(StreamError::IncompleteCameraForm)
+        ));
+        // CV `k` mixed with CG `eye` is conflicting.
+        let conflicting = camera_batch(vec![
+            (list_field("k", 9), list_col(9, vec![1.0; 9])),
+            (list_field("eye", 3), list_col(3, vec![1.0, 2.0, 3.0])),
+        ]);
+        assert!(matches!(
+            decode_frames(&conflicting),
+            Err(StreamError::ConflictingCameraForms)
+        ));
+    }
+
+    use arrow::buffer::OffsetBuffer;
+
+    /// A `List<UInt32>` column with the given per-row id lists.
+    fn draw_mesh_col(rows: &[Vec<u32>]) -> ArrayRef {
+        let field = Arc::new(Field::new("item", DataType::UInt32, false));
+        let flat: Vec<u32> = rows.iter().flatten().copied().collect();
+        let offsets = OffsetBuffer::from_lengths(rows.iter().map(Vec::len));
+        Arc::new(ListArray::new(
+            field,
+            offsets,
+            Arc::new(UInt32Array::from(flat)),
+            None,
+        )) as ArrayRef
+    }
+
+    /// A `List<FixedSizeList<Float32>[16]>` column with the given per-row model
+    /// lists (each model is 16 flat column-major floats).
+    fn draw_model_col(rows: &[Vec<[f32; 16]>]) -> ArrayRef {
+        let item = Arc::new(Field::new("item", DataType::Float32, false));
+        let flat: Vec<f32> = rows.iter().flatten().flatten().copied().collect();
+        let fsl = FixedSizeListArray::new(item, 16, Arc::new(Float32Array::from(flat)), None);
+        let field = Arc::new(Field::new(
+            "item",
+            DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, false)), 16),
+            false,
+        ));
+        let offsets = OffsetBuffer::from_lengths(rows.iter().map(Vec::len));
+        Arc::new(ListArray::new(field, offsets, Arc::new(fsl), None)) as ArrayRef
+    }
+
+    /// The `Field` for a `draw_mesh` / `draw_model` column.
+    fn draw_field(name: &str, item: DataType) -> Field {
+        Field::new(
+            name,
+            DataType::List(Arc::new(Field::new("item", item, false))),
+            false,
+        )
+    }
+
+    fn draw_batch(mesh_rows: &[Vec<u32>], model_rows: &[Vec<[f32; 16]>]) -> RecordBatch {
+        let vec2 = |name| {
+            Field::new(
+                name,
+                DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, false)), 2),
+                false,
+            )
+        };
+        let n = mesh_rows.len();
+        let schema = Arc::new(Schema::new(vec![
+            vec2("center"),
+            vec2("size"),
+            Field::new("theta", DataType::Float32, false),
+            draw_field("draw_mesh", DataType::UInt32),
+            draw_field(
+                "draw_model",
+                DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, false)), 16),
+            ),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                list_col(2, vec![0.0; n * 2]),
+                list_col(2, vec![1.0; n * 2]),
+                Arc::new(Float32Array::from(vec![0.0_f32; n])) as ArrayRef,
+                draw_mesh_col(mesh_rows),
+                draw_model_col(model_rows),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn decode_draws_absent_returns_none() {
+        let batch = build_input_batch(&[FrameParams::IDENTITY]);
+        assert!(decode_draws(&batch).unwrap().is_none());
+    }
+
+    #[test]
+    fn decodes_variable_length_draw_lists() {
+        let a = [
+            1.0f32, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ];
+        let b = [
+            2.0f32, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 5.0, 6.0, 7.0, 1.0,
+        ];
+        // Row 0 draws two instances (meshes 0 and 1); row 1 draws one (mesh 1).
+        let batch = draw_batch(&[vec![0, 1], vec![1]], &[vec![a, b], vec![b]]);
+        let rows = decode_draws(&batch).unwrap().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0],
+            vec![
+                Draw {
+                    mesh_id: 0,
+                    model: a
+                },
+                Draw {
+                    mesh_id: 1,
+                    model: b
+                },
+            ]
+        );
+        assert_eq!(
+            rows[1],
+            vec![Draw {
+                mesh_id: 1,
+                model: b
+            }]
+        );
+    }
+
+    #[test]
+    fn rejects_mismatched_draw_lists() {
+        let m = [0.0f32; 16];
+        // Row 0: two mesh ids but only one model.
+        let batch = draw_batch(&[vec![0, 1]], &[vec![m]]);
+        assert!(matches!(
+            decode_draws(&batch),
+            Err(StreamError::MismatchedDrawLists {
+                row: 0,
+                mesh_len: 2,
+                model_len: 1,
+            })
+        ));
+    }
+
+    #[test]
+    fn draw_columns_must_come_as_a_pair() {
+        let batch = build_input_batch(&[FrameParams::IDENTITY]);
+        let schema = Arc::new(Schema::new(vec![
+            batch.schema().field(0).clone(),
+            batch.schema().field(1).clone(),
+            batch.schema().field(2).clone(),
+            draw_field("draw_mesh", DataType::UInt32),
+        ]));
+        let with_mesh_only = RecordBatch::try_new(
+            schema,
+            vec![
+                batch.column(0).clone(),
+                batch.column(1).clone(),
+                batch.column(2).clone(),
+                draw_mesh_col(&[vec![0]]),
+            ],
+        )
+        .unwrap();
+        assert!(matches!(
+            decode_draws(&with_mesh_only),
+            Err(StreamError::MissingColumn("draw_model"))
+        ));
     }
 
     #[test]
@@ -744,5 +1295,161 @@ mod tests {
         let last_row = frames.len() - 2;
         let differs = (0..pixels).any(|i| row0(&r, 0, i) != row0(&last, last_row, i));
         assert!(differs, "rotation should change pixels across frames");
+    }
+
+    // ---- 0.0.3 two-stream [mesh][params] framing ----
+
+    /// Serializes a mesh as a one-row Arrow IPC **mesh stream** (nested list
+    /// columns: `position`/`color` `List<FixedSizeList<Float32>[3]>`, `index`
+    /// `List<UInt32>`), tagged with the 0.0.3 protocol version.
+    fn write_mesh_stream(buf: &mut Vec<u8>, mesh: &Mesh) {
+        use arrow::array::{ListArray, UInt32Array};
+        use arrow::buffer::OffsetBuffer;
+
+        let fsl_type =
+            DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, false)), 3);
+        let geometry = |flat: Vec<f32>| -> ArrayRef {
+            let fsl = FixedSizeListArray::new(
+                Arc::new(Field::new("item", DataType::Float32, false)),
+                3,
+                Arc::new(Float32Array::from(flat)),
+                None,
+            );
+            let field = Arc::new(Field::new("item", fsl_type.clone(), false));
+            let offsets = OffsetBuffer::from_lengths([fsl.len()]);
+            Arc::new(ListArray::new(field, offsets, Arc::new(fsl), None))
+        };
+        let positions: Vec<f32> = mesh.vertices.iter().flat_map(|v| v.position).collect();
+        let colors: Vec<f32> = mesh.vertices.iter().flat_map(|v| v.color).collect();
+        let idx_values = UInt32Array::from(mesh.indices.clone());
+        let index: ArrayRef = Arc::new(ListArray::new(
+            Arc::new(Field::new("item", DataType::UInt32, false)),
+            OffsetBuffer::from_lengths([idx_values.len()]),
+            Arc::new(idx_values),
+            None,
+        ));
+
+        let list_of_fsl = DataType::List(Arc::new(Field::new("item", fsl_type.clone(), false)));
+        let schema = Schema::new(vec![
+            Field::new("position", list_of_fsl.clone(), false),
+            Field::new("color", list_of_fsl, false),
+            Field::new(
+                "index",
+                DataType::List(Arc::new(Field::new("item", DataType::UInt32, false))),
+                false,
+            ),
+        ])
+        .with_metadata(
+            [(
+                PROTOCOL_VERSION_KEY.to_string(),
+                PROTOCOL_VERSION.to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let batch = RecordBatch::try_new(
+            Arc::new(schema.clone()),
+            vec![geometry(positions), geometry(colors), index],
+        )
+        .unwrap();
+        let mut wr = StreamWriter::try_new(buf, &schema).unwrap();
+        wr.write(&batch).unwrap();
+        wr.finish().unwrap();
+    }
+
+    /// Serializes frames as an Arrow IPC **params stream**.
+    fn write_params_stream(buf: &mut Vec<u8>, frames: &[FrameParams]) {
+        let batch = build_input_batch(frames);
+        let mut wr = StreamWriter::try_new(buf, &input_schema()).unwrap();
+        wr.write(&batch).unwrap();
+        wr.finish().unwrap();
+    }
+
+    #[test]
+    fn two_stream_mesh_then_params_split_and_decode() {
+        use std::io::Cursor;
+
+        // Build a concatenated [mesh][params] byte stream in memory.
+        let mesh = Mesh::hello_triangle();
+        let frames = vec![
+            FrameParams::IDENTITY,
+            FrameParams {
+                theta: 1.0,
+                ..FrameParams::IDENTITY
+            },
+        ];
+        let mut bytes = Vec::new();
+        write_mesh_stream(&mut bytes, &mesh);
+        write_params_stream(&mut bytes, &frames);
+
+        // The framing helpers must recover the mesh, then the params that follow
+        // it in the same byte stream (the mesh reader must not over-read).
+        let mut first = StreamReader::try_new(Cursor::new(bytes), None).unwrap();
+        assert!(is_mesh_schema(first.schema().as_ref()));
+        let decoded_meshes = read_meshes(&mut first).unwrap();
+        assert_eq!(decoded_meshes, vec![mesh]);
+
+        let params = StreamReader::try_new(first.get_mut(), None).unwrap();
+        assert!(!is_mesh_schema(params.schema().as_ref()));
+        let mut decoded = Vec::new();
+        for batch in params {
+            decoded.extend(decode_frames(&batch.unwrap()).unwrap());
+        }
+        assert_eq!(decoded, frames);
+    }
+
+    #[test]
+    fn legacy_params_only_stream_has_no_mesh_schema() {
+        let mut bytes = Vec::new();
+        write_params_stream(&mut bytes, &[FrameParams::IDENTITY]);
+        let reader = StreamReader::try_new(bytes.as_slice(), None).unwrap();
+        assert!(!is_mesh_schema(reader.schema().as_ref()));
+    }
+
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    fn run_stream_renders_mesh_first_stream() {
+        let (w, h) = (32u32, 32u32);
+        // A full-screen quad as the leading mesh; two params frames follow.
+        let mesh =
+            Mesh::from_obj("v -1 -1 0\nv 1 -1 0\nv 1 1 0\nv -1 1 0\nf 1 2 3\nf 1 3 4\n").unwrap();
+        let frames = vec![
+            FrameParams::IDENTITY,
+            FrameParams {
+                theta: 0.5,
+                ..FrameParams::IDENTITY
+            },
+        ];
+        let mut input_bytes = Vec::new();
+        write_mesh_stream(&mut input_bytes, &mesh);
+        write_params_stream(&mut input_bytes, &frames);
+
+        let mut output_bytes = Vec::new();
+        run_stream(&input_bytes[..], &mut output_bytes, w, h).unwrap();
+
+        let reader = StreamReader::try_new(&output_bytes[..], None).unwrap();
+        let batches = reader.collect::<Result<Vec<_>, _>>().unwrap();
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, frames.len());
+
+        // The white quad covers the frame, so the center pixel must be lit.
+        let get = |batch: &RecordBatch, name: &str| -> U8List {
+            batch
+                .column_by_name(name)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<U8List>()
+                .unwrap()
+                .clone()
+        };
+        let r = get(&batches[0], "r");
+        let center = (h as usize / 2) * w as usize + w as usize / 2;
+        let value = r
+            .value(0)
+            .as_any()
+            .downcast_ref::<UInt8Array>()
+            .unwrap()
+            .value(center);
+        assert!(value > 0, "mesh quad should cover the center pixel");
     }
 }

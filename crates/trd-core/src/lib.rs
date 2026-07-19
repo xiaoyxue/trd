@@ -16,15 +16,15 @@ pub use math::{
     Aabb2, Aabb3, Matrix3, Matrix4, Normal3, Point2, Point3, Point4, Rotation, Scalar, ToWgsl,
     Transform, Vector2, Vector3, Vector4, EPSILON,
 };
-pub use mesh::MeshError;
+pub use mesh::{MeshError, DEFAULT_PREVIEW_TARGET};
 pub use output::{output_schema, tightly_pack_rgba, OutputError, OutputSession};
 pub use protocol::{
     frame_rate_from_metadata, FrameBatch, InputSession, ProtocolError, DEFAULT_FRAME_RATE,
     FRAME_RATE_KEY, PROTOCOL_VERSION, PROTOCOL_VERSION_KEY,
 };
 pub use render::{
-    create_mesh_pipeline, create_triangle_pipeline, render_triangle, FrameParams, Mesh,
-    MeshRenderer, TriangleRenderer, Vertex, Viewport,
+    create_mesh_pipeline, create_triangle_pipeline, render_triangle, CameraFormError, Draw,
+    FrameParams, Mesh, MeshRenderer, TriangleRenderer, Vertex, Viewport,
 };
 
 #[cfg(not(target_arch = "wasm32"))]

@@ -6,13 +6,19 @@
 #
 # Usage:
 #   examples/render.sh [--cli | --native | --web [--arrow-renderer|--canvas-renderer]] \
-#                      [INPUT.jsonl] [OUTPUT.gif|.webp] [WIDTH] [HEIGHT] [FPS]
+#                      [--mesh OBJ] [INPUT.jsonl] [OUTPUT.gif|.webp] [WIDTH] [HEIGHT] [FPS]
 # Defaults: examples/frames.0.0.2.jsonl  output/out.gif  256 256 30
 #
 # By default (or with --cli, alias --headless) the frame stream is rendered to a
 # GIF/WebP via the headless trd-cli.
 # With --native (alias --app) it is played live in the interactive trd-app window
 # (trd-native); OUTPUT is then ignored and neither uv nor ffmpeg are needed.
+# With --mesh OBJ the input is a protocol 0.0.3 stream: a leading mesh table
+# (scripts/obj_to_arrow.py encodes the OBJ) concatenated with the params stream,
+# so trd renders the loaded mesh (centered + uniformly scaled to fit) driven by
+# INPUT.jsonl. Try: examples/render.sh --mesh assets/meshes/bunny.obj \
+# examples/frames.turntable.jsonl output/bunny.gif. (--mesh needs pyarrow via
+# uv/python3 and is ignored by --web.)
 # With --web (alias --wasm) it builds the browser (wasm) bundle via nix and serves
 # it, printing the URLs and an SSH-tunnel command. The web demo generates its own
 # Arrow frame stream in-browser, so all positional arguments are ignored. Two
@@ -26,23 +32,28 @@
 # On WSL, prefix with WGPU_BACKEND=gl for GPU rendering (else it uses software).
 set -euo pipefail
 
-# Extract the optional mode flags (--cli/--native/--web) and the --web renderer
-# sub-flags (--arrow-renderer/--canvas-renderer); the rest are positional.
+# Extract the optional mode flags (--cli/--native/--web), the --web renderer
+# sub-flags (--arrow-renderer/--canvas-renderer), and an optional --mesh <obj>
+# that prepends a mesh Arrow stream (0.0.3 [mesh][params]); the rest are positional.
 cli=0
 native=0
 web=0
 arrow_renderer=0
 canvas_renderer=0
+mesh=""
 positional=()
-for arg in "$@"; do
-  case "$arg" in
+while [ $# -gt 0 ]; do
+  case "$1" in
     --cli|--headless) cli=1 ;;
     --native|--app) native=1 ;;
     --web|--wasm) web=1 ;;
     --arrow-renderer) arrow_renderer=1 ;;
     --canvas-renderer) canvas_renderer=1 ;;
-    *) positional+=("$arg") ;;
+    --mesh) shift; mesh="${1:?--mesh requires an OBJ path}" ;;
+    --mesh=*) mesh="${1#--mesh=}" ;;
+    *) positional+=("$1") ;;
   esac
+  shift
 done
 if [ ${#positional[@]} -gt 0 ]; then set -- "${positional[@]}"; else set --; fi
 
@@ -185,14 +196,39 @@ frames() {
   esac
 }
 
+# When rendering a loaded mesh (--mesh), pick a pyarrow-capable Python to encode
+# the OBJ into the leading mesh Arrow stream (duckdb can't author the nested-list
+# mesh table). scripts/obj_to_arrow.py emits a 0.0.3 mesh table; it is
+# concatenated *before* the params stream so trd reads [mesh][params].
+mesh_producer=""
+if [ -n "$mesh" ]; then
+  if command -v uv >/dev/null 2>&1; then
+    mesh_producer=uv
+  elif command -v python3 >/dev/null 2>&1 && python3 -c 'import pyarrow' >/dev/null 2>&1; then
+    mesh_producer=python3
+  else
+    echo "error: --mesh needs uv or python3 with pyarrow to encode $mesh" >&2
+    exit 1
+  fi
+fi
+
+# The full trd input stream: the optional leading mesh table, then the params.
+stream() {
+  case "$mesh_producer" in
+    uv) uv run --with pyarrow "$root/scripts/obj_to_arrow.py" "$mesh" ;;
+    python3) python3 "$root/scripts/obj_to_arrow.py" "$mesh" ;;
+  esac
+  frames
+}
+
 if [ "$native" -eq 1 ]; then
   # Play the frame stream live in the interactive trd-app window (trd-native).
-  frames \
+  stream \
     | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-app -- --width "$width" --height "$height" --fps "$fps"
   echo "streamed $input to the trd-app window (${width}x${height}, ${fps}fps)"
 else
   mkdir -p "$(dirname "$output")"
-  frames \
+  stream \
     | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-cli -- --width "$width" --height "$height" \
     | uv run --with pyarrow --with numpy "$root/scripts/encode.py" --fps "$fps" -o "$output"
   echo "wrote $output (${width}x${height}, ${fps}fps) from $input"
