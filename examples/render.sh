@@ -32,6 +32,16 @@
 # bunny turntable to see its box track the rotation).
 # With --axes (--cli only) trd overlays a coordinate-axes gizmo (X=red, Y=green,
 # Z=blue) at the world origin (#42), marking the world frame the camera looks at.
+#
+# Dolly-camera capstone (#49): examples/bunny_dolly.py authors the same 45°
+# bird's-eye *dolly* camera twice — CG (eye/target/fovy) and CV (K + pose) — as
+# two JSONL streams that render identically (verified to <0.01% pixels). Render
+# each with --wireframe --mesh assets/meshes/bunny.obj and compare:
+#   python examples/bunny_dolly.py
+#   examples/render.sh --cli --wireframe --mesh assets/meshes/bunny.obj \
+#     examples/frames.bunny_dolly.cg.jsonl output/bunny_dolly_cg.gif 1024 1024 24
+#   examples/render.sh --cli --wireframe --mesh assets/meshes/bunny.obj \
+#     examples/frames.bunny_dolly.cv.jsonl output/bunny_dolly_cv.gif 1024 1024 24
 # With --web (alias --wasm) it builds the browser (wasm) bundle via nix and serves
 # it, printing the URLs and an SSH-tunnel command. The web demo generates its own
 # Arrow frame stream in-browser, so all positional arguments are ignored. Two
@@ -80,6 +90,8 @@ Examples:
   examples/render.sh --cli --wireframe --aabb \
     --mesh assets/meshes/bunny.obj --mesh examples/cube.obj \
     examples/frames.multimesh.jsonl output/scene.gif 1024 1024 24
+  examples/render.sh --cli --wireframe --axes --aabb --mesh assets/meshes/bunny.obj \
+    examples/frames.bunny_dolly.cg.jsonl output/bunny_dolly.gif 1024 1024 24  # dolly capstone (#49)
   examples/render.sh --web                                   # build + serve the wasm demo
 
 Run from `nix develop`. On WSL, prefix with WGPU_BACKEND=gl for GPU rendering.

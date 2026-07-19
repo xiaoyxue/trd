@@ -30,8 +30,7 @@ pub(crate) const AABB_EDGE_INDICES: [u32; 24] = [
 /// RGB colors of the coordinate-axes overlay gizmo (#42): X = red, Y = green,
 /// Z = blue — the conventional right-handed axis coloring. See
 /// [`MeshRenderer::set_show_axes`].
-pub(crate) const AXES_COLORS: [[f32; 3]; 3] =
-    [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+pub(crate) const AXES_COLORS: [[f32; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
 
 /// World-space length of each coordinate axis in the overlay gizmo. The mesh
 /// preview transform ([`crate::Mesh::preview_transform`]) fits a mesh's largest

@@ -45,7 +45,9 @@ fn main() -> Result<(), trd_core::StreamError> {
     };
     let stdin = io::stdin().lock();
     let stdout = io::stdout().lock();
-    trd_core::run_stream(stdin, stdout, cli.width, cli.height, mode, cli.aabb, cli.axes)?;
+    trd_core::run_stream(
+        stdin, stdout, cli.width, cli.height, mode, cli.aabb, cli.axes,
+    )?;
     io::stdout().flush()?;
     Ok(())
 }
