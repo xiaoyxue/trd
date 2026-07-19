@@ -194,7 +194,9 @@ impl Gpu {
 /// (sent once, before any frames) followed by decoded frames.
 enum StreamMsg {
     Rate(f64),
-    Frame(FrameParams),
+    // Boxed: `FrameParams` is large (camera columns), so an unboxed variant
+    // would dwarf `Rate` (clippy::large_enum_variant).
+    Frame(Box<FrameParams>),
 }
 
 /// The winit application: owns the GPU state and drives stream playback.
@@ -260,7 +262,7 @@ impl App {
         loop {
             match self.rx.try_recv() {
                 Ok(StreamMsg::Rate(rate)) => self.stream_rate = rate,
-                Ok(StreamMsg::Frame(params)) => self.frames.push(params),
+                Ok(StreamMsg::Frame(params)) => self.frames.push(*params),
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     self.stream_done = true;
@@ -411,7 +413,7 @@ fn spawn_stdin_reader(tx: mpsc::Sender<StreamMsg>) {
                     let _ = rate_tx.send(StreamMsg::Rate(rate));
                 },
                 |params| {
-                    let _ = tx.send(StreamMsg::Frame(params));
+                    let _ = tx.send(StreamMsg::Frame(Box::new(params)));
                 },
             ) {
                 log::error!("input stream error: {err}");
