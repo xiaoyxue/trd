@@ -2,7 +2,8 @@ use futures_channel::oneshot;
 use wasm_bindgen::prelude::*;
 
 use trd_core::{
-    tightly_pack_rgba, FrameBatch, FrameParams, InputSession, OutputSession, TriangleRenderer,
+    build_scene, tightly_pack_rgba, Draw, DrawableObject, FrameBatch, FrameParams, InputSession,
+    Matrix4, Mesh, MeshRenderer, OutputSession, RenderMode, Viewport, DEFAULT_PREVIEW_TARGET,
 };
 
 fn error_message(context: &str, error: impl std::fmt::Display) -> String {
@@ -30,7 +31,13 @@ impl RendererState {
 pub struct ArrowRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    triangle: TriangleRenderer,
+    format: wgpu::TextureFormat,
+    /// Built lazily on the first rendered frame from the stream's leading mesh
+    /// table, or the built-in hello-triangle for a legacy params-only stream.
+    renderer: Option<MeshRenderer>,
+    mode: RenderMode,
+    show_aabb: bool,
+    show_axes: bool,
     target: wgpu::Texture,
     staging: wgpu::Buffer,
     input: InputSession,
@@ -81,7 +88,6 @@ impl ArrowRenderer {
         }
 
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-        let triangle = TriangleRenderer::new(&device, format);
 
         let target = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("trd ArrowRenderer target"),
@@ -116,7 +122,11 @@ impl ArrowRenderer {
         Ok(Self {
             device,
             queue,
-            triangle,
+            format,
+            renderer: None,
+            mode: RenderMode::Filled,
+            show_aabb: false,
+            show_axes: false,
             target,
             staging,
             input: InputSession::new(),
@@ -163,12 +173,60 @@ impl ArrowRenderer {
             Err(message) => self.fail(message),
         }
     }
+
+    /// Selects filled (`false`) or wireframe (`true`) rendering for later frames.
+    #[wasm_bindgen(js_name = setWireframe)]
+    pub fn set_wireframe(&mut self, enabled: bool) {
+        self.mode = if enabled {
+            RenderMode::Wireframe
+        } else {
+            RenderMode::Filled
+        };
+    }
+
+    /// Toggles the per-instance AABB overlay box for later frames.
+    #[wasm_bindgen(js_name = setShowAabb)]
+    pub fn set_show_aabb(&mut self, enabled: bool) {
+        self.show_aabb = enabled;
+    }
+
+    /// Toggles the origin coordinate-axes overlay gizmo for later frames.
+    #[wasm_bindgen(js_name = setShowAxes)]
+    pub fn set_show_axes(&mut self, enabled: bool) {
+        self.show_axes = enabled;
+    }
 }
 
 impl ArrowRenderer {
     fn fail<T>(&mut self, message: String) -> Result<T, JsValue> {
         self.state = RendererState::Failed(message.clone());
         Err(crate::js_error(message))
+    }
+
+    /// Lazily builds the mesh renderer on first use: a multi-mesh renderer over
+    /// the stream's leading mesh table (each mesh under its `preview_transform`
+    /// base model), or the built-in hello-triangle for a legacy params-only
+    /// stream.
+    fn ensure_renderer(&mut self) -> &mut MeshRenderer {
+        if self.renderer.is_none() {
+            let renderer = if self.input.has_meshes() {
+                let meshes = self.input.meshes();
+                let base_models: Vec<Matrix4> = meshes
+                    .iter()
+                    .map(|mesh| mesh.preview_transform(DEFAULT_PREVIEW_TARGET).matrix())
+                    .collect();
+                MeshRenderer::with_meshes(&self.device, self.format, meshes, &base_models)
+            } else {
+                MeshRenderer::with_base_model(
+                    &self.device,
+                    self.format,
+                    &Mesh::hello_triangle(),
+                    Matrix4::IDENTITY,
+                )
+            };
+            self.renderer = Some(renderer);
+        }
+        self.renderer.as_mut().expect("renderer just built")
     }
 
     async fn push_open(&mut self, chunk: Vec<u8>) -> Result<Vec<u8>, String> {
@@ -180,8 +238,30 @@ impl ArrowRenderer {
         for frame_batch in frame_batches {
             let mut images = Vec::with_capacity(frame_batch.len());
 
-            for params in frame_batch {
-                images.push(self.render_frame(params).await?);
+            for frame in frame_batch {
+                let params = frame.params;
+                // Absent per-frame draw list ⇒ one instance of mesh 0 placed by
+                // the frame's own model (legacy single-object behavior).
+                let draws: Vec<Draw> = if frame.draws.is_empty() {
+                    vec![Draw {
+                        mesh_id: 0,
+                        model: params.model_matrix().to_cols_array(),
+                    }]
+                } else {
+                    frame.draws
+                };
+
+                let mesh_count = self.ensure_renderer().mesh_count();
+                for draw in &draws {
+                    if draw.mesh_id as usize >= mesh_count {
+                        return Err(format!(
+                            "draw references mesh {} but only {mesh_count} mesh(es) are loaded",
+                            draw.mesh_id
+                        ));
+                    }
+                }
+                let scene = build_scene(&draws, self.mode, self.show_aabb, self.show_axes);
+                images.push(self.render_frame(params, &scene).await?);
             }
 
             self.output
@@ -194,7 +274,11 @@ impl ArrowRenderer {
             .map_err(|error| error_message("output IPC drain failed", error))
     }
 
-    async fn render_frame(&mut self, params: FrameParams) -> Result<Vec<u8>, String> {
+    async fn render_frame(
+        &mut self,
+        params: FrameParams,
+        scene: &[DrawableObject],
+    ) -> Result<Vec<u8>, String> {
         let view = self
             .target
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -205,14 +289,14 @@ impl ArrowRenderer {
                 label: Some("trd ArrowRenderer frame"),
             });
 
-        self.triangle.encode(
-            &self.queue,
-            &mut encoder,
-            &view,
-            params,
-            self.width,
-            self.height,
-        );
+        let viewport = Viewport {
+            width: self.width,
+            height: self.height,
+        };
+        self.renderer
+            .as_mut()
+            .expect("renderer built before render_frame")
+            .encode(&self.queue, &mut encoder, &view, params, scene, viewport);
 
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {

@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 
-use arrow::array::{Array, FixedSizeListArray, Float32Array, RecordBatch};
+use arrow::array::{Array, FixedSizeListArray, Float32Array, ListArray, RecordBatch, UInt32Array};
 use arrow::buffer::Buffer;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::error::ArrowError;
 use arrow::ipc::reader::StreamDecoder;
 
-use crate::{CameraFormError, FrameParams};
+use crate::render::Draw;
+use crate::{CameraFormError, FrameParams, Mesh, MeshError};
 
 pub const PROTOCOL_VERSION: &str = "0.0.3";
 pub const PROTOCOL_VERSION_KEY: &str = "trd.protocol.version";
@@ -37,7 +38,17 @@ pub fn frame_rate_from_metadata(metadata: &HashMap<String, String>) -> f64 {
         .unwrap_or(DEFAULT_FRAME_RATE)
 }
 
-pub type FrameBatch = Vec<FrameParams>;
+pub type FrameBatch = Vec<DecodedFrame>;
+
+/// One decoded frame: its [`FrameParams`] plus the optional per-frame instanced
+/// draw list (`draw_mesh`/`draw_model`). `draws` is empty for legacy
+/// single-object streams, in which case the renderer draws one default instance
+/// of mesh `0` placed by the frame's own [`FrameParams::model_matrix`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecodedFrame {
+    pub params: FrameParams,
+    pub draws: Vec<Draw>,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProtocolError {
@@ -74,6 +85,17 @@ pub enum ProtocolError {
     IncompleteCameraForm,
     #[error("unsupported protocol version `{0}` (expected `{PROTOCOL_VERSION}`)")]
     UnsupportedVersion(String),
+    #[error("mesh table decode failed: {0}")]
+    Mesh(#[from] MeshError),
+    #[error(
+        "per-frame draw list length mismatch at row {row}: \
+         `draw_mesh` has {mesh_len} entries but `draw_model` has {model_len}"
+    )]
+    MismatchedDrawLists {
+        row: usize,
+        mesh_len: usize,
+        model_len: usize,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,9 +105,37 @@ enum SessionState {
     Failed,
 }
 
+/// Which of a `0.0.3` stream's two concatenated IPC streams the session is
+/// currently decoding. A stream is `[mesh][params]`; a legacy `0.0.1`/`0.0.2`
+/// stream is params-only (no `First`→`Params` transition — the first stream is
+/// already the params stream).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    /// Decoding the first IPC stream. Its schema decides mesh-table vs. legacy
+    /// params-only (see [`is_mesh_schema`]).
+    First,
+    /// Decoding the params IPC stream that follows a leading mesh stream.
+    Params,
+}
+
+/// Incremental decoder for the trd input protocol, mirroring the native
+/// [`crate::run_stream`] two-stream framing but push-based for wasm. A `0.0.3`
+/// stream is `[mesh][params]`: the leading **mesh** table (one row = one mesh)
+/// is decoded once via [`Mesh::from_arrow_all`] and exposed through
+/// [`InputSession::meshes`], then the following **params** stream drives
+/// per-frame rendering. Legacy `0.0.1`/`0.0.2` params-only streams decode with
+/// no meshes (the front-end renders the built-in hello-triangle).
 pub struct InputSession {
     decoder: StreamDecoder,
-    schema_validated: bool,
+    stage: Stage,
+    /// `Some(true)` once the first stream is classified as a mesh table,
+    /// `Some(false)` for a legacy params-only first stream, `None` until its
+    /// schema is decoded.
+    first_is_mesh: Option<bool>,
+    meshes: Vec<Mesh>,
+    /// Whether a **params** schema has been validated (either the legacy first
+    /// stream or the params stream after a mesh stream).
+    params_schema_validated: bool,
     state: SessionState,
 }
 
@@ -93,7 +143,10 @@ impl InputSession {
     pub fn new() -> Self {
         Self {
             decoder: StreamDecoder::new(),
-            schema_validated: false,
+            stage: Stage::First,
+            first_is_mesh: None,
+            meshes: Vec::new(),
+            params_schema_validated: false,
             state: SessionState::Open,
         }
     }
@@ -112,8 +165,9 @@ impl InputSession {
 
         let result = (|| {
             self.decoder.finish()?;
-            self.validate_schema_if_available()?;
-            if !self.schema_validated {
+            self.classify_first_if_ready()?;
+            self.validate_params_schema_if_available()?;
+            if !self.params_schema_validated {
                 return Err(ProtocolError::MissingSchema);
             }
             Ok(())
@@ -131,13 +185,28 @@ impl InputSession {
         }
     }
 
+    /// Whether a params schema has been decoded and validated (frames can be
+    /// produced). For a `0.0.3` mesh stream this becomes true only once the
+    /// following params stream's schema arrives.
     pub fn has_schema(&self) -> bool {
-        self.schema_validated
+        self.params_schema_validated
     }
 
-    /// The stream's declared playback rate (fps) once the schema has been
-    /// decoded, or `None` if no schema has arrived yet. Falls back to
-    /// [`DEFAULT_FRAME_RATE`] when the metadata key is absent.
+    /// The meshes decoded from a `0.0.3` stream's leading mesh table, in stream
+    /// order (mesh id = index). Empty for a legacy params-only stream (the
+    /// front-end renders the built-in hello-triangle instead).
+    pub fn meshes(&self) -> &[Mesh] {
+        &self.meshes
+    }
+
+    /// Whether the stream carried a leading mesh table (`0.0.3`).
+    pub fn has_meshes(&self) -> bool {
+        !self.meshes.is_empty()
+    }
+
+    /// The stream's declared playback rate (fps) once a schema has been decoded,
+    /// or `None` if none has arrived yet. Falls back to [`DEFAULT_FRAME_RATE`]
+    /// when the metadata key is absent.
     pub fn frame_rate(&self) -> Option<f64> {
         self.decoder
             .schema()
@@ -158,11 +227,38 @@ impl InputSession {
 
         while !bytes.is_empty() {
             let before = bytes.len();
-            let decoded = self.decoder.decode(&mut bytes)?;
-            self.validate_schema_if_available()?;
-
-            if let Some(batch) = decoded {
-                batches.push(decode_batch(&batch)?);
+            match self.stage {
+                Stage::First => match self.decoder.decode(&mut bytes) {
+                    Ok(decoded) => {
+                        self.classify_first_if_ready()?;
+                        if let Some(batch) = decoded {
+                            match self.first_is_mesh {
+                                Some(true) => self.meshes.extend(Mesh::from_arrow_all(&batch)?),
+                                // Legacy params-only stream: no leading mesh table.
+                                _ => batches.push(decode_frame_batch(&batch)?),
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        // A leading mesh stream's end-of-stream marker leaves the
+                        // params stream's bytes in `bytes`; the decoder reports it
+                        // as an "unexpected EOS". Switch to a fresh decoder for the
+                        // params stream and re-drive the remaining bytes.
+                        if self.first_is_mesh == Some(true) && is_stream_boundary(&error) {
+                            self.decoder = StreamDecoder::new();
+                            self.stage = Stage::Params;
+                            continue;
+                        }
+                        return Err(error.into());
+                    }
+                },
+                Stage::Params => {
+                    let decoded = self.decoder.decode(&mut bytes)?;
+                    self.validate_params_schema_if_available()?;
+                    if let Some(batch) = decoded {
+                        batches.push(decode_frame_batch(&batch)?);
+                    }
+                }
             }
 
             if bytes.len() == before {
@@ -170,21 +266,42 @@ impl InputSession {
             }
         }
 
-        self.validate_schema_if_available()?;
+        self.classify_first_if_ready()?;
+        self.validate_params_schema_if_available()?;
         Ok(batches)
     }
 
-    fn validate_schema_if_available(&mut self) -> Result<(), ProtocolError> {
-        if self.schema_validated {
+    /// Classifies the first stream (mesh table vs. legacy params) once its schema
+    /// is available, validating the version (both) and the params schema (legacy).
+    fn classify_first_if_ready(&mut self) -> Result<(), ProtocolError> {
+        if self.first_is_mesh.is_some() || self.stage != Stage::First {
             return Ok(());
         }
-
         let Some(schema) = self.decoder.schema() else {
             return Ok(());
         };
+        if is_mesh_schema(schema.as_ref()) {
+            check_version(schema.as_ref())?;
+            self.first_is_mesh = Some(true);
+        } else {
+            validate_schema(schema.as_ref())?;
+            self.first_is_mesh = Some(false);
+            self.params_schema_validated = true;
+        }
+        Ok(())
+    }
 
+    /// Validates the params stream's schema once available (only in the
+    /// [`Stage::Params`] that follows a leading mesh stream).
+    fn validate_params_schema_if_available(&mut self) -> Result<(), ProtocolError> {
+        if self.params_schema_validated || self.stage != Stage::Params {
+            return Ok(());
+        }
+        let Some(schema) = self.decoder.schema() else {
+            return Ok(());
+        };
         validate_schema(schema.as_ref())?;
-        self.schema_validated = true;
+        self.params_schema_validated = true;
         Ok(())
     }
 }
@@ -195,12 +312,149 @@ impl Default for InputSession {
     }
 }
 
-fn validate_schema(schema: &Schema) -> Result<(), ProtocolError> {
+/// True if `error` is the arrow "Unexpected EOS" signal a [`StreamDecoder`]
+/// raises when bytes remain after a stream's end-of-stream marker — i.e. the
+/// boundary between a leading mesh stream and the params stream that follows it
+/// in the same concatenated byte stream.
+fn is_stream_boundary(error: &ArrowError) -> bool {
+    matches!(error, ArrowError::IpcError(message) if message == "Unexpected EOS")
+}
+
+/// True if `schema` is a **mesh table** (has a `position` column) — used to tell
+/// a leading `0.0.3` mesh stream apart from the params stream that follows it (or
+/// a legacy params-only stream).
+pub(crate) fn is_mesh_schema(schema: &Schema) -> bool {
+    schema.fields().iter().any(|f| f.name() == "position")
+}
+
+/// Validates a schema's declared protocol version against
+/// [`SUPPORTED_INPUT_VERSIONS`] (absent metadata is allowed for legacy streams).
+fn check_version(schema: &Schema) -> Result<(), ProtocolError> {
     if let Some(version) = schema.metadata().get(PROTOCOL_VERSION_KEY) {
         if !SUPPORTED_INPUT_VERSIONS.contains(&version.as_str()) {
             return Err(ProtocolError::UnsupportedVersion(version.clone()));
         }
     }
+    Ok(())
+}
+
+/// Decodes one params batch into [`DecodedFrame`]s: each row's [`FrameParams`]
+/// zipped with its optional per-frame instanced draw list. Rows without draw
+/// columns get an empty `draws` (the renderer draws one default instance).
+fn decode_frame_batch(batch: &RecordBatch) -> Result<FrameBatch, ProtocolError> {
+    let params = decode_batch(batch)?;
+    let draws = decode_draws(batch)?;
+    Ok(params
+        .into_iter()
+        .enumerate()
+        .map(|(row, params)| DecodedFrame {
+            params,
+            draws: draws
+                .as_ref()
+                .map(|rows| rows[row].clone())
+                .unwrap_or_default(),
+        })
+        .collect())
+}
+
+/// Decodes the optional per-frame **instanced draw list** columns `draw_mesh`
+/// (`List<UInt32>`) and `draw_model` (`List<FixedSizeList<Float32>[16]>`) into
+/// one `Vec<Draw>` per row. Returns `Some(rows)` when both columns are present,
+/// `None` when neither is (legacy single-object streams). Having exactly one of
+/// the pair, or a per-row length mismatch, is an error. Mirrors the native
+/// `stream::decode_draws`.
+fn decode_draws(batch: &RecordBatch) -> Result<Option<Vec<Vec<Draw>>>, ProtocolError> {
+    let (mesh_col, model_col) = match (
+        batch.column_by_name("draw_mesh"),
+        batch.column_by_name("draw_model"),
+    ) {
+        (None, None) => return Ok(None),
+        (Some(m), Some(n)) => (m, n),
+        (Some(_), None) => return Err(ProtocolError::MissingColumn("draw_model")),
+        (None, Some(_)) => return Err(ProtocolError::MissingColumn("draw_mesh")),
+    };
+
+    let mesh_list = mesh_col
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .ok_or_else(|| ProtocolError::ColumnType {
+            column: "draw_mesh",
+            expected: "List<UInt32>",
+            actual: mesh_col.data_type().clone(),
+        })?;
+    let model_list = model_col
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .ok_or_else(|| ProtocolError::ColumnType {
+            column: "draw_model",
+            expected: "List<FixedSizeList<Float32>[16]>",
+            actual: model_col.data_type().clone(),
+        })?;
+    if mesh_list.null_count() > 0 {
+        return Err(ProtocolError::NullValues("draw_mesh"));
+    }
+    if model_list.null_count() > 0 {
+        return Err(ProtocolError::NullValues("draw_model"));
+    }
+
+    let mut rows = Vec::with_capacity(batch.num_rows());
+    for row in 0..batch.num_rows() {
+        let ids_ref = mesh_list.value(row);
+        let ids = ids_ref
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .ok_or_else(|| ProtocolError::ColumnType {
+                column: "draw_mesh",
+                expected: "List<UInt32>",
+                actual: ids_ref.data_type().clone(),
+            })?;
+        if ids.null_count() > 0 {
+            return Err(ProtocolError::NullValues("draw_mesh"));
+        }
+
+        let models_ref = model_list.value(row);
+        let models = models_ref
+            .as_any()
+            .downcast_ref::<FixedSizeListArray>()
+            .filter(|list| list.value_length() == 16)
+            .ok_or_else(|| ProtocolError::ColumnType {
+                column: "draw_model",
+                expected: "FixedSizeList<Float32>[16]",
+                actual: models_ref.data_type().clone(),
+            })?;
+        if models.null_count() > 0 || models.values().null_count() > 0 {
+            return Err(ProtocolError::NullValues("draw_model"));
+        }
+        if ids.len() != models.len() {
+            return Err(ProtocolError::MismatchedDrawLists {
+                row,
+                mesh_len: ids.len(),
+                model_len: models.len(),
+            });
+        }
+        let model_values = models
+            .values()
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .ok_or_else(|| ProtocolError::ColumnType {
+                column: "draw_model",
+                expected: "FixedSizeList<Float32>[16]",
+                actual: models.values().data_type().clone(),
+            })?;
+
+        let draws = (0..ids.len())
+            .map(|j| Draw {
+                mesh_id: ids.value(j),
+                model: read_fixed::<16>(models, model_values, j),
+            })
+            .collect();
+        rows.push(draws);
+    }
+    Ok(Some(rows))
+}
+
+fn validate_schema(schema: &Schema) -> Result<(), ProtocolError> {
+    check_version(schema)?;
 
     validate_vec2_field(
         schema
@@ -321,7 +575,7 @@ fn validate_f32_field(field: &Field, name: &'static str) -> Result<(), ProtocolE
     }
 }
 
-fn decode_batch(batch: &RecordBatch) -> Result<FrameBatch, ProtocolError> {
+fn decode_batch(batch: &RecordBatch) -> Result<Vec<FrameParams>, ProtocolError> {
     let center = require_vec2(batch, "center")?;
     let size = require_vec2(batch, "size")?;
     let theta = require_f32(batch, "theta")?;
@@ -605,6 +859,19 @@ mod tests {
         test_batch_with(valid_schema(Some(PROTOCOL_VERSION)), frames)
     }
 
+    /// Wraps decoded params as a draws-less [`FrameBatch`] — the shape a legacy
+    /// params-only stream (or any frame without a `draw_mesh`/`draw_model` list)
+    /// produces — for assertions that predate per-frame instanced draw lists.
+    fn plain(frames: Vec<FrameParams>) -> FrameBatch {
+        frames
+            .into_iter()
+            .map(|params| DecodedFrame {
+                params,
+                draws: Vec::new(),
+            })
+            .collect()
+    }
+
     fn test_stream(batches: &[RecordBatch]) -> Vec<u8> {
         let schema = batches
             .first()
@@ -703,7 +970,7 @@ mod tests {
             let mut batches = session.push(&bytes[..split]).unwrap();
             batches.extend(session.push(&bytes[split..]).unwrap());
             session.finish().unwrap();
-            assert_eq!(batches, vec![expected.clone()]);
+            assert_eq!(batches, vec![plain(expected.clone())]);
         }
     }
 
@@ -725,7 +992,7 @@ mod tests {
         }
 
         session.finish().unwrap();
-        assert_eq!(batches, vec![first, second]);
+        assert_eq!(batches, vec![plain(first), plain(second)]);
     }
 
     #[test]
@@ -791,7 +1058,7 @@ mod tests {
         let mut compatible = InputSession::new();
         assert_eq!(
             compatible.push(&test_stream(&[without_version])).unwrap(),
-            vec![vec![FrameParams::IDENTITY]]
+            vec![plain(vec![FrameParams::IDENTITY])]
         );
         compatible.finish().unwrap();
     }
@@ -1131,5 +1398,224 @@ mod tests {
             let expected = <[f32; 16]>::try_from(values).unwrap();
             proptest::prop_assert_eq!(decoded[0].model, Some(expected));
         }
+    }
+
+    /// Serializes a `Mesh` as a `0.0.3` leading **mesh table** Arrow IPC stream
+    /// (one row: `position`/`color` `List<FixedSizeList<Float32>[3]>` + `index`
+    /// `List<UInt32>`), mirroring the native `stream::write_mesh_stream`.
+    fn write_mesh_stream(mesh: &crate::Mesh) -> Vec<u8> {
+        use arrow::array::{ListArray, UInt32Array};
+        use arrow::buffer::OffsetBuffer;
+
+        let fsl_type =
+            DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, false)), 3);
+        let geometry = |flat: Vec<f32>| -> ArrayRef {
+            let fsl = FixedSizeListArray::new(
+                Arc::new(Field::new("item", DataType::Float32, false)),
+                3,
+                Arc::new(Float32Array::from(flat)),
+                None,
+            );
+            let field = Arc::new(Field::new("item", fsl_type.clone(), false));
+            Arc::new(ListArray::new(
+                field,
+                OffsetBuffer::from_lengths([fsl.len()]),
+                Arc::new(fsl),
+                None,
+            ))
+        };
+        let positions: Vec<f32> = mesh.vertices.iter().flat_map(|v| v.position).collect();
+        let colors: Vec<f32> = mesh.vertices.iter().flat_map(|v| v.color).collect();
+        let idx_values = UInt32Array::from(mesh.indices.clone());
+        let index: ArrayRef = Arc::new(ListArray::new(
+            Arc::new(Field::new("item", DataType::UInt32, false)),
+            OffsetBuffer::from_lengths([idx_values.len()]),
+            Arc::new(idx_values),
+            None,
+        ));
+
+        let list_of_fsl = DataType::List(Arc::new(Field::new("item", fsl_type.clone(), false)));
+        let schema = Schema::new(vec![
+            Field::new("position", list_of_fsl.clone(), false),
+            Field::new("color", list_of_fsl, false),
+            Field::new(
+                "index",
+                DataType::List(Arc::new(Field::new("item", DataType::UInt32, false))),
+                false,
+            ),
+        ])
+        .with_metadata(
+            [(
+                PROTOCOL_VERSION_KEY.to_string(),
+                PROTOCOL_VERSION.to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let batch = RecordBatch::try_new(
+            Arc::new(schema.clone()),
+            vec![geometry(positions), geometry(colors), index],
+        )
+        .unwrap();
+        let mut buf = Vec::new();
+        let mut wr = StreamWriter::try_new(&mut buf, &schema).unwrap();
+        wr.write(&batch).unwrap();
+        wr.finish().unwrap();
+        buf
+    }
+
+    /// A one-row params stream whose frame carries a `draw_mesh`/`draw_model`
+    /// instanced draw list of the given `(mesh_id, model)` pairs.
+    fn params_stream_with_draws(draws: &[(u32, [f32; 16])]) -> Vec<u8> {
+        use arrow::array::{ListArray, UInt32Array};
+        use arrow::buffer::OffsetBuffer;
+
+        let mut fields = vec![
+            vec2_field("center", false, false),
+            vec2_field("size", false, false),
+            Field::new("theta", DataType::Float32, false),
+        ];
+        let mut columns: Vec<ArrayRef> = vec![
+            list_col(2, vec![0.0, 0.0]),
+            list_col(2, vec![1.0, 1.0]),
+            Arc::new(Float32Array::from(vec![0.0_f32])) as ArrayRef,
+        ];
+
+        let mesh_ids = UInt32Array::from(draws.iter().map(|(id, _)| *id).collect::<Vec<_>>());
+        let draw_mesh: ArrayRef = Arc::new(ListArray::new(
+            Arc::new(Field::new("item", DataType::UInt32, false)),
+            OffsetBuffer::from_lengths([draws.len()]),
+            Arc::new(mesh_ids),
+            None,
+        ));
+        let mat_item =
+            DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, false)), 16);
+        let models = FixedSizeListArray::new(
+            Arc::new(Field::new("item", DataType::Float32, false)),
+            16,
+            Arc::new(Float32Array::from(
+                draws.iter().flat_map(|(_, m)| *m).collect::<Vec<_>>(),
+            )),
+            None,
+        );
+        let draw_model: ArrayRef = Arc::new(ListArray::new(
+            Arc::new(Field::new("item", mat_item, false)),
+            OffsetBuffer::from_lengths([draws.len()]),
+            Arc::new(models),
+            None,
+        ));
+
+        fields.push(Field::new(
+            "draw_mesh",
+            DataType::List(Arc::new(Field::new("item", DataType::UInt32, false))),
+            false,
+        ));
+        fields.push(Field::new(
+            "draw_model",
+            DataType::List(Arc::new(Field::new(
+                "item",
+                DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, false)), 16),
+                false,
+            ))),
+            false,
+        ));
+        columns.push(draw_mesh);
+        columns.push(draw_model);
+
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(PROTOCOL_VERSION_KEY.to_owned(), PROTOCOL_VERSION.to_owned());
+        let schema = Arc::new(Schema::new(fields).with_metadata(metadata));
+        let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
+        let mut bytes = Vec::new();
+        let mut writer = StreamWriter::try_new(&mut bytes, &schema).unwrap();
+        writer.write(&batch).unwrap();
+        writer.finish().unwrap();
+        bytes
+    }
+
+    #[test]
+    fn decodes_leading_mesh_table_then_params() {
+        let mesh = crate::Mesh::hello_triangle();
+        let frames = vec![
+            FrameParams::IDENTITY,
+            FrameParams {
+                theta: 1.0,
+                ..FrameParams::IDENTITY
+            },
+        ];
+        let mut bytes = write_mesh_stream(&mesh);
+        bytes.extend(test_stream(&[test_batch(&frames)]));
+
+        let mut session = InputSession::new();
+        let batches = session.push(&bytes).unwrap();
+        session.finish().unwrap();
+
+        assert!(session.has_meshes());
+        assert_eq!(session.meshes(), &[mesh]);
+        assert_eq!(batches, vec![plain(frames)]);
+    }
+
+    #[test]
+    fn decodes_mesh_then_params_across_every_split() {
+        // The mesh→params boundary (an end-of-stream marker) must be recovered no
+        // matter which byte the chunk boundary falls on, including inside the EOS
+        // marker itself and after a clean mesh-only chunk.
+        let mesh = crate::Mesh::hello_triangle();
+        let frames = vec![FrameParams::IDENTITY];
+        let mut bytes = write_mesh_stream(&mesh);
+        bytes.extend(test_stream(&[test_batch(&frames)]));
+
+        for split in 0..=bytes.len() {
+            let mut session = InputSession::new();
+            let mut batches = session.push(&bytes[..split]).unwrap();
+            batches.extend(session.push(&bytes[split..]).unwrap());
+            session.finish().unwrap();
+            assert_eq!(
+                session.meshes(),
+                std::slice::from_ref(&mesh),
+                "split at {split}"
+            );
+            assert_eq!(batches, vec![plain(frames.clone())], "split at {split}");
+        }
+    }
+
+    #[test]
+    fn decodes_per_frame_instanced_draw_lists() {
+        let a = [1.0_f32; 16];
+        let b = [2.0_f32; 16];
+        let mesh = crate::Mesh::hello_triangle();
+        let mut bytes = write_mesh_stream(&mesh);
+        bytes.extend(params_stream_with_draws(&[(0, a), (1, b)]));
+
+        let mut session = InputSession::new();
+        let batches = session.push(&bytes).unwrap();
+        session.finish().unwrap();
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].len(), 1);
+        assert_eq!(
+            batches[0][0].draws,
+            vec![
+                Draw {
+                    mesh_id: 0,
+                    model: a
+                },
+                Draw {
+                    mesh_id: 1,
+                    model: b
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn legacy_params_only_stream_has_no_meshes() {
+        let frames = vec![FrameParams::IDENTITY];
+        let mut session = InputSession::new();
+        let batches = session.push(&test_stream(&[test_batch(&frames)])).unwrap();
+        session.finish().unwrap();
+        assert!(!session.has_meshes());
+        assert!(session.meshes().is_empty());
+        assert_eq!(batches, vec![plain(frames)]);
     }
 }

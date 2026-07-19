@@ -193,7 +193,9 @@ impl FrameParams {
 
     /// The effective 4×4 model matrix: the explicit [`FrameParams::model`] if
     /// present, else the 2D affine synthesized from `center`/`size`/`theta`.
-    pub(crate) fn model_matrix(&self) -> Matrix4 {
+    /// Used by front-ends to place the default single instance of mesh 0 when a
+    /// frame carries no explicit instanced draw list.
+    pub fn model_matrix(&self) -> Matrix4 {
         match self.model {
             Some(cols) => Matrix4::from_cols_array(&cols),
             None => model_from_2d_affine(self.center, self.size, self.theta),
@@ -826,6 +828,42 @@ pub enum DrawableObject {
 /// boxes). A single-mesh frame is the degenerate one-element scene — the
 /// renderer always iterates a `Scene`, with no single-object special case.
 pub type Scene = Vec<DrawableObject>;
+
+/// Builds a per-frame [`Scene`] from a wire `draws` list plus the render `mode`
+/// and overlay flags. Each [`Draw`] becomes one [`DrawableObject::Mesh`] in
+/// `mode`; with `show_aabb`, each also emits a tracking
+/// [`DrawableObject::AabbBox`]; with `show_axes`, one origin
+/// [`DrawableObject::CoordinateAxes`] is appended. The order (all meshes, then
+/// all boxes, then axes) matches the renderer's draw buckets so output is
+/// pixel-identical to the pre-scene, flag-driven path.
+///
+/// Shared by the native ([`crate::run_stream`]) and wasm front-ends so neither
+/// branches per primitive type: both author the same ordered `Scene` and hand
+/// it to [`MeshRenderer::encode`].
+pub fn build_scene(draws: &[Draw], mode: RenderMode, show_aabb: bool, show_axes: bool) -> Scene {
+    let mut scene = Vec::with_capacity(draws.len() * (1 + usize::from(show_aabb)) + 1);
+    for draw in draws {
+        scene.push(DrawableObject::Mesh {
+            mesh_id: draw.mesh_id,
+            model: draw.model,
+            mode,
+        });
+    }
+    if show_aabb {
+        for draw in draws {
+            scene.push(DrawableObject::AabbBox {
+                mesh_id: draw.mesh_id,
+                model: draw.model,
+            });
+        }
+    }
+    if show_axes {
+        scene.push(DrawableObject::CoordinateAxes {
+            model: Matrix4::IDENTITY.to_cols_array(),
+        });
+    }
+    scene
+}
 
 /// A mesh uploaded to the GPU: its vertex buffer, the filled **triangle** index
 /// buffer, the deduped **edge** (`LineList`) index buffer for wireframe (#38),
