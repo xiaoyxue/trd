@@ -85,8 +85,12 @@ columns as an Arrow IPC stream can drive the renderer. The current version is
 | **Input** (params) | `center`, `size` | `FixedSizeList<f32>[2]` |
 | | `theta` | `f32` |
 | | `model` *(opt, 0.0.2)* | `FixedSizeList<f32>[16]` (4×4 model matrix) |
-| | `k` *(opt, 0.0.2)* | `FixedSizeList<f32>[9]` (3×3 camera intrinsics) |
-| | `pose` *(opt, 0.0.2)* | `FixedSizeList<f32>[16]` (4×4 camera pose) |
+| | `k` *(opt, 0.0.2)* | `FixedSizeList<f32>[9]` (3×3 camera intrinsics, **CV**) |
+| | `pose` *(opt, 0.0.2)* | `FixedSizeList<f32>[16]` (4×4 camera-to-world pose, **CV**) |
+| | `eye`, `target`, `direction`, `up` *(opt, 0.0.3)* | `FixedSizeList<f32>[3]` (**CG** look-at) |
+| | `fovy`, `aspect`, `znear`, `zfar` *(opt, 0.0.3)* | `f32` (**CG** perspective) |
+| | `draw_mesh` *(opt, 0.0.3)* | `List<u32>` (per-instance mesh index) |
+| | `draw_model` *(opt, 0.0.3)* | `List<FixedSizeList<f32>[16]>` (per-instance 4×4 model) |
 | **Input** (mesh, *opt, 0.0.3*) | `position`, `color` | `List<FixedSizeList<f32>[3]>` |
 | | `index` | `List<u32>` |
 | **Output** (image) | `r`, `g`, `b`, `a` | `fixed_shape_tensor<u8>` `[H, W]` |
@@ -96,13 +100,26 @@ The `0.0.2` matrix columns are **optional/additive** and drive the MVP transform
 matrices) renders identically to `0.0.1`. The protocol-version metadata is
 optional, so DuckDB and pyarrow streams are both accepted as-is.
 
-**0.0.3** adds an optional leading **mesh** Arrow stream, concatenated before the
-params stream (`[mesh][params]`): one row per mesh, geometry in nested list
-columns. The native path decodes it (`Mesh::from_arrow`), uploads it, and renders
-it **centered and uniformly scaled to fit** (a `base_model` beneath the per-frame
-`model`), driven by the following params. A params-only stream (no leading mesh)
-still renders the built-in hello-triangle. Encode an OBJ with
-`scripts/obj_to_arrow.py`; `examples/render.sh --mesh <obj>` wires it end-to-end.
+**0.0.3** adds three things on top of the params stream:
+
+- an optional leading **mesh** Arrow stream, concatenated before the params
+  stream (`[mesh][params]`): one row per mesh, geometry in nested list columns.
+  The native path decodes it (`Mesh::from_arrow`), uploads it, and renders it
+  **centered and uniformly scaled to fit** (a `base_model` beneath the per-frame
+  `model`), driven by the following params. Encode an OBJ with
+  `scripts/obj_to_arrow.py`; `examples/render.sh --mesh <obj>` wires it end-to-end.
+- an optional per-frame **camera**, authored either **CV**-style (`k` intrinsics +
+  `pose` extrinsics, resolved as `view = inverse(pose)`) or **CG**-style (a look-at
+  from `eye` + `target`/`direction` + `up`, with `fovy`/`aspect`/`znear`/`zfar`
+  perspective). CV wins per component; absent any camera column the view is
+  identity with a default perspective.
+- an optional per-frame **draw list** (`draw_mesh` + `draw_model`, equal-length
+  list columns) that instances several meshes in one frame — each entry places
+  mesh `draw_mesh[i]` under model `draw_model[i]` (composed beneath that mesh's
+  preview transform). Absent a draw list, one instance of mesh 0 is placed by the
+  frame's own `model`.
+
+A params-only stream (no leading mesh) still renders the built-in hello-triangle.
 
 **Full, versioned specification: [`docs/protocol/`](docs/protocol/)** (per-version
 schema reference + [changelog](docs/protocol/CHANGELOG.md)).
@@ -218,6 +235,31 @@ examples\render.ps1 [MODE] [-InputPath]  [-Output]       [-Width] [-Height] [-Fp
 On Windows the Arrow stages are handed off through a temp dir (Windows DuckDB
 can't write to `/dev/stdout` and PowerShell pipelines aren't binary-safe); the
 output is identical.
+
+#### Mesh & render flags (`--cli`)
+
+Beyond the `MODE`, the headless (`--cli`) path takes content/appearance flags that
+map straight onto `trd-cli`:
+
+| Flag | Effect |
+|---|---|
+| `--mesh <obj>` | Prepend a mesh Arrow stream (protocol 0.0.3 `[mesh][params]`) built from `<obj>` by [`scripts/obj_to_arrow.py`](scripts/obj_to_arrow.py); the mesh renders centered + scaled-to-fit, driven by the params `INPUT.jsonl`. **Repeatable** — pass `--mesh` several times to load several meshes (one table row each, in order); a frame's `draws` list then references them by 0-based index. Needs pyarrow (via uv/python3). |
+| `--wireframe` | Draw mesh **edges** as a line list (`trd --wireframe`) instead of filled triangles (protocol #38). Reveals topology; on a dense asset (e.g. the ~70k-tri bunny) the edges read as a fine mesh. |
+| `--aabb` | Overlay each drawn mesh instance's **axis-aligned bounding box** as a green (`[0, 1, 0]`) wireframe box (`trd --aabb`, #42). The box uses the *same* per-instance model as the mesh, so it tracks the mesh through the preview + per-frame transforms. Combine freely with `--wireframe`. |
+
+```sh
+# Single bunny turntable, filled, with its bounding box:
+examples/render.sh --cli --aabb --mesh assets/meshes/bunny.obj \
+  examples/frames.turntable.jsonl output/bunny.gif 1024 1024 24
+
+# Two-mesh scene (bunny = mesh 0, cube = mesh 1), wireframe + boxes:
+examples/render.sh --cli --wireframe --aabb \
+  --mesh assets/meshes/bunny.obj --mesh examples/cube.obj \
+  examples/frames.multimesh.jsonl output/scene.gif 1024 1024 24
+```
+
+Both flags are also raw `trd-cli` flags, so any producer pipeline can use them:
+`… | trd --width 1024 --height 1024 --wireframe --aabb | …`.
 
 #### The render pipeline
 
