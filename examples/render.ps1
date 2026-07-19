@@ -15,6 +15,8 @@
 #                       [-CLI | -Native | -Web [-ArrowRenderer|-CanvasRenderer]]
 #   examples/render.ps1 INPUT.jsonl OUTPUT.gif 256 256 30   # positional
 # Defaults: examples/frames.0.0.2.jsonl  output/out.gif  256 256 30
+# Run with no arguments (or -Help) to print the flag guidance and exit; pass -CLI
+# to render the default demo.
 #
 # By default (or with -CLI, alias -Headless) the frame stream is rendered to a
 # GIF/WebP via the headless trd-cli.
@@ -47,11 +49,53 @@ param(
     [Alias('App')][switch]$Native,
     [Alias('Wasm')][switch]$Web,
     [switch]$ArrowRenderer,
-    [switch]$CanvasRenderer
+    [switch]$CanvasRenderer,
+    [switch]$Help
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+# Print flag guidance (shown for a bare invocation or -Help).
+function Show-RenderUsage {
+    Write-Host @'
+render.ps1 - render a trd JSONL frame-parameter file to a GIF/WebP (or play/serve it). PowerShell 7.
+
+Usage:
+  examples\render.ps1 [-CLI | -Native | -Web [-ArrowRenderer|-CanvasRenderer]] `
+                      [-InputPath INPUT.jsonl] [-Output OUTPUT.gif|.webp] [-Width 256] [-Height 256] [-Fps 30]
+  examples\render.ps1 INPUT.jsonl OUTPUT.gif 256 256 30   # positional form
+
+Defaults: InputPath=examples\frames.0.0.2.jsonl  Output=output\out.gif  Width=256  Height=256  Fps=30
+
+MODE (pick one; default -CLI):
+  -CLI, -Headless   Render to a GIF/WebP via the headless trd-cli (default).
+  -Native, -App     Play live in the interactive trd-app window (-Output ignored).
+  -Web, -Wasm       Build the browser (wasm) bundle and serve it (positional args ignored).
+                      -ArrowRenderer   offscreen output-stream smoke (default)
+                      -CanvasRenderer  on-screen canvas demo
+
+  -Help             Show this guidance and exit.
+
+Examples:
+  examples\render.ps1 -CLI                                    # default demo -> output\out.gif
+  examples\render.ps1 -Native                                # play the default demo live
+  examples\render.ps1 -CLI my.jsonl out.gif 1024 1024 24     # custom input/output/size/fps
+  examples\render.ps1 -Web                                    # build + serve the wasm demo
+
+Note: the mesh/appearance flags (--mesh, --wireframe, --aabb) are Linux-only for
+now; Windows parity is tracked in issue #53. Use examples/render.sh for those.
+
+On Windows this auto-sources scripts\dev-env.ps1; on Linux/macOS run inside `nix develop`.
+'@
+}
+
+# A bare invocation (no arguments at all), or -Help, prints the flag guidance and
+# exits rather than silently rendering the default demo -- pass -CLI to run it.
+if ($Help -or $PSBoundParameters.Count -eq 0) {
+    Show-RenderUsage
+    exit 0
+}
 
 # --- Mode selection & validation ---------------------------------------------
 # The top-level modes are mutually exclusive: the default headless render

@@ -161,14 +161,16 @@ schema reference + [changelog](docs/protocol/CHANGELOG.md)).
 
 ```sh
 # Linux / macOS / WSL
-examples/render.sh            # render → output/out.gif
+examples/render.sh --cli      # render → output/out.gif
 examples/render.sh --native   # play live in a window
+# (run examples/render.sh with no flags to print the flag guidance)
 ```
 
 ```powershell
 # Windows (PowerShell 7)
-examples\render.ps1           # render → output/out.gif
+examples\render.ps1 -CLI      # render → output/out.gif
 examples\render.ps1 -Native   # play live in a window
+# (run examples\render.ps1 with no arguments to print the flag guidance)
 ```
 
 > On WSL, prefix GPU commands with `WGPU_BACKEND=gl` (otherwise rendering is
@@ -178,7 +180,7 @@ examples\render.ps1 -Native   # play live in a window
 >
 > ```sh
 > NIXPKGS_ALLOW_UNFREE=1 nix run --impure github:nix-community/nixGL#nixGLNvidia -- \
->   examples/render.sh            # or --native / --web; use #nixGLIntel for Intel/Mesa
+>   examples/render.sh --cli      # or --native / --web; use #nixGLIntel for Intel/Mesa
 > ```
 >
 > NixOS machines don't need this (the driver is on `/run/opengl-driver`).
@@ -230,6 +232,8 @@ examples\render.ps1 [MODE] [-InputPath]  [-Output]       [-Width] [-Height] [-Fp
 # Defaults: examples/frames.0.0.2.jsonl → output/out.gif, 256×256 @ 30 fps
 # MODE (pick one): --cli/-CLI (default: headless GIF/WebP) · --native/-Native (live window) ·
 #   --web/-Wasm (browser; --arrow-renderer/-ArrowRenderer default, or --canvas-renderer/-CanvasRenderer)
+# Run either wrapper with no arguments (or -h/--help / -Help) to print the flag
+# guidance and exit; pass a mode (e.g. --cli) to render the default demo.
 ```
 
 On Windows the Arrow stages are handed off through a temp dir (Windows DuckDB
@@ -484,7 +488,7 @@ ffmpeg/duckdb/uv. It installs a missing `uv` via winget automatically (pass
 
 ```powershell
 cargo build -p trd-cli      # cargo can now link native binaries
-examples\render.ps1         # render examples\frames.0.0.2.jsonl → output\out.gif
+examples\render.ps1 -CLI    # render examples\frames.0.0.2.jsonl → output\out.gif
 ```
 
 Notes:

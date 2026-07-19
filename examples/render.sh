@@ -8,6 +8,8 @@
 #   examples/render.sh [--cli | --native | --web [--arrow-renderer|--canvas-renderer]] \
 #                      [--mesh OBJ]... [--wireframe] [--aabb] [INPUT.jsonl] [OUTPUT.gif|.webp] [WIDTH] [HEIGHT] [FPS]
 # Defaults: examples/frames.0.0.2.jsonl  output/out.gif  256 256 30
+# Run with no arguments (or -h/--help) to print the flag guidance and exit; pass
+# --cli to render the default demo.
 #
 # By default (or with --cli, alias --headless) the frame stream is rendered to a
 # GIF/WebP via the headless trd-cli.
@@ -41,6 +43,53 @@
 # On WSL, prefix with WGPU_BACKEND=gl for GPU rendering (else it uses software).
 set -euo pipefail
 
+# Print flag guidance (shown for a bare invocation or -h/--help).
+usage() {
+  cat <<'USAGE'
+render.sh — render a trd JSONL frame-parameter file to a GIF/WebP (or play/serve it).
+
+Usage:
+  examples/render.sh [MODE] [CONTENT FLAGS] [INPUT.jsonl] [OUTPUT.gif|.webp] [WIDTH] [HEIGHT] [FPS]
+
+Defaults: INPUT=examples/frames.0.0.2.jsonl  OUTPUT=output/out.gif  WIDTH=256  HEIGHT=256  FPS=30
+
+MODE (pick one; default --cli):
+  --cli, --headless   Render to a GIF/WebP via the headless trd-cli (default).
+  --native, --app     Play live in the interactive trd-app window (OUTPUT ignored).
+  --web, --wasm       Build the browser (wasm) bundle and serve it (positional args ignored).
+                        --arrow-renderer   offscreen output-stream smoke (default)
+                        --canvas-renderer  on-screen canvas demo
+
+CONTENT FLAGS (--cli only):
+  --mesh OBJ          Load OBJ as a protocol 0.0.3 mesh (centered + scaled to fit).
+                      Repeatable: pass several times to load several meshes (row 0,
+                      1, …); a frame's `draws` list references them by index.
+  --wireframe         Draw mesh edges as a line list instead of filled triangles (#38).
+  --aabb              Overlay each mesh's axis-aligned bounding box as a green box (#42).
+
+  -h, --help          Show this guidance and exit.
+
+Examples:
+  examples/render.sh --cli                                   # default demo → output/out.gif
+  examples/render.sh --native                                # play the default demo live
+  examples/render.sh --cli --aabb --mesh assets/meshes/bunny.obj \
+    examples/frames.turntable.jsonl output/bunny.gif 1024 1024 24
+  examples/render.sh --cli --wireframe --aabb \
+    --mesh assets/meshes/bunny.obj --mesh examples/cube.obj \
+    examples/frames.multimesh.jsonl output/scene.gif 1024 1024 24
+  examples/render.sh --web                                   # build + serve the wasm demo
+
+Run from `nix develop`. On WSL, prefix with WGPU_BACKEND=gl for GPU rendering.
+USAGE
+}
+
+# A bare invocation (no arguments at all) prints the flag guidance and exits,
+# rather than silently rendering the default demo — pass --cli to run it.
+if [ $# -eq 0 ]; then
+  usage
+  exit 0
+fi
+
 # Extract the optional mode flags (--cli/--native/--web), the --web renderer
 # sub-flags (--arrow-renderer/--canvas-renderer), and repeatable --mesh <obj>
 # flags that prepend a mesh Arrow stream (0.0.3 [mesh][params]); the rest are
@@ -56,6 +105,7 @@ meshes=()
 positional=()
 while [ $# -gt 0 ]; do
   case "$1" in
+    -h|--help) usage; exit 0 ;;
     --cli|--headless) cli=1 ;;
     --native|--app) native=1 ;;
     --web|--wasm) web=1 ;;
