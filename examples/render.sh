@@ -6,7 +6,7 @@
 #
 # Usage:
 #   examples/render.sh [--cli | --native | --web [--arrow-renderer|--canvas-renderer]] \
-#                      [--mesh OBJ] [--wireframe] [INPUT.jsonl] [OUTPUT.gif|.webp] [WIDTH] [HEIGHT] [FPS]
+#                      [--mesh OBJ]... [--wireframe] [INPUT.jsonl] [OUTPUT.gif|.webp] [WIDTH] [HEIGHT] [FPS]
 # Defaults: examples/frames.0.0.2.jsonl  output/out.gif  256 256 30
 #
 # By default (or with --cli, alias --headless) the frame stream is rendered to a
@@ -17,8 +17,12 @@
 # (scripts/obj_to_arrow.py encodes the OBJ) concatenated with the params stream,
 # so trd renders the loaded mesh (centered + uniformly scaled to fit) driven by
 # INPUT.jsonl. Try: examples/render.sh --mesh assets/meshes/bunny.obj \
-# examples/frames.turntable.jsonl output/bunny.gif. (--mesh needs pyarrow via
-# uv/python3 and is ignored by --web.)
+# examples/frames.turntable.jsonl output/bunny.gif. --mesh is repeatable: pass it
+# several times to load several meshes (one table row each, in order); a frame's
+# `draws` list then references them by 0-based index. Try the two-mesh demo:
+# examples/render.sh --cli --wireframe --mesh assets/meshes/bunny.obj \
+# --mesh examples/cube.obj examples/frames.multimesh.jsonl output/scene.gif.
+# (--mesh needs pyarrow via uv/python3 and is ignored by --web.)
 # With --wireframe (--cli only) trd draws mesh edges as a line list instead of
 # filled triangles (protocol #38); combine with --mesh for a wireframe asset.
 # With --web (alias --wasm) it builds the browser (wasm) bundle via nix and serves
@@ -35,15 +39,16 @@
 set -euo pipefail
 
 # Extract the optional mode flags (--cli/--native/--web), the --web renderer
-# sub-flags (--arrow-renderer/--canvas-renderer), and an optional --mesh <obj>
-# that prepends a mesh Arrow stream (0.0.3 [mesh][params]); the rest are positional.
+# sub-flags (--arrow-renderer/--canvas-renderer), and repeatable --mesh <obj>
+# flags that prepend a mesh Arrow stream (0.0.3 [mesh][params]); the rest are
+# positional.
 cli=0
 native=0
 web=0
 arrow_renderer=0
 canvas_renderer=0
 wireframe=0
-mesh=""
+meshes=()
 positional=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -53,8 +58,8 @@ while [ $# -gt 0 ]; do
     --arrow-renderer) arrow_renderer=1 ;;
     --canvas-renderer) canvas_renderer=1 ;;
     --wireframe) wireframe=1 ;;
-    --mesh) shift; mesh="${1:?--mesh requires an OBJ path}" ;;
-    --mesh=*) mesh="${1#--mesh=}" ;;
+    --mesh) shift; meshes+=("${1:?--mesh requires an OBJ path}") ;;
+    --mesh=*) meshes+=("${1#--mesh=}") ;;
     *) positional+=("$1") ;;
   esac
   shift
@@ -219,18 +224,20 @@ frames() {
   esac
 }
 
-# When rendering a loaded mesh (--mesh), pick a pyarrow-capable Python to encode
-# the OBJ into the leading mesh Arrow stream (duckdb can't author the nested-list
-# mesh table). scripts/obj_to_arrow.py emits a 0.0.3 mesh table; it is
-# concatenated *before* the params stream so trd reads [mesh][params].
+# When rendering loaded meshes (--mesh, repeatable), pick a pyarrow-capable
+# Python to encode the OBJ(s) into the leading mesh Arrow stream (duckdb can't
+# author the nested-list mesh table). scripts/obj_to_arrow.py emits a 0.0.3 mesh
+# table with **one row per --mesh** (in the order given); it is concatenated
+# *before* the params stream so trd reads [mesh][params]. A frame's `draws` list
+# references these meshes by 0-based index (mesh 0 = first --mesh).
 mesh_producer=""
-if [ -n "$mesh" ]; then
+if [ ${#meshes[@]} -gt 0 ]; then
   if command -v uv >/dev/null 2>&1; then
     mesh_producer=uv
   elif command -v python3 >/dev/null 2>&1 && python3 -c 'import pyarrow' >/dev/null 2>&1; then
     mesh_producer=python3
   else
-    echo "error: --mesh needs uv or python3 with pyarrow to encode $mesh" >&2
+    echo "error: --mesh needs uv or python3 with pyarrow to encode ${meshes[*]}" >&2
     exit 1
   fi
 fi
@@ -238,8 +245,8 @@ fi
 # The full trd input stream: the optional leading mesh table, then the params.
 stream() {
   case "$mesh_producer" in
-    uv) uv run --with pyarrow "$root/scripts/obj_to_arrow.py" "$mesh" ;;
-    python3) python3 "$root/scripts/obj_to_arrow.py" "$mesh" ;;
+    uv) uv run --with pyarrow "$root/scripts/obj_to_arrow.py" "${meshes[@]}" ;;
+    python3) python3 "$root/scripts/obj_to_arrow.py" "${meshes[@]}" ;;
   esac
   frames
 }
