@@ -2163,4 +2163,160 @@ mod tests {
             "axes gizmo must add pure-red pixels in the composed scene"
         );
     }
+
+    /// A unit quad centered at the origin in the z=0 plane, spanning
+    /// `[-0.5, 0.5]²`. Used to render a *loaded* mesh (not the baked triangle).
+    #[cfg(not(target_arch = "wasm32"))]
+    const QUAD_OBJ: &str = "\
+v -0.5 -0.5 0.0
+v 0.5 -0.5 0.0
+v 0.5 0.5 0.0
+v -0.5 0.5 0.0
+f 1 2 3 4
+";
+
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn mesh_renderer_renders_loaded_quad_filled_with_correct_coverage() {
+        // #37/#41: a mesh loaded from OBJ (not the baked triangle) renders filled
+        // via `draw_indexed` as a `DrawableObject::Mesh`. Under the identity camera
+        // the unit quad spans NDC [-0.5, 0.5]², i.e. the central quarter of the
+        // frame — so the center is lit, the corners are dark, and coverage ≈ 25%.
+        let (device, queue) = pollster::block_on(test_device());
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let (width, height) = (64, 64);
+        let quad = Mesh::from_obj(QUAD_OBJ).expect("quad OBJ parses");
+        let mut mesh = MeshRenderer::new(&device, format, &quad);
+
+        let scene = [DrawableObject::Mesh {
+            mesh_id: 0,
+            model: Matrix4::IDENTITY.to_cols_array(),
+            mode: RenderMode::Filled,
+        }];
+        let px = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
+            mesh.encode(
+                q,
+                e,
+                v,
+                FrameParams::IDENTITY,
+                &scene,
+                Viewport { width, height },
+            );
+        });
+
+        let (w, h) = (width as usize, height as usize);
+        let covered = |x: usize, y: usize| -> bool {
+            let b = (y * w + x) * 4;
+            px[b] > 0 || px[b + 1] > 0 || px[b + 2] > 0
+        };
+        assert!(covered(w / 2, h / 2), "quad center must be covered");
+        assert!(!covered(1, 1), "top-left corner must be outside the quad");
+        assert!(
+            !covered(w - 2, 1),
+            "top-right corner must be outside the quad"
+        );
+        assert!(
+            !covered(1, h - 2),
+            "bottom-left corner must be outside the quad"
+        );
+        assert!(
+            !covered(w - 2, h - 2),
+            "bottom-right corner must be outside the quad"
+        );
+
+        let covered_count = (0..w * h)
+            .filter(|i| {
+                let b = i * 4;
+                px[b] > 0 || px[b + 1] > 0 || px[b + 2] > 0
+            })
+            .count();
+        let frac = covered_count as f32 / (w * h) as f32;
+        assert!(
+            (0.18..=0.32).contains(&frac),
+            "quad coverage {frac} is not ≈ the central quarter (0.25)"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn cg_and_cv_cameras_render_matching_output() {
+        // #43/#49: a CG-authored camera (eye/target/up/fovy) and its CV-lowered
+        // equivalent (pose = world-from-camera, K = intrinsics) describe the *same*
+        // camera, so rendering the same `Scene` under each yields matching pixels.
+        let (device, queue) = pollster::block_on(test_device());
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let (width, height) = (96, 96);
+        let viewport = Viewport { width, height };
+        let quad = Mesh::from_obj(QUAD_OBJ).expect("quad OBJ parses");
+        let mut mesh = MeshRenderer::new(&device, format, &quad);
+
+        let scene = [DrawableObject::Mesh {
+            mesh_id: 0,
+            model: Matrix4::IDENTITY.to_cols_array(),
+            mode: RenderMode::Filled,
+        }];
+
+        // An off-axis camera so orientation actually matters.
+        let eye_arr = [0.6f32, 0.4, 1.4];
+        let target_arr = [0.0f32, 0.0, 0.0];
+        let up_arr = [0.0f32, 1.0, 0.0];
+        let fovy = crate::DEFAULT_FOV_Y;
+
+        let cg = FrameParams {
+            eye: Some(eye_arr),
+            target: Some(target_arr),
+            up: Some(up_arr),
+            fovy: Some(fovy),
+            ..FrameParams::IDENTITY
+        };
+
+        // Lower the same camera to CV form (K + pose) via the camera API.
+        let cam = crate::Camera::look_at(
+            Point3::new(eye_arr[0], eye_arr[1], eye_arr[2]),
+            Point3::new(target_arr[0], target_arr[1], target_arr[2]),
+            Vector3::new(up_arr[0], up_arr[1], up_arr[2]),
+            fovy,
+            viewport,
+        );
+        let cv = FrameParams {
+            pose: Some(cam.to_pose().matrix().to_cols_array()),
+            k: Some(cam.to_intrinsics()),
+            ..FrameParams::IDENTITY
+        };
+
+        let cg_px = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
+            mesh.encode(q, e, v, cg, &scene, viewport);
+        });
+        let cv_px = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
+            mesh.encode(q, e, v, cv, &scene, viewport);
+        });
+
+        // Both must actually show the quad (non-trivial coverage).
+        let lit = |px: &[u8]| {
+            px.chunks_exact(4)
+                .filter(|c| c[0] > 0 || c[1] > 0 || c[2] > 0)
+                .count()
+        };
+        assert!(lit(&cg_px) > 200, "CG camera must render the quad");
+        assert!(lit(&cv_px) > 200, "CV camera must render the quad");
+
+        // ...and their outputs must match within a tiny tolerance (a few edge
+        // pixels may differ by rounding in the K⇄projection round-trip).
+        let differing = cg_px
+            .chunks_exact(4)
+            .zip(cv_px.chunks_exact(4))
+            .filter(|(a, b)| {
+                a.iter()
+                    .zip(b.iter())
+                    .any(|(x, y)| (i16::from(*x) - i16::from(*y)).abs() > 2)
+            })
+            .count();
+        let frac = differing as f32 / (width * height) as f32;
+        assert!(
+            frac < 0.01,
+            "CG and CV renders differ in {differing} px (fraction {frac})"
+        );
+    }
 }
