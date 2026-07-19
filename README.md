@@ -80,12 +80,17 @@ Each is a *thin shell* that only supplies a render target and calls the core:
   swapchain surface** and presenting it. No read-back, no file — pixels go on
   screen. With no stdin it shows the identity triangle.
 - **`trd-wasm` / `web/` — browser.** `CanvasRenderer.create(canvas)` obtains a wgpu
-  surface from the `<canvas>` and holds a persistent pipeline plus an `InputSession`.
-  `web/main.ts` produces a persistent Apache Arrow IPC stream (one one-row batch per
-  `requestAnimationFrame`) and pumps its bytes into `canvas.pushIpc(chunk)`; Rust
-  decodes and draws each frame straight to the canvas — no pixel read-back. JS only
-  moves Arrow bytes and schedules frames; it never touches the WebGPU API. Packaged
-  as the `trd-wasm` npm library.
+  surface from the `<canvas>` and holds a persistent `MeshRenderer` plus an
+  `InputSession`. It renders the **same mesh Scene** as the native CLI: push a
+  leading `[mesh]` Arrow table (`canvas.pushIpc(meshBytes)`) and it uploads the
+  geometry; each subsequent params batch is decoded and drawn straight to the
+  canvas via the shared `build_scene`/`MeshRenderer` path — no per-frontend
+  branching, no pixel read-back. Overlays toggle from JS with `setWireframe`,
+  `setShowAabb`, and `setShowAxes`. `web/src/canvas-demo.ts` authors a colored
+  cube mesh table in TypeScript, enables the AABB + axes overlays, and spins it
+  with the `frames.turntable.jsonl` turntable frames (one one-row batch per
+  `requestAnimationFrame`). JS only moves Arrow bytes and schedules frames; it
+  never touches the WebGPU API. Packaged as the `trd-wasm` npm library.
 
 ### Stream protocol
 
@@ -117,10 +122,11 @@ optional, so DuckDB and pyarrow streams are both accepted as-is.
 
 - an optional leading **mesh** Arrow stream, concatenated before the params
   stream (`[mesh][params]`): one row per mesh, geometry in nested list columns.
-  The native path decodes it (`Mesh::from_arrow`), uploads it, and renders it
-  **centered and uniformly scaled to fit** (a `base_model` beneath the per-frame
-  `model`), driven by the following params. Encode an OBJ with
-  `scripts/obj_to_arrow.py`; `examples/render.sh --mesh <obj>` wires it end-to-end.
+  **Both the native path and the browser `CanvasRenderer`** decode it
+  (`Mesh::from_arrow`), upload it, and render it **centered and uniformly scaled
+  to fit** (a `base_model` beneath the per-frame `model`), driven by the
+  following params. Encode an OBJ with `scripts/obj_to_arrow.py`;
+  `examples/render.sh --mesh <obj>` wires it end-to-end.
 - an optional per-frame **camera**, authored either **CV**-style (`k` intrinsics +
   `pose` extrinsics, resolved as `view = inverse(pose)`) or **CG**-style (a look-at
   from `eye` + `target`/`direction` + `up`, with `fovy`/`aspect`/`znear`/`zfar`

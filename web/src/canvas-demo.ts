@@ -2,19 +2,23 @@ import {
   Field,
   FixedSizeList,
   Float32,
+  List,
   makeData,
   RecordBatch,
   RecordBatchStreamWriter,
   Schema,
   Struct,
+  Uint32,
   vectorFromArray,
 } from "apache-arrow";
 import init, { CanvasRenderer } from "trd-wasm";
 import wasmUrl from "trd-wasm/trd_wasm_bg.wasm" with { type: "file" };
-// The same frame data the native CLI/window consume, so all three front-ends
-// render the identical animation from one shared source of truth. This is the
-// protocol-0.0.2 example: each row carries the triangle's 4x4 model matrix.
-import framesUrl from "../../examples/frames.0.0.2.jsonl" with { type: "file" };
+// The same turntable frame data the native CLI/window consume, so all three
+// front-ends render the identical animation from one shared source of truth.
+// Each row carries a `rotate_y(theta_i)` 4x4 model matrix (protocol 0.0.3); the
+// mesh it spins is the cube authored below and delivered as the stream's leading
+// mesh table, mirroring `examples/render.sh --mesh …` on the native side.
+import framesUrl from "../../examples/frames.turntable.jsonl" with { type: "file" };
 
 const canvas = document.getElementById("trd-canvas");
 const status = document.getElementById("trd-status");
@@ -30,7 +34,7 @@ const canvasElement = canvas;
 const statusElement = status;
 
 const vec2 = new FixedSizeList(2, new Field("item", new Float32(), false));
-// Column-major 4x4 Mat4 = the triangle's model transform (protocol 0.0.2).
+// Column-major 4x4 Mat4 = the mesh's per-frame model transform (protocol 0.0.3).
 const mat4 = new FixedSizeList(16, new Field("item", new Float32(), false));
 const schema = new Schema(
   [
@@ -39,12 +43,81 @@ const schema = new Schema(
     new Field("theta", new Float32(), false),
     new Field("model", mat4, false),
   ],
-  new Map([["trd.protocol.version", "0.0.2"]]),
+  // The params stream that follows the leading mesh table (0.0.3).
+  new Map([["trd.protocol.version", "0.0.3"]]),
 );
 
-// A protocol-0.0.2 frame is just the 4x4 model matrix (16 column-major floats);
-// the legacy center/size/theta columns are still required on the wire, so they
-// are filled with the identity below.
+// A colored unit cube (8 vertices, 12 triangles) authored as a protocol-0.0.3
+// **mesh table** (one row = one mesh): `position`/`color` as
+// `List<FixedSizeList<Float32>[3]>` and `index` as `List<UInt32>` — the exact
+// shape `trd_core::Mesh::from_arrow_all` decodes and `scripts/obj_to_arrow.py`
+// emits on the native side. Delivered once as the stream's leading mesh table so
+// the browser renders the same loaded mesh the CLI does.
+const CUBE_HALF = 0.5;
+const cubePositions: readonly (readonly [number, number, number])[] = [
+  [-CUBE_HALF, -CUBE_HALF, -CUBE_HALF],
+  [CUBE_HALF, -CUBE_HALF, -CUBE_HALF],
+  [CUBE_HALF, CUBE_HALF, -CUBE_HALF],
+  [-CUBE_HALF, CUBE_HALF, -CUBE_HALF],
+  [-CUBE_HALF, -CUBE_HALF, CUBE_HALF],
+  [CUBE_HALF, -CUBE_HALF, CUBE_HALF],
+  [CUBE_HALF, CUBE_HALF, CUBE_HALF],
+  [-CUBE_HALF, CUBE_HALF, CUBE_HALF],
+];
+// Per-vertex color = normalized position, so each corner gets a distinct hue.
+const cubeColors = cubePositions.map(([x, y, z]) => [x + 0.5, y + 0.5, z + 0.5] as const);
+// Two triangles per face, fan-triangulated from each face's 4 corner indices
+// (winding is irrelevant — no backface culling).
+const cubeFaces: readonly (readonly [number, number, number, number])[] = [
+  [0, 1, 2, 3], // back   (z = -half)
+  [4, 5, 6, 7], // front  (z = +half)
+  [0, 3, 7, 4], // left   (x = -half)
+  [1, 2, 6, 5], // right  (x = +half)
+  [0, 1, 5, 4], // bottom (y = -half)
+  [3, 2, 6, 7], // top    (y = +half)
+];
+const cubeIndices: readonly number[] = cubeFaces.flatMap(([a, b, c, d]) => [a, b, c, a, c, d]);
+
+const f32Item = new Field("item", new Float32(), false);
+const geometryType = new List(new Field("item", new FixedSizeList(3, f32Item), false));
+const indexType = new List(new Field("item", new Uint32(), false));
+const meshSchema = new Schema(
+  [
+    new Field("position", geometryType, false),
+    new Field("color", geometryType, false),
+    new Field("index", indexType, false),
+  ],
+  new Map([["trd.protocol.version", "0.0.3"]]),
+);
+
+/// Serializes the cube as a one-row `[mesh]` Arrow IPC stream (schema + batch +
+/// end-of-stream). Pushed to the renderer before any params frame, so the
+/// `InputSession` decodes it as the leading mesh table and the `MeshRenderer`
+/// renders it (centered + scaled to fit) driven by the per-frame model.
+function meshStreamBytes(): Promise<Uint8Array> {
+  // One row = one mesh: each column's single row is the list of per-vertex/index
+  // values (hence the extra array nesting around the cube data).
+  const position = vectorFromArray([cubePositions], geometryType).data[0];
+  const color = vectorFromArray([cubeColors], geometryType).data[0];
+  const index = vectorFromArray([cubeIndices], indexType).data[0];
+  if (!position || !color || !index) {
+    throw new Error("mesh Arrow vector construction produced no data");
+  }
+  const batch = new RecordBatch(
+    meshSchema,
+    makeData({
+      type: new Struct(meshSchema.fields),
+      length: 1,
+      nullCount: 0,
+      children: [position, color, index],
+    }),
+  );
+  return RecordBatchStreamWriter.writeAll([batch]).toUint8Array();
+}
+
+// A frame carries the cube's 4x4 model matrix (16 column-major floats); the
+// legacy center/size/theta columns are still required on the wire, so they are
+// filled with the identity below.
 type Frame = Readonly<{ model: readonly number[] }>;
 
 const ZERO2: readonly [number, number] = [0, 0];
@@ -121,13 +194,13 @@ function addMeasure(name: string, duration: number): void {
   performance.measure(name, { start: performance.now(), duration });
 }
 
-/// Loads the shared `examples/frames.0.0.2.jsonl` sequence — the same protocol
-/// 0.0.2 model-matrix data the native CLI/window render — so the browser plays
-/// the identical animation.
+/// Loads the shared `examples/frames.turntable.jsonl` sequence — the same
+/// `rotate_y(theta_i)` turntable model matrices the native CLI/window render —
+/// so the browser spins the cube through the identical animation.
 async function loadFrames(): Promise<Frame[]> {
   const response = await fetch(framesUrl);
   if (!response.ok) {
-    throw new Error(`failed to load frames.0.0.2.jsonl: ${response.status}`);
+    throw new Error(`failed to load frames.turntable.jsonl: ${response.status}`);
   }
   const text = await response.text();
   return text
@@ -151,6 +224,14 @@ async function loadFrames(): Promise<Frame[]> {
 async function run(): Promise<void> {
   await init({ module_or_path: wasmUrl });
   const renderer = await CanvasRenderer.create(canvasElement);
+
+  // Overlays on: draw the cube's AABB box and the world coordinate-axes gizmo
+  // alongside it (the same DrawableObject scene the native --aabb --axes flags
+  // build). Deliver the cube as the leading mesh table before any params frame.
+  renderer.setShowAabb(true);
+  renderer.setShowAxes(true);
+  renderer.pushIpc(await meshStreamBytes());
+
   const writer = new RecordBatchStreamWriter({ compressionType: null });
   const query = new URLSearchParams(window.location.search);
   const smoke = query.get("smoke") === "1";
