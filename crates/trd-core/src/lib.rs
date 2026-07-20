@@ -19,13 +19,13 @@ pub use math::{
 pub use mesh::{MeshError, DEFAULT_PREVIEW_TARGET};
 pub use output::{output_schema, tightly_pack_rgba, OutputError, OutputSession};
 pub use protocol::{
-    frame_rate_from_metadata, FrameBatch, InputSession, ProtocolError, DEFAULT_FRAME_RATE,
-    FRAME_RATE_KEY, PROTOCOL_VERSION, PROTOCOL_VERSION_KEY,
+    frame_rate_from_metadata, DecodedFrame, FrameBatch, InputSession, ProtocolError,
+    DEFAULT_FRAME_RATE, FRAME_RATE_KEY, PROTOCOL_VERSION, PROTOCOL_VERSION_KEY,
 };
 pub use render::{
-    create_mesh_pipeline, create_triangle_pipeline, render_triangle, CameraFormError, Draw,
-    DrawableObject, FrameParams, Mesh, MeshRenderer, RenderMode, Scene, TriangleRenderer, Vertex,
-    Viewport,
+    build_scene, create_mesh_pipeline, create_triangle_pipeline, render_triangle, CameraFormError,
+    Draw, DrawableObject, FrameParams, Mesh, MeshRenderer, RenderMode, Scene, TriangleRenderer,
+    Vertex, Viewport,
 };
 
 #[cfg(not(target_arch = "wasm32"))]

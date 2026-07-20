@@ -193,7 +193,9 @@ impl FrameParams {
 
     /// The effective 4×4 model matrix: the explicit [`FrameParams::model`] if
     /// present, else the 2D affine synthesized from `center`/`size`/`theta`.
-    pub(crate) fn model_matrix(&self) -> Matrix4 {
+    /// Used by front-ends to place the default single instance of mesh 0 when a
+    /// frame carries no explicit instanced draw list.
+    pub fn model_matrix(&self) -> Matrix4 {
         match self.model {
             Some(cols) => Matrix4::from_cols_array(&cols),
             None => model_from_2d_affine(self.center, self.size, self.theta),
@@ -826,6 +828,42 @@ pub enum DrawableObject {
 /// boxes). A single-mesh frame is the degenerate one-element scene — the
 /// renderer always iterates a `Scene`, with no single-object special case.
 pub type Scene = Vec<DrawableObject>;
+
+/// Builds a per-frame [`Scene`] from a wire `draws` list plus the render `mode`
+/// and overlay flags. Each [`Draw`] becomes one [`DrawableObject::Mesh`] in
+/// `mode`; with `show_aabb`, each also emits a tracking
+/// [`DrawableObject::AabbBox`]; with `show_axes`, one origin
+/// [`DrawableObject::CoordinateAxes`] is appended. The order (all meshes, then
+/// all boxes, then axes) matches the renderer's draw buckets so output is
+/// pixel-identical to the pre-scene, flag-driven path.
+///
+/// Shared by the native ([`crate::run_stream`]) and wasm front-ends so neither
+/// branches per primitive type: both author the same ordered `Scene` and hand
+/// it to [`MeshRenderer::encode`].
+pub fn build_scene(draws: &[Draw], mode: RenderMode, show_aabb: bool, show_axes: bool) -> Scene {
+    let mut scene = Vec::with_capacity(draws.len() * (1 + usize::from(show_aabb)) + 1);
+    for draw in draws {
+        scene.push(DrawableObject::Mesh {
+            mesh_id: draw.mesh_id,
+            model: draw.model,
+            mode,
+        });
+    }
+    if show_aabb {
+        for draw in draws {
+            scene.push(DrawableObject::AabbBox {
+                mesh_id: draw.mesh_id,
+                model: draw.model,
+            });
+        }
+    }
+    if show_axes {
+        scene.push(DrawableObject::CoordinateAxes {
+            model: Matrix4::IDENTITY.to_cols_array(),
+        });
+    }
+    scene
+}
 
 /// A mesh uploaded to the GPU: its vertex buffer, the filled **triangle** index
 /// buffer, the deduped **edge** (`LineList`) index buffer for wireframe (#38),
@@ -2175,6 +2213,25 @@ v -0.5 0.5 0.0
 f 1 2 3 4
 ";
 
+    // A unit cube centered at the origin (±0.5) — a mesh with real depth extent,
+    // used by the dolly-turntable scenario test to make near/far framing matter.
+    const CUBE_OBJ: &str = "\
+v -0.5 -0.5 -0.5
+v 0.5 -0.5 -0.5
+v 0.5 0.5 -0.5
+v -0.5 0.5 -0.5
+v -0.5 -0.5 0.5
+v 0.5 -0.5 0.5
+v 0.5 0.5 0.5
+v -0.5 0.5 0.5
+f 1 2 3 4
+f 5 6 7 8
+f 1 5 8 4
+f 2 6 7 3
+f 4 3 7 8
+f 1 2 6 5
+";
+
     #[test]
     #[ignore = "requires a GPU adapter"]
     #[cfg(not(target_arch = "wasm32"))]
@@ -2318,5 +2375,155 @@ f 1 2 3 4
             frac < 0.01,
             "CG and CV renders differ in {differing} px (fraction {frac})"
         );
+    }
+
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn dolly_turntable_bird_eye_cg_cv_wireframe_stays_framed() {
+        // #49 scenario end-to-end: a fixed 45° bird's-eye camera dollies in and
+        // out while a mesh spins about +Y, rendered as a **wireframe**. At every
+        // (dolly distance, spin angle) this asserts the three defining behaviors
+        // of the slice:
+        //   (a) the CG-authored camera (eye/target/up/fovy) and its CV-lowered
+        //       equivalent (pose + K) render matching pixels;
+        //   (b) near/far fit: the spinning mesh stays fully framed — visible
+        //       wireframe, empty frame border (nothing clipped at any distance);
+        //   (c) the dolly actually reframes: dollying in covers more pixels than
+        //       dollying out.
+        // (A cube stands in for the bunny for a fast, deterministic GPU test; the
+        // same scenario is exercised on the real bunny by examples/bunny_dolly.py
+        // + `render.sh --wireframe`.)
+        let (device, queue) = pollster::block_on(test_device());
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let (width, height) = (128, 128);
+        let viewport = Viewport { width, height };
+        let cube = Mesh::from_obj(CUBE_OBJ).expect("cube OBJ parses");
+        let mut mesh = MeshRenderer::new(&device, format, &cube);
+
+        let fovy = crate::DEFAULT_FOV_Y; // 45°
+                                         // Fixed bird's-eye view direction: 45° elevation, 35° azimuth (unit).
+        let elev = 45f32.to_radians();
+        let azim = 35f32.to_radians();
+        let view_dir =
+            Vec3::new(elev.cos() * azim.sin(), elev.sin(), elev.cos() * azim.cos()).normalize();
+        let target = Point3::new(0.0, 0.0, 0.0);
+        let up = Vector3::Y;
+
+        // Dolly-in (near) → mid → dolly-out (far).
+        let distances = [3.5f32, 4.75, 6.0];
+        // Turntable spin angles about +Y.
+        let angles = [0.0f32, std::f32::consts::FRAC_PI_2, 2.4];
+
+        let lit = |px: &[u8]| -> usize {
+            px.chunks_exact(4)
+                .filter(|c| c[0] > 0 || c[1] > 0 || c[2] > 0)
+                .count()
+        };
+        // Lit pixels in the outer 2-px ring — must stay 0 (mesh never clipped).
+        let border_lit = |px: &[u8]| -> usize {
+            let w = width as usize;
+            let h = height as usize;
+            let mut n = 0;
+            for y in 0..h {
+                for x in 0..w {
+                    if x < 2 || x >= w - 2 || y < 2 || y >= h - 2 {
+                        let b = (y * w + x) * 4;
+                        if px[b] > 0 || px[b + 1] > 0 || px[b + 2] > 0 {
+                            n += 1;
+                        }
+                    }
+                }
+            }
+            n
+        };
+
+        let mut lit_at_zero_spin = Vec::new();
+        for &dist in &distances {
+            let eye_arr = [view_dir.x * dist, view_dir.y * dist, view_dir.z * dist];
+            let eye = Point3::new(eye_arr[0], eye_arr[1], eye_arr[2]);
+            // Lower the same camera to CV form (K + pose) once per distance.
+            let cam = crate::Camera::look_at(eye, target, up, fovy, viewport);
+            let pose = cam.to_pose().matrix().to_cols_array();
+            let k = cam.to_intrinsics();
+
+            for &theta in &angles {
+                let scene = [DrawableObject::Mesh {
+                    mesh_id: 0,
+                    model: Mat4::from_rotation_y(theta).to_cols_array(),
+                    mode: RenderMode::Wireframe,
+                }];
+
+                let cg = FrameParams {
+                    eye: Some(eye_arr),
+                    target: Some([0.0, 0.0, 0.0]),
+                    up: Some([0.0, 1.0, 0.0]),
+                    fovy: Some(fovy),
+                    ..FrameParams::IDENTITY
+                };
+                let cv = FrameParams {
+                    pose: Some(pose),
+                    k: Some(k),
+                    ..FrameParams::IDENTITY
+                };
+
+                let cg_px =
+                    render_with_readback(&device, &queue, format, width, height, |q, e, v| {
+                        mesh.encode(q, e, v, cg, &scene, viewport);
+                    });
+                let cv_px =
+                    render_with_readback(&device, &queue, format, width, height, |q, e, v| {
+                        mesh.encode(q, e, v, cv, &scene, viewport);
+                    });
+
+                let cg_lit = lit(&cg_px);
+                // (b) near/far fit: visible wireframe, but framed — never fills
+                // the frame and never touches the border (nothing clipped).
+                assert!(
+                    cg_lit > 20,
+                    "dist {dist} theta {theta}: wireframe must be visible (near/far fit)"
+                );
+                assert!(
+                    (cg_lit as f32) < 0.5 * (width * height) as f32,
+                    "dist {dist} theta {theta}: mesh must stay framed, not overflow ({cg_lit} px)"
+                );
+                assert_eq!(
+                    border_lit(&cg_px),
+                    0,
+                    "dist {dist} theta {theta}: mesh must not touch the frame border (stays framed)"
+                );
+
+                // (a) CG and CV forms render matching pixels (few edge pixels may
+                // differ by rounding in the K⇄projection round-trip).
+                let differing = cg_px
+                    .chunks_exact(4)
+                    .zip(cv_px.chunks_exact(4))
+                    .filter(|(a, b)| {
+                        a.iter()
+                            .zip(b.iter())
+                            .any(|(x, y)| (i16::from(*x) - i16::from(*y)).abs() > 2)
+                    })
+                    .count();
+                let frac = differing as f32 / (width * height) as f32;
+                assert!(
+                    frac < 0.02,
+                    "dist {dist} theta {theta}: CG vs CV differ in {differing} px ({frac})"
+                );
+
+                if theta == angles[0] {
+                    lit_at_zero_spin.push((dist, cg_lit));
+                }
+            }
+        }
+
+        // (c) the dolly reframes the mesh: closer distance ⇒ larger footprint.
+        for pair in lit_at_zero_spin.windows(2) {
+            let (near_d, near_lit) = pair[0];
+            let (far_d, far_lit) = pair[1];
+            assert!(
+                near_lit > far_lit,
+                "dolly-in ({near_d}, {near_lit}px) must cover more than dolly-out ({far_d}, {far_lit}px)"
+            );
+        }
     }
 }

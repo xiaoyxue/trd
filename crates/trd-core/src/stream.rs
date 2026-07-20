@@ -23,7 +23,8 @@ use std::io::{Read, Write};
 
 use crate::math::Matrix4;
 use crate::protocol::{
-    frame_rate_from_metadata, PROTOCOL_VERSION, PROTOCOL_VERSION_KEY, SUPPORTED_INPUT_VERSIONS,
+    frame_rate_from_metadata, is_mesh_schema, PROTOCOL_VERSION, PROTOCOL_VERSION_KEY,
+    SUPPORTED_INPUT_VERSIONS,
 };
 use crate::render::{
     CameraFormError, Draw, DrawableObject, FrameParams, Mesh, MeshRenderer, RenderMode,
@@ -620,7 +621,7 @@ impl BatchRenderer {
     /// Builds the per-frame [`Scene`](crate::Scene) from a wire `draws` list and
     /// this renderer's mode/overlay flags (delegates to [`build_scene`]).
     fn build_scene(&self, draws: &[Draw]) -> Vec<DrawableObject> {
-        build_scene(draws, self.mode, self.show_aabb, self.show_axes)
+        crate::render::build_scene(draws, self.mode, self.show_aabb, self.show_axes)
     }
 
     /// Renders `params` with the given per-frame instance `draws` and returns
@@ -697,50 +698,6 @@ impl BatchRenderer {
         self.staging.unmap();
         Ok(pixels)
     }
-}
-
-/// Builds a per-frame [`Scene`](crate::Scene) from a wire `draws` list plus the
-/// render `mode` and overlay flags. Each draw becomes one
-/// [`DrawableObject::Mesh`] in `mode`; with `show_aabb`, each also emits a
-/// tracking [`DrawableObject::AabbBox`]; with `show_axes`, one origin
-/// [`DrawableObject::CoordinateAxes`] is appended. The order (all meshes, then
-/// all boxes, then axes) matches the renderer's draw buckets so output is
-/// pixel-identical to the pre-scene, flag-driven path.
-fn build_scene(
-    draws: &[Draw],
-    mode: RenderMode,
-    show_aabb: bool,
-    show_axes: bool,
-) -> Vec<DrawableObject> {
-    let mut scene = Vec::with_capacity(draws.len() * (1 + usize::from(show_aabb)) + 1);
-    for draw in draws {
-        scene.push(DrawableObject::Mesh {
-            mesh_id: draw.mesh_id,
-            model: draw.model,
-            mode,
-        });
-    }
-    if show_aabb {
-        for draw in draws {
-            scene.push(DrawableObject::AabbBox {
-                mesh_id: draw.mesh_id,
-                model: draw.model,
-            });
-        }
-    }
-    if show_axes {
-        scene.push(DrawableObject::CoordinateAxes {
-            model: Matrix4::IDENTITY.to_cols_array(),
-        });
-    }
-    scene
-}
-
-/// True if `schema` is a **mesh table** (has a `position` column) — used to tell
-/// a leading `0.0.3` mesh stream apart from the params stream that follows it (or
-/// a legacy params-only stream).
-fn is_mesh_schema(schema: &Schema) -> bool {
-    schema.fields().iter().any(|f| f.name() == "position")
 }
 
 /// Reads the leading mesh stream, decoding **every** row of its batches into a
@@ -867,6 +824,7 @@ pub fn run_stream<R: Read, W: Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::build_scene;
     use arrow::array::{ArrayRef, FixedSizeListArray as U8List, UInt8Array};
     use arrow::ipc::writer::StreamWriter;
 

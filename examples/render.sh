@@ -35,12 +35,14 @@
 #
 # Dolly-camera capstone (#49): examples/bunny_dolly.py authors the same 45°
 # bird's-eye *dolly* camera twice — CG (eye/target/fovy) and CV (K + pose) — as
-# two JSONL streams that render identically (verified to <0.01% pixels). Render
-# each with --wireframe --mesh assets/meshes/bunny.obj and compare:
-#   python examples/bunny_dolly.py
-#   examples/render.sh --cli --wireframe --mesh assets/meshes/bunny.obj \
+# two JSONL streams that render identically (verified to <0.01% pixels).
+# render.sh runs this producer automatically: pass frames.bunny_dolly.cg.jsonl
+# (or .cv.jsonl) as INPUT and, if it is missing, it is generated on the fly — no
+# manual pre-step. Render with --wireframe --aabb --axes --mesh assets/meshes/
+# bunny.obj and compare the two forms:
+#   examples/render.sh --cli --wireframe --aabb --axes --mesh assets/meshes/bunny.obj \
 #     examples/frames.bunny_dolly.cg.jsonl output/bunny_dolly_cg.gif 1024 1024 24
-#   examples/render.sh --cli --wireframe --mesh assets/meshes/bunny.obj \
+#   examples/render.sh --cli --wireframe --aabb --axes --mesh assets/meshes/bunny.obj \
 #     examples/frames.bunny_dolly.cv.jsonl output/bunny_dolly_cv.gif 1024 1024 24
 # With --web (alias --wasm) it builds the browser (wasm) bundle via nix and serves
 # it, printing the URLs and an SSH-tunnel command. The web demo generates its own
@@ -49,6 +51,21 @@
 # offscreen output-stream smoke (the browser counterpart of the CLI);
 # --canvas-renderer runs the on-screen canvas demo. Override the port with PORT
 # (default 8080); the server binds all interfaces.
+#
+# The --canvas-renderer demo is the browser twin of the dolly capstone: it parses
+# assets/meshes/bunny.obj in-browser and renders it under the same 45° bird's-eye
+# dolly camera (frames.bunny_dolly.cg.jsonl) with wireframe + AABB + axes. Its
+# resolution and playback speed are tuned live via URL query params (no rebuild):
+#   ?size=N   square render resolution, N px (16..4096; default 1024; aspect=1.0)
+#   ?fps=N    playback frame rate (1..240; default 24; render-bound above the
+#             achievable rate — playback never exceeds what the GPU can draw)
+#   ?smoke=1  render only the 2-row smoke batch, then stop (used by tests)
+#   ?benchmarkRate=60|120   fixed-rate throughput benchmark (overrides ?fps)
+# Combine them, e.g. http://localhost:8080/?size=2048&fps=30 . WebGPU needs a
+# secure context, so open http://localhost:<port> (an SSH tunnel makes a remote
+# machine's origin "localhost" too); a bare http://<ip> is NOT a secure context.
+# The server sends a long cache-control on the page, so hard-refresh
+# (Ctrl+Shift+R) after a rebuild to avoid replaying a stale bundle.
 #
 # Run from `nix develop`. The Arrow frame stream is built with duckdb's 'arrow'
 # community extension when it loads, otherwise with pyarrow (via uv/python3).
@@ -70,7 +87,18 @@ MODE (pick one; default --cli):
   --native, --app     Play live in the interactive trd-app window (OUTPUT ignored).
   --web, --wasm       Build the browser (wasm) bundle and serve it (positional args ignored).
                         --arrow-renderer   offscreen output-stream smoke (default)
-                        --canvas-renderer  on-screen canvas demo
+                        --canvas-renderer  on-screen canvas demo (bunny dolly capstone)
+
+BROWSER QUERY PARAMS (--web --canvas-renderer; append to the URL, no rebuild):
+  ?size=N             square render resolution in px (16..4096; default 1024).
+  ?fps=N              playback frame rate (1..240; default 24). Render-bound: it
+                      never plays faster than the GPU can draw a frame.
+  ?smoke=1            render only the 2-row smoke batch, then stop.
+  ?benchmarkRate=60|120   fixed-rate throughput benchmark (overrides ?fps).
+                      Combine, e.g. http://localhost:8080/?size=2048&fps=30
+  Open http://localhost:PORT (WebGPU needs this secure context; a bare IP is not
+  one — use the printed SSH tunnel for a remote browser). Hard-refresh
+  (Ctrl+Shift+R) after a rebuild so the browser drops the cached bundle.
 
 CONTENT FLAGS (--cli only):
   --mesh OBJ          Load OBJ as a protocol 0.0.3 mesh (centered + scaled to fit).
@@ -91,8 +119,10 @@ Examples:
     --mesh assets/meshes/bunny.obj --mesh examples/cube.obj \
     examples/frames.multimesh.jsonl output/scene.gif 1024 1024 24
   examples/render.sh --cli --wireframe --axes --aabb --mesh assets/meshes/bunny.obj \
-    examples/frames.bunny_dolly.cg.jsonl output/bunny_dolly.gif 1024 1024 24  # dolly capstone (#49)
+    examples/frames.bunny_dolly.cg.jsonl output/bunny_dolly.gif 1024 1024 24  # dolly capstone (#49; auto-generates the frames)
   examples/render.sh --web                                   # build + serve the wasm demo
+  examples/render.sh --web --canvas-renderer                 # on-screen bunny dolly demo
+  #   then open http://localhost:8080/?size=2048&fps=30       (size/fps tuned live)
 
 Run from `nix develop`. On WSL, prefix with WGPU_BACKEND=gl for GPU rendering.
 USAGE
@@ -161,6 +191,28 @@ fps="${5:-30}"
 # DuckDB SQL string literals escape a single quote by doubling it.
 sql_input=${input//\'/\'\'}
 
+# examples/bunny_dolly.py authors the 45° bird's-eye *dolly* camera capstone (#49)
+# as two JSONL streams — CG (eye/target/fovy) and CV (K + pose) — that render
+# identically. If the requested INPUT is one of its outputs
+# (frames.bunny_dolly.{cg,cv}.jsonl) and it is not present yet, generate it now
+# via the (pure-stdlib) producer so the demo renders without a manual pre-step.
+case "$input" in
+  *frames.bunny_dolly.cg.jsonl|*frames.bunny_dolly.cv.jsonl)
+    if [ ! -f "$input" ]; then
+      prefix=${input%.cg.jsonl}; prefix=${prefix%.cv.jsonl}
+      echo "generating dolly frames via examples/bunny_dolly.py (--out-prefix $prefix)…" >&2
+      if command -v python3 >/dev/null 2>&1; then
+        python3 "$root/examples/bunny_dolly.py" --out-prefix "$prefix" >&2
+      elif command -v uv >/dev/null 2>&1; then
+        uv run --python 3.12 "$root/examples/bunny_dolly.py" --out-prefix "$prefix" >&2
+      else
+        echo "error: need python3 (or uv) to run examples/bunny_dolly.py" >&2
+        exit 1
+      fi
+    fi
+    ;;
+esac
+
 # The web path builds/serves via nix; native needs only cargo; the GIF path also
 # needs ffmpeg (and uv for encoding).
 if [ "$web" -eq 1 ]; then
@@ -193,10 +245,23 @@ if [ "$web" -eq 1 ]; then
   # browser counterpart of --cli); --canvas-renderer = the on-screen canvas demo.
   if [ "$canvas_renderer" -eq 1 ]; then
     demo_query=""
-    renderer_label="CanvasRenderer (on-screen canvas demo)"
+    renderer_label="CanvasRenderer (on-screen canvas demo — bunny dolly capstone)"
+    # Live-tunable URL params for the canvas demo (no rebuild needed).
+    demo_params=$(cat <<PARAMS
+
+  Tune the canvas demo live via URL query params (no rebuild):
+    ?size=N   square resolution px (16..4096, default 1024)
+    ?fps=N    playback rate (1..240, default 24; render-bound above achievable)
+    ?smoke=1  render the 2-row smoke batch then stop
+    ?benchmarkRate=60|120  throughput benchmark (overrides ?fps)
+  e.g.  http://localhost:$port/?size=2048&fps=30
+  (Hard-refresh Ctrl+Shift+R after a rebuild to drop the cached bundle.)
+PARAMS
+)
   else
     demo_query="?arrow-smoke"
     renderer_label="ArrowRenderer (offscreen output-stream smoke)"
+    demo_params=""
   fi
 
   echo "building trd web (wasm) bundle via nix (.#web)…" >&2
@@ -214,6 +279,7 @@ trd web (wasm) server — port $port  (press Ctrl-C to stop)
     ssh -L $port:localhost:$port $user@$ip
   then open in a WebGPU browser (Chrome/Edge):
                           http://localhost:$port$demo_query
+$demo_params
 
 EOF
 
