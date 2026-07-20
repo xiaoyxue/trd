@@ -13,12 +13,15 @@ import {
 } from "apache-arrow";
 import init, { CanvasRenderer } from "trd-wasm";
 import wasmUrl from "trd-wasm/trd_wasm_bg.wasm" with { type: "file" };
-// The same turntable frame data the native CLI/window consume, so all three
-// front-ends render the identical animation from one shared source of truth.
-// Each row carries a `rotate_y(theta_i)` 4x4 model matrix (protocol 0.0.3); the
-// mesh it spins is the cube authored below and delivered as the stream's leading
-// mesh table, mirroring `examples/render.sh --mesh …` on the native side.
-import framesUrl from "../../examples/frames.turntable.jsonl" with { type: "file" };
+// The Stanford bunny OBJ (colorless), parsed in-browser into a protocol-0.0.3
+// **mesh table** — exactly as `scripts/obj_to_arrow.py` encodes it natively.
+import bunnyUrl from "../../assets/meshes/bunny.obj" with { type: "file" };
+// The 45° bird's-eye *dolly* camera capstone params (#49): each row carries a
+// `rotate_y(theta_i)` model **plus** a CG camera (eye/target/up/fovy/aspect),
+// authored by `examples/bunny_dolly.py`. The browser thus renders the identical
+// scene the native `render.sh --wireframe --aabb --axes --mesh
+// assets/meshes/bunny.obj examples/frames.bunny_dolly.cg.jsonl` does.
+import framesUrl from "../../examples/frames.bunny_dolly.cg.jsonl" with { type: "file" };
 
 const canvas = document.getElementById("trd-canvas");
 const status = document.getElementById("trd-status");
@@ -34,73 +37,85 @@ const canvasElement = canvas;
 const statusElement = status;
 
 const vec2 = new FixedSizeList(2, new Field("item", new Float32(), false));
+const vec3 = new FixedSizeList(3, new Field("item", new Float32(), false));
 // Column-major 4x4 Mat4 = the mesh's per-frame model transform (protocol 0.0.3).
 const mat4 = new FixedSizeList(16, new Field("item", new Float32(), false));
+// The params stream that follows the leading mesh table (0.0.3): the legacy
+// center/size/theta + per-frame `model`, plus the CG dolly-camera columns
+// (eye/target/up/fovy/aspect) — the exact schema `scripts/jsonl_to_arrow.py`
+// emits for `examples/frames.bunny_dolly.cg.jsonl`.
 const schema = new Schema(
   [
     new Field("center", vec2, false),
     new Field("size", vec2, false),
     new Field("theta", new Float32(), false),
     new Field("model", mat4, false),
+    new Field("eye", vec3, false),
+    new Field("target", vec3, false),
+    new Field("up", vec3, false),
+    new Field("fovy", new Float32(), false),
+    new Field("aspect", new Float32(), false),
   ],
-  // The params stream that follows the leading mesh table (0.0.3).
   new Map([["trd.protocol.version", "0.0.3"]]),
 );
-
-// A colored unit cube (8 vertices, 12 triangles) authored as a protocol-0.0.3
-// **mesh table** (one row = one mesh): `position`/`color` as
-// `List<FixedSizeList<Float32>[3]>` and `index` as `List<UInt32>` — the exact
-// shape `trd_core::Mesh::from_arrow_all` decodes and `scripts/obj_to_arrow.py`
-// emits on the native side. Delivered once as the stream's leading mesh table so
-// the browser renders the same loaded mesh the CLI does.
-const CUBE_HALF = 0.5;
-const cubePositions: readonly (readonly [number, number, number])[] = [
-  [-CUBE_HALF, -CUBE_HALF, -CUBE_HALF],
-  [CUBE_HALF, -CUBE_HALF, -CUBE_HALF],
-  [CUBE_HALF, CUBE_HALF, -CUBE_HALF],
-  [-CUBE_HALF, CUBE_HALF, -CUBE_HALF],
-  [-CUBE_HALF, -CUBE_HALF, CUBE_HALF],
-  [CUBE_HALF, -CUBE_HALF, CUBE_HALF],
-  [CUBE_HALF, CUBE_HALF, CUBE_HALF],
-  [-CUBE_HALF, CUBE_HALF, CUBE_HALF],
-];
-// Per-vertex color = normalized position, so each corner gets a distinct hue.
-const cubeColors = cubePositions.map(([x, y, z]) => [x + 0.5, y + 0.5, z + 0.5] as const);
-// Two triangles per face, fan-triangulated from each face's 4 corner indices
-// (winding is irrelevant — no backface culling).
-const cubeFaces: readonly (readonly [number, number, number, number])[] = [
-  [0, 1, 2, 3], // back   (z = -half)
-  [4, 5, 6, 7], // front  (z = +half)
-  [0, 3, 7, 4], // left   (x = -half)
-  [1, 2, 6, 5], // right  (x = +half)
-  [0, 1, 5, 4], // bottom (y = -half)
-  [3, 2, 6, 7], // top    (y = +half)
-];
-const cubeIndices: readonly number[] = cubeFaces.flatMap(([a, b, c, d]) => [a, b, c, a, c, d]);
 
 const f32Item = new Field("item", new Float32(), false);
 const geometryType = new List(new Field("item", new FixedSizeList(3, f32Item), false));
 const indexType = new List(new Field("item", new Uint32(), false));
+// The bunny carries no vertex colors, so the mesh table is `position` + `index`
+// only (obj_to_arrow.py omits the optional `color` column for a colorless OBJ;
+// trd then defaults every vertex to DEFAULT_COLOR).
 const meshSchema = new Schema(
-  [
-    new Field("position", geometryType, false),
-    new Field("color", geometryType, false),
-    new Field("index", indexType, false),
-  ],
+  [new Field("position", geometryType, false), new Field("index", indexType, false)],
   new Map([["trd.protocol.version", "0.0.3"]]),
 );
 
-/// Serializes the cube as a one-row `[mesh]` Arrow IPC stream (schema + batch +
-/// end-of-stream). Pushed to the renderer before any params frame, so the
+type Vec3 = readonly [number, number, number];
+
+/// Parses OBJ text into position triples + a triangle index list, mirroring
+/// `scripts/obj_to_arrow.py`: only `v x y z` (positions) and `f` (faces) are
+/// read; each face-vertex reference `a/b/c` uses the position index (`a`) only,
+/// 1-based (negative = relative to the end), and polygons are fan-triangulated.
+function parseObj(text: string): { positions: Vec3[]; indices: number[] } {
+  const positions: Vec3[] = [];
+  const indices: number[] = [];
+  for (const line of text.split("\n")) {
+    if (line.startsWith("v ")) {
+      const coords = line.slice(2).trim().split(/\s+/);
+      positions.push([Number(coords[0]), Number(coords[1]), Number(coords[2])]);
+    } else if (line.startsWith("f ")) {
+      const refs = line
+        .slice(2)
+        .trim()
+        .split(/\s+/)
+        .map((token) => {
+          const raw = Number.parseInt(token.split("/")[0] ?? "", 10);
+          return raw > 0 ? raw - 1 : positions.length + raw;
+        });
+      for (let i = 1; i + 1 < refs.length; i += 1) {
+        const a = refs[0];
+        const b = refs[i];
+        const c = refs[i + 1];
+        if (a === undefined || b === undefined || c === undefined) {
+          throw new Error(`invalid OBJ face: ${line}`);
+        }
+        indices.push(a, b, c);
+      }
+    }
+  }
+  return { positions, indices };
+}
+
+/// Serializes the parsed bunny as a one-row `[mesh]` Arrow IPC stream (schema +
+/// batch + end-of-stream). Pushed to the renderer before any params frame, so the
 /// `InputSession` decodes it as the leading mesh table and the `MeshRenderer`
 /// renders it (centered + scaled to fit) driven by the per-frame model.
-function meshStreamBytes(): Promise<Uint8Array> {
-  // One row = one mesh: each column's single row is the list of per-vertex/index
-  // values (hence the extra array nesting around the cube data).
-  const position = vectorFromArray([cubePositions], geometryType).data[0];
-  const color = vectorFromArray([cubeColors], geometryType).data[0];
-  const index = vectorFromArray([cubeIndices], indexType).data[0];
-  if (!position || !color || !index) {
+function meshStreamBytes(positions: readonly Vec3[], indices: readonly number[]): Uint8Array {
+  // One row = one mesh: each column's single row is the whole vertex/index list
+  // (hence the extra array nesting around the geometry).
+  const position = vectorFromArray([positions], geometryType).data[0];
+  const index = vectorFromArray([indices], indexType).data[0];
+  if (!position || !index) {
     throw new Error("mesh Arrow vector construction produced no data");
   }
   const batch = new RecordBatch(
@@ -109,19 +124,35 @@ function meshStreamBytes(): Promise<Uint8Array> {
       type: new Struct(meshSchema.fields),
       length: 1,
       nullCount: 0,
-      children: [position, color, index],
+      children: [position, index],
     }),
   );
-  return RecordBatchStreamWriter.writeAll([batch]).toUint8Array();
+  return RecordBatchStreamWriter.writeAll([batch]).toUint8Array(true);
 }
 
-// A frame carries the cube's 4x4 model matrix (16 column-major floats); the
-// legacy center/size/theta columns are still required on the wire, so they are
-// filled with the identity below.
-type Frame = Readonly<{ model: readonly number[] }>;
+// A frame carries the mesh's 4x4 model matrix (16 column-major floats) and the
+// per-frame CG dolly camera; the legacy center/size/theta columns are still
+// required on the wire and filled with the identity below.
+type Frame = Readonly<{
+  model: readonly number[];
+  eye: Vec3;
+  target: Vec3;
+  up: Vec3;
+  fovy: number;
+  aspect: number;
+}>;
 
 const ZERO2: readonly [number, number] = [0, 0];
 const ONE2: readonly [number, number] = [1, 1];
+
+// A default CG camera for the two-row smoke batch (which authors only models).
+const SMOKE_CAMERA = {
+  eye: [1.2, 0.9, 2.6] as Vec3,
+  target: [0, 0, 0] as Vec3,
+  up: [0, 1, 0] as Vec3,
+  fovy: Math.PI / 4,
+  aspect: 1,
+} as const;
 
 /// Column-major `translate(center) . rotate_z(theta) . scale(size)` — the same
 /// 4x4 model matrix trd-core synthesizes (glam) and the producer emits. Used to
@@ -142,25 +173,41 @@ function frameBatch(frames: readonly Frame[]): RecordBatch {
   const center = vectorFromArray(
     frames.map(() => ZERO2),
     vec2,
-  );
+  ).data[0];
   const size = vectorFromArray(
     frames.map(() => ONE2),
     vec2,
-  );
+  ).data[0];
   const theta = vectorFromArray(
     frames.map(() => 0),
     new Float32(),
-  );
+  ).data[0];
   const model = vectorFromArray(
     frames.map((frame) => frame.model),
     mat4,
-  );
-  const centerData = center.data[0];
-  const sizeData = size.data[0];
-  const thetaData = theta.data[0];
-  const modelData = model.data[0];
+  ).data[0];
+  const eye = vectorFromArray(
+    frames.map((frame) => frame.eye),
+    vec3,
+  ).data[0];
+  const target = vectorFromArray(
+    frames.map((frame) => frame.target),
+    vec3,
+  ).data[0];
+  const up = vectorFromArray(
+    frames.map((frame) => frame.up),
+    vec3,
+  ).data[0];
+  const fovy = vectorFromArray(
+    frames.map((frame) => frame.fovy),
+    new Float32(),
+  ).data[0];
+  const aspect = vectorFromArray(
+    frames.map((frame) => frame.aspect),
+    new Float32(),
+  ).data[0];
 
-  if (!centerData || !sizeData || !thetaData || !modelData) {
+  if (!center || !size || !theta || !model || !eye || !target || !up || !fovy || !aspect) {
     throw new Error("Arrow vector construction produced no data");
   }
 
@@ -170,7 +217,7 @@ function frameBatch(frames: readonly Frame[]): RecordBatch {
       type: new Struct(schema.fields),
       length: frames.length,
       nullCount: 0,
-      children: [centerData, sizeData, thetaData, modelData],
+      children: [center, size, theta, model, eye, target, up, fovy, aspect],
     }),
   );
 }
@@ -194,49 +241,98 @@ function addMeasure(name: string, duration: number): void {
   performance.measure(name, { start: performance.now(), duration });
 }
 
-/// Loads the shared `examples/frames.turntable.jsonl` sequence — the same
-/// `rotate_y(theta_i)` turntable model matrices the native CLI/window render —
-/// so the browser spins the cube through the identical animation.
+/// Reads a 3-float array field from a parsed JSONL row.
+function readVec3(row: Record<string, unknown>, key: string): Vec3 {
+  const value = row[key];
+  if (!Array.isArray(value) || value.length !== 3) {
+    throw new Error(`invalid frame row (expected 3-float ${key})`);
+  }
+  return [Number(value[0]), Number(value[1]), Number(value[2])];
+}
+
+/// Loads `examples/frames.bunny_dolly.cg.jsonl` — the 45° bird's-eye *dolly*
+/// camera capstone (#49): each row's `rotate_y(theta_i)` model + CG camera
+/// (eye/target/up/fovy/aspect), so the browser renders the identical animation
+/// the native CLI does from the same source of truth.
 async function loadFrames(): Promise<Frame[]> {
   const response = await fetch(framesUrl);
   if (!response.ok) {
-    throw new Error(`failed to load frames.turntable.jsonl: ${response.status}`);
+    throw new Error(`failed to load frames.bunny_dolly.cg.jsonl: ${response.status}`);
   }
   const text = await response.text();
   return text
     .split("\n")
     .filter((line) => line.trim().length > 0)
     .map((line) => {
-      const row: unknown = JSON.parse(line);
-      if (
-        typeof row !== "object" ||
-        row === null ||
-        !("model" in row) ||
-        !Array.isArray((row as { model: unknown }).model) ||
-        (row as { model: unknown[] }).model.length !== 16
-      ) {
+      const parsed: unknown = JSON.parse(line);
+      if (typeof parsed !== "object" || parsed === null) {
+        throw new Error(`invalid frame row: ${line}`);
+      }
+      const row = parsed as Record<string, unknown>;
+      const model = row.model;
+      if (!Array.isArray(model) || model.length !== 16) {
         throw new Error(`invalid frame row (expected 16-float model): ${line}`);
       }
-      return { model: (row as { model: number[] }).model };
+      const fovy = Number(row.fovy);
+      const aspect = Number(row.aspect);
+      if (!Number.isFinite(fovy) || !Number.isFinite(aspect)) {
+        throw new Error(`invalid frame row (expected fovy/aspect scalars): ${line}`);
+      }
+      return {
+        model: model.map(Number),
+        eye: readVec3(row, "eye"),
+        target: readVec3(row, "target"),
+        up: readVec3(row, "up"),
+        fovy,
+        aspect,
+      };
     });
 }
 
 async function run(): Promise<void> {
   await init({ module_or_path: wasmUrl });
+
+  // The render resolution = the canvas drawing-buffer size (default 1024x1024,
+  // matching the dolly camera's `aspect = 1.0`). Override it with `?size=N` for a
+  // square NxN buffer; the CanvasRenderer reads width/height at creation time, so
+  // this must run before `create`.
+  const query = new URLSearchParams(window.location.search);
+  const sizeParam = Number(query.get("size"));
+  if (Number.isFinite(sizeParam) && sizeParam >= 16 && sizeParam <= 4096) {
+    const size = Math.floor(sizeParam);
+    canvasElement.width = size;
+    canvasElement.height = size;
+  }
+
   const renderer = await CanvasRenderer.create(canvasElement);
 
-  // Overlays on: draw the cube's AABB box and the world coordinate-axes gizmo
-  // alongside it (the same DrawableObject scene the native --aabb --axes flags
-  // build). Deliver the cube as the leading mesh table before any params frame.
+  // Match the native `--wireframe --aabb --axes` config: draw the bunny as a
+  // wireframe and overlay its AABB box + the world coordinate-axes gizmo (the
+  // same DrawableObject scene those flags build). Fetch + parse the bunny OBJ and
+  // deliver it as the leading mesh table before any params frame.
+  renderer.setWireframe(true);
   renderer.setShowAabb(true);
   renderer.setShowAxes(true);
-  renderer.pushIpc(await meshStreamBytes());
+
+  const bunnyResponse = await fetch(bunnyUrl);
+  if (!bunnyResponse.ok) {
+    throw new Error(`failed to load bunny.obj: ${bunnyResponse.status}`);
+  }
+  const { positions, indices } = parseObj(await bunnyResponse.text());
+  if (positions.length === 0 || indices.length === 0) {
+    throw new Error("bunny OBJ parsed to an empty mesh");
+  }
+  renderer.pushIpc(meshStreamBytes(positions, indices));
 
   const writer = new RecordBatchStreamWriter({ compressionType: null });
-  const query = new URLSearchParams(window.location.search);
   const smoke = query.get("smoke") === "1";
   const rate = Number(query.get("benchmarkRate"));
   const benchmark = rate === 60 || rate === 120;
+  // Playback frame rate (default 24, matching the native GIF); `?fps=N` overrides.
+  // The benchmark path keeps its own fixed 60/120 pacing.
+  const fpsParam = Number(query.get("fps"));
+  const fps = Number.isFinite(fpsParam) && fpsParam >= 1 && fpsParam <= 240 ? fpsParam : 24;
+  const frameRate = benchmark ? rate : fps;
   const totalFrames = benchmark ? 600 : 300;
 
   const generation = [] as number[];
@@ -310,8 +406,8 @@ async function run(): Promise<void> {
 
   const smokeStart = performance.now();
   const smokeBatch = frameBatch([
-    { model: modelMatrix([-0.35, 0], [0.45, 0.45], 0) },
-    { model: modelMatrix([0.35, 0], [0.45, 0.45], Math.PI / 2) },
+    { model: modelMatrix([-0.35, 0], [0.45, 0.45], 0), ...SMOKE_CAMERA },
+    { model: modelMatrix([0.35, 0], [0.45, 0.45], Math.PI / 2), ...SMOKE_CAMERA },
   ]);
   const smokeDuration = performance.now() - smokeStart;
   generation.push(smokeDuration);
@@ -329,9 +425,8 @@ async function run(): Promise<void> {
   }
 
   // The shared frame sequence (same as native); cycle through it, one frame per
-  // present. Speed = frame_rate carried in the data via the number of frames;
-  // pacing is the browser's requestAnimationFrame (its refresh rate) — no fps
-  // knob, matching the native "the stream is the animation" model.
+  // present, paced to `frameRate` (default 24 fps, `?fps=N` override) via
+  // setTimeout so playback matches the native GIF's timing.
   const frames = await loadFrames();
   if (frames.length === 0) {
     throw new Error("shared frame stream is empty");
@@ -362,32 +457,20 @@ async function run(): Promise<void> {
       return;
     }
 
-    if (benchmark) {
-      nextDeadline += 1000 / rate;
-      const delay = Math.max(0, nextDeadline - performance.now());
-      window.setTimeout(() => {
-        void schedule().catch(reportError);
-      }, delay);
-    } else {
-      requestAnimationFrame(() => {
-        void schedule().catch(reportError);
-      });
-    }
+    nextDeadline += 1000 / frameRate;
+    const delay = Math.max(0, nextDeadline - performance.now());
+    window.setTimeout(() => {
+      void schedule().catch(reportError);
+    }, delay);
   }
 
-  if (benchmark) {
-    nextDeadline += 1000 / rate;
-    window.setTimeout(
-      () => {
-        void schedule().catch(reportError);
-      },
-      Math.max(0, nextDeadline - performance.now()),
-    );
-  } else {
-    requestAnimationFrame(() => {
+  nextDeadline += 1000 / frameRate;
+  window.setTimeout(
+    () => {
       void schedule().catch(reportError);
-    });
-  }
+    },
+    Math.max(0, nextDeadline - performance.now()),
+  );
 }
 
 function reportError(error: unknown): void {
