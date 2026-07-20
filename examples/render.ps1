@@ -10,8 +10,8 @@
 # (created in a temp dir and auto-removed). The produced GIF/WebP is identical.
 #
 # Usage:
-#   examples/render.ps1 [-CLI | -Native | -Web [-ArrowRenderer|-CanvasRenderer]] `
-#                       [-Mesh OBJ]... [-Wireframe] [-Aabb] [-Axes] `
+#   examples/render.ps1 [-CLI | -Native | -Web [-ArrowRenderer|-CanvasRenderer|-TexturedRenderer]] `
+#                       [-Mesh OBJ]... [-Texture IMG] [-Wireframe] [-Aabb] [-Axes] `
 #                       [-InputPath INPUT.jsonl] [-Output OUTPUT.gif|.webp] `
 #                       [-Width 256] [-Height 256] [-Fps 30]
 #   examples/render.ps1 INPUT.jsonl OUTPUT.gif 256 256 30   # positional
@@ -23,8 +23,8 @@
 # GIF/WebP via the headless trd-cli.
 # With -Native (alias -App) it is played live in the interactive trd-app window
 # (trd-native); -Output is then ignored and neither uv nor ffmpeg are needed.
-# The content flags below (-Mesh/-Wireframe/-Aabb/-Axes) apply to both -CLI and
-# -Native (trd-cli and trd-app share trd-core's mesh Scene renderer).
+# The content flags below (-Mesh/-Texture/-Wireframe/-Aabb/-Axes) apply to both
+# -CLI and -Native (trd-cli and trd-app share trd-core's mesh Scene renderer).
 # With -Mesh OBJ the input is a protocol 0.0.3 stream: a leading mesh table
 # (scripts\obj_to_arrow.py encodes the OBJ) concatenated with the params stream,
 # so trd renders the loaded mesh (centered + uniformly scaled to fit) driven by
@@ -35,6 +35,13 @@
 # examples\render.ps1 -CLI -Wireframe -Mesh assets\meshes\bunny.obj `
 # -Mesh examples\cube.obj examples\frames.multimesh.jsonl output\scene.gif.
 # (-Mesh needs pyarrow via uv/python and is ignored by -Web.)
+# With -Texture IMG trd binds IMG as a 0.0.4 texture table (sampled albedo) and
+# renders textured, sampling it at each vertex UV (#20). Requires -Mesh (with
+# UVs); mutually exclusive with -Wireframe. Needs pyarrow + pillow + numpy;
+# downscaled to 2048 (portable limit). Try: examples\render.ps1 -CLI `
+# -Mesh assets\meshes\bunny_with_texture\bunny.obj `
+# -Texture assets\meshes\bunny_with_texture\bunny_uv_map1.jpg `
+# examples\frames.bunny_dolly.cg.jsonl output\bunny_textured.gif 512 512 20.
 # With -Wireframe trd draws mesh edges as a line list instead of filled triangles
 # (protocol #38); combine with -Mesh for a wireframe asset.
 # With -Aabb trd overlays each drawn mesh's axis-aligned bounding box as a green
@@ -56,10 +63,11 @@
 # With -Web (alias -Wasm) it builds the browser (wasm) bundle with wasm-pack + bun
 # and serves web/dist, printing the machine URLs and an SSH-tunnel command. The web
 # demo generates its own Arrow frame stream in-browser, so all positional arguments
-# are ignored. Two in-browser renderers share the bundle: -ArrowRenderer (default)
+# are ignored. Three in-browser renderers share the bundle: -ArrowRenderer (default)
 # runs the offscreen output-stream smoke (the browser counterpart of the CLI);
-# -CanvasRenderer runs the on-screen canvas demo. Override the port with $env:PORT
-# (default 8088); binds all interfaces.
+# -CanvasRenderer runs the on-screen wireframe canvas demo; -TexturedRenderer runs
+# the on-screen textured bunny demo (#20: texture + AABB + axes). Override the port
+# with $env:PORT (default 8088); binds all interfaces.
 #
 # On Windows this auto-sources scripts\dev-env.ps1 (the flake.nix devShell
 # counterpart; see README "Windows setup (without Nix)" for the one-time
@@ -81,9 +89,11 @@ param(
     [Alias('Wasm')][switch]$Web,
     [switch]$ArrowRenderer,
     [switch]$CanvasRenderer,
+    [switch]$TexturedRenderer,
     [switch]$Wireframe,
     [switch]$Aabb,
     [switch]$Axes,
+    [string]$Texture,
     [switch]$Help,
     # Repeatable -Mesh <obj> flags land here (PowerShell can't bind a named
     # parameter more than once); they are extracted into $meshes below. Leaving
@@ -111,13 +121,17 @@ MODE (pick one; default -CLI):
   -CLI, -Headless   Render to a GIF/WebP via the headless trd-cli (default).
   -Native, -App     Play live in the interactive trd-app window (-Output ignored).
   -Web, -Wasm       Build the browser (wasm) bundle and serve it (positional args ignored).
-                      -ArrowRenderer   offscreen output-stream smoke (default)
-                      -CanvasRenderer  on-screen canvas demo
+                      -ArrowRenderer     offscreen output-stream smoke (default)
+                      -CanvasRenderer    on-screen wireframe demo (bunny dolly capstone)
+                      -TexturedRenderer  on-screen textured demo (#20: texture + AABB + axes)
 
 CONTENT FLAGS (apply to -CLI and -Native):
   -Mesh OBJ         Load OBJ as a protocol 0.0.3 mesh (centered + scaled to fit).
                     Repeatable: pass several times to load several meshes (row 0,
                     1, ...); a frame's `draws` list references them by index.
+  -Texture IMG      Bind IMG as a 0.0.4 texture and render textured - sampling it
+                    at each vertex UV (#20). Requires -Mesh (with UVs); mutually
+                    exclusive with -Wireframe.
   -Wireframe        Draw mesh edges as a line list instead of filled triangles (#38).
   -Aabb             Overlay each mesh's axis-aligned bounding box as a green box (#42).
   -Axes             Overlay a coordinate-axes gizmo (X=red, Y=green, Z=blue) at the origin (#42).
@@ -131,12 +145,19 @@ Examples:
     examples\frames.bunny_dolly.cg.jsonl _ 1024 1024 24      # live dolly capstone in a window
   examples\render.ps1 -CLI -Aabb -Mesh assets\meshes\bunny.obj `
     examples\frames.turntable.jsonl output\bunny.gif 1024 1024 24
+  examples\render.ps1 -CLI -Mesh assets\meshes\bunny_with_texture\bunny.obj `
+    -Texture assets\meshes\bunny_with_texture\bunny_uv_map1.jpg `
+    examples\frames.bunny_dolly.cg.jsonl output\bunny_textured.gif 512 512 20  # textured bunny (#20)
   examples\render.ps1 -CLI -Wireframe -Aabb `
     -Mesh assets\meshes\bunny.obj -Mesh examples\cube.obj `
     examples\frames.multimesh.jsonl output\scene.gif 1024 1024 24
   examples\render.ps1 -CLI -Wireframe -Axes -Aabb -Mesh assets\meshes\bunny.obj `
     examples\frames.bunny_dolly.cg.jsonl output\bunny_dolly.gif 1024 1024 24  # dolly capstone (#49; auto-generates the frames)
   examples\render.ps1 -Web                                    # build + serve the wasm demo
+  examples\render.ps1 -Web -CanvasRenderer                    # on-screen wireframe bunny dolly demo
+  #   then open http://localhost:8088/?size=2048&fps=30        (size/fps tuned live)
+  examples\render.ps1 -Web -TexturedRenderer                 # on-screen textured bunny (#20: texture+AABB+axes)
+  #   then open http://localhost:8088/?textured&size=2048      (size/fps tuned live)
 
 On Windows this auto-sources scripts\dev-env.ps1; on Linux/macOS run inside `nix develop`.
 '@
@@ -152,12 +173,13 @@ if ($Help -or $PSBoundParameters.Count -eq 0) {
 # --- Mode selection & validation ---------------------------------------------
 # The top-level modes are mutually exclusive: the default headless render
 # (explicit alias -CLI/-Headless), the live -Native window, and the browser
-# -Web/-Wasm bundle. -ArrowRenderer / -CanvasRenderer sub-select the in-browser
-# renderer and therefore apply only to -Web.
+# -Web/-Wasm bundle. -ArrowRenderer / -CanvasRenderer / -TexturedRenderer
+# sub-select the in-browser renderer and therefore apply only to -Web.
 $modeCount = @($CLI, $Native, $Web).Where({ $_ }).Count
 if ($modeCount -gt 1) { Write-Error 'error: choose only one of -CLI, -Native, -Web.' }
-if ($ArrowRenderer -and $CanvasRenderer) { Write-Error 'error: -ArrowRenderer and -CanvasRenderer are mutually exclusive.' }
-if (($ArrowRenderer -or $CanvasRenderer) -and -not $Web) { Write-Error 'error: -ArrowRenderer / -CanvasRenderer apply only to -Web/-Wasm.' }
+$rendererCount = @($ArrowRenderer, $CanvasRenderer, $TexturedRenderer).Where({ $_ }).Count
+if ($rendererCount -gt 1) { Write-Error 'error: choose only one of -ArrowRenderer, -CanvasRenderer, -TexturedRenderer.' }
+if ($rendererCount -ge 1 -and -not $Web) { Write-Error 'error: -ArrowRenderer / -CanvasRenderer / -TexturedRenderer apply only to -Web/-Wasm.' }
 
 # --- Repeatable -Mesh <obj> extraction ---------------------------------------
 # PowerShell can't bind a named parameter more than once, so the repeatable
@@ -188,6 +210,17 @@ if ($Rest) {
 $root = Split-Path -Parent $PSScriptRoot
 if (-not $InputPath) { $InputPath = Join-Path $PSScriptRoot 'frames.0.0.2.jsonl' }
 
+# -Texture binds a 0.0.4 texture table (sampled albedo) and renders textured. It
+# needs a -Mesh (UVs to sample) and is mutually exclusive with -Wireframe.
+if ($Texture) {
+    if ($meshes.Count -eq 0) {
+        Write-Error 'error: -Texture requires at least one -Mesh (with UVs to sample).'
+    }
+    if ($Wireframe) {
+        Write-Error 'error: -Texture and -Wireframe are mutually exclusive.'
+    }
+}
+
 # Make the trd toolchain available the way `nix develop` does on Linux.
 $devEnv = Join-Path $root 'scripts\dev-env.ps1'
 if ((Test-Path $devEnv) -and -not $env:TRD_SKIP_DEV_ENV) {
@@ -209,13 +242,18 @@ if ($Web) {
     $port = if ($env:PORT) { $env:PORT } else { '8088' }
     $webDir = Join-Path $root 'web'
 
-    # Both browser renderers ship in one bundle; web/src/main.ts routes on the
-    # `arrow-smoke` query param, so only the opened URL differs. Default (or
-    # -ArrowRenderer) = the offscreen ArrowRenderer output-stream smoke (the
-    # browser counterpart of -CLI); -CanvasRenderer = the on-screen canvas demo.
+    # All three browser renderers ship in one bundle; web/src/main.ts routes on
+    # the `arrow-smoke` / `textured` query param, so only the opened URL differs.
+    # Default (or -ArrowRenderer) = the offscreen ArrowRenderer output-stream smoke
+    # (the browser counterpart of -CLI); -CanvasRenderer = the on-screen wireframe
+    # canvas demo; -TexturedRenderer = the on-screen textured bunny demo (?textured).
     if ($CanvasRenderer) {
         $demoQuery = ''
-        $rendererLabel = 'CanvasRenderer (on-screen canvas demo)'
+        $rendererLabel = 'CanvasRenderer (on-screen canvas demo - bunny dolly capstone)'
+    }
+    elseif ($TexturedRenderer) {
+        $demoQuery = '?textured'
+        $rendererLabel = 'CanvasRenderer (on-screen textured bunny - #20: texture + AABB + axes)'
     }
     else {
         $demoQuery = '?arrow-smoke'
@@ -276,6 +314,9 @@ Bun.serve({
     Write-Host '  then open in a WebGPU browser (Chrome/Edge):'
     Write-Host "                          http://localhost:$port$demoQuery"
     Write-Host ''
+    Write-Host '  After a rebuild hard-refresh (Ctrl+Shift+R); if you restarted the server'
+    Write-Host '  behind an SSH tunnel, reconnect the tunnel too, to drop the cached bundle.'
+    Write-Host ''
 
     try {
         $env:PORT = $port
@@ -303,11 +344,14 @@ $uvOk = [bool](Get-Command uv -ErrorAction SilentlyContinue)
 $pythonOk = [bool](Get-Command python -ErrorAction SilentlyContinue)
 $pyarrowOk = $false
 $pyNumpyOk = $false
+$pyTextureOk = $false
 if ($pythonOk) {
     try { & python -c 'import pyarrow' 2>$null } catch { }
     $pyarrowOk = ($LASTEXITCODE -eq 0)
     try { & python -c 'import pyarrow, numpy' 2>$null } catch { }
     $pyNumpyOk = ($LASTEXITCODE -eq 0)
+    try { & python -c 'import pyarrow, PIL, numpy' 2>$null } catch { }
+    $pyTextureOk = ($LASTEXITCODE -eq 0)
 }
 
 # Dolly-camera capstone (#49): examples\bunny_dolly.py authors the 45° bird's-eye
@@ -376,6 +420,20 @@ if ($meshes.Count -gt 0) {
     }
 }
 
+# -Texture encodes the image into a 0.0.4 texture table via
+# scripts\texture_to_arrow.py, concatenated between the mesh table and the
+# params ([mesh][texture][params]). Needs pyarrow + pillow + numpy; downscaled
+# to --max-size 2048 to stay within the portable (downlevel/WebGL2) limit.
+$textureToArrow = Join-Path $root 'scripts/texture_to_arrow.py'
+$textureProducer = $null
+if ($Texture) {
+    if ($uvOk) { $textureProducer = 'uv' }
+    elseif ($pyTextureOk) { $textureProducer = 'python' }
+    else {
+        Write-Error "error: -Texture needs uv or a python with pyarrow + pillow + numpy to encode $Texture.`nrun '. scripts\dev-env.ps1', or 'pip install pyarrow pillow numpy'."
+    }
+}
+
 # encode.py needs pyarrow + numpy. Prefer `uv run` (as render.sh does); fall
 # back to a system `python` that already has both. Skipped for the native viewer.
 if (-not $Native) {
@@ -419,6 +477,7 @@ function Join-Files([string[]]$Parts, [string]$Dest) {
 $work = (New-Item -ItemType Directory -Path (Join-Path ([System.IO.Path]::GetTempPath()) "trd-render-$([guid]::NewGuid())")).FullName
 $framesArrow = Join-Path $work 'frames.arrows'
 $meshArrow = Join-Path $work 'mesh.arrows'
+$textureArrow = Join-Path $work 'texture.arrows'
 $streamArrow = Join-Path $work 'stream.arrows'
 $imagesArrow = Join-Path $work 'images.arrows'
 try {
@@ -472,9 +531,9 @@ COPY (
 
     # 1b. -Mesh: encode the OBJ(s) into a leading 0.0.3 mesh table (one row per
     #     -Mesh, in order) and concatenate it *before* the params so trd reads
-    #     [mesh][params]. A frame's `draws` list references these meshes by
-    #     0-based index (mesh 0 = first -Mesh). Without -Mesh, trd reads the
-    #     params stream directly.
+    #     [mesh][params] (or [mesh][texture][params] with -Texture). A frame's
+    #     `draws` list references these meshes by 0-based index (mesh 0 = first
+    #     -Mesh). Without -Mesh, trd reads the params stream directly.
     if ($meshes.Count -gt 0) {
         if ($meshProducer -eq 'uv') {
             $meshArgs = @('run', '--with', 'pyarrow', $objToArrow) + $meshes + @('-o', $meshArrow)
@@ -484,7 +543,23 @@ COPY (
         }
         $meshGen = Start-Process -FilePath $meshProducer -NoNewWindow -Wait -PassThru -ArgumentList $meshArgs
         if ($meshGen.ExitCode -ne 0) { throw "obj_to_arrow ($meshProducer) failed (exit $($meshGen.ExitCode))" }
-        Join-Files -Parts @($meshArrow, $framesArrow) -Dest $streamArrow
+
+        # 1c. -Texture: encode the image into a 0.0.4 texture table and splice it
+        #     between the mesh table and the params ([mesh][texture][params]).
+        if ($Texture) {
+            if ($textureProducer -eq 'uv') {
+                $textureArgs = @('run', '--with', 'pyarrow', '--with', 'pillow', '--with', 'numpy', $textureToArrow, $Texture, '--max-size', '2048', '-o', $textureArrow)
+            }
+            else {
+                $textureArgs = @($textureToArrow, $Texture, '--max-size', '2048', '-o', $textureArrow)
+            }
+            $texGen = Start-Process -FilePath $textureProducer -NoNewWindow -Wait -PassThru -ArgumentList $textureArgs
+            if ($texGen.ExitCode -ne 0) { throw "texture_to_arrow ($textureProducer) failed (exit $($texGen.ExitCode))" }
+            Join-Files -Parts @($meshArrow, $textureArrow, $framesArrow) -Dest $streamArrow
+        }
+        else {
+            Join-Files -Parts @($meshArrow, $framesArrow) -Dest $streamArrow
+        }
         $trdInput = $streamArrow
     }
     else {
@@ -501,6 +576,7 @@ COPY (
             '-q', '-p', 'trd-app', '--', '--width', $Width, '--height', $Height, '--fps', $Fps
         )
         if ($Wireframe) { $appArgs += '--wireframe' }
+        if ($Texture) { $appArgs += '--textured' }
         if ($Aabb) { $appArgs += '--aabb' }
         if ($Axes) { $appArgs += '--axes' }
         $app = Start-Process -FilePath 'cargo' -NoNewWindow -Wait -PassThru `
@@ -517,6 +593,7 @@ COPY (
             '-q', '-p', 'trd-cli', '--', '--width', $Width, '--height', $Height
         )
         if ($Wireframe) { $trdArgs += '--wireframe' }
+        if ($Texture) { $trdArgs += '--textured' }
         if ($Aabb) { $trdArgs += '--aabb' }
         if ($Axes) { $trdArgs += '--axes' }
         $trd = Start-Process -FilePath 'cargo' -NoNewWindow -Wait -PassThru `

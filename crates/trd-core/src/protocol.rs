@@ -7,17 +7,20 @@ use arrow::error::ArrowError;
 use arrow::ipc::reader::StreamDecoder;
 
 use crate::render::Draw;
+use crate::texture::{ImageTexture, TextureError, TEXTURE_COLUMN};
 use crate::{CameraFormError, FrameParams, Mesh, MeshError};
 
-pub const PROTOCOL_VERSION: &str = "0.0.3";
+pub const PROTOCOL_VERSION: &str = "0.0.4";
 pub const PROTOCOL_VERSION_KEY: &str = "trd.protocol.version";
 
-/// Input schema versions this build accepts. `0.0.3` adds an optional leading
-/// **mesh** Arrow stream (concatenated before the params stream); `0.0.2` adds
-/// the optional `model`, `k`, and `pose` matrix columns; `0.0.1` streams (2D
-/// affine only) still decode. The params stream itself is unchanged since
-/// `0.0.2`; the version bump marks the multi-stream framing.
-pub const SUPPORTED_INPUT_VERSIONS: &[&str] = &["0.0.1", "0.0.2", "0.0.3"];
+/// Input schema versions this build accepts. `0.0.4` adds an optional **texture**
+/// Arrow stream (`[mesh][texture][params]` framing) plus a per-vertex `uv` mesh
+/// column; `0.0.3` adds an optional leading **mesh** Arrow stream (concatenated
+/// before the params stream); `0.0.2` adds the optional `model`, `k`, and `pose`
+/// matrix columns; `0.0.1` streams (2D affine only) still decode. The params
+/// stream itself is unchanged since `0.0.2`; the version bumps mark the
+/// multi-stream framing and additive columns.
+pub const SUPPORTED_INPUT_VERSIONS: &[&str] = &["0.0.1", "0.0.2", "0.0.3", "0.0.4"];
 
 /// Schema-metadata key declaring the stream's intended playback rate in frames
 /// per second. Optional and version-independent: it defines *animation speed* so
@@ -87,6 +90,8 @@ pub enum ProtocolError {
     UnsupportedVersion(String),
     #[error("mesh table decode failed: {0}")]
     Mesh(#[from] MeshError),
+    #[error("texture table decode failed: {0}")]
+    Texture(#[from] TextureError),
     #[error(
         "per-frame draw list length mismatch at row {row}: \
          `draw_mesh` has {mesh_len} entries but `draw_model` has {model_len}"
@@ -105,36 +110,44 @@ enum SessionState {
     Failed,
 }
 
-/// Which of a `0.0.3` stream's two concatenated IPC streams the session is
-/// currently decoding. A stream is `[mesh][params]`; a legacy `0.0.1`/`0.0.2`
-/// stream is params-only (no `First`→`Params` transition — the first stream is
-/// already the params stream).
+/// Which kind of concatenated IPC sub-stream the session is currently decoding.
+/// A `0.0.4` stream is `[mesh?][texture?][params]`: zero or more leading data
+/// tables (a **mesh** table, then an optional **texture** table) followed by the
+/// **params** stream. Each sub-stream is classified from its schema
+/// ([`is_mesh_schema`] / [`is_texture_schema`]); the params stream is the
+/// terminal one. A legacy `0.0.1`/`0.0.2` stream is params-only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Stage {
-    /// Decoding the first IPC stream. Its schema decides mesh-table vs. legacy
-    /// params-only (see [`is_mesh_schema`]).
-    First,
-    /// Decoding the params IPC stream that follows a leading mesh stream.
+enum StreamKind {
+    /// The leading **mesh** table (one row = one mesh); accumulated into `meshes`.
+    Mesh,
+    /// The optional **texture** table (one row = one image); decoded into
+    /// `texture` and bound as the sampled albedo for [`RenderMode::Textured`].
+    Texture,
+    /// The terminal **params** stream (one row = one frame).
     Params,
 }
 
 /// Incremental decoder for the trd input protocol, mirroring the native
-/// [`crate::run_stream`] two-stream framing but push-based for wasm. A `0.0.3`
-/// stream is `[mesh][params]`: the leading **mesh** table (one row = one mesh)
-/// is decoded once via [`Mesh::from_arrow_all`] and exposed through
-/// [`InputSession::meshes`], then the following **params** stream drives
-/// per-frame rendering. Legacy `0.0.1`/`0.0.2` params-only streams decode with
-/// no meshes (the front-end renders the built-in hello-triangle).
+/// [`crate::run_stream`] multi-stream framing but push-based for wasm. A `0.0.4`
+/// stream is `[mesh?][texture?][params]`: an optional leading **mesh** table
+/// (one row = one mesh) decoded via [`Mesh::from_arrow_all`] and exposed through
+/// [`InputSession::meshes`], an optional **texture** table decoded via
+/// [`ImageTexture::from_arrow`] and exposed through [`InputSession::texture`],
+/// then the terminal **params** stream driving per-frame rendering. Legacy
+/// `0.0.1`/`0.0.2`/`0.0.3` streams decode unchanged (a params-only stream has no
+/// leading tables; a `0.0.3` stream has a mesh table but no texture).
 pub struct InputSession {
     decoder: StreamDecoder,
-    stage: Stage,
-    /// `Some(true)` once the first stream is classified as a mesh table,
-    /// `Some(false)` for a legacy params-only first stream, `None` until its
-    /// schema is decoded.
-    first_is_mesh: Option<bool>,
+    /// The kind of the sub-stream currently being decoded, or `None` until its
+    /// schema is available (or just after a sub-stream boundary, before the next
+    /// schema arrives).
+    current_kind: Option<StreamKind>,
     meshes: Vec<Mesh>,
-    /// Whether a **params** schema has been validated (either the legacy first
-    /// stream or the params stream after a mesh stream).
+    /// The image decoded from an optional leading **texture** table (`0.0.4`),
+    /// bound as the sampled albedo. `None` for streams without a texture table.
+    texture: Option<ImageTexture>,
+    /// Whether a **params** schema has been decoded and validated (the terminal
+    /// sub-stream). Frames can only be produced once true.
     params_schema_validated: bool,
     state: SessionState,
 }
@@ -143,9 +156,9 @@ impl InputSession {
     pub fn new() -> Self {
         Self {
             decoder: StreamDecoder::new(),
-            stage: Stage::First,
-            first_is_mesh: None,
+            current_kind: None,
             meshes: Vec::new(),
+            texture: None,
             params_schema_validated: false,
             state: SessionState::Open,
         }
@@ -165,8 +178,7 @@ impl InputSession {
 
         let result = (|| {
             self.decoder.finish()?;
-            self.classify_first_if_ready()?;
-            self.validate_params_schema_if_available()?;
+            self.classify_current_if_ready()?;
             if !self.params_schema_validated {
                 return Err(ProtocolError::MissingSchema);
             }
@@ -186,22 +198,34 @@ impl InputSession {
     }
 
     /// Whether a params schema has been decoded and validated (frames can be
-    /// produced). For a `0.0.3` mesh stream this becomes true only once the
-    /// following params stream's schema arrives.
+    /// produced). For a stream with leading mesh/texture tables this becomes true
+    /// only once the terminal params stream's schema arrives.
     pub fn has_schema(&self) -> bool {
         self.params_schema_validated
     }
 
-    /// The meshes decoded from a `0.0.3` stream's leading mesh table, in stream
-    /// order (mesh id = index). Empty for a legacy params-only stream (the
-    /// front-end renders the built-in hello-triangle instead).
+    /// The meshes decoded from a stream's leading mesh table, in stream order
+    /// (mesh id = index). Empty for a legacy params-only stream (the front-end
+    /// renders the built-in hello-triangle instead).
     pub fn meshes(&self) -> &[Mesh] {
         &self.meshes
     }
 
-    /// Whether the stream carried a leading mesh table (`0.0.3`).
+    /// Whether the stream carried a leading mesh table (`0.0.3`+).
     pub fn has_meshes(&self) -> bool {
         !self.meshes.is_empty()
+    }
+
+    /// The image decoded from an optional leading **texture** table (`0.0.4`),
+    /// bound as the sampled albedo for [`crate::RenderMode::Textured`] meshes.
+    /// `None` for streams without a texture table.
+    pub fn texture(&self) -> Option<&ImageTexture> {
+        self.texture.as_ref()
+    }
+
+    /// Whether the stream carried a leading texture table (`0.0.4`).
+    pub fn has_texture(&self) -> bool {
+        self.texture.is_some()
     }
 
     /// The stream's declared playback rate (fps) once a schema has been decoded,
@@ -227,37 +251,38 @@ impl InputSession {
 
         while !bytes.is_empty() {
             let before = bytes.len();
-            match self.stage {
-                Stage::First => match self.decoder.decode(&mut bytes) {
-                    Ok(decoded) => {
-                        self.classify_first_if_ready()?;
-                        if let Some(batch) = decoded {
-                            match self.first_is_mesh {
-                                Some(true) => self.meshes.extend(Mesh::from_arrow_all(&batch)?),
-                                // Legacy params-only stream: no leading mesh table.
-                                _ => batches.push(decode_frame_batch(&batch)?),
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        // A leading mesh stream's end-of-stream marker leaves the
-                        // params stream's bytes in `bytes`; the decoder reports it
-                        // as an "unexpected EOS". Switch to a fresh decoder for the
-                        // params stream and re-drive the remaining bytes.
-                        if self.first_is_mesh == Some(true) && is_stream_boundary(&error) {
-                            self.decoder = StreamDecoder::new();
-                            self.stage = Stage::Params;
-                            continue;
-                        }
-                        return Err(error.into());
-                    }
-                },
-                Stage::Params => {
-                    let decoded = self.decoder.decode(&mut bytes)?;
-                    self.validate_params_schema_if_available()?;
+            match self.decoder.decode(&mut bytes) {
+                Ok(decoded) => {
+                    self.classify_current_if_ready()?;
                     if let Some(batch) = decoded {
-                        batches.push(decode_frame_batch(&batch)?);
+                        match self.current_kind {
+                            Some(StreamKind::Mesh) => {
+                                self.meshes.extend(Mesh::from_arrow_all(&batch)?)
+                            }
+                            Some(StreamKind::Texture) => self.decode_texture(&batch)?,
+                            Some(StreamKind::Params) => batches.push(decode_frame_batch(&batch)?),
+                            // A batch always implies its schema (classified above)
+                            // is available, so `current_kind` is set here.
+                            None => return Err(ProtocolError::MissingSchema),
+                        }
                     }
+                }
+                Err(error) => {
+                    // A leading mesh/texture sub-stream's end-of-stream marker
+                    // leaves the following sub-stream's bytes in `bytes`; the
+                    // decoder reports it as an "unexpected EOS". Switch to a fresh
+                    // decoder for the next sub-stream and re-drive the remainder.
+                    if is_stream_boundary(&error)
+                        && matches!(
+                            self.current_kind,
+                            Some(StreamKind::Mesh) | Some(StreamKind::Texture)
+                        )
+                    {
+                        self.decoder = StreamDecoder::new();
+                        self.current_kind = None;
+                        continue;
+                    }
+                    return Err(error.into());
                 }
             }
 
@@ -266,15 +291,16 @@ impl InputSession {
             }
         }
 
-        self.classify_first_if_ready()?;
-        self.validate_params_schema_if_available()?;
+        self.classify_current_if_ready()?;
         Ok(batches)
     }
 
-    /// Classifies the first stream (mesh table vs. legacy params) once its schema
-    /// is available, validating the version (both) and the params schema (legacy).
-    fn classify_first_if_ready(&mut self) -> Result<(), ProtocolError> {
-        if self.first_is_mesh.is_some() || self.stage != Stage::First {
+    /// Classifies the current sub-stream once its schema is available, validating
+    /// the version (mesh/texture) or the full params schema (params). Idempotent:
+    /// a no-op once `current_kind` is set (until the next sub-stream boundary
+    /// resets it).
+    fn classify_current_if_ready(&mut self) -> Result<(), ProtocolError> {
+        if self.current_kind.is_some() {
             return Ok(());
         }
         let Some(schema) = self.decoder.schema() else {
@@ -282,26 +308,25 @@ impl InputSession {
         };
         if is_mesh_schema(schema.as_ref()) {
             check_version(schema.as_ref())?;
-            self.first_is_mesh = Some(true);
+            self.current_kind = Some(StreamKind::Mesh);
+        } else if is_texture_schema(schema.as_ref()) {
+            check_version(schema.as_ref())?;
+            self.current_kind = Some(StreamKind::Texture);
         } else {
             validate_schema(schema.as_ref())?;
-            self.first_is_mesh = Some(false);
+            self.current_kind = Some(StreamKind::Params);
             self.params_schema_validated = true;
         }
         Ok(())
     }
 
-    /// Validates the params stream's schema once available (only in the
-    /// [`Stage::Params`] that follows a leading mesh stream).
-    fn validate_params_schema_if_available(&mut self) -> Result<(), ProtocolError> {
-        if self.params_schema_validated || self.stage != Stage::Params {
-            return Ok(());
+    /// Decodes the texture table's image (first non-empty row wins — one bound
+    /// texture per stream). Later rows/batches of the same texture stream are
+    /// ignored (a texture table is one row = one image).
+    fn decode_texture(&mut self, batch: &RecordBatch) -> Result<(), ProtocolError> {
+        if self.texture.is_none() && batch.num_rows() > 0 {
+            self.texture = Some(ImageTexture::from_arrow(batch)?);
         }
-        let Some(schema) = self.decoder.schema() else {
-            return Ok(());
-        };
-        validate_schema(schema.as_ref())?;
-        self.params_schema_validated = true;
         Ok(())
     }
 }
@@ -321,10 +346,17 @@ fn is_stream_boundary(error: &ArrowError) -> bool {
 }
 
 /// True if `schema` is a **mesh table** (has a `position` column) — used to tell
-/// a leading `0.0.3` mesh stream apart from the params stream that follows it (or
+/// a leading `0.0.3`+ mesh stream apart from the params stream that follows it (or
 /// a legacy params-only stream).
 pub(crate) fn is_mesh_schema(schema: &Schema) -> bool {
     schema.fields().iter().any(|f| f.name() == "position")
+}
+
+/// True if `schema` is a **texture table** (has the `rgba` image column) — used
+/// to tell an optional leading `0.0.4` texture stream apart from the mesh stream
+/// before it and the params stream after it.
+pub(crate) fn is_texture_schema(schema: &Schema) -> bool {
+    schema.fields().iter().any(|f| f.name() == TEXTURE_COLUMN)
 }
 
 /// Validates a schema's declared protocol version against
@@ -1184,15 +1216,15 @@ mod tests {
 
     #[test]
     fn accepts_supported_versions_and_rejects_unknown() {
-        for version in ["0.0.1", "0.0.2", "0.0.3"] {
+        for version in ["0.0.1", "0.0.2", "0.0.3", "0.0.4"] {
             let mut session = InputSession::new();
             session.push(&version_stream(version)).unwrap();
             session.finish().unwrap();
         }
         let mut session = InputSession::new();
         assert!(matches!(
-            session.push(&version_stream("0.0.4")),
-            Err(ProtocolError::UnsupportedVersion(v)) if v == "0.0.4"
+            session.push(&version_stream("0.0.5")),
+            Err(ProtocolError::UnsupportedVersion(v)) if v == "0.0.5"
         ));
     }
 
@@ -1617,5 +1649,124 @@ mod tests {
         assert!(!session.has_meshes());
         assert!(session.meshes().is_empty());
         assert_eq!(batches, vec![plain(frames)]);
+    }
+
+    /// Serializes a `[height, width, 4]` RGBA image as a `0.0.4` **texture table**
+    /// Arrow IPC stream (one row: `rgba` `FixedSizeList<UInt8>[H*W*4]` carrying the
+    /// `arrow.fixed_shape_tensor` extension), mirroring `texture::from_arrow`'s
+    /// expected wire form.
+    fn write_texture_stream(width: usize, height: usize, rgba: Vec<u8>) -> Vec<u8> {
+        use arrow::array::UInt8Array;
+        use arrow_schema::extension::FixedShapeTensor;
+
+        let list_size = (width * height * 4) as i32;
+        let storage = DataType::FixedSizeList(
+            Arc::new(Field::new("item", DataType::UInt8, false)),
+            list_size,
+        );
+        let extension = FixedShapeTensor::try_new(
+            DataType::UInt8,
+            vec![height, width, 4],
+            Some(vec![
+                "height".to_string(),
+                "width".to_string(),
+                "channel".to_string(),
+            ]),
+            None,
+        )
+        .unwrap();
+        let field = Field::new(TEXTURE_COLUMN, storage, false).with_extension_type(extension);
+        let array = FixedSizeListArray::new(
+            Arc::new(Field::new("item", DataType::UInt8, false)),
+            list_size,
+            Arc::new(UInt8Array::from(rgba)),
+            None,
+        );
+        let schema = Arc::new(
+            Schema::new(vec![field]).with_metadata(
+                [(
+                    PROTOCOL_VERSION_KEY.to_string(),
+                    PROTOCOL_VERSION.to_string(),
+                )]
+                .into_iter()
+                .collect(),
+            ),
+        );
+        let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(array)]).unwrap();
+        let mut bytes = Vec::new();
+        let mut writer = StreamWriter::try_new(&mut bytes, &schema).unwrap();
+        writer.write(&batch).unwrap();
+        writer.finish().unwrap();
+        bytes
+    }
+
+    #[test]
+    fn decodes_mesh_then_texture_then_params() {
+        // A full 0.0.4 `[mesh][texture][params]` stream: the mesh table, a 2x2
+        // checker texture, then a params frame all decode, with the texture bound.
+        let mesh = crate::Mesh::hello_triangle();
+        let rgba = vec![
+            255, 255, 255, 255, 255, 0, 0, 255, // white, red
+            0, 255, 0, 255, 0, 0, 255, 255, // green, blue
+        ];
+        let frames = vec![FrameParams::IDENTITY];
+        let mut bytes = write_mesh_stream(&mesh);
+        bytes.extend(write_texture_stream(2, 2, rgba.clone()));
+        bytes.extend(test_stream(&[test_batch(&frames)]));
+
+        let mut session = InputSession::new();
+        let batches = session.push(&bytes).unwrap();
+        session.finish().unwrap();
+
+        assert!(session.has_meshes());
+        assert_eq!(session.meshes(), std::slice::from_ref(&mesh));
+        assert!(session.has_texture());
+        let texture = session.texture().expect("texture bound");
+        assert_eq!((texture.width(), texture.height()), (2, 2));
+        assert_eq!(texture.rgba(), rgba.as_slice());
+        assert_eq!(batches, vec![plain(frames)]);
+    }
+
+    #[test]
+    fn decodes_mesh_then_texture_then_params_across_every_split() {
+        // Every sub-stream boundary (two EOS markers) must be recovered no matter
+        // which byte the chunk boundary lands on.
+        let mesh = crate::Mesh::hello_triangle();
+        let rgba = vec![9u8; 2 * 2 * 4];
+        let frames = vec![FrameParams::IDENTITY];
+        let mut bytes = write_mesh_stream(&mesh);
+        bytes.extend(write_texture_stream(2, 2, rgba.clone()));
+        bytes.extend(test_stream(&[test_batch(&frames)]));
+
+        for split in 0..=bytes.len() {
+            let mut session = InputSession::new();
+            let mut batches = session.push(&bytes[..split]).unwrap();
+            batches.extend(session.push(&bytes[split..]).unwrap());
+            session.finish().unwrap();
+            assert_eq!(
+                session.meshes(),
+                std::slice::from_ref(&mesh),
+                "split {split}"
+            );
+            assert!(session.has_texture(), "split {split}");
+            assert_eq!(batches, vec![plain(frames.clone())], "split {split}");
+        }
+    }
+
+    #[test]
+    fn mesh_then_params_has_no_texture() {
+        // A 0.0.3 `[mesh][params]` stream binds no texture.
+        let mesh = crate::Mesh::hello_triangle();
+        let frames = vec![FrameParams::IDENTITY];
+        let mut bytes = write_mesh_stream(&mesh);
+        bytes.extend(test_stream(&[test_batch(&frames)]));
+
+        let mut session = InputSession::new();
+        session.push(&bytes).unwrap();
+        session.finish().unwrap();
+
+        assert!(session.has_meshes());
+        assert!(!session.has_texture());
+        assert!(session.texture().is_none());
     }
 }

@@ -5,8 +5,8 @@
 #   JSONL --(Arrow IPC: duckdb or pyarrow)--> trd --(tensors)--> ffmpeg
 #
 # Usage:
-#   examples/render.sh [--cli | --native | --web [--arrow-renderer|--canvas-renderer]] \
-#                      [--mesh OBJ]... [--wireframe] [--aabb] [--axes] [INPUT.jsonl] [OUTPUT.gif|.webp] [WIDTH] [HEIGHT] [FPS]
+#   examples/render.sh [--cli | --native | --web [--arrow-renderer|--canvas-renderer|--textured-renderer]] \
+#                      [--mesh OBJ]... [--texture IMG] [--wireframe] [--aabb] [--axes] [INPUT.jsonl] [OUTPUT.gif|.webp] [WIDTH] [HEIGHT] [FPS]
 # Defaults: examples/frames.0.0.2.jsonl  output/out.gif  256 256 30
 # Run with no arguments (or -h/--help) to print the flag guidance and exit; pass
 # --cli to render the default demo.
@@ -48,26 +48,36 @@
 #     examples/frames.bunny_dolly.cv.jsonl output/bunny_dolly_cv.gif 1024 1024 24
 # With --web (alias --wasm) it builds the browser (wasm) bundle via nix and serves
 # it, printing the URLs and an SSH-tunnel command. The web demo generates its own
-# Arrow frame stream in-browser, so all positional arguments are ignored. Two
+# Arrow frame stream in-browser, so all positional arguments are ignored. Three
 # in-browser renderers share the bundle: --arrow-renderer (default) runs the
 # offscreen output-stream smoke (the browser counterpart of the CLI);
-# --canvas-renderer runs the on-screen canvas demo. Override the port with PORT
+# --canvas-renderer runs the on-screen wireframe canvas demo; --textured-renderer
+# runs the on-screen textured bunny demo (#20). Override the port with PORT
 # (default 8080); the server binds all interfaces.
 #
 # The --canvas-renderer demo is the browser twin of the dolly capstone: it parses
 # assets/meshes/bunny.obj in-browser and renders it under the same 45° bird's-eye
-# dolly camera (frames.bunny_dolly.cg.jsonl) with wireframe + AABB + axes. Its
-# resolution and playback speed are tuned live via URL query params (no rebuild):
+# dolly camera (frames.bunny_dolly.cg.jsonl) with wireframe + AABB + axes. The
+# --textured-renderer demo is the browser twin of the textured render: it parses
+# assets/meshes/bunny_with_texture/bunny.obj (with UVs) + decodes bunny_uv_map1.jpg
+# in-browser and renders the same dolly camera *textured* + AABB + axes — the exact
+# `--cli --mesh …/bunny.obj --texture …/bunny_uv_map1.jpg --aabb --axes` scene. Both
+# demos' resolution and playback speed are tuned live via URL query params (no
+# rebuild):
 #   ?size=N   square render resolution, N px (16..4096; default 1024; aspect=1.0)
 #   ?fps=N    playback frame rate (1..240; default 24; render-bound above the
 #             achievable rate — playback never exceeds what the GPU can draw)
-#   ?smoke=1  render only the 2-row smoke batch, then stop (used by tests)
-#   ?benchmarkRate=60|120   fixed-rate throughput benchmark (overrides ?fps)
-# Combine them, e.g. http://localhost:8080/?size=2048&fps=30 . WebGPU needs a
-# secure context, so open http://localhost:<port> (an SSH tunnel makes a remote
-# machine's origin "localhost" too); a bare http://<ip> is NOT a secure context.
-# The server sends a long cache-control on the page, so hard-refresh
-# (Ctrl+Shift+R) after a rebuild to avoid replaying a stale bundle.
+#   ?smoke=1  render only the 2-row smoke batch, then stop (used by tests;
+#             --canvas-renderer only)
+#   ?benchmarkRate=60|120   fixed-rate throughput benchmark (overrides ?fps;
+#             --canvas-renderer only)
+# Combine them, e.g. http://localhost:8080/?size=2048&fps=30 (the textured demo
+# keeps its ?textured route, e.g. http://localhost:8080/?textured&size=2048).
+# WebGPU needs a secure context, so open http://localhost:<port> (an SSH tunnel
+# makes a remote machine's origin "localhost" too); a bare http://<ip> is NOT a
+# secure context. The server sends a long cache-control on the page, so after a
+# rebuild hard-refresh (Ctrl+Shift+R) — and if you restarted the server behind an
+# SSH tunnel, reconnect the tunnel too — to avoid replaying a stale bundle.
 #
 # Run from `nix develop`. The Arrow frame stream is built with duckdb's 'arrow'
 # community extension when it loads, otherwise with pyarrow (via uv/python3).
@@ -88,24 +98,30 @@ MODE (pick one; default --cli):
   --cli, --headless   Render to a GIF/WebP via the headless trd-cli (default).
   --native, --app     Play live in the interactive trd-app window (OUTPUT ignored).
   --web, --wasm       Build the browser (wasm) bundle and serve it (positional args ignored).
-                        --arrow-renderer   offscreen output-stream smoke (default)
-                        --canvas-renderer  on-screen canvas demo (bunny dolly capstone)
+                        --arrow-renderer    offscreen output-stream smoke (default)
+                        --canvas-renderer   on-screen wireframe demo (bunny dolly capstone)
+                        --textured-renderer on-screen textured demo (#20: texture + AABB + axes)
 
-BROWSER QUERY PARAMS (--web --canvas-renderer; append to the URL, no rebuild):
+BROWSER QUERY PARAMS (--web --canvas-renderer / --textured-renderer; append to the URL, no rebuild):
   ?size=N             square render resolution in px (16..4096; default 1024).
   ?fps=N              playback frame rate (1..240; default 24). Render-bound: it
                       never plays faster than the GPU can draw a frame.
-  ?smoke=1            render only the 2-row smoke batch, then stop.
-  ?benchmarkRate=60|120   fixed-rate throughput benchmark (overrides ?fps).
+  ?smoke=1            render only the 2-row smoke batch, then stop (--canvas-renderer only).
+  ?benchmarkRate=60|120   fixed-rate throughput benchmark (overrides ?fps; --canvas-renderer only).
                       Combine, e.g. http://localhost:8080/?size=2048&fps=30
+                      (the textured demo keeps its route: ?textured&size=2048&fps=30)
   Open http://localhost:PORT (WebGPU needs this secure context; a bare IP is not
-  one — use the printed SSH tunnel for a remote browser). Hard-refresh
-  (Ctrl+Shift+R) after a rebuild so the browser drops the cached bundle.
+  one — use the printed SSH tunnel for a remote browser). After a rebuild
+  hard-refresh (Ctrl+Shift+R); if you also restarted the server, reconnect the
+  SSH tunnel so the browser drops the cached bundle.
 
 CONTENT FLAGS (--cli and --native):
   --mesh OBJ          Load OBJ as a protocol 0.0.3 mesh (centered + scaled to fit).
                       Repeatable: pass several times to load several meshes (row 0,
                       1, …); a frame's `draws` list references them by index.
+  --texture IMG       Bind IMG as a 0.0.4 texture and render textured — sampling it
+                      at each vertex UV (#20). Requires --mesh (with UVs); mutually
+                      exclusive with --wireframe.
   --wireframe         Draw mesh edges as a line list instead of filled triangles (#38).
   --aabb              Overlay each mesh's axis-aligned bounding box as a green box (#42).
   --axes              Overlay a coordinate-axes gizmo (X=red, Y=green, Z=blue) at the origin (#42).
@@ -119,14 +135,19 @@ Examples:
     examples/frames.bunny_dolly.cg.jsonl '' 1024 1024 24     # live dolly capstone in a window
   examples/render.sh --cli --aabb --mesh assets/meshes/bunny.obj \
     examples/frames.turntable.jsonl output/bunny.gif 1024 1024 24
+  examples/render.sh --cli --mesh assets/meshes/bunny_with_texture/bunny.obj \
+    --texture assets/meshes/bunny_with_texture/bunny_uv_map1.jpg \
+    examples/frames.bunny_dolly.cg.jsonl output/bunny_textured.gif 512 512 20  # textured bunny (#20)
   examples/render.sh --cli --wireframe --aabb \
     --mesh assets/meshes/bunny.obj --mesh examples/cube.obj \
     examples/frames.multimesh.jsonl output/scene.gif 1024 1024 24
   examples/render.sh --cli --wireframe --axes --aabb --mesh assets/meshes/bunny.obj \
     examples/frames.bunny_dolly.cg.jsonl output/bunny_dolly.gif 1024 1024 24  # dolly capstone (#49; auto-generates the frames)
   examples/render.sh --web                                   # build + serve the wasm demo
-  examples/render.sh --web --canvas-renderer                 # on-screen bunny dolly demo
+  examples/render.sh --web --canvas-renderer                 # on-screen wireframe bunny dolly demo
   #   then open http://localhost:8080/?size=2048&fps=30       (size/fps tuned live)
+  examples/render.sh --web --textured-renderer               # on-screen textured bunny (#20: texture+AABB+axes)
+  #   then open http://localhost:8080/?textured&size=2048     (size/fps tuned live)
 
 Run from `nix develop`. On WSL, prefix with WGPU_BACKEND=gl for GPU rendering.
 USAGE
@@ -148,10 +169,12 @@ native=0
 web=0
 arrow_renderer=0
 canvas_renderer=0
+textured_renderer=0
 wireframe=0
 aabb=0
 axes=0
 meshes=()
+texture=""
 positional=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -161,11 +184,14 @@ while [ $# -gt 0 ]; do
     --web|--wasm) web=1 ;;
     --arrow-renderer) arrow_renderer=1 ;;
     --canvas-renderer) canvas_renderer=1 ;;
+    --textured-renderer) textured_renderer=1 ;;
     --wireframe) wireframe=1 ;;
     --aabb) aabb=1 ;;
     --axes) axes=1 ;;
     --mesh) shift; meshes+=("${1:?--mesh requires an OBJ path}") ;;
     --mesh=*) meshes+=("${1#--mesh=}") ;;
+    --texture) shift; texture="${1:?--texture requires an image path}" ;;
+    --texture=*) texture="${1#--texture=}" ;;
     *) positional+=("$1") ;;
   esac
   shift
@@ -177,13 +203,28 @@ if [ $((cli + native + web)) -gt 1 ]; then
   echo "error: choose only one of --cli, --native, --web" >&2
   exit 1
 fi
-if [ "$arrow_renderer" -eq 1 ] && [ "$canvas_renderer" -eq 1 ]; then
-  echo "error: --arrow-renderer and --canvas-renderer are mutually exclusive" >&2
+if [ $((arrow_renderer + canvas_renderer + textured_renderer)) -gt 1 ]; then
+  echo "error: choose only one of --arrow-renderer, --canvas-renderer, --textured-renderer" >&2
   exit 1
 fi
-if { [ "$arrow_renderer" -eq 1 ] || [ "$canvas_renderer" -eq 1 ]; } && [ "$web" -ne 1 ]; then
-  echo "error: --arrow-renderer / --canvas-renderer apply only to --web/--wasm" >&2
+if [ $((arrow_renderer + canvas_renderer + textured_renderer)) -ge 1 ] && [ "$web" -ne 1 ]; then
+  echo "error: --arrow-renderer / --canvas-renderer / --textured-renderer apply only to --web/--wasm" >&2
   exit 1
+fi
+
+# --texture provides a 0.0.4 texture table (bound as the sampled albedo) and
+# renders textured. It needs a --mesh (UVs to sample the texture) and is
+# mutually exclusive with --wireframe. --web ignores it (browser demos are
+# their own pipeline).
+if [ -n "$texture" ]; then
+  if [ ${#meshes[@]} -eq 0 ]; then
+    echo "error: --texture requires at least one --mesh (with UVs to sample)" >&2
+    exit 1
+  fi
+  if [ "$wireframe" -eq 1 ]; then
+    echo "error: --texture and --wireframe are mutually exclusive" >&2
+    exit 1
+  fi
 fi
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -243,10 +284,11 @@ if [ "$web" -eq 1 ]; then
   ip="$(hostname -I 2>/dev/null | awk '{print $1; exit}')"
   [ -n "$ip" ] || ip="<server-ip>"
 
-  # Both browser renderers ship in one bundle; web/src/main.ts routes on the
-  # `arrow-smoke` query param, so only the opened URL differs. Default (or
-  # --arrow-renderer) = the offscreen ArrowRenderer output-stream smoke (the
-  # browser counterpart of --cli); --canvas-renderer = the on-screen canvas demo.
+  # All three browser renderers ship in one bundle; web/src/main.ts routes on the
+  # `arrow-smoke` / `textured` query params, so only the opened URL differs.
+  # Default (or --arrow-renderer) = the offscreen ArrowRenderer output-stream smoke
+  # (the browser counterpart of --cli); --canvas-renderer = the on-screen wireframe
+  # canvas demo; --textured-renderer = the on-screen textured bunny demo (?textured).
   if [ "$canvas_renderer" -eq 1 ]; then
     demo_query=""
     renderer_label="CanvasRenderer (on-screen canvas demo — bunny dolly capstone)"
@@ -259,7 +301,22 @@ if [ "$web" -eq 1 ]; then
     ?smoke=1  render the 2-row smoke batch then stop
     ?benchmarkRate=60|120  throughput benchmark (overrides ?fps)
   e.g.  http://localhost:$port/?size=2048&fps=30
-  (Hard-refresh Ctrl+Shift+R after a rebuild to drop the cached bundle.)
+  (After a rebuild hard-refresh Ctrl+Shift+R; if you restarted the server behind
+  an SSH tunnel, reconnect the tunnel too, to drop the cached bundle.)
+PARAMS
+)
+  elif [ "$textured_renderer" -eq 1 ]; then
+    demo_query="?textured"
+    renderer_label="CanvasRenderer (on-screen textured bunny — #20: texture + AABB + axes)"
+    # Live-tunable URL params for the textured demo (no rebuild needed).
+    demo_params=$(cat <<PARAMS
+
+  Tune the textured demo live via URL query params (no rebuild):
+    ?size=N   square resolution px (16..4096, default 1024)
+    ?fps=N    playback rate (1..240, default 24)
+  e.g.  http://localhost:$port/?textured&size=2048&fps=30
+  (After a rebuild hard-refresh Ctrl+Shift+R; if you restarted the server behind
+  an SSH tunnel, reconnect the tunnel too, to drop the cached bundle.)
 PARAMS
 )
   else
@@ -384,11 +441,35 @@ if [ ${#meshes[@]} -gt 0 ]; then
   fi
 fi
 
-# The full trd input stream: the optional leading mesh table, then the params.
+# The optional texture table (0.0.4): scripts/texture_to_arrow.py encodes the
+# image into a one-row `rgba` fixed_shape_tensor<u8>[H,W,4] Arrow stream,
+# concatenated *between* the mesh table and the params so trd reads
+# [mesh][texture][params] and binds it as the sampled albedo. Downscaled to
+# --max-size 2048 to stay within the renderer's portable (downlevel/WebGL2)
+# 2048² texture limit. Needs pyarrow + pillow + numpy.
+texture_producer=""
+if [ -n "$texture" ]; then
+  if command -v uv >/dev/null 2>&1; then
+    texture_producer=uv
+  elif command -v python3 >/dev/null 2>&1 \
+    && python3 -c 'import pyarrow, PIL, numpy' >/dev/null 2>&1; then
+    texture_producer=python3
+  else
+    echo "error: --texture needs uv or python3 with pyarrow/pillow/numpy to encode $texture" >&2
+    exit 1
+  fi
+fi
+
+# The full trd input stream: the optional leading mesh table, the optional
+# texture table, then the params.
 stream() {
   case "$mesh_producer" in
     uv) uv run --with pyarrow "$root/scripts/obj_to_arrow.py" "${meshes[@]}" ;;
     python3) python3 "$root/scripts/obj_to_arrow.py" "${meshes[@]}" ;;
+  esac
+  case "$texture_producer" in
+    uv) uv run --with pyarrow --with pillow --with numpy "$root/scripts/texture_to_arrow.py" "$texture" --max-size 2048 ;;
+    python3) python3 "$root/scripts/texture_to_arrow.py" "$texture" --max-size 2048 ;;
   esac
   frames
 }
@@ -397,6 +478,8 @@ stream() {
 # trd-core's shared mesh Scene renderer honours them either way.
 wireframe_flag=()
 [ "$wireframe" -eq 1 ] && wireframe_flag=(--wireframe)
+textured_flag=()
+[ -n "$texture" ] && textured_flag=(--textured)
 aabb_flag=()
 [ "$aabb" -eq 1 ] && aabb_flag=(--aabb)
 axes_flag=()
@@ -407,12 +490,12 @@ if [ "$native" -eq 1 ]; then
   # The appearance flags pass through to trd-app too (it now renders the mesh
   # Scene via the shared trd-core MeshRenderer, like trd-cli).
   stream \
-    | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-app -- --width "$width" --height "$height" --fps "$fps" "${wireframe_flag[@]}" "${aabb_flag[@]}" "${axes_flag[@]}"
+    | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-app -- --width "$width" --height "$height" --fps "$fps" "${wireframe_flag[@]}" "${textured_flag[@]}" "${aabb_flag[@]}" "${axes_flag[@]}"
   echo "streamed $input to the trd-app window (${width}x${height}, ${fps}fps)"
 else
   mkdir -p "$(dirname "$output")"
   stream \
-    | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-cli -- --width "$width" --height "$height" "${wireframe_flag[@]}" "${aabb_flag[@]}" "${axes_flag[@]}" \
+    | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-cli -- --width "$width" --height "$height" "${wireframe_flag[@]}" "${textured_flag[@]}" "${aabb_flag[@]}" "${axes_flag[@]}" \
     | uv run --with pyarrow --with numpy "$root/scripts/encode.py" --fps "$fps" -o "$output"
   echo "wrote $output (${width}x${height}, ${fps}fps) from $input"
 fi

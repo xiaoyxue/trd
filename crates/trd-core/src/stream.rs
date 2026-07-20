@@ -1,17 +1,19 @@
-//! Native-only Arrow streaming protocol (trd protocol 0.0.3).
+//! Native-only Arrow streaming protocol (trd protocol 0.0.4).
 //!
-//! Input is one or two concatenated Arrow IPC streams on stdin. A `0.0.3` stream
-//! is `[mesh][params]`: a leading **mesh** table (one row = one mesh, all rows
-//! decoded by [`Mesh::from_arrow_all`]) followed by the **params** stream (one
-//! row per frame: `center`, `size`, `theta`, + optional camera columns
-//! `model`/`k`/`pose`/`eye`/`target`/`direction`/`up`/`fovy`/`aspect`/`znear`/
-//! `zfar`, + an optional per-frame instanced draw list `draw_mesh`
-//! (`List<UInt32>`) / `draw_model` (`List<FixedSizeList<Float32>[16]>`) placing
-//! instances of the loaded meshes). When the draw list is absent, one instance
-//! of mesh 0 is placed by the frame's own model. A legacy `0.0.1`/`0.0.2` stream
-//! is just the params stream and renders the built-in hello-triangle. Output:
-//! one row per frame, four `fixed_shape_tensor<u8>` channels `r,g,b,a` of shape
-//! `[H, W]`.
+//! Input is one to three concatenated Arrow IPC streams on stdin. A `0.0.4`
+//! stream is `[mesh][texture?][params]`: a leading **mesh** table (one row = one
+//! mesh, all rows decoded by [`Mesh::from_arrow_all`]), an optional **texture**
+//! table (one row = one `fixed_shape_tensor<u8>[H,W,4]` image, decoded by
+//! [`ImageTexture::from_arrow`] and bound as the sampled albedo), then the
+//! **params** stream (one row per frame: `center`, `size`, `theta`, + optional
+//! camera columns `model`/`k`/`pose`/`eye`/`target`/`direction`/`up`/`fovy`/
+//! `aspect`/`znear`/`zfar`, + an optional per-frame instanced draw list
+//! `draw_mesh` (`List<UInt32>`) / `draw_model`
+//! (`List<FixedSizeList<Float32>[16]>`) placing instances of the loaded meshes).
+//! When the draw list is absent, one instance of mesh 0 is placed by the frame's
+//! own model. A legacy `0.0.1`/`0.0.2` stream is just the params stream and
+//! renders the built-in hello-triangle. Output: one row per frame, four
+//! `fixed_shape_tensor<u8>` channels `r,g,b,a` of shape `[H, W]`.
 
 use std::sync::Arc;
 
@@ -23,12 +25,13 @@ use std::io::{Read, Write};
 
 use crate::math::Matrix4;
 use crate::protocol::{
-    frame_rate_from_metadata, is_mesh_schema, PROTOCOL_VERSION, PROTOCOL_VERSION_KEY,
-    SUPPORTED_INPUT_VERSIONS,
+    frame_rate_from_metadata, is_mesh_schema, is_texture_schema, PROTOCOL_VERSION,
+    PROTOCOL_VERSION_KEY, SUPPORTED_INPUT_VERSIONS,
 };
 use crate::render::{
     CameraFormError, Draw, DrawableObject, FrameParams, Mesh, MeshRenderer, RenderMode,
 };
+use crate::texture::ImageTexture;
 use crate::OutputSession;
 
 /// Errors from decoding, validating, rendering, or encoding a trd stream.
@@ -94,6 +97,9 @@ pub enum StreamError {
     /// The leading mesh table could not be decoded into a [`Mesh`].
     #[error("mesh decode error: {0}")]
     Mesh(#[from] crate::MeshError),
+    /// The optional leading texture table could not be decoded.
+    #[error("texture decode error: {0}")]
+    Texture(#[from] crate::TextureError),
     #[error(transparent)]
     Output(#[from] crate::OutputError),
 }
@@ -605,6 +611,13 @@ impl BatchRenderer {
         self.mode = mode;
     }
 
+    /// Binds `texture` as the source sampled by [`RenderMode::Textured`] meshes
+    /// (`0.0.4`). Delegates to [`MeshRenderer::set_texture`]; the image is
+    /// (re)uploaded on the next `render`.
+    pub fn set_texture(&mut self, texture: &dyn crate::texture::Texture) {
+        self.renderer.set_texture(texture);
+    }
+
     /// Enables/disables the per-instance AABB overlay box: when on, each drawn
     /// instance also contributes a [`DrawableObject::AabbBox`] to the scene.
     pub fn set_show_aabb(&mut self, show: bool) {
@@ -720,6 +733,23 @@ fn read_meshes<R: Read>(reader: &mut StreamReader<R>) -> Result<Vec<Mesh>, Strea
     Ok(meshes)
 }
 
+/// Reads an optional leading **texture** sub-stream (`0.0.4`), decoding its first
+/// row into an [`ImageTexture`], then **drains the rest of the stream through its
+/// end-of-stream marker** so the underlying reader is positioned at the start of
+/// the following params stream. Like [`read_meshes`], the reader must be
+/// unbuffered so it does not over-read past this stream's EOS. Returns the
+/// decoded image (a texture table is one row = one image).
+fn read_texture<R: Read>(reader: &mut StreamReader<R>) -> Result<ImageTexture, StreamError> {
+    let mut texture: Option<ImageTexture> = None;
+    for batch in reader.by_ref() {
+        let batch = batch?;
+        if texture.is_none() && batch.num_rows() > 0 {
+            texture = Some(ImageTexture::from_arrow(&batch)?);
+        }
+    }
+    texture.ok_or(StreamError::Texture(crate::TextureError::Empty))
+}
+
 /// Resolves the `i`-th frame's instanced draw list: the wire `draw_lists` row
 /// when present, else one instance of mesh 0 placed by the frame's own model
 /// (legacy single-object behavior). Every referenced `mesh_id` is validated
@@ -749,21 +779,25 @@ fn resolve_draws(
     Ok(draws)
 }
 
-/// Reads a trd input stream **mesh-aware** — the same `[mesh][params]` framing
-/// [`run_stream`] uses — for a live front-end (e.g. the windowed `trd-app`) that
-/// owns its own render target and encodes each frame's [`Scene`](crate::Scene)
-/// itself, rather than the headless byte-stream path [`run_stream`] drives.
+/// Reads a trd input stream **mesh-aware** — the same `[mesh][texture?][params]`
+/// framing [`run_stream`] uses — for a live front-end (e.g. the windowed
+/// `trd-app`) that owns its own render target and encodes each frame's
+/// [`Scene`](crate::Scene) itself, rather than the headless byte-stream path
+/// [`run_stream`] drives.
 ///
-/// Invokes `on_meshes` **once** with the decoded mesh table (a `0.0.3`
+/// Invokes `on_meshes` **once** with the decoded mesh table (a `0.0.3`+
 /// mesh-first stream) or the built-in hello-triangle (a legacy `0.0.1`/`0.0.2`
-/// params-only stream), then `on_meta` with the stream's declared playback rate,
-/// then `on_frame` for each frame's `(FrameParams, draws)` in order. A frame
-/// carrying no wire draw list defaults to one instance of mesh 0 placed by the
-/// frame's own model — matching [`run_stream`]. The mesh table's rows are
-/// referenced by 0-based index; out-of-range `mesh_id`s are an error.
+/// params-only stream), then `on_texture` **once** with the optional bound
+/// texture (`Some` only for a `0.0.4` stream carrying a texture table), then
+/// `on_meta` with the stream's declared playback rate, then `on_frame` for each
+/// frame's `(FrameParams, draws)` in order. A frame carrying no wire draw list
+/// defaults to one instance of mesh 0 placed by the frame's own model — matching
+/// [`run_stream`]. The mesh table's rows are referenced by 0-based index;
+/// out-of-range `mesh_id`s are an error.
 pub fn read_scene_stream_with_meta<R: Read>(
     input: R,
     on_meshes: impl FnOnce(Vec<Mesh>),
+    on_texture: impl FnOnce(Option<ImageTexture>),
     on_meta: impl FnOnce(f64),
     mut on_frame: impl FnMut(FrameParams, Vec<Draw>),
 ) -> Result<(), StreamError> {
@@ -783,21 +817,36 @@ pub fn read_scene_stream_with_meta<R: Read>(
     };
 
     if is_mesh_schema(first.schema().as_ref()) {
-        // 0.0.3 mesh-first: decode the leading mesh table, then the params stream
-        // that follows it in the same byte stream.
+        // 0.0.3+ mesh-first: decode the leading mesh table, then the optional
+        // texture table, then the params stream — all in the same byte stream.
         let meshes = read_meshes(&mut first)?;
         let mesh_count = meshes.len();
         on_meshes(meshes);
-        let params = StreamReader::try_new(first.get_mut(), None)?;
-        check_version(params.schema().as_ref())?;
-        on_meta(frame_rate_from_metadata(params.schema().metadata()));
-        for batch in params {
-            emit(&batch?, mesh_count)?;
+
+        // The stream after the mesh table is either a 0.0.4 texture table or the
+        // params stream; sniff its schema to decide.
+        let mut next = StreamReader::try_new(first.get_mut(), None)?;
+        check_version(next.schema().as_ref())?;
+        if is_texture_schema(next.schema().as_ref()) {
+            on_texture(Some(read_texture(&mut next)?));
+            let params = StreamReader::try_new(next.get_mut(), None)?;
+            check_version(params.schema().as_ref())?;
+            on_meta(frame_rate_from_metadata(params.schema().metadata()));
+            for batch in params {
+                emit(&batch?, mesh_count)?;
+            }
+        } else {
+            on_texture(None);
+            on_meta(frame_rate_from_metadata(next.schema().metadata()));
+            for batch in next {
+                emit(&batch?, mesh_count)?;
+            }
         }
     } else {
         // Legacy params-only stream → the built-in hello-triangle, so the live
         // renderer draws the same demo the headless CLI does.
         on_meshes(vec![Mesh::hello_triangle()]);
+        on_texture(None);
         on_meta(frame_rate_from_metadata(first.schema().metadata()));
         for batch in first {
             emit(&batch?, 1)?;
@@ -849,11 +898,12 @@ where
 /// of `fixed_shape_tensor` images to `output`. Output batch boundaries mirror
 /// input batches (one batch in flight).
 ///
-/// A `0.0.3` stream is `[mesh][params]`: the leading mesh table is decoded once
-/// (via [`Mesh::from_arrow`]) and uploaded, then the following params stream
-/// drives per-frame rendering. A legacy `0.0.1`/`0.0.2` params-only stream
-/// renders the built-in hello-triangle. The two are told apart by sniffing the
-/// first stream's schema ([`is_mesh_schema`]).
+/// A `0.0.4` stream is `[mesh][texture?][params]`: the leading mesh table is
+/// decoded once (via [`Mesh::from_arrow_all`]) and uploaded, then an optional
+/// texture table is uploaded as the bound albedo, then the following params
+/// stream drives per-frame rendering. A legacy `0.0.1`/`0.0.2` params-only stream
+/// renders the built-in hello-triangle. The sub-streams are told apart by
+/// sniffing each schema ([`is_mesh_schema`] / [`is_texture_schema`]).
 pub fn run_stream<R: Read, W: Write>(
     input: R,
     output: W,
@@ -871,17 +921,30 @@ pub fn run_stream<R: Read, W: Write>(
     check_version(first.schema().as_ref())?;
 
     if is_mesh_schema(first.schema().as_ref()) {
-        // 0.0.3 mesh-first: decode + upload the mesh table (one mesh per row),
-        // then render the params stream that follows it in the same byte stream.
+        // 0.0.3+ mesh-first: decode + upload the mesh table (one mesh per row),
+        // then the optional texture table, then render the params stream that
+        // follows them in the same byte stream.
         let meshes = read_meshes(&mut first)?;
         let mut renderer = BatchRenderer::with_meshes(width, height, &meshes)?;
         renderer.set_mode(mode);
         renderer.set_show_aabb(show_aabb);
         renderer.set_show_axes(show_axes);
-        let params = StreamReader::try_new(first.get_mut(), None)?;
-        check_version(params.schema().as_ref())?;
-        let frame_rate = frame_rate_from_metadata(params.schema().metadata());
-        render_params(params, renderer, frame_rate, width, height, output)
+
+        // The stream after the mesh table is either a 0.0.4 texture table or the
+        // params stream; sniff its schema to decide.
+        let mut next = StreamReader::try_new(first.get_mut(), None)?;
+        check_version(next.schema().as_ref())?;
+        if is_texture_schema(next.schema().as_ref()) {
+            let texture = read_texture(&mut next)?;
+            renderer.set_texture(&texture);
+            let params = StreamReader::try_new(next.get_mut(), None)?;
+            check_version(params.schema().as_ref())?;
+            let frame_rate = frame_rate_from_metadata(params.schema().metadata());
+            render_params(params, renderer, frame_rate, width, height, output)
+        } else {
+            let frame_rate = frame_rate_from_metadata(next.schema().metadata());
+            render_params(next, renderer, frame_rate, width, height, output)
+        }
     } else {
         // Legacy params-only stream → built-in hello-triangle.
         let mut renderer = BatchRenderer::new(width, height)?;

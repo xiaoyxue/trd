@@ -46,7 +46,7 @@ Platform-agnostic wgpu logic, shared verbatim by every target:
 - **`protocol.rs`** — the cross-platform (native + wasm) incremental Arrow IPC
   decoder. `InputSession` feeds arbitrary byte chunks through `arrow`'s
   `StreamDecoder`, validates the protocol schema once (accepts
-  `0.0.1`/`0.0.2`/`0.0.3`), and yields one `FrameBatch` (`Vec<FrameParams>`) per
+  `0.0.1`/`0.0.2`/`0.0.3`/`0.0.4`), and yields one `FrameBatch` (`Vec<FrameParams>`) per
   record batch — the
   browser's input path.
 - **`output.rs`** — the cross-platform Arrow IPC *output* serialization.
@@ -86,17 +86,19 @@ Each is a *thin shell* that only supplies a render target and calls the core:
   geometry; each subsequent params batch is decoded and drawn straight to the
   canvas via the shared `build_scene`/`MeshRenderer` path — no per-frontend
   branching, no pixel read-back. Overlays toggle from JS with `setWireframe`,
-  `setShowAabb`, and `setShowAxes`. `web/src/canvas-demo.ts` authors a colored
+  `setShowAabb`, `setShowAxes`, and `setTextured`. `web/src/canvas-demo.ts` authors a colored
   cube mesh table in TypeScript, enables the AABB + axes overlays, and spins it
   with the `frames.turntable.jsonl` turntable frames (one one-row batch per
-  `requestAnimationFrame`). JS only moves Arrow bytes and schedules frames; it
-  never touches the WebGPU API. Packaged as the `trd-wasm` npm library.
+  `requestAnimationFrame`). The `?textured` demo (`web/src/textured-demo.ts`) authors
+  a `[mesh][texture][params]` stream — a UV quad + a 2×2 RGBA checker — and calls
+  `setTextured(true)` to sample it (#20). JS only moves Arrow bytes and schedules
+  frames; it never touches the WebGPU API. Packaged as the `trd-wasm` npm library.
 
 ### Stream protocol
 
 Frame parameters are plain columnar data, so **any** tool that emits the input
 columns as an Arrow IPC stream can drive the renderer. The current version is
-**0.0.3**; it is backward-compatible with 0.0.2 and 0.0.1.
+**0.0.4**; it is backward-compatible with 0.0.3, 0.0.2 and 0.0.1.
 
 | Direction | Columns | Arrow type |
 |---|---|---|
@@ -110,7 +112,9 @@ columns as an Arrow IPC stream can drive the renderer. The current version is
 | | `draw_mesh` *(opt, 0.0.3)* | `List<u32>` (per-instance mesh index) |
 | | `draw_model` *(opt, 0.0.3)* | `List<FixedSizeList<f32>[16]>` (per-instance 4×4 model) |
 | **Input** (mesh, *opt, 0.0.3*) | `position`, `color` | `List<FixedSizeList<f32>[3]>` |
+| | `uv` *(opt, 0.0.4)* | `List<FixedSizeList<f32>[2]>` (per-vertex texture coords) |
 | | `index` | `List<u32>` |
+| **Input** (texture, *opt, 0.0.4*) | `rgba` | `fixed_shape_tensor<u8>` `[H, W, 4]` (interleaved RGBA) |
 | **Output** (image) | `r`, `g`, `b`, `a` | `fixed_shape_tensor<u8>` `[H, W]` |
 
 The `0.0.2` matrix columns are **optional/additive** and drive the MVP transform
@@ -137,6 +141,16 @@ optional, so DuckDB and pyarrow streams are both accepted as-is.
   mesh `draw_mesh[i]` under model `draw_model[i]` (composed beneath that mesh's
   preview transform). Absent a draw list, one instance of mesh 0 is placed by the
   frame's own `model`.
+
+**0.0.4** adds **textured rendering**: an optional **texture** Arrow stream
+spliced between the mesh and params streams (`[mesh][texture][params]`) — one row
+of interleaved-RGBA `rgba` (`fixed_shape_tensor<u8>` `[H, W, 4]`, dimensions
+self-describing) — plus an optional per-vertex **`uv`** mesh column. With
+`--textured` (`setTextured(true)`) meshes sample the bound texture at each UV
+(`textureSample`, `Rgba8UnormSrgb` linear clamp-to-edge); a textured draw with no
+texture stream samples a default 1×1 white. Encode an image with
+`scripts/texture_to_arrow.py`; `examples/render.sh --texture <img>` (`.ps1
+-Texture`) wires it end-to-end, and the browser demo is at `?textured`.
 
 A params-only stream (no leading mesh) still renders the built-in hello-triangle.
 
@@ -267,6 +281,7 @@ map straight onto `trd-cli`:
 | Flag | Effect |
 |---|---|
 | `--mesh <obj>` | Prepend a mesh Arrow stream (protocol 0.0.3 `[mesh][params]`) built from `<obj>` by [`scripts/obj_to_arrow.py`](scripts/obj_to_arrow.py); the mesh renders centered + scaled-to-fit, driven by the params `INPUT.jsonl`. **Repeatable** — pass `--mesh` several times to load several meshes (one table row each, in order); a frame's `draws` list then references them by 0-based index. Needs pyarrow (via uv/python3). |
+| `--texture <img>` | Splice a texture Arrow stream (protocol 0.0.4 `[mesh][texture][params]`) built from `<img>` by [`scripts/texture_to_arrow.py`](scripts/texture_to_arrow.py) and render **textured** (`trd --textured`, #20): meshes sample the image at each vertex UV. Requires `--mesh` (with UVs); mutually exclusive with `--wireframe`. Downscaled to ≤ 2048² (portable limit); needs pyarrow + pillow + numpy. |
 | `--wireframe` | Draw mesh **edges** as a line list (`trd --wireframe`) instead of filled triangles (protocol #38). Reveals topology; on a dense asset (e.g. the ~70k-tri bunny) the edges read as a fine mesh. |
 | `--aabb` | Overlay each drawn mesh instance's **axis-aligned bounding box** as a green (`[0, 1, 0]`) wireframe box (`trd --aabb`, #42). The box uses the *same* per-instance model as the mesh, so it tracks the mesh through the preview + per-frame transforms. Combine freely with `--wireframe`. |
 | `--axes` | Overlay a **coordinate-axes gizmo** (X=red, Y=green, Z=blue lines) at the world origin (`trd --axes`, #42), under the camera `P·V` with an identity model, marking the world frame the camera looks at. |
@@ -275,6 +290,11 @@ map straight onto `trd-cli`:
 # Single bunny turntable, filled, with its bounding box:
 examples/render.sh --cli --aabb --mesh assets/meshes/bunny.obj \
   examples/frames.turntable.jsonl output/bunny.gif 1024 1024 24
+
+# Textured bunny (samples a UV-mapped albedo at each vertex UV, #20):
+examples/render.sh --cli --mesh assets/meshes/bunny_with_texture/bunny.obj \
+  --texture assets/meshes/bunny_with_texture/bunny_uv_map1.jpg \
+  examples/frames.bunny_dolly.cg.jsonl output/bunny_textured.gif 512 512 20
 
 # Two-mesh scene (bunny = mesh 0, cube = mesh 1), wireframe + boxes:
 examples/render.sh --cli --wireframe --aabb \

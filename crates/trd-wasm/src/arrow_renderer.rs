@@ -184,6 +184,18 @@ impl ArrowRenderer {
         };
     }
 
+    /// Selects textured (`true`) rendering — sampling the stream's bound texture
+    /// table at each vertex UV — or per-vertex color (`false`) for later frames.
+    /// Textured meshes without a stream texture sample the default 1×1 white.
+    #[wasm_bindgen(js_name = setTextured)]
+    pub fn set_textured(&mut self, enabled: bool) {
+        self.mode = if enabled {
+            RenderMode::Textured
+        } else {
+            RenderMode::Filled
+        };
+    }
+
     /// Toggles the per-instance AABB overlay box for later frames.
     #[wasm_bindgen(js_name = setShowAabb)]
     pub fn set_show_aabb(&mut self, enabled: bool) {
@@ -225,6 +237,15 @@ impl ArrowRenderer {
                 )
             };
             self.renderer = Some(renderer);
+
+            // Bind the stream's texture (0.0.4) as the sampled albedo so
+            // RenderMode::Textured meshes show it; absent ⇒ the default 1×1 white.
+            if let Some(texture) = self.input.texture() {
+                self.renderer
+                    .as_mut()
+                    .expect("renderer just built")
+                    .set_texture(texture);
+            }
         }
         self.renderer.as_mut().expect("renderer just built")
     }

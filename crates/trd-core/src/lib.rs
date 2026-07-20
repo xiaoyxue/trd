@@ -10,6 +10,7 @@ mod mesh;
 mod output;
 mod protocol;
 mod render;
+mod texture;
 
 pub use camera::{Camera, DEFAULT_FIT_MARGIN, DEFAULT_FOV_Y, DEFAULT_VIEW_DIR};
 pub use math::{
@@ -26,6 +27,9 @@ pub use render::{
     build_scene, create_mesh_pipeline, create_triangle_pipeline, render_triangle, CameraFormError,
     Draw, DrawableObject, FrameParams, Mesh, MeshRenderer, RenderMode, Scene, TriangleRenderer,
     Vertex, Viewport,
+};
+pub use texture::{
+    ConstantTexture, ImageData, ImageTexture, Texture, TextureError, TEXTURE_COLUMN,
 };
 
 #[cfg(not(target_arch = "wasm32"))]

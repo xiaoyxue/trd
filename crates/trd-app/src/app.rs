@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 use trd_core::{
-    build_scene, read_scene_stream_with_meta, Draw, FrameParams, Mesh, MeshRenderer, RenderMode,
-    Viewport,
+    build_scene, read_scene_stream_with_meta, Draw, FrameParams, ImageTexture, Mesh, MeshRenderer,
+    RenderMode, Viewport,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
@@ -54,6 +54,12 @@ struct Cli {
     /// triangles (#38).
     #[arg(long)]
     wireframe: bool,
+    /// Render meshes textured — sampling the stream's bound texture table at
+    /// each vertex UV — instead of the per-vertex color (#20). Requires a
+    /// `0.0.4` stream carrying a texture table (else the bound texture is 1×1
+    /// white).
+    #[arg(long, conflicts_with = "wireframe")]
+    textured: bool,
     /// Overlay each drawn mesh's axis-aligned bounding box as a green wireframe
     /// box (#42).
     #[arg(long)]
@@ -190,6 +196,15 @@ impl Gpu {
         ));
     }
 
+    /// Binds `texture` as the albedo sampled by [`RenderMode::Textured`] meshes
+    /// (`0.0.4`). No-op until the renderer is built; re-uploaded lazily on the
+    /// next `render`.
+    fn set_texture(&mut self, texture: &ImageTexture) {
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.set_texture(texture);
+        }
+    }
+
     /// Renders one frame's [`Scene`](trd_core::Scene) to the window surface.
     /// No-op until the renderer is built and a frame is available.
     fn render(
@@ -247,9 +262,14 @@ impl Gpu {
 }
 
 /// A message from the stdin reader thread: the decoded mesh table (sent once,
-/// first), the stream's declared playback rate (once), then each decoded frame.
+/// first), then the optional bound texture (once, only for a `0.0.4` stream
+/// carrying a texture table), then the stream's declared playback rate (once),
+/// then each decoded frame.
 enum StreamMsg {
     Meshes(Vec<Mesh>),
+    // Only sent when the stream carries a texture table; small (width/height +
+    // an RGBA byte buffer), so it needs no boxing.
+    Texture(ImageTexture),
     Rate(f64),
     // Boxed: `FrameData` embeds the large `FrameParams` (camera columns), so an
     // unboxed variant would dwarf `Rate` (clippy::large_enum_variant).
@@ -272,6 +292,13 @@ struct App {
     /// The stream's mesh table (or the legacy built-in fallback), held until the
     /// GPU surface exists so the renderer can be built.
     pending_meshes: Option<Vec<Mesh>>,
+    /// The stream's bound texture (`0.0.4`), held until the renderer is built so
+    /// it can be uploaded; `None` for streams without a texture table.
+    pending_texture: Option<ImageTexture>,
+    /// Whether `pending_texture` has been applied to the built renderer (so it is
+    /// uploaded exactly once, even though it can arrive before or after the mesh
+    /// table triggers the renderer build).
+    texture_applied: bool,
     /// Every frame received so far, retained so playback can loop.
     frames: Vec<FrameData>,
     /// The frame currently on screen (none until the first arrives).
@@ -317,6 +344,8 @@ impl App {
             gpu: None,
             rx,
             pending_meshes: None,
+            pending_texture: None,
+            texture_applied: false,
             frames: Vec::new(),
             current: None,
             rate_override,
@@ -344,6 +373,7 @@ impl App {
         loop {
             match self.rx.try_recv() {
                 Ok(StreamMsg::Meshes(meshes)) => self.pending_meshes = Some(meshes),
+                Ok(StreamMsg::Texture(texture)) => self.pending_texture = Some(texture),
                 Ok(StreamMsg::Rate(rate)) => self.stream_rate = rate,
                 Ok(StreamMsg::Frame(frame)) => self.frames.push(*frame),
                 Err(TryRecvError::Empty) => break,
@@ -473,6 +503,15 @@ impl ApplicationHandler for App {
                     gpu.window.request_redraw();
                 }
             }
+            // Upload the stream's bound texture once the renderer exists (the
+            // texture can arrive before or after the mesh table).
+            if !self.texture_applied && gpu.renderer.is_some() {
+                if let Some(texture) = self.pending_texture.as_ref() {
+                    gpu.set_texture(texture);
+                    self.texture_applied = true;
+                    gpu.window.request_redraw();
+                }
+            }
         }
 
         // Select the frame for the current wall-clock time (speed = rate()),
@@ -505,12 +544,18 @@ fn spawn_stdin_reader(tx: mpsc::Sender<StreamMsg>) {
         .spawn(move || {
             let stdin = std::io::stdin().lock();
             let meshes_tx = tx.clone();
+            let texture_tx = tx.clone();
             let rate_tx = tx.clone();
             // A send error just means the window closed; stop reading in that case.
             if let Err(err) = read_scene_stream_with_meta(
                 stdin,
                 |meshes| {
                     let _ = meshes_tx.send(StreamMsg::Meshes(meshes));
+                },
+                |texture| {
+                    if let Some(texture) = texture {
+                        let _ = texture_tx.send(StreamMsg::Texture(texture));
+                    }
                 },
                 |rate| {
                     let _ = rate_tx.send(StreamMsg::Rate(rate));
@@ -536,7 +581,9 @@ pub fn run() -> Result<(), AppError> {
 
     let cli = Cli::parse();
     let rate_override = cli.fps.filter(|fps| fps.is_finite() && *fps > 0.0);
-    let mode = if cli.wireframe {
+    let mode = if cli.textured {
+        RenderMode::Textured
+    } else if cli.wireframe {
         RenderMode::Wireframe
     } else {
         RenderMode::Filled

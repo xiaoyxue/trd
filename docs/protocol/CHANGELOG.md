@@ -13,7 +13,38 @@ follows `MAJOR.MINOR.PATCH`.
   it as the default GIF/WebP frame rate; `trd-app` plays at this rate (or `--fps`)
   and, by default, presents decoupled from the monitor refresh (`--vsync` to lock).
 
-## 0.0.3 — Current
+## 0.0.4 — Current
+
+### Added
+- Optional **texture Arrow stream**, spliced between the mesh and params streams
+  (`[mesh][texture][params]`). One row = one image: an **`rgba`** column of type
+  `FixedSizeList<UInt8>[H·W·4]` carrying the canonical `arrow.fixed_shape_tensor`
+  extension (shape `[H, W, 4]`, interleaved RGBA8, row-major). Height/width are
+  read from the extension metadata (self-describing, like the output tensor).
+  Decoded by `ImageTexture::from_arrow`; the first non-empty row is bound as the
+  sampled albedo. Producer helper `scripts/texture_to_arrow.py` encodes an image
+  (with `--max-size` downscaling to stay within the portable 2048² limit).
+- **Texture schema sniffing**: a leading stream carrying an `rgba` column (and no
+  `position`) is a texture table, classified after the optional mesh table and
+  before the terminal params table.
+- Optional per-vertex **`uv`** mesh column (`List<FixedSizeList<Float32>[2]>`, one
+  `(u, v)` per vertex, top-left texel origin). `scripts/obj_to_arrow.py` emits it
+  as `[u, 1 − v]` from an OBJ's `vt` records; absent → `(0, 0)`.
+- **Textured render mode** (`--textured` / `setTextured(true)`, mutually exclusive
+  with wireframe): a `texture_2d<f32>` + `sampler` bind group samples the bound
+  texture at each vertex UV (`textureSample(tex, samp, uv)`). Uploaded to
+  `Rgba8UnormSrgb` (texels linearized on read, matching the output path), **linear**
+  filtering, **clamp-to-edge**. A textured draw with no bound texture samples a
+  default 1×1 opaque-white texel (identity multiply against the vertex color).
+  Shared by the native (CLI + window) and wasm (`CanvasRenderer`/`ArrowRenderer`)
+  paths.
+
+### Compatibility
+- **Backward-compatible with 0.0.3, 0.0.2 and 0.0.1.** A mesh-only or params-only
+  stream renders identically; the texture stream and `uv` column are optional.
+  Decoders accept `{0.0.1, 0.0.2, 0.0.3, 0.0.4}`.
+
+## 0.0.3 — Superseded
 
 ### Added
 - Optional **leading mesh Arrow stream**, concatenated before the params stream
