@@ -32,8 +32,8 @@ pub use render::{
 mod stream;
 #[cfg(not(target_arch = "wasm32"))]
 pub use stream::{
-    decode_frames, input_schema, read_frame_stream, read_frame_stream_with_meta, run_stream,
-    StreamError,
+    decode_frames, input_schema, read_frame_stream, read_frame_stream_with_meta,
+    read_scene_stream_with_meta, run_stream, StreamError,
 };
 
 /// Returns the project greeting used by the CLI and web entry points.

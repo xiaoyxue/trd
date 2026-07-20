@@ -1042,6 +1042,26 @@ impl MeshRenderer {
         Self::with_meshes(device, format, std::slice::from_ref(mesh), &[base_model])
     }
 
+    /// Like [`with_meshes`](Self::with_meshes) but derives each mesh's base
+    /// (preview) model automatically via [`Mesh::preview_transform`]
+    /// ([`crate::DEFAULT_PREVIEW_TARGET`]) — center + uniform scale-to-fit — so an
+    /// arbitrary-unit asset renders centered at a reasonable size. Shared by the
+    /// headless [`crate::run_stream`]/`BatchRenderer` and the windowed `trd-app`.
+    pub fn with_meshes_preview(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        meshes: &[Mesh],
+    ) -> Self {
+        let base_models: Vec<Matrix4> = meshes
+            .iter()
+            .map(|mesh| {
+                mesh.preview_transform(crate::DEFAULT_PREVIEW_TARGET)
+                    .matrix()
+            })
+            .collect();
+        Self::with_meshes(device, format, meshes, &base_models)
+    }
+
     /// Builds a renderer over several meshes, each with its own base (preview)
     /// model. A frame's [`Scene`] references these meshes by id (row index).
     ///

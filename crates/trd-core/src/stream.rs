@@ -720,6 +720,92 @@ fn read_meshes<R: Read>(reader: &mut StreamReader<R>) -> Result<Vec<Mesh>, Strea
     Ok(meshes)
 }
 
+/// Resolves the `i`-th frame's instanced draw list: the wire `draw_lists` row
+/// when present, else one instance of mesh 0 placed by the frame's own model
+/// (legacy single-object behavior). Every referenced `mesh_id` is validated
+/// against `mesh_count`. Shared by the headless [`run_stream`] path and the live
+/// [`read_scene_stream_with_meta`] front-end so both resolve draws identically.
+fn resolve_draws(
+    params: &FrameParams,
+    draw_lists: &Option<Vec<Vec<Draw>>>,
+    i: usize,
+    mesh_count: usize,
+) -> Result<Vec<Draw>, StreamError> {
+    let draws = match draw_lists {
+        Some(rows) => rows[i].clone(),
+        None => vec![Draw {
+            mesh_id: 0,
+            model: params.model_matrix().to_cols_array(),
+        }],
+    };
+    for draw in &draws {
+        if draw.mesh_id as usize >= mesh_count {
+            return Err(StreamError::MeshIndexOutOfRange {
+                mesh_id: draw.mesh_id,
+                mesh_count,
+            });
+        }
+    }
+    Ok(draws)
+}
+
+/// Reads a trd input stream **mesh-aware** — the same `[mesh][params]` framing
+/// [`run_stream`] uses — for a live front-end (e.g. the windowed `trd-app`) that
+/// owns its own render target and encodes each frame's [`Scene`](crate::Scene)
+/// itself, rather than the headless byte-stream path [`run_stream`] drives.
+///
+/// Invokes `on_meshes` **once** with the decoded mesh table (a `0.0.3`
+/// mesh-first stream) or the built-in hello-triangle (a legacy `0.0.1`/`0.0.2`
+/// params-only stream), then `on_meta` with the stream's declared playback rate,
+/// then `on_frame` for each frame's `(FrameParams, draws)` in order. A frame
+/// carrying no wire draw list defaults to one instance of mesh 0 placed by the
+/// frame's own model — matching [`run_stream`]. The mesh table's rows are
+/// referenced by 0-based index; out-of-range `mesh_id`s are an error.
+pub fn read_scene_stream_with_meta<R: Read>(
+    input: R,
+    on_meshes: impl FnOnce(Vec<Mesh>),
+    on_meta: impl FnOnce(f64),
+    mut on_frame: impl FnMut(FrameParams, Vec<Draw>),
+) -> Result<(), StreamError> {
+    let mut first = StreamReader::try_new(input, None)?;
+    check_version(first.schema().as_ref())?;
+
+    // Decodes one params batch into `(FrameParams, draws)` callbacks, validating
+    // draw mesh ids against `mesh_count`.
+    let mut emit = |batch: &RecordBatch, mesh_count: usize| -> Result<(), StreamError> {
+        let frames = decode_frames(batch)?;
+        let draw_lists = decode_draws(batch)?;
+        for (i, params) in frames.iter().enumerate() {
+            let draws = resolve_draws(params, &draw_lists, i, mesh_count)?;
+            on_frame(*params, draws);
+        }
+        Ok(())
+    };
+
+    if is_mesh_schema(first.schema().as_ref()) {
+        // 0.0.3 mesh-first: decode the leading mesh table, then the params stream
+        // that follows it in the same byte stream.
+        let meshes = read_meshes(&mut first)?;
+        let mesh_count = meshes.len();
+        on_meshes(meshes);
+        let params = StreamReader::try_new(first.get_mut(), None)?;
+        check_version(params.schema().as_ref())?;
+        on_meta(frame_rate_from_metadata(params.schema().metadata()));
+        for batch in params {
+            emit(&batch?, mesh_count)?;
+        }
+    } else {
+        // Legacy params-only stream → the built-in hello-triangle, so the live
+        // renderer draws the same demo the headless CLI does.
+        on_meshes(vec![Mesh::hello_triangle()]);
+        on_meta(frame_rate_from_metadata(first.schema().metadata()));
+        for batch in first {
+            emit(&batch?, 1)?;
+        }
+    }
+    Ok(())
+}
+
 /// Renders every frame of the `params` batch stream to `output`, one Arrow
 /// output batch per input batch. Shared by both the mesh-first and legacy paths.
 fn render_params<I, W>(
@@ -747,21 +833,7 @@ where
             .iter()
             .enumerate()
             .map(|(i, params)| {
-                let draws: Vec<Draw> = match &draw_lists {
-                    Some(rows) => rows[i].clone(),
-                    None => vec![Draw {
-                        mesh_id: 0,
-                        model: params.model_matrix().to_cols_array(),
-                    }],
-                };
-                for draw in &draws {
-                    if draw.mesh_id as usize >= mesh_count {
-                        return Err(StreamError::MeshIndexOutOfRange {
-                            mesh_id: draw.mesh_id,
-                            mesh_count,
-                        });
-                    }
-                }
+                let draws = resolve_draws(params, &draw_lists, i, mesh_count)?;
                 renderer.render(*params, &draws)
             })
             .collect::<Result<_, _>>()?;

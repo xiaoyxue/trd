@@ -25,13 +25,15 @@
 # examples/render.sh --cli --wireframe --mesh assets/meshes/bunny.obj \
 # --mesh examples/cube.obj examples/frames.multimesh.jsonl output/scene.gif.
 # (--mesh needs pyarrow via uv/python3 and is ignored by --web.)
-# With --wireframe (--cli only) trd draws mesh edges as a line list instead of
-# filled triangles (protocol #38); combine with --mesh for a wireframe asset.
-# With --aabb (--cli only) trd overlays each drawn mesh's axis-aligned bounding
-# box as a green wireframe box (#42); combine with --mesh (e.g. add --aabb to the
-# bunny turntable to see its box track the rotation).
-# With --axes (--cli only) trd overlays a coordinate-axes gizmo (X=red, Y=green,
-# Z=blue) at the world origin (#42), marking the world frame the camera looks at.
+# The appearance flags below (--wireframe/--aabb/--axes) apply to both --cli and
+# --native: trd-cli and trd-app share trd-core's mesh Scene renderer.
+# With --wireframe trd draws mesh edges as a line list instead of filled
+# triangles (protocol #38); combine with --mesh for a wireframe asset.
+# With --aabb trd overlays each drawn mesh's axis-aligned bounding box as a green
+# wireframe box (#42); combine with --mesh (e.g. add --aabb to the bunny
+# turntable to see its box track the rotation).
+# With --axes trd overlays a coordinate-axes gizmo (X=red, Y=green, Z=blue) at
+# the world origin (#42), marking the world frame the camera looks at.
 #
 # Dolly-camera capstone (#49): examples/bunny_dolly.py authors the same 45°
 # bird's-eye *dolly* camera twice — CG (eye/target/fovy) and CV (K + pose) — as
@@ -100,7 +102,7 @@ BROWSER QUERY PARAMS (--web --canvas-renderer; append to the URL, no rebuild):
   one — use the printed SSH tunnel for a remote browser). Hard-refresh
   (Ctrl+Shift+R) after a rebuild so the browser drops the cached bundle.
 
-CONTENT FLAGS (--cli only):
+CONTENT FLAGS (--cli and --native):
   --mesh OBJ          Load OBJ as a protocol 0.0.3 mesh (centered + scaled to fit).
                       Repeatable: pass several times to load several meshes (row 0,
                       1, …); a frame's `draws` list references them by index.
@@ -113,6 +115,8 @@ CONTENT FLAGS (--cli only):
 Examples:
   examples/render.sh --cli                                   # default demo → output/out.gif
   examples/render.sh --native                                # play the default demo live
+  examples/render.sh --native --wireframe --aabb --axes --mesh assets/meshes/bunny.obj \
+    examples/frames.bunny_dolly.cg.jsonl '' 1024 1024 24     # live dolly capstone in a window
   examples/render.sh --cli --aabb --mesh assets/meshes/bunny.obj \
     examples/frames.turntable.jsonl output/bunny.gif 1024 1024 24
   examples/render.sh --cli --wireframe --aabb \
@@ -389,19 +393,24 @@ stream() {
   frames
 }
 
+# Appearance flags pass through to both trd-cli (--cli) and trd-app (--native);
+# trd-core's shared mesh Scene renderer honours them either way.
+wireframe_flag=()
+[ "$wireframe" -eq 1 ] && wireframe_flag=(--wireframe)
+aabb_flag=()
+[ "$aabb" -eq 1 ] && aabb_flag=(--aabb)
+axes_flag=()
+[ "$axes" -eq 1 ] && axes_flag=(--axes)
+
 if [ "$native" -eq 1 ]; then
   # Play the frame stream live in the interactive trd-app window (trd-native).
+  # The appearance flags pass through to trd-app too (it now renders the mesh
+  # Scene via the shared trd-core MeshRenderer, like trd-cli).
   stream \
-    | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-app -- --width "$width" --height "$height" --fps "$fps"
+    | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-app -- --width "$width" --height "$height" --fps "$fps" "${wireframe_flag[@]}" "${aabb_flag[@]}" "${axes_flag[@]}"
   echo "streamed $input to the trd-app window (${width}x${height}, ${fps}fps)"
 else
   mkdir -p "$(dirname "$output")"
-  wireframe_flag=()
-  [ "$wireframe" -eq 1 ] && wireframe_flag=(--wireframe)
-  aabb_flag=()
-  [ "$aabb" -eq 1 ] && aabb_flag=(--aabb)
-  axes_flag=()
-  [ "$axes" -eq 1 ] && axes_flag=(--axes)
   stream \
     | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-cli -- --width "$width" --height "$height" "${wireframe_flag[@]}" "${aabb_flag[@]}" "${axes_flag[@]}" \
     | uv run --with pyarrow --with numpy "$root/scripts/encode.py" --fps "$fps" -o "$output"

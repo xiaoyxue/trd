@@ -1,10 +1,11 @@
 //! Native windowed streaming viewer: a winit application that owns a live wgpu
 //! surface and renders trd frame-params streamed from stdin.
 //!
-//! A background thread reads the Arrow IPC frame-params stream (the same input
-//! `trd-cli` consumes) via [`trd_core::read_frame_stream`] and forwards each
-//! decoded [`trd_core::FrameParams`] over a channel. The window plays them at a
-//! fixed rate, rendering each with the shared [`trd_core::render_triangle`] — so
+//! A background thread reads the Arrow IPC stream (the same `[mesh][params]`
+//! input `trd-cli` consumes) via [`trd_core::read_scene_stream_with_meta`],
+//! forwarding the decoded mesh table then each frame's params + instanced draw
+//! list over a channel. The window plays them at a fixed rate, encoding each
+//! frame's [`trd_core::Scene`] with the shared [`trd_core::MeshRenderer`] — so
 //! all rendering logic still lives in `trd-core`.
 
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -12,17 +13,22 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-use trd_core::FrameParams;
+use trd_core::{
+    build_scene, read_scene_stream_with_meta, Draw, FrameParams, Mesh, MeshRenderer, RenderMode,
+    Viewport,
+};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
-/// Interactive desktop viewer for a trd frame-params stream (protocol 0.0.1).
+/// Interactive desktop viewer for a trd scene stream (protocol 0.0.3).
 ///
-/// Reads an Arrow IPC stream of `{center, size, theta}` rows on stdin and plays
-/// them live in a window, e.g. `duckdb ... | trd-app`.
+/// Reads the Arrow IPC `[mesh][params]` stream on stdin — a leading mesh table
+/// then per-frame params + instanced draw lists (or a legacy `0.0.1`/`0.0.2`
+/// params-only stream → the built-in hello-triangle) — and plays it live in a
+/// window, e.g. `trd-render.sh --mesh bunny.obj … | trd-app`.
 #[derive(Parser)]
 #[command(name = "trd-app", version, about)]
 struct Cli {
@@ -44,6 +50,18 @@ struct Cli {
     /// presents at `--fps` decoupled from the refresh rate (non-vsync).
     #[arg(long)]
     vsync: bool,
+    /// Render meshes as an edge wireframe (line list) instead of filled
+    /// triangles (#38).
+    #[arg(long)]
+    wireframe: bool,
+    /// Overlay each drawn mesh's axis-aligned bounding box as a green wireframe
+    /// box (#42).
+    #[arg(long)]
+    aabb: bool,
+    /// Overlay a coordinate-axes gizmo (X=red, Y=green, Z=blue) at the world
+    /// origin (#42).
+    #[arg(long)]
+    axes: bool,
 }
 
 /// Errors that can occur while setting up the window or GPU.
@@ -73,6 +91,9 @@ struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
+    /// The scene renderer, built lazily once the stream's mesh table (or the
+    /// legacy built-in fallback) has arrived from the reader thread.
+    renderer: Option<MeshRenderer>,
 }
 
 impl Gpu {
@@ -146,6 +167,7 @@ impl Gpu {
             device,
             queue,
             config,
+            renderer: None,
         })
     }
 
@@ -157,10 +179,33 @@ impl Gpu {
         }
     }
 
-    fn render(&mut self, params: FrameParams) {
-        let frame = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(frame)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
+    /// Uploads the stream's meshes and builds the scene renderer (each mesh
+    /// centered + scaled to fit via its preview base model). Idempotent per
+    /// stream: called once when the mesh table first arrives.
+    fn set_meshes(&mut self, meshes: &[Mesh]) {
+        self.renderer = Some(MeshRenderer::with_meshes_preview(
+            &self.device,
+            self.config.format,
+            meshes,
+        ));
+    }
+
+    /// Renders one frame's [`Scene`](trd_core::Scene) to the window surface.
+    /// No-op until the renderer is built and a frame is available.
+    fn render(
+        &mut self,
+        frame: Option<&FrameData>,
+        mode: RenderMode,
+        show_aabb: bool,
+        show_axes: bool,
+    ) {
+        let (Some(renderer), Some(frame)) = (self.renderer.as_mut(), frame) else {
+            return;
+        };
+
+        let surface = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(surface)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(surface) => surface,
             // The surface config is stale (e.g. after a resize/minimise or a lost
             // surface); reconfigure and try again on the next redraw.
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
@@ -172,42 +217,65 @@ impl Gpu {
             _ => return,
         };
 
-        let view = frame
+        let view = surface
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        trd_core::render_triangle(
-            &self.device,
+        // Author the frame's Scene from its draw list + the render mode/overlay
+        // flags, then hand it to the shared MeshRenderer — the same Scene the
+        // headless CLI and wasm front-ends build.
+        let scene = build_scene(&frame.draws, mode, show_aabb, show_axes);
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("trd app frame"),
+            });
+        renderer.encode(
             &self.queue,
+            &mut encoder,
             &view,
-            self.config.format,
-            params,
-            self.config.width,
-            self.config.height,
+            frame.params,
+            &scene,
+            Viewport {
+                width: self.config.width,
+                height: self.config.height,
+            },
         );
-
-        self.queue.present(frame);
+        self.queue.submit(Some(encoder.finish()));
+        self.queue.present(surface);
     }
 }
 
-/// A message from the stdin reader thread: the stream's declared playback rate
-/// (sent once, before any frames) followed by decoded frames.
+/// A message from the stdin reader thread: the decoded mesh table (sent once,
+/// first), the stream's declared playback rate (once), then each decoded frame.
 enum StreamMsg {
+    Meshes(Vec<Mesh>),
     Rate(f64),
-    // Boxed: `FrameParams` is large (camera columns), so an unboxed variant
-    // would dwarf `Rate` (clippy::large_enum_variant).
-    Frame(Box<FrameParams>),
+    // Boxed: `FrameData` embeds the large `FrameParams` (camera columns), so an
+    // unboxed variant would dwarf `Rate` (clippy::large_enum_variant).
+    Frame(Box<FrameData>),
+}
+
+/// One decoded frame: its camera/transform params and resolved instanced draw
+/// list, built into a [`trd_core::Scene`] at render time.
+#[derive(Clone)]
+struct FrameData {
+    params: FrameParams,
+    draws: Vec<Draw>,
 }
 
 /// The winit application: owns the GPU state and drives stream playback.
 struct App {
     gpu: Option<Gpu>,
-    /// Rate + frames arriving from the stdin reader thread.
+    /// Meshes + rate + frames arriving from the stdin reader thread.
     rx: Receiver<StreamMsg>,
+    /// The stream's mesh table (or the legacy built-in fallback), held until the
+    /// GPU surface exists so the renderer can be built.
+    pending_meshes: Option<Vec<Mesh>>,
     /// Every frame received so far, retained so playback can loop.
-    frames: Vec<FrameParams>,
-    /// The frame currently on screen (identity until the first arrives).
-    current: FrameParams,
+    frames: Vec<FrameData>,
+    /// The frame currently on screen (none until the first arrives).
+    current: Option<FrameData>,
     /// Explicit `--fps` override; when `None`, `stream_rate` drives playback.
     rate_override: Option<f64>,
     /// The stream's declared playback rate (fps); `DEFAULT_FRAME_RATE` until the
@@ -225,21 +293,32 @@ struct App {
     window_size: (u32, u32),
     /// Whether to lock presentation to the monitor refresh (vsync / Fifo).
     vsync: bool,
+    /// Render mode (filled / wireframe) applied to every mesh drawable.
+    mode: RenderMode,
+    /// Overlay each drawn mesh's axis-aligned bounding box (#42).
+    show_aabb: bool,
+    /// Overlay the origin coordinate-axes gizmo (#42).
+    show_axes: bool,
 }
 
 impl App {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         rx: Receiver<StreamMsg>,
         window_size: (u32, u32),
         rate_override: Option<f64>,
         loop_playback: bool,
         vsync: bool,
+        mode: RenderMode,
+        show_aabb: bool,
+        show_axes: bool,
     ) -> Self {
         Self {
             gpu: None,
             rx,
+            pending_meshes: None,
             frames: Vec::new(),
-            current: FrameParams::IDENTITY,
+            current: None,
             rate_override,
             stream_rate: trd_core::DEFAULT_FRAME_RATE,
             playback_start: None,
@@ -248,6 +327,9 @@ impl App {
             stream_done: false,
             window_size,
             vsync,
+            mode,
+            show_aabb,
+            show_axes,
         }
     }
 
@@ -261,8 +343,9 @@ impl App {
     fn drain_stream(&mut self) {
         loop {
             match self.rx.try_recv() {
+                Ok(StreamMsg::Meshes(meshes)) => self.pending_meshes = Some(meshes),
                 Ok(StreamMsg::Rate(rate)) => self.stream_rate = rate,
-                Ok(StreamMsg::Frame(params)) => self.frames.push(*params),
+                Ok(StreamMsg::Frame(frame)) => self.frames.push(*frame),
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     self.stream_done = true;
@@ -298,7 +381,7 @@ impl App {
         if self.shown_index == Some(index) {
             return false;
         }
-        self.current = self.frames[index];
+        self.current = Some(self.frames[index].clone());
         self.shown_index = Some(index);
         true
     }
@@ -368,13 +451,29 @@ impl ApplicationHandler for App {
                 gpu.resize(size);
                 gpu.window.request_redraw();
             }
-            WindowEvent::RedrawRequested => gpu.render(self.current),
+            WindowEvent::RedrawRequested => gpu.render(
+                self.current.as_ref(),
+                self.mode,
+                self.show_aabb,
+                self.show_axes,
+            ),
             _ => {}
         }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.drain_stream();
+
+        // Build the scene renderer once both the GPU surface and the stream's
+        // mesh table (or built-in fallback) are available; then paint.
+        if let Some(gpu) = self.gpu.as_mut() {
+            if gpu.renderer.is_none() {
+                if let Some(meshes) = self.pending_meshes.as_ref() {
+                    gpu.set_meshes(meshes);
+                    gpu.window.request_redraw();
+                }
+            }
+        }
 
         // Select the frame for the current wall-clock time (speed = rate()),
         // independent of how often this runs or the present/refresh rate.
@@ -405,15 +504,19 @@ fn spawn_stdin_reader(tx: mpsc::Sender<StreamMsg>) {
         .name("trd-stdin-reader".to_string())
         .spawn(move || {
             let stdin = std::io::stdin().lock();
+            let meshes_tx = tx.clone();
             let rate_tx = tx.clone();
             // A send error just means the window closed; stop reading in that case.
-            if let Err(err) = trd_core::read_frame_stream_with_meta(
+            if let Err(err) = read_scene_stream_with_meta(
                 stdin,
+                |meshes| {
+                    let _ = meshes_tx.send(StreamMsg::Meshes(meshes));
+                },
                 |rate| {
                     let _ = rate_tx.send(StreamMsg::Rate(rate));
                 },
-                |params| {
-                    let _ = tx.send(StreamMsg::Frame(Box::new(params)));
+                |params, draws| {
+                    let _ = tx.send(StreamMsg::Frame(Box::new(FrameData { params, draws })));
                 },
             ) {
                 log::error!("input stream error: {err}");
@@ -433,6 +536,11 @@ pub fn run() -> Result<(), AppError> {
 
     let cli = Cli::parse();
     let rate_override = cli.fps.filter(|fps| fps.is_finite() && *fps > 0.0);
+    let mode = if cli.wireframe {
+        RenderMode::Wireframe
+    } else {
+        RenderMode::Filled
+    };
 
     let (tx, rx) = mpsc::channel();
     spawn_stdin_reader(tx);
@@ -448,6 +556,9 @@ pub fn run() -> Result<(), AppError> {
         rate_override,
         !cli.once,
         cli.vsync,
+        mode,
+        cli.aabb,
+        cli.axes,
     );
     event_loop.run_app(&mut app)?;
     Ok(())
