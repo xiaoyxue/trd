@@ -18,9 +18,6 @@ pub use math::{
     Transform, Vector2, Vector3, Vector4, EPSILON,
 };
 pub use mesh::{MeshError, DEFAULT_PREVIEW_TARGET};
-pub use texture::{
-    ConstantTexture, ImageData, ImageTexture, Texture, TextureError, TEXTURE_COLUMN,
-};
 pub use output::{output_schema, tightly_pack_rgba, OutputError, OutputSession};
 pub use protocol::{
     frame_rate_from_metadata, DecodedFrame, FrameBatch, InputSession, ProtocolError,
@@ -30,6 +27,9 @@ pub use render::{
     build_scene, create_mesh_pipeline, create_triangle_pipeline, render_triangle, CameraFormError,
     Draw, DrawableObject, FrameParams, Mesh, MeshRenderer, RenderMode, Scene, TriangleRenderer,
     Vertex, Viewport,
+};
+pub use texture::{
+    ConstantTexture, ImageData, ImageTexture, Texture, TextureError, TEXTURE_COLUMN,
 };
 
 #[cfg(not(target_arch = "wasm32"))]

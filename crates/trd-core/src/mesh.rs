@@ -741,7 +741,11 @@ f 1 2 3
 
     #[test]
     fn arrow_without_uv_defaults_to_zero() {
-        let batch = mesh_batch(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0], None, None);
+        let batch = mesh_batch(
+            vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            None,
+            None,
+        );
         let mesh = Mesh::from_arrow(&batch).unwrap();
         assert!(mesh.vertices.iter().all(|v| v.uv == [0.0, 0.0]));
     }

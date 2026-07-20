@@ -212,14 +212,14 @@ impl ImageTexture {
             return Err(TextureError::NullValues(TEXTURE_COLUMN));
         }
         let row = list.value(0);
-        let bytes = row
-            .as_any()
-            .downcast_ref::<UInt8Array>()
-            .ok_or_else(|| TextureError::ColumnType {
-                column: TEXTURE_COLUMN,
-                expected: "FixedSizeList<UInt8>",
-                actual: row.data_type().clone(),
-            })?;
+        let bytes =
+            row.as_any()
+                .downcast_ref::<UInt8Array>()
+                .ok_or_else(|| TextureError::ColumnType {
+                    column: TEXTURE_COLUMN,
+                    expected: "FixedSizeList<UInt8>",
+                    actual: row.data_type().clone(),
+                })?;
         if bytes.null_count() > 0 {
             return Err(TextureError::NullValues(TEXTURE_COLUMN));
         }
@@ -401,7 +401,7 @@ mod tests {
         assert_eq!(tex.sample([0.75, 0.25]), [255, 0, 0, 255]); // top-right red
         assert_eq!(tex.sample([0.25, 0.75]), [0, 255, 0, 255]); // bottom-left green
         assert_eq!(tex.sample([0.75, 0.75]), [0, 0, 255, 255]); // bottom-right blue
-        // Clamp-to-edge past the borders.
+                                                                // Clamp-to-edge past the borders.
         assert_eq!(tex.sample([-1.0, -1.0]), [255, 255, 255, 255]);
         assert_eq!(tex.sample([2.0, 2.0]), [0, 0, 255, 255]);
     }
@@ -418,9 +418,11 @@ mod tests {
     #[test]
     fn image_from_arrow_missing_column_errors() {
         let schema = Schema::new(vec![Field::new("not_rgba", DataType::UInt8, false)]);
-        let batch =
-            RecordBatch::try_new(Arc::new(schema), vec![Arc::new(UInt8Array::from(vec![0u8]))])
-                .unwrap();
+        let batch = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![Arc::new(UInt8Array::from(vec![0u8]))],
+        )
+        .unwrap();
         assert!(matches!(
             ImageTexture::from_arrow(&batch),
             Err(TextureError::MissingColumn("rgba"))
