@@ -75,8 +75,9 @@
 # keeps its ?textured route, e.g. http://localhost:8080/?textured&size=2048).
 # WebGPU needs a secure context, so open http://localhost:<port> (an SSH tunnel
 # makes a remote machine's origin "localhost" too); a bare http://<ip> is NOT a
-# secure context. The server sends a long cache-control on the page, so
-# hard-refresh (Ctrl+Shift+R) after a rebuild to avoid replaying a stale bundle.
+# secure context. The server sends a long cache-control on the page, so after a
+# rebuild hard-refresh (Ctrl+Shift+R) — and if you restarted the server behind an
+# SSH tunnel, reconnect the tunnel too — to avoid replaying a stale bundle.
 #
 # Run from `nix develop`. The Arrow frame stream is built with duckdb's 'arrow'
 # community extension when it loads, otherwise with pyarrow (via uv/python3).
@@ -110,8 +111,9 @@ BROWSER QUERY PARAMS (--web --canvas-renderer / --textured-renderer; append to t
                       Combine, e.g. http://localhost:8080/?size=2048&fps=30
                       (the textured demo keeps its route: ?textured&size=2048&fps=30)
   Open http://localhost:PORT (WebGPU needs this secure context; a bare IP is not
-  one — use the printed SSH tunnel for a remote browser). Hard-refresh
-  (Ctrl+Shift+R) after a rebuild so the browser drops the cached bundle.
+  one — use the printed SSH tunnel for a remote browser). After a rebuild
+  hard-refresh (Ctrl+Shift+R); if you also restarted the server, reconnect the
+  SSH tunnel so the browser drops the cached bundle.
 
 CONTENT FLAGS (--cli and --native):
   --mesh OBJ          Load OBJ as a protocol 0.0.3 mesh (centered + scaled to fit).
@@ -299,7 +301,8 @@ if [ "$web" -eq 1 ]; then
     ?smoke=1  render the 2-row smoke batch then stop
     ?benchmarkRate=60|120  throughput benchmark (overrides ?fps)
   e.g.  http://localhost:$port/?size=2048&fps=30
-  (Hard-refresh Ctrl+Shift+R after a rebuild to drop the cached bundle.)
+  (After a rebuild hard-refresh Ctrl+Shift+R; if you restarted the server behind
+  an SSH tunnel, reconnect the tunnel too, to drop the cached bundle.)
 PARAMS
 )
   elif [ "$textured_renderer" -eq 1 ]; then
@@ -312,7 +315,8 @@ PARAMS
     ?size=N   square resolution px (16..4096, default 1024)
     ?fps=N    playback rate (1..240, default 24)
   e.g.  http://localhost:$port/?textured&size=2048&fps=30
-  (Hard-refresh Ctrl+Shift+R after a rebuild to drop the cached bundle.)
+  (After a rebuild hard-refresh Ctrl+Shift+R; if you restarted the server behind
+  an SSH tunnel, reconnect the tunnel too, to drop the cached bundle.)
 PARAMS
 )
   else
