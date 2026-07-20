@@ -10,7 +10,7 @@
 # (created in a temp dir and auto-removed). The produced GIF/WebP is identical.
 #
 # Usage:
-#   examples/render.ps1 [-CLI | -Native | -Web [-ArrowRenderer|-CanvasRenderer]] `
+#   examples/render.ps1 [-CLI | -Native | -Web [-ArrowRenderer|-CanvasRenderer|-TexturedRenderer]] `
 #                       [-Mesh OBJ]... [-Texture IMG] [-Wireframe] [-Aabb] [-Axes] `
 #                       [-InputPath INPUT.jsonl] [-Output OUTPUT.gif|.webp] `
 #                       [-Width 256] [-Height 256] [-Fps 30]
@@ -63,10 +63,11 @@
 # With -Web (alias -Wasm) it builds the browser (wasm) bundle with wasm-pack + bun
 # and serves web/dist, printing the machine URLs and an SSH-tunnel command. The web
 # demo generates its own Arrow frame stream in-browser, so all positional arguments
-# are ignored. Two in-browser renderers share the bundle: -ArrowRenderer (default)
+# are ignored. Three in-browser renderers share the bundle: -ArrowRenderer (default)
 # runs the offscreen output-stream smoke (the browser counterpart of the CLI);
-# -CanvasRenderer runs the on-screen canvas demo. Override the port with $env:PORT
-# (default 8088); binds all interfaces.
+# -CanvasRenderer runs the on-screen wireframe canvas demo; -TexturedRenderer runs
+# the on-screen textured bunny demo (#20: texture + AABB + axes). Override the port
+# with $env:PORT (default 8088); binds all interfaces.
 #
 # On Windows this auto-sources scripts\dev-env.ps1 (the flake.nix devShell
 # counterpart; see README "Windows setup (without Nix)" for the one-time
@@ -88,6 +89,7 @@ param(
     [Alias('Wasm')][switch]$Web,
     [switch]$ArrowRenderer,
     [switch]$CanvasRenderer,
+    [switch]$TexturedRenderer,
     [switch]$Wireframe,
     [switch]$Aabb,
     [switch]$Axes,
@@ -119,8 +121,9 @@ MODE (pick one; default -CLI):
   -CLI, -Headless   Render to a GIF/WebP via the headless trd-cli (default).
   -Native, -App     Play live in the interactive trd-app window (-Output ignored).
   -Web, -Wasm       Build the browser (wasm) bundle and serve it (positional args ignored).
-                      -ArrowRenderer   offscreen output-stream smoke (default)
-                      -CanvasRenderer  on-screen canvas demo
+                      -ArrowRenderer     offscreen output-stream smoke (default)
+                      -CanvasRenderer    on-screen wireframe demo (bunny dolly capstone)
+                      -TexturedRenderer  on-screen textured demo (#20: texture + AABB + axes)
 
 CONTENT FLAGS (apply to -CLI and -Native):
   -Mesh OBJ         Load OBJ as a protocol 0.0.3 mesh (centered + scaled to fit).
@@ -151,6 +154,10 @@ Examples:
   examples\render.ps1 -CLI -Wireframe -Axes -Aabb -Mesh assets\meshes\bunny.obj `
     examples\frames.bunny_dolly.cg.jsonl output\bunny_dolly.gif 1024 1024 24  # dolly capstone (#49; auto-generates the frames)
   examples\render.ps1 -Web                                    # build + serve the wasm demo
+  examples\render.ps1 -Web -CanvasRenderer                    # on-screen wireframe bunny dolly demo
+  #   then open http://localhost:8088/?size=2048&fps=30        (size/fps tuned live)
+  examples\render.ps1 -Web -TexturedRenderer                 # on-screen textured bunny (#20: texture+AABB+axes)
+  #   then open http://localhost:8088/?textured&size=2048      (size/fps tuned live)
 
 On Windows this auto-sources scripts\dev-env.ps1; on Linux/macOS run inside `nix develop`.
 '@
@@ -166,12 +173,13 @@ if ($Help -or $PSBoundParameters.Count -eq 0) {
 # --- Mode selection & validation ---------------------------------------------
 # The top-level modes are mutually exclusive: the default headless render
 # (explicit alias -CLI/-Headless), the live -Native window, and the browser
-# -Web/-Wasm bundle. -ArrowRenderer / -CanvasRenderer sub-select the in-browser
-# renderer and therefore apply only to -Web.
+# -Web/-Wasm bundle. -ArrowRenderer / -CanvasRenderer / -TexturedRenderer
+# sub-select the in-browser renderer and therefore apply only to -Web.
 $modeCount = @($CLI, $Native, $Web).Where({ $_ }).Count
 if ($modeCount -gt 1) { Write-Error 'error: choose only one of -CLI, -Native, -Web.' }
-if ($ArrowRenderer -and $CanvasRenderer) { Write-Error 'error: -ArrowRenderer and -CanvasRenderer are mutually exclusive.' }
-if (($ArrowRenderer -or $CanvasRenderer) -and -not $Web) { Write-Error 'error: -ArrowRenderer / -CanvasRenderer apply only to -Web/-Wasm.' }
+$rendererCount = @($ArrowRenderer, $CanvasRenderer, $TexturedRenderer).Where({ $_ }).Count
+if ($rendererCount -gt 1) { Write-Error 'error: choose only one of -ArrowRenderer, -CanvasRenderer, -TexturedRenderer.' }
+if ($rendererCount -ge 1 -and -not $Web) { Write-Error 'error: -ArrowRenderer / -CanvasRenderer / -TexturedRenderer apply only to -Web/-Wasm.' }
 
 # --- Repeatable -Mesh <obj> extraction ---------------------------------------
 # PowerShell can't bind a named parameter more than once, so the repeatable
@@ -234,13 +242,18 @@ if ($Web) {
     $port = if ($env:PORT) { $env:PORT } else { '8088' }
     $webDir = Join-Path $root 'web'
 
-    # Both browser renderers ship in one bundle; web/src/main.ts routes on the
-    # `arrow-smoke` query param, so only the opened URL differs. Default (or
-    # -ArrowRenderer) = the offscreen ArrowRenderer output-stream smoke (the
-    # browser counterpart of -CLI); -CanvasRenderer = the on-screen canvas demo.
+    # All three browser renderers ship in one bundle; web/src/main.ts routes on
+    # the `arrow-smoke` / `textured` query param, so only the opened URL differs.
+    # Default (or -ArrowRenderer) = the offscreen ArrowRenderer output-stream smoke
+    # (the browser counterpart of -CLI); -CanvasRenderer = the on-screen wireframe
+    # canvas demo; -TexturedRenderer = the on-screen textured bunny demo (?textured).
     if ($CanvasRenderer) {
         $demoQuery = ''
-        $rendererLabel = 'CanvasRenderer (on-screen canvas demo)'
+        $rendererLabel = 'CanvasRenderer (on-screen canvas demo - bunny dolly capstone)'
+    }
+    elseif ($TexturedRenderer) {
+        $demoQuery = '?textured'
+        $rendererLabel = 'CanvasRenderer (on-screen textured bunny - #20: texture + AABB + axes)'
     }
     else {
         $demoQuery = '?arrow-smoke'
@@ -300,6 +313,9 @@ Bun.serve({
     Write-Host "    ssh -L ${port}:localhost:$port $user@$ip"
     Write-Host '  then open in a WebGPU browser (Chrome/Edge):'
     Write-Host "                          http://localhost:$port$demoQuery"
+    Write-Host ''
+    Write-Host '  After a rebuild hard-refresh (Ctrl+Shift+R); if you restarted the server'
+    Write-Host '  behind an SSH tunnel, reconnect the tunnel too, to drop the cached bundle.'
     Write-Host ''
 
     try {
