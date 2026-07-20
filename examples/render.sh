@@ -6,7 +6,7 @@
 #
 # Usage:
 #   examples/render.sh [--cli | --native | --web [--arrow-renderer|--canvas-renderer]] \
-#                      [--mesh OBJ]... [--wireframe] [--aabb] [--axes] [INPUT.jsonl] [OUTPUT.gif|.webp] [WIDTH] [HEIGHT] [FPS]
+#                      [--mesh OBJ]... [--texture IMG] [--wireframe] [--aabb] [--axes] [INPUT.jsonl] [OUTPUT.gif|.webp] [WIDTH] [HEIGHT] [FPS]
 # Defaults: examples/frames.0.0.2.jsonl  output/out.gif  256 256 30
 # Run with no arguments (or -h/--help) to print the flag guidance and exit; pass
 # --cli to render the default demo.
@@ -106,6 +106,9 @@ CONTENT FLAGS (--cli and --native):
   --mesh OBJ          Load OBJ as a protocol 0.0.3 mesh (centered + scaled to fit).
                       Repeatable: pass several times to load several meshes (row 0,
                       1, …); a frame's `draws` list references them by index.
+  --texture IMG       Bind IMG as a 0.0.4 texture and render textured — sampling it
+                      at each vertex UV (#20). Requires --mesh (with UVs); mutually
+                      exclusive with --wireframe.
   --wireframe         Draw mesh edges as a line list instead of filled triangles (#38).
   --aabb              Overlay each mesh's axis-aligned bounding box as a green box (#42).
   --axes              Overlay a coordinate-axes gizmo (X=red, Y=green, Z=blue) at the origin (#42).
@@ -119,6 +122,9 @@ Examples:
     examples/frames.bunny_dolly.cg.jsonl '' 1024 1024 24     # live dolly capstone in a window
   examples/render.sh --cli --aabb --mesh assets/meshes/bunny.obj \
     examples/frames.turntable.jsonl output/bunny.gif 1024 1024 24
+  examples/render.sh --cli --mesh assets/meshes/bunny_with_texture/bunny.obj \
+    --texture assets/meshes/bunny_with_texture/bunny_uv_map1.jpg \
+    examples/frames.bunny_dolly.cg.jsonl output/bunny_textured.gif 512 512 20  # textured bunny (#20)
   examples/render.sh --cli --wireframe --aabb \
     --mesh assets/meshes/bunny.obj --mesh examples/cube.obj \
     examples/frames.multimesh.jsonl output/scene.gif 1024 1024 24
@@ -152,6 +158,7 @@ wireframe=0
 aabb=0
 axes=0
 meshes=()
+texture=""
 positional=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -166,6 +173,8 @@ while [ $# -gt 0 ]; do
     --axes) axes=1 ;;
     --mesh) shift; meshes+=("${1:?--mesh requires an OBJ path}") ;;
     --mesh=*) meshes+=("${1#--mesh=}") ;;
+    --texture) shift; texture="${1:?--texture requires an image path}" ;;
+    --texture=*) texture="${1#--texture=}" ;;
     *) positional+=("$1") ;;
   esac
   shift
@@ -184,6 +193,21 @@ fi
 if { [ "$arrow_renderer" -eq 1 ] || [ "$canvas_renderer" -eq 1 ]; } && [ "$web" -ne 1 ]; then
   echo "error: --arrow-renderer / --canvas-renderer apply only to --web/--wasm" >&2
   exit 1
+fi
+
+# --texture provides a 0.0.4 texture table (bound as the sampled albedo) and
+# renders textured. It needs a --mesh (UVs to sample the texture) and is
+# mutually exclusive with --wireframe. --web ignores it (browser demos are
+# their own pipeline).
+if [ -n "$texture" ]; then
+  if [ ${#meshes[@]} -eq 0 ]; then
+    echo "error: --texture requires at least one --mesh (with UVs to sample)" >&2
+    exit 1
+  fi
+  if [ "$wireframe" -eq 1 ]; then
+    echo "error: --texture and --wireframe are mutually exclusive" >&2
+    exit 1
+  fi
 fi
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -384,11 +408,35 @@ if [ ${#meshes[@]} -gt 0 ]; then
   fi
 fi
 
-# The full trd input stream: the optional leading mesh table, then the params.
+# The optional texture table (0.0.4): scripts/texture_to_arrow.py encodes the
+# image into a one-row `rgba` fixed_shape_tensor<u8>[H,W,4] Arrow stream,
+# concatenated *between* the mesh table and the params so trd reads
+# [mesh][texture][params] and binds it as the sampled albedo. Downscaled to
+# --max-size 2048 to stay within the renderer's portable (downlevel/WebGL2)
+# 2048² texture limit. Needs pyarrow + pillow + numpy.
+texture_producer=""
+if [ -n "$texture" ]; then
+  if command -v uv >/dev/null 2>&1; then
+    texture_producer=uv
+  elif command -v python3 >/dev/null 2>&1 \
+    && python3 -c 'import pyarrow, PIL, numpy' >/dev/null 2>&1; then
+    texture_producer=python3
+  else
+    echo "error: --texture needs uv or python3 with pyarrow/pillow/numpy to encode $texture" >&2
+    exit 1
+  fi
+fi
+
+# The full trd input stream: the optional leading mesh table, the optional
+# texture table, then the params.
 stream() {
   case "$mesh_producer" in
     uv) uv run --with pyarrow "$root/scripts/obj_to_arrow.py" "${meshes[@]}" ;;
     python3) python3 "$root/scripts/obj_to_arrow.py" "${meshes[@]}" ;;
+  esac
+  case "$texture_producer" in
+    uv) uv run --with pyarrow --with pillow --with numpy "$root/scripts/texture_to_arrow.py" "$texture" --max-size 2048 ;;
+    python3) python3 "$root/scripts/texture_to_arrow.py" "$texture" --max-size 2048 ;;
   esac
   frames
 }
@@ -397,6 +445,8 @@ stream() {
 # trd-core's shared mesh Scene renderer honours them either way.
 wireframe_flag=()
 [ "$wireframe" -eq 1 ] && wireframe_flag=(--wireframe)
+textured_flag=()
+[ -n "$texture" ] && textured_flag=(--textured)
 aabb_flag=()
 [ "$aabb" -eq 1 ] && aabb_flag=(--aabb)
 axes_flag=()
@@ -407,12 +457,12 @@ if [ "$native" -eq 1 ]; then
   # The appearance flags pass through to trd-app too (it now renders the mesh
   # Scene via the shared trd-core MeshRenderer, like trd-cli).
   stream \
-    | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-app -- --width "$width" --height "$height" --fps "$fps" "${wireframe_flag[@]}" "${aabb_flag[@]}" "${axes_flag[@]}"
+    | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-app -- --width "$width" --height "$height" --fps "$fps" "${wireframe_flag[@]}" "${textured_flag[@]}" "${aabb_flag[@]}" "${axes_flag[@]}"
   echo "streamed $input to the trd-app window (${width}x${height}, ${fps}fps)"
 else
   mkdir -p "$(dirname "$output")"
   stream \
-    | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-cli -- --width "$width" --height "$height" "${wireframe_flag[@]}" "${aabb_flag[@]}" "${axes_flag[@]}" \
+    | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-cli -- --width "$width" --height "$height" "${wireframe_flag[@]}" "${textured_flag[@]}" "${aabb_flag[@]}" "${axes_flag[@]}" \
     | uv run --with pyarrow --with numpy "$root/scripts/encode.py" --fps "$fps" -o "$output"
   echo "wrote $output (${width}x${height}, ${fps}fps) from $input"
 fi
