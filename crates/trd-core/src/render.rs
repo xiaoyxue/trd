@@ -5,6 +5,7 @@
 //! the vertex/index-buffer path used by the native batch renderer.
 
 use crate::math::{Matrix4, Point3, Transform, Vector3};
+use crate::texture::{ImageData, Texture};
 
 /// Default clip near/far planes used when deriving a projection from camera
 /// intrinsics `K`. The hello-triangle is authored on the `z = 0` plane, so the
@@ -588,6 +589,134 @@ fn create_mesh_pipeline_with(
     })
 }
 
+/// The group-1 bind-group layout for the textured pipeline (#20): a filterable
+/// `texture_2d<f32>` (binding 0) plus a filtering `sampler` (binding 1), both
+/// fragment-stage visible.
+pub(crate) fn create_texture_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("trd texture bind group layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    })
+}
+
+/// Builds the textured `TriangleList` pipeline (#20): `textured.wgsl` over the
+/// shared vertex/instance layout, with group 0 = the camera `P·V` uniform and
+/// group 1 = the bound texture + sampler.
+fn create_textured_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    layout: &wgpu::PipelineLayout,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::include_wgsl!("textured.wgsl"));
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("trd textured pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            compilation_options: Default::default(),
+            buffers: &[Some(Vertex::layout()), Some(InstanceRaw::layout())],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            compilation_options: Default::default(),
+            targets: &[Some(format.into())],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+/// Uploads `image` to a fresh `Rgba8UnormSrgb` `wgpu::Texture` and builds the
+/// group-1 bind group (texture view + a linear, clamp-to-edge sampler) over
+/// `layout`. sRGB storage so texels linearize on sample (#20).
+fn upload_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    layout: &wgpu::BindGroupLayout,
+    image: &ImageData,
+) -> wgpu::BindGroup {
+    let size = wgpu::Extent3d {
+        width: image.width,
+        height: image.height,
+        depth_or_array_layers: 1,
+    };
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("trd texture"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &image.rgba,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(image.width * 4),
+            rows_per_image: Some(image.height),
+        },
+        size,
+    );
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("trd texture sampler"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+        ..Default::default()
+    });
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("trd texture bind group"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&sampler),
+            },
+        ],
+    })
+}
+
 /// Creates the params uniform buffer + bind group for `pipeline`, initialised
 /// to `params` for the given `viewport` (needed to project camera intrinsics).
 pub(crate) fn create_params_binding(
@@ -789,11 +918,15 @@ impl TriangleRenderer {
 /// [`MeshRenderer::set_mode`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RenderMode {
-    /// Draw triangles filled (the mesh's triangle index buffer).
+    /// Draw triangles filled with the per-vertex color (the mesh's triangle
+    /// index buffer).
     #[default]
     Filled,
     /// Draw only triangle edges as lines (the deduped edge index buffer).
     Wireframe,
+    /// Draw triangles filled, sampling the renderer's bound texture at each
+    /// vertex UV instead of the vertex color (#20).
+    Textured,
 }
 
 /// A single instance placement decoded from a frame's protocol draw list
@@ -976,6 +1109,9 @@ fn create_instance_buffer(device: &wgpu::Device, capacity: u32) -> wgpu::Buffer 
 enum DrawKind {
     /// Filled triangles of a mesh (its triangle index buffer + filled pipeline).
     Filled(usize),
+    /// Textured triangles of a mesh (triangle index buffer + textured pipeline,
+    /// sampling the bound texture at each vertex UV) (#20).
+    Textured(usize),
     /// Edge lines of a mesh (its deduped edge index buffer + line pipeline).
     Wireframe(usize),
     /// A mesh's AABB box (its precomputed corner geometry + line pipeline).
@@ -1025,8 +1161,20 @@ fn push_command(
 pub struct MeshRenderer {
     pipeline: wgpu::RenderPipeline,
     wireframe_pipeline: wgpu::RenderPipeline,
+    /// Textured pipeline (#20): draws filled triangles sampling the bound
+    /// texture at each vertex UV.
+    textured_pipeline: wgpu::RenderPipeline,
     uniform: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    /// Group-1 layout for the bound texture + sampler (kept to rebuild the bind
+    /// group when [`set_texture`](MeshRenderer::set_texture) swaps the image).
+    texture_bind_group_layout: wgpu::BindGroupLayout,
+    /// The bound texture's group-1 bind group; `None` until `texture_image` is
+    /// (re)uploaded on the next `encode` (which supplies the GPU queue).
+    texture_bind_group: Option<wgpu::BindGroup>,
+    /// The RGBA8 image uploaded as the bound texture (default: 1x1 white, the
+    /// identity albedo).
+    texture_image: ImageData,
     meshes: Vec<MeshGpu>,
     /// The coordinate-axes gizmo geometry (six `LineList` vertices); each
     /// [`DrawableObject::CoordinateAxes`] draws it under its own model, supplied
@@ -1122,6 +1270,16 @@ impl MeshRenderer {
             &pipeline_layout,
             wgpu::PrimitiveTopology::LineList,
         );
+        // Textured pipeline (#20): group 0 = the shared view-proj uniform, group
+        // 1 = the bound texture + sampler.
+        let texture_bind_group_layout = create_texture_bind_group_layout(device);
+        let textured_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("trd textured pipeline layout"),
+                bind_group_layouts: &[Some(&bind_group_layout), Some(&texture_bind_group_layout)],
+                immediate_size: 0,
+            });
+        let textured_pipeline = create_textured_pipeline(device, format, &textured_pipeline_layout);
         // The identity params ignore the viewport (no intrinsics); each `encode`
         // supplies the real target dimensions.
         let (uniform, bind_group) = create_view_proj_binding(
@@ -1153,8 +1311,16 @@ impl MeshRenderer {
         Self {
             pipeline,
             wireframe_pipeline,
+            textured_pipeline,
             uniform,
             bind_group,
+            texture_bind_group_layout,
+            texture_bind_group: None,
+            texture_image: ImageData {
+                width: 1,
+                height: 1,
+                rgba: vec![255, 255, 255, 255],
+            },
             meshes: gpu_meshes,
             axes_vertex_buffer,
             instance_buffer,
@@ -1168,6 +1334,15 @@ impl MeshRenderer {
     /// `0..mesh_count()`.
     pub fn mesh_count(&self) -> usize {
         self.meshes.len()
+    }
+
+    /// Binds `texture` as the source sampled by [`RenderMode::Textured`] meshes
+    /// (#20). The image is (re)uploaded lazily on the next
+    /// [`encode`](Self::encode) (which supplies the GPU queue). Until set, the
+    /// bound texture is 1x1 white (the identity albedo).
+    pub fn set_texture(&mut self, texture: &dyn Texture) {
+        self.texture_image = texture.to_image();
+        self.texture_bind_group = None;
     }
 
     /// Encodes one frame's [`Scene`] — an ordered list of [`DrawableObject`]s —
@@ -1194,10 +1369,22 @@ impl MeshRenderer {
     ) {
         write_view_proj(queue, &self.uniform, params, viewport);
 
+        // (Re)upload the bound texture on first use / after `set_texture` (#20):
+        // `encode` is where a GPU queue is available.
+        if self.texture_bind_group.is_none() {
+            self.texture_bind_group = Some(upload_texture(
+                &self.device,
+                queue,
+                &self.texture_bind_group_layout,
+                &self.texture_image,
+            ));
+        }
+
         // Walk the scene once, bucketing each drawable's instance model by the
         // geometry it draws so same-geometry instances share one draw call.
         let mesh_count = self.meshes.len();
         let mut filled: Vec<Vec<InstanceRaw>> = vec![Vec::new(); mesh_count];
+        let mut textured: Vec<Vec<InstanceRaw>> = vec![Vec::new(); mesh_count];
         let mut wireframe: Vec<Vec<InstanceRaw>> = vec![Vec::new(); mesh_count];
         let mut aabb: Vec<Vec<InstanceRaw>> = vec![Vec::new(); mesh_count];
         let mut axes: Vec<InstanceRaw> = Vec::new();
@@ -1218,6 +1405,7 @@ impl MeshRenderer {
                     };
                     match mode {
                         RenderMode::Filled => filled[mesh_id as usize].push(instance),
+                        RenderMode::Textured => textured[mesh_id as usize].push(instance),
                         RenderMode::Wireframe => wireframe[mesh_id as usize].push(instance),
                     }
                 }
@@ -1246,6 +1434,14 @@ impl MeshRenderer {
                 &mut instances,
                 &mut commands,
                 DrawKind::Filled(mesh_id),
+                bucket,
+            );
+        }
+        for (mesh_id, bucket) in textured.iter().enumerate() {
+            push_command(
+                &mut instances,
+                &mut commands,
+                DrawKind::Textured(mesh_id),
                 bucket,
             );
         }
@@ -1299,6 +1495,18 @@ impl MeshRenderer {
                 DrawKind::Filled(mesh_id) => {
                     let mesh = &self.meshes[mesh_id];
                     pass.set_pipeline(&self.pipeline);
+                    pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                    pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..mesh.index_count, 0, range);
+                }
+                DrawKind::Textured(mesh_id) => {
+                    let mesh = &self.meshes[mesh_id];
+                    pass.set_pipeline(&self.textured_pipeline);
+                    // group 0 (view-proj) stays bound from before the loop; bind
+                    // the texture as group 1 (uploaded above, always Some here).
+                    if let Some(texture) = self.texture_bind_group.as_ref() {
+                        pass.set_bind_group(1, texture, &[]);
+                    }
                     pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
                     pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(0..mesh.index_count, 0, range);
