@@ -10,9 +10,10 @@
 # (created in a temp dir and auto-removed). The produced GIF/WebP is identical.
 #
 # Usage:
-#   examples/render.ps1 [-InputPath INPUT.jsonl] [-Output OUTPUT.gif|.webp] `
-#                       [-Width 256] [-Height 256] [-Fps 30] `
-#                       [-CLI | -Native | -Web [-ArrowRenderer|-CanvasRenderer]]
+#   examples/render.ps1 [-CLI | -Native | -Web [-ArrowRenderer|-CanvasRenderer]] `
+#                       [-Mesh OBJ]... [-Wireframe] [-Aabb] [-Axes] `
+#                       [-InputPath INPUT.jsonl] [-Output OUTPUT.gif|.webp] `
+#                       [-Width 256] [-Height 256] [-Fps 30]
 #   examples/render.ps1 INPUT.jsonl OUTPUT.gif 256 256 30   # positional
 # Defaults: examples/frames.0.0.2.jsonl  output/out.gif  256 256 30
 # Run with no arguments (or -Help) to print the flag guidance and exit; pass -CLI
@@ -22,6 +23,34 @@
 # GIF/WebP via the headless trd-cli.
 # With -Native (alias -App) it is played live in the interactive trd-app window
 # (trd-native); -Output is then ignored and neither uv nor ffmpeg are needed.
+# With -Mesh OBJ the input is a protocol 0.0.3 stream: a leading mesh table
+# (scripts\obj_to_arrow.py encodes the OBJ) concatenated with the params stream,
+# so trd renders the loaded mesh (centered + uniformly scaled to fit) driven by
+# InputPath. Try: examples\render.ps1 -CLI -Mesh assets\meshes\bunny.obj `
+# examples\frames.turntable.jsonl output\bunny.gif. -Mesh is repeatable: pass it
+# several times to load several meshes (one table row each, in order); a frame's
+# `draws` list then references them by 0-based index. Two-mesh demo:
+# examples\render.ps1 -CLI -Wireframe -Mesh assets\meshes\bunny.obj `
+# -Mesh examples\cube.obj examples\frames.multimesh.jsonl output\scene.gif.
+# (-Mesh needs pyarrow via uv/python and is ignored by -Web.)
+# With -Wireframe (-CLI only) trd draws mesh edges as a line list instead of
+# filled triangles (protocol #38); combine with -Mesh for a wireframe asset.
+# With -Aabb (-CLI only) trd overlays each drawn mesh's axis-aligned bounding box
+# as a green wireframe box (#42); combine with -Mesh (e.g. add -Aabb to the bunny
+# turntable to see its box track the rotation).
+# With -Axes (-CLI only) trd overlays a coordinate-axes gizmo (X=red, Y=green,
+# Z=blue) at the world origin (#42), marking the world frame the camera looks at.
+#
+# Dolly-camera capstone (#49): examples\bunny_dolly.py authors the same 45°
+# bird's-eye dolly camera twice - CG (eye/target/fovy) and CV (K + pose) - as two
+# JSONL streams that render identically (verified to <0.01% pixels). render.ps1
+# runs this producer automatically: pass frames.bunny_dolly.cg.jsonl (or
+# .cv.jsonl) as InputPath and, if it is missing, it is generated on the fly - no
+# manual pre-step. Compare the two camera forms:
+#   examples\render.ps1 -CLI -Wireframe -Aabb -Axes -Mesh assets\meshes\bunny.obj `
+#     examples\frames.bunny_dolly.cg.jsonl output\bunny_dolly_cg.gif 1024 1024 24
+#   examples\render.ps1 -CLI -Wireframe -Aabb -Axes -Mesh assets\meshes\bunny.obj `
+#     examples\frames.bunny_dolly.cv.jsonl output\bunny_dolly_cv.gif 1024 1024 24
 # With -Web (alias -Wasm) it builds the browser (wasm) bundle with wasm-pack + bun
 # and serves web/dist, printing the machine URLs and an SSH-tunnel command. The web
 # demo generates its own Arrow frame stream in-browser, so all positional arguments
@@ -50,7 +79,15 @@ param(
     [Alias('Wasm')][switch]$Web,
     [switch]$ArrowRenderer,
     [switch]$CanvasRenderer,
-    [switch]$Help
+    [switch]$Wireframe,
+    [switch]$Aabb,
+    [switch]$Axes,
+    [switch]$Help,
+    # Repeatable -Mesh <obj> flags land here (PowerShell can't bind a named
+    # parameter more than once); they are extracted into $meshes below. Leaving
+    # -Mesh out of the formal parameters keeps positional InputPath/Output/Width/
+    # Height/Fps binding intact when -Mesh flags are interleaved.
+    [Parameter(ValueFromRemainingArguments = $true)][string[]]$Rest
 )
 
 Set-StrictMode -Version Latest
@@ -62,8 +99,8 @@ function Show-RenderUsage {
 render.ps1 - render a trd JSONL frame-parameter file to a GIF/WebP (or play/serve it). PowerShell 7.
 
 Usage:
-  examples\render.ps1 [-CLI | -Native | -Web [-ArrowRenderer|-CanvasRenderer]] `
-                      [-InputPath INPUT.jsonl] [-Output OUTPUT.gif|.webp] [-Width 256] [-Height 256] [-Fps 30]
+  examples\render.ps1 [MODE] [CONTENT FLAGS] [-InputPath INPUT.jsonl] [-Output OUTPUT.gif|.webp] `
+                      [-Width 256] [-Height 256] [-Fps 30]
   examples\render.ps1 INPUT.jsonl OUTPUT.gif 256 256 30   # positional form
 
 Defaults: InputPath=examples\frames.0.0.2.jsonl  Output=output\out.gif  Width=256  Height=256  Fps=30
@@ -75,16 +112,27 @@ MODE (pick one; default -CLI):
                       -ArrowRenderer   offscreen output-stream smoke (default)
                       -CanvasRenderer  on-screen canvas demo
 
+CONTENT FLAGS (-CLI only, except -Mesh which also applies to -Native):
+  -Mesh OBJ         Load OBJ as a protocol 0.0.3 mesh (centered + scaled to fit).
+                    Repeatable: pass several times to load several meshes (row 0,
+                    1, ...); a frame's `draws` list references them by index.
+  -Wireframe        Draw mesh edges as a line list instead of filled triangles (#38).
+  -Aabb             Overlay each mesh's axis-aligned bounding box as a green box (#42).
+  -Axes             Overlay a coordinate-axes gizmo (X=red, Y=green, Z=blue) at the origin (#42).
+
   -Help             Show this guidance and exit.
 
 Examples:
   examples\render.ps1 -CLI                                    # default demo -> output\out.gif
   examples\render.ps1 -Native                                # play the default demo live
-  examples\render.ps1 -CLI my.jsonl out.gif 1024 1024 24     # custom input/output/size/fps
+  examples\render.ps1 -CLI -Aabb -Mesh assets\meshes\bunny.obj `
+    examples\frames.turntable.jsonl output\bunny.gif 1024 1024 24
+  examples\render.ps1 -CLI -Wireframe -Aabb `
+    -Mesh assets\meshes\bunny.obj -Mesh examples\cube.obj `
+    examples\frames.multimesh.jsonl output\scene.gif 1024 1024 24
+  examples\render.ps1 -CLI -Wireframe -Axes -Aabb -Mesh assets\meshes\bunny.obj `
+    examples\frames.bunny_dolly.cg.jsonl output\bunny_dolly.gif 1024 1024 24  # dolly capstone (#49; auto-generates the frames)
   examples\render.ps1 -Web                                    # build + serve the wasm demo
-
-Note: the mesh/appearance flags (--mesh, --wireframe, --aabb) are Linux-only for
-now; Windows parity is tracked in issue #53. Use examples/render.sh for those.
 
 On Windows this auto-sources scripts\dev-env.ps1; on Linux/macOS run inside `nix develop`.
 '@
@@ -106,6 +154,32 @@ $modeCount = @($CLI, $Native, $Web).Where({ $_ }).Count
 if ($modeCount -gt 1) { Write-Error 'error: choose only one of -CLI, -Native, -Web.' }
 if ($ArrowRenderer -and $CanvasRenderer) { Write-Error 'error: -ArrowRenderer and -CanvasRenderer are mutually exclusive.' }
 if (($ArrowRenderer -or $CanvasRenderer) -and -not $Web) { Write-Error 'error: -ArrowRenderer / -CanvasRenderer apply only to -Web/-Wasm.' }
+
+# --- Repeatable -Mesh <obj> extraction ---------------------------------------
+# PowerShell can't bind a named parameter more than once, so the repeatable
+# -Mesh flag (parity with render.sh's `--mesh`) is captured by
+# ValueFromRemainingArguments into $Rest and unpacked here, preserving order
+# (mesh 0 = first -Mesh). Each mesh becomes one row of the leading 0.0.3 mesh
+# table (scripts\obj_to_arrow.py); a frame's `draws` list references them by
+# 0-based index. Also accepts the -Mesh=OBJ / -Mesh:OBJ forms. Anything else in
+# $Rest is an unrecognised argument.
+$meshes = @()
+if ($Rest) {
+    for ($i = 0; $i -lt $Rest.Count; $i++) {
+        $tok = $Rest[$i]
+        if ($tok -ieq '-Mesh') {
+            $i++
+            if ($i -ge $Rest.Count) { Write-Error 'error: -Mesh requires an OBJ path.' }
+            $meshes += $Rest[$i]
+        }
+        elseif ($tok -like '-Mesh=*' -or $tok -like '-Mesh:*') {
+            $meshes += $tok.Substring(6)
+        }
+        else {
+            Write-Error "error: unexpected argument '$tok' (use -Mesh <obj>; content flags are -Wireframe/-Aabb/-Axes)."
+        }
+    }
+}
 
 $root = Split-Path -Parent $PSScriptRoot
 if (-not $InputPath) { $InputPath = Join-Path $PSScriptRoot 'frames.0.0.2.jsonl' }
@@ -222,13 +296,35 @@ foreach ($tool in $required) {
 # Probe the optional Python-based producers/encoders once (numpy is only needed
 # to encode). uv, when present, supplies pyarrow/numpy on demand.
 $uvOk = [bool](Get-Command uv -ErrorAction SilentlyContinue)
+$pythonOk = [bool](Get-Command python -ErrorAction SilentlyContinue)
 $pyarrowOk = $false
 $pyNumpyOk = $false
-if (Get-Command python -ErrorAction SilentlyContinue) {
+if ($pythonOk) {
     try { & python -c 'import pyarrow' 2>$null } catch { }
     $pyarrowOk = ($LASTEXITCODE -eq 0)
     try { & python -c 'import pyarrow, numpy' 2>$null } catch { }
     $pyNumpyOk = ($LASTEXITCODE -eq 0)
+}
+
+# Dolly-camera capstone (#49): examples\bunny_dolly.py authors the 45° bird's-eye
+# dolly camera as two JSONL streams - CG (eye/target/fovy) and CV (K + pose) -
+# that render identically. If the requested InputPath is one of its outputs
+# (frames.bunny_dolly.{cg,cv}.jsonl) and it is not present yet, generate it now
+# via the (pure-stdlib) producer so the demo renders without a manual pre-step.
+if ($InputPath -match 'frames\.bunny_dolly\.(cg|cv)\.jsonl$' -and -not (Test-Path $InputPath)) {
+    $prefix = $InputPath -replace '\.(cg|cv)\.jsonl$', ''
+    $dollyPy = Join-Path $root 'examples/bunny_dolly.py'
+    Write-Host "generating dolly frames via examples/bunny_dolly.py (--out-prefix $prefix)..."
+    if ($pythonOk) {
+        $dollyGen = Start-Process -FilePath 'python' -NoNewWindow -Wait -PassThru -ArgumentList @($dollyPy, '--out-prefix', $prefix)
+    }
+    elseif ($uvOk) {
+        $dollyGen = Start-Process -FilePath 'uv' -NoNewWindow -Wait -PassThru -ArgumentList @('run', '--python', '3.12', $dollyPy, '--out-prefix', $prefix)
+    }
+    else {
+        Write-Error 'error: need python (or uv) to run examples/bunny_dolly.py.'
+    }
+    if ($dollyGen.ExitCode -ne 0) { throw "bunny_dolly.py failed (exit $($dollyGen.ExitCode))" }
 }
 
 # Choose a frame producer: DuckDB (via its 'arrow' community extension) if that
@@ -245,6 +341,34 @@ if (-not $producer) {
     elseif ($pyarrowOk) { $producer = 'python' }
     else {
         Write-Error "error: need duckdb (with the 'arrow' community extension) or uv/python with pyarrow to build the Arrow frame stream.`nrun '. scripts\dev-env.ps1', or 'pip install pyarrow'."
+    }
+}
+
+# DuckDB's producer only understands the 0.0.1/0.0.2 columns (center/size/theta/
+# model); its SQL silently DROPS the additive 0.0.3 camera (eye/target/direction/
+# up/k/pose/fovy/aspect/znear/zfar) and instanced draw-list (draws) columns. If
+# the input carries any of those, fall back to the pyarrow producer (which emits
+# them) so the camera/draw data actually reaches trd - otherwise an authored
+# camera is lost and trd renders with the identity camera (z-clipping).
+if ($producer -eq 'duckdb' -and
+    (Select-String -Path $InputPath -Pattern '"(eye|target|direction|up|k|pose|fovy|aspect|znear|zfar|draws)"\s*:' -Quiet)) {
+    if ($uvOk) { $producer = 'uv' }
+    elseif ($pyarrowOk) { $producer = 'python' }
+    else {
+        Write-Error "error: '$InputPath' carries 0.0.3 camera/draw columns that DuckDB cannot emit;`ninstall uv or a python with pyarrow to render it (run '. scripts\dev-env.ps1')."
+    }
+}
+
+# -Mesh (repeatable) encodes the leading 0.0.3 mesh table via
+# scripts\obj_to_arrow.py (one row per OBJ, in order). DuckDB cannot author the
+# nested-list mesh table, so this always needs a pyarrow-capable Python.
+$objToArrow = Join-Path $root 'scripts/obj_to_arrow.py'
+$meshProducer = $null
+if ($meshes.Count -gt 0) {
+    if ($uvOk) { $meshProducer = 'uv' }
+    elseif ($pyarrowOk) { $meshProducer = 'python' }
+    else {
+        Write-Error "error: -Mesh needs uv or a python with pyarrow to encode $($meshes -join ', ').`nrun '. scripts\dev-env.ps1', or 'pip install pyarrow'."
     }
 }
 
@@ -273,8 +397,25 @@ if (-not $Native) {
 # slashes work on every platform, so normalise Windows backslashes.
 function ConvertTo-SqlPath([string]$p) { ($p -replace "'", "''") -replace '\\', '/' }
 
+# Binary-safe concatenation of Arrow IPC files into one stream. render.sh pipes
+# `obj_to_arrow.py` then the params producer into a single trd stdin; on Windows
+# (no binary-safe pipes) we stage each stage to a temp file and concatenate the
+# bytes here, reproducing the exact [mesh][params] byte order trd reads.
+function Join-Files([string[]]$Parts, [string]$Dest) {
+    $out = [System.IO.File]::Create($Dest)
+    try {
+        foreach ($p in $Parts) {
+            $in = [System.IO.File]::OpenRead($p)
+            try { $in.CopyTo($out) } finally { $in.Dispose() }
+        }
+    }
+    finally { $out.Dispose() }
+}
+
 $work = (New-Item -ItemType Directory -Path (Join-Path ([System.IO.Path]::GetTempPath()) "trd-render-$([guid]::NewGuid())")).FullName
 $framesArrow = Join-Path $work 'frames.arrows'
+$meshArrow = Join-Path $work 'mesh.arrows'
+$streamArrow = Join-Path $work 'stream.arrows'
 $imagesArrow = Join-Path $work 'images.arrows'
 try {
     # 1. Build a streaming Arrow IPC file of frame params from the JSONL: the
@@ -325,6 +466,27 @@ COPY (
         if ($gen.ExitCode -ne 0) { throw "jsonl_to_arrow ($producer) failed (exit $($gen.ExitCode))" }
     }
 
+    # 1b. -Mesh: encode the OBJ(s) into a leading 0.0.3 mesh table (one row per
+    #     -Mesh, in order) and concatenate it *before* the params so trd reads
+    #     [mesh][params]. A frame's `draws` list references these meshes by
+    #     0-based index (mesh 0 = first -Mesh). Without -Mesh, trd reads the
+    #     params stream directly.
+    if ($meshes.Count -gt 0) {
+        if ($meshProducer -eq 'uv') {
+            $meshArgs = @('run', '--with', 'pyarrow', $objToArrow) + $meshes + @('-o', $meshArrow)
+        }
+        else {
+            $meshArgs = @($objToArrow) + $meshes + @('-o', $meshArrow)
+        }
+        $meshGen = Start-Process -FilePath $meshProducer -NoNewWindow -Wait -PassThru -ArgumentList $meshArgs
+        if ($meshGen.ExitCode -ne 0) { throw "obj_to_arrow ($meshProducer) failed (exit $($meshGen.ExitCode))" }
+        Join-Files -Parts @($meshArrow, $framesArrow) -Dest $streamArrow
+        $trdInput = $streamArrow
+    }
+    else {
+        $trdInput = $framesArrow
+    }
+
     if ($Native) {
         # 2. Play the frame stream live in the interactive trd-app window
         #    (trd-native). It reads the same Arrow stream trd-cli consumes.
@@ -334,19 +496,23 @@ COPY (
         )
         $app = Start-Process -FilePath 'cargo' -NoNewWindow -Wait -PassThru `
             -ArgumentList $appArgs `
-            -RedirectStandardInput $framesArrow
+            -RedirectStandardInput $trdInput
         if ($app.ExitCode -ne 0) { throw "trd-app failed (exit $($app.ExitCode))" }
     }
     else {
         # 2. trd renders each row to r,g,b,a fixed_shape_tensor<u8> channels. The
         #    Arrow streams are redirected via files so the bytes stay intact.
+        #    -Wireframe/-Aabb/-Axes pass through to trd-cli (#38, #42).
         $trdArgs = @(
             'run', '--manifest-path', (Join-Path $root 'Cargo.toml'),
             '-q', '-p', 'trd-cli', '--', '--width', $Width, '--height', $Height
         )
+        if ($Wireframe) { $trdArgs += '--wireframe' }
+        if ($Aabb) { $trdArgs += '--aabb' }
+        if ($Axes) { $trdArgs += '--axes' }
         $trd = Start-Process -FilePath 'cargo' -NoNewWindow -Wait -PassThru `
             -ArgumentList $trdArgs `
-            -RedirectStandardInput $framesArrow -RedirectStandardOutput $imagesArrow
+            -RedirectStandardInput $trdInput -RedirectStandardOutput $imagesArrow
         if ($trd.ExitCode -ne 0) { throw "trd failed (exit $($trd.ExitCode))" }
 
         # 3. encode.py decodes the tensors and pipes RGBA frames to ffmpeg
