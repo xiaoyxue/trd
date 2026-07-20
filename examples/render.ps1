@@ -23,6 +23,8 @@
 # GIF/WebP via the headless trd-cli.
 # With -Native (alias -App) it is played live in the interactive trd-app window
 # (trd-native); -Output is then ignored and neither uv nor ffmpeg are needed.
+# The content flags below (-Mesh/-Wireframe/-Aabb/-Axes) apply to both -CLI and
+# -Native (trd-cli and trd-app share trd-core's mesh Scene renderer).
 # With -Mesh OBJ the input is a protocol 0.0.3 stream: a leading mesh table
 # (scripts\obj_to_arrow.py encodes the OBJ) concatenated with the params stream,
 # so trd renders the loaded mesh (centered + uniformly scaled to fit) driven by
@@ -33,13 +35,13 @@
 # examples\render.ps1 -CLI -Wireframe -Mesh assets\meshes\bunny.obj `
 # -Mesh examples\cube.obj examples\frames.multimesh.jsonl output\scene.gif.
 # (-Mesh needs pyarrow via uv/python and is ignored by -Web.)
-# With -Wireframe (-CLI only) trd draws mesh edges as a line list instead of
-# filled triangles (protocol #38); combine with -Mesh for a wireframe asset.
-# With -Aabb (-CLI only) trd overlays each drawn mesh's axis-aligned bounding box
-# as a green wireframe box (#42); combine with -Mesh (e.g. add -Aabb to the bunny
-# turntable to see its box track the rotation).
-# With -Axes (-CLI only) trd overlays a coordinate-axes gizmo (X=red, Y=green,
-# Z=blue) at the world origin (#42), marking the world frame the camera looks at.
+# With -Wireframe trd draws mesh edges as a line list instead of filled triangles
+# (protocol #38); combine with -Mesh for a wireframe asset.
+# With -Aabb trd overlays each drawn mesh's axis-aligned bounding box as a green
+# wireframe box (#42); combine with -Mesh (e.g. add -Aabb to the bunny turntable
+# to see its box track the rotation).
+# With -Axes trd overlays a coordinate-axes gizmo (X=red, Y=green, Z=blue) at the
+# world origin (#42), marking the world frame the camera looks at.
 #
 # Dolly-camera capstone (#49): examples\bunny_dolly.py authors the same 45°
 # bird's-eye dolly camera twice - CG (eye/target/fovy) and CV (K + pose) - as two
@@ -112,7 +114,7 @@ MODE (pick one; default -CLI):
                       -ArrowRenderer   offscreen output-stream smoke (default)
                       -CanvasRenderer  on-screen canvas demo
 
-CONTENT FLAGS (-CLI only):
+CONTENT FLAGS (apply to -CLI and -Native):
   -Mesh OBJ         Load OBJ as a protocol 0.0.3 mesh (centered + scaled to fit).
                     Repeatable: pass several times to load several meshes (row 0,
                     1, ...); a frame's `draws` list references them by index.
@@ -125,6 +127,8 @@ CONTENT FLAGS (-CLI only):
 Examples:
   examples\render.ps1 -CLI                                    # default demo -> output\out.gif
   examples\render.ps1 -Native                                # play the default demo live
+  examples\render.ps1 -Native -Mesh assets\meshes\bunny.obj `
+    examples\frames.bunny_dolly.cg.jsonl _ 1024 1024 24      # live dolly capstone in a window
   examples\render.ps1 -CLI -Aabb -Mesh assets\meshes\bunny.obj `
     examples\frames.turntable.jsonl output\bunny.gif 1024 1024 24
   examples\render.ps1 -CLI -Wireframe -Aabb `
@@ -489,11 +493,16 @@ COPY (
 
     if ($Native) {
         # 2. Play the frame stream live in the interactive trd-app window
-        #    (trd-native). It reads the same Arrow stream trd-cli consumes.
+        #    (trd-native). It reads the same [mesh][params] stream trd-cli
+        #    consumes and renders the Scene (meshes + overlays) via trd-core.
+        #    -Wireframe/-Aabb/-Axes pass through to trd-app (#38, #42).
         $appArgs = @(
             'run', '--manifest-path', (Join-Path $root 'Cargo.toml'),
             '-q', '-p', 'trd-app', '--', '--width', $Width, '--height', $Height, '--fps', $Fps
         )
+        if ($Wireframe) { $appArgs += '--wireframe' }
+        if ($Aabb) { $appArgs += '--aabb' }
+        if ($Axes) { $appArgs += '--axes' }
         $app = Start-Process -FilePath 'cargo' -NoNewWindow -Wait -PassThru `
             -ArgumentList $appArgs `
             -RedirectStandardInput $trdInput
