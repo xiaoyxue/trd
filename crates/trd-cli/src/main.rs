@@ -21,6 +21,11 @@ struct Cli {
     /// triangles.
     #[arg(long)]
     wireframe: bool,
+    /// Render meshes textured — sampling the stream's bound texture table at each
+    /// vertex UV — instead of the per-vertex color. Requires a `0.0.4` stream
+    /// carrying a texture table (else the bound texture is 1×1 white).
+    #[arg(long, conflicts_with = "wireframe")]
+    textured: bool,
     /// Overlay each drawn mesh's axis-aligned bounding box as a green
     /// wireframe box.
     #[arg(long)]
@@ -38,7 +43,9 @@ fn main() -> Result<(), trd_core::StreamError> {
     .init();
 
     let cli = Cli::parse();
-    let mode = if cli.wireframe {
+    let mode = if cli.textured {
+        trd_core::RenderMode::Textured
+    } else if cli.wireframe {
         trd_core::RenderMode::Wireframe
     } else {
         trd_core::RenderMode::Filled
