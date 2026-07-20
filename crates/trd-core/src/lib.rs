@@ -10,6 +10,7 @@ mod mesh;
 mod output;
 mod protocol;
 mod render;
+mod texture;
 
 pub use camera::{Camera, DEFAULT_FIT_MARGIN, DEFAULT_FOV_Y, DEFAULT_VIEW_DIR};
 pub use math::{
@@ -17,6 +18,9 @@ pub use math::{
     Transform, Vector2, Vector3, Vector4, EPSILON,
 };
 pub use mesh::{MeshError, DEFAULT_PREVIEW_TARGET};
+pub use texture::{
+    ConstantTexture, ImageData, ImageTexture, Texture, TextureError, TEXTURE_COLUMN,
+};
 pub use output::{output_schema, tightly_pack_rgba, OutputError, OutputSession};
 pub use protocol::{
     frame_rate_from_metadata, DecodedFrame, FrameBatch, InputSession, ProtocolError,
