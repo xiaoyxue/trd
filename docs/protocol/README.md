@@ -43,7 +43,8 @@ the classic video-player model:
 |---|---|---|
 | [0.0.1](./0.0.1.md) | Superseded | 2D affine per frame (`center`, `size`, `theta`) → RGBA tensor images. |
 | [0.0.2](./0.0.2.md) | Superseded | Adds optional `model` (4×4), `k` (3×3 intrinsics), `pose` (4×4) matrix columns (the MVP + camera). Backward-compatible with 0.0.1. |
-| [0.0.3](./0.0.3.md) | Current | Adds an optional leading **mesh** Arrow stream (`[mesh][params]` framing) with nested-list geometry and the scale-to-fit preview transform, a full **camera** (CV `k`/`pose` or CG `eye`/`target`/`direction`/`up`/`fovy`/`aspect`/`znear`/`zfar`), and a per-frame instanced **draw list** (`draw_mesh`/`draw_model` list columns) for multi-mesh scenes. Backward-compatible with 0.0.2. |
+| [0.0.3](./0.0.3.md) | Superseded | Adds an optional leading **mesh** Arrow stream (`[mesh][params]` framing) with nested-list geometry and the scale-to-fit preview transform, a full **camera** (CV `k`/`pose` or CG `eye`/`target`/`direction`/`up`/`fovy`/`aspect`/`znear`/`zfar`), and a per-frame instanced **draw list** (`draw_mesh`/`draw_model` list columns) for multi-mesh scenes. Backward-compatible with 0.0.2. |
+| [0.0.4](./0.0.4.md) | Current | Adds an optional **texture** Arrow stream (`[mesh][texture][params]` framing) — `rgba` interleaved-RGBA `fixed_shape_tensor<UInt8>[H, W, 4]` — an optional per-vertex **`uv`** mesh column, and a **textured** render mode sampling the bound texture (`Rgba8UnormSrgb`, linear, clamp-to-edge). Backward-compatible with 0.0.3. |
 
 See [`CHANGELOG.md`](./CHANGELOG.md) for the per-version deltas.
 
