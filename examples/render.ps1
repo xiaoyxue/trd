@@ -112,7 +112,7 @@ MODE (pick one; default -CLI):
                       -ArrowRenderer   offscreen output-stream smoke (default)
                       -CanvasRenderer  on-screen canvas demo
 
-CONTENT FLAGS (-CLI only, except -Mesh which also applies to -Native):
+CONTENT FLAGS (-CLI only):
   -Mesh OBJ         Load OBJ as a protocol 0.0.3 mesh (centered + scaled to fit).
                     Repeatable: pass several times to load several meshes (row 0,
                     1, ...); a frame's `draws` list references them by index.
