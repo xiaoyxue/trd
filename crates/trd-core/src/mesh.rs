@@ -101,6 +101,8 @@ impl Mesh {
             let base = vertices.len() as u32;
             // `vertex_color` is either empty or parallel to `positions`.
             let has_color = mesh.vertex_color.len() == mesh.positions.len();
+            // `texcoords` (u, v) are two-per-vertex when present (single_index).
+            let has_uv = mesh.texcoords.len() == mesh.positions.len() / 3 * 2;
             for v in 0..mesh.positions.len() / 3 {
                 let position = [
                     mesh.positions[3 * v],
@@ -116,7 +118,18 @@ impl Mesh {
                 } else {
                     DEFAULT_COLOR
                 };
-                vertices.push(Vertex { position, color });
+                // OBJ `vt` v runs bottom-up; flip to the top-left texel origin
+                // used by the uploaded texture / wgpu sampler (#20).
+                let uv = if has_uv {
+                    [mesh.texcoords[2 * v], 1.0 - mesh.texcoords[2 * v + 1]]
+                } else {
+                    [0.0, 0.0]
+                };
+                vertices.push(Vertex {
+                    position,
+                    color,
+                    uv,
+                });
             }
             indices.extend(mesh.indices.iter().map(|&i| i + base));
         }
@@ -272,6 +285,36 @@ impl Mesh {
             None => None,
         };
 
+        let uv_ref = match batch.column_by_name("uv") {
+            Some(column) => {
+                let list = as_list(column, "uv")?;
+                if list.is_null(row) {
+                    None
+                } else {
+                    Some(list.value(row))
+                }
+            }
+            None => None,
+        };
+        let uv = match &uv_ref {
+            Some(uv_ref) => {
+                let uv = fixed_f32_list(uv_ref, "uv", 2)?;
+                if uv.len() != vertex_count {
+                    return Err(MeshError::ColumnType {
+                        column: "uv",
+                        expected: "one uv per vertex",
+                        actual: uv.data_type().clone(),
+                    });
+                }
+                if uv.null_count() > 0 || uv.values().null_count() > 0 {
+                    return Err(MeshError::NullValues("uv"));
+                }
+                let values = fixed_list_f32_values(uv, "uv")?;
+                Some((uv.value_offset(0) as usize, values))
+            }
+            None => None,
+        };
+
         let vertices: Vec<Vertex> = (0..vertex_count)
             .map(|i| {
                 let po = position_base + i * 3;
@@ -287,7 +330,18 @@ impl Mesh {
                     }
                     None => DEFAULT_COLOR,
                 };
-                Vertex { position, color }
+                let uv = match uv {
+                    Some((base, values)) => {
+                        let uo = base + i * 2;
+                        [values.value(uo), values.value(uo + 1)]
+                    }
+                    None => [0.0, 0.0],
+                };
+                Vertex {
+                    position,
+                    color,
+                    uv,
+                }
             })
             .collect();
 
@@ -664,6 +718,35 @@ f 1 2 3
     }
 
     #[test]
+    fn arrow_uv_column_is_decoded() {
+        // 3 vertices with an explicit `uv` column (FixedSizeList<f32>[2]).
+        let list_of_fsl =
+            |stride: i32| DataType::List(Arc::new(Field::new("item", fsl_type(stride), false)));
+        let fields = vec![
+            Field::new("position", list_of_fsl(3), false),
+            Field::new("uv", list_of_fsl(2), false),
+        ];
+        let columns = vec![
+            geometry_column(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0], 3),
+            geometry_column(vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6], 2),
+        ];
+        let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap();
+        let mesh = Mesh::from_arrow(&batch).unwrap();
+        assert_eq!(mesh.vertices[0].uv, [0.1, 0.2]);
+        assert_eq!(mesh.vertices[1].uv, [0.3, 0.4]);
+        assert_eq!(mesh.vertices[2].uv, [0.5, 0.6]);
+        // Color defaults to white when absent (uv is independent).
+        assert_eq!(mesh.vertices[0].color, DEFAULT_COLOR);
+    }
+
+    #[test]
+    fn arrow_without_uv_defaults_to_zero() {
+        let batch = mesh_batch(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0], None, None);
+        let mesh = Mesh::from_arrow(&batch).unwrap();
+        assert!(mesh.vertices.iter().all(|v| v.uv == [0.0, 0.0]));
+    }
+
+    #[test]
     fn arrow_quad_matches_obj_quad() {
         // The same geometry via Arrow and OBJ must yield an identical Mesh.
         let batch = mesh_batch(
@@ -839,10 +922,12 @@ f 1 2 3
                 Vertex {
                     position: [8.0, -1.0, -0.5],
                     color: DEFAULT_COLOR,
+                    uv: [0.0, 0.0],
                 },
                 Vertex {
                     position: [12.0, 1.0, 0.5],
                     color: DEFAULT_COLOR,
+                    uv: [0.0, 0.0],
                 },
             ],
             indices: vec![0, 1, 0],
@@ -871,6 +956,7 @@ f 1 2 3
             vertices: vec![Vertex {
                 position: [3.0, 3.0, 3.0],
                 color: DEFAULT_COLOR,
+                uv: [0.0, 0.0],
             }],
             indices: vec![0],
         };

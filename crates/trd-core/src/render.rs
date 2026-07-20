@@ -53,26 +53,32 @@ pub(crate) const fn axes_vertices() -> [Vertex; 6] {
         Vertex {
             position: [0.0, 0.0, 0.0],
             color: AXES_COLORS[0],
+            uv: [0.0, 0.0],
         },
         Vertex {
             position: [AXES_LENGTH, 0.0, 0.0],
             color: AXES_COLORS[0],
+            uv: [0.0, 0.0],
         },
         Vertex {
             position: [0.0, 0.0, 0.0],
             color: AXES_COLORS[1],
+            uv: [0.0, 0.0],
         },
         Vertex {
             position: [0.0, AXES_LENGTH, 0.0],
             color: AXES_COLORS[1],
+            uv: [0.0, 0.0],
         },
         Vertex {
             position: [0.0, 0.0, 0.0],
             color: AXES_COLORS[2],
+            uv: [0.0, 0.0],
         },
         Vertex {
             position: [0.0, 0.0, AXES_LENGTH],
             color: AXES_COLORS[2],
+            uv: [0.0, 0.0],
         },
     ]
 }
@@ -360,16 +366,19 @@ impl Uniform {
     }
 }
 
-/// A mesh vertex consumed by `mesh.wgsl`.
+/// A mesh vertex consumed by `mesh.wgsl` / `textured.wgsl`.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
     pub position: [f32; 3],
     pub color: [f32; 3],
+    /// Texture coordinate (#20). `[0, 0]` for untextured/gizmo geometry; the
+    /// textured pipeline samples the bound texture at this UV.
+    pub uv: [f32; 2],
 }
 
 impl Vertex {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 2] = [
+    const ATTRIBUTES: [wgpu::VertexAttribute; 3] = [
         wgpu::VertexAttribute {
             format: wgpu::VertexFormat::Float32x3,
             offset: 0,
@@ -379,6 +388,11 @@ impl Vertex {
             format: wgpu::VertexFormat::Float32x3,
             offset: 12,
             shader_location: 1,
+        },
+        wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Float32x2,
+            offset: 24,
+            shader_location: 2,
         },
     ];
 
@@ -405,22 +419,22 @@ impl InstanceRaw {
         wgpu::VertexAttribute {
             format: wgpu::VertexFormat::Float32x4,
             offset: 0,
-            shader_location: 2,
-        },
-        wgpu::VertexAttribute {
-            format: wgpu::VertexFormat::Float32x4,
-            offset: 16,
             shader_location: 3,
         },
         wgpu::VertexAttribute {
             format: wgpu::VertexFormat::Float32x4,
-            offset: 32,
+            offset: 16,
             shader_location: 4,
         },
         wgpu::VertexAttribute {
             format: wgpu::VertexFormat::Float32x4,
-            offset: 48,
+            offset: 32,
             shader_location: 5,
+        },
+        wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Float32x4,
+            offset: 48,
+            shader_location: 6,
         },
     ];
 
@@ -449,14 +463,17 @@ impl Mesh {
                 Vertex {
                     position: [0.0, 0.5, 0.0],
                     color: [1.0, 0.0, 0.0],
+                    uv: [0.0, 0.0],
                 },
                 Vertex {
                     position: [-0.5, -0.5, 0.0],
                     color: [0.0, 1.0, 0.0],
+                    uv: [0.0, 0.0],
                 },
                 Vertex {
                     position: [0.5, -0.5, 0.0],
                     color: [0.0, 0.0, 1.0],
+                    uv: [0.0, 0.0],
                 },
             ],
             indices: vec![0, 1, 2],
@@ -917,6 +934,7 @@ fn upload_mesh(device: &wgpu::Device, mesh: &Mesh, base_model: Matrix4) -> MeshG
         .map(|c| Vertex {
             position: c.to_array(),
             color: AABB_COLOR,
+            uv: [0.0, 0.0],
         })
         .collect();
     let aabb_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1335,19 +1353,22 @@ mod tests {
 
     #[test]
     fn vertex_layout_matches_wgsl_inputs() {
-        assert_eq!(std::mem::size_of::<Vertex>(), 24);
+        assert_eq!(std::mem::size_of::<Vertex>(), 32);
         assert_eq!(std::mem::align_of::<Vertex>(), 4);
 
         let layout = Vertex::layout();
-        assert_eq!(layout.array_stride, 24);
+        assert_eq!(layout.array_stride, 32);
         assert_eq!(layout.step_mode, wgpu::VertexStepMode::Vertex);
-        assert_eq!(layout.attributes.len(), 2);
+        assert_eq!(layout.attributes.len(), 3);
         assert_eq!(layout.attributes[0].offset, 0);
         assert_eq!(layout.attributes[0].shader_location, 0);
         assert_eq!(layout.attributes[0].format, wgpu::VertexFormat::Float32x3);
         assert_eq!(layout.attributes[1].offset, 12);
         assert_eq!(layout.attributes[1].shader_location, 1);
         assert_eq!(layout.attributes[1].format, wgpu::VertexFormat::Float32x3);
+        assert_eq!(layout.attributes[2].offset, 24);
+        assert_eq!(layout.attributes[2].shader_location, 2);
+        assert_eq!(layout.attributes[2].format, wgpu::VertexFormat::Float32x2);
     }
 
     #[test]
@@ -1359,14 +1380,17 @@ mod tests {
                 Vertex {
                     position: [0.0, 0.5, 0.0],
                     color: [1.0, 0.0, 0.0],
+                    uv: [0.0, 0.0],
                 },
                 Vertex {
                     position: [-0.5, -0.5, 0.0],
                     color: [0.0, 1.0, 0.0],
+                    uv: [0.0, 0.0],
                 },
                 Vertex {
                     position: [0.5, -0.5, 0.0],
                     color: [0.0, 0.0, 1.0],
+                    uv: [0.0, 0.0],
                 },
             ]
         );
