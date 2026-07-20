@@ -2230,6 +2230,106 @@ mod tests {
     #[test]
     #[ignore = "requires a GPU adapter"]
     #[cfg(not(target_arch = "wasm32"))]
+    fn mesh_renderer_textured_samples_bound_texture() {
+        // A full-screen quad mapped 1:1 to a 2×2 checker texture (#20): white,
+        // red / green, blue (top-left origin). Each screen quadrant must show the
+        // matching texel color, proving the textured pipeline samples the bound
+        // texture at the interpolated vertex UVs with the correct orientation.
+        let (device, queue) = pollster::block_on(test_device());
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let (width, height) = (64, 64);
+
+        // Quad in NDC: uv(0,0) at the top-left corner (NDC (-1,+1)), so the
+        // texture's top-left texel lands in the framebuffer's top-left quadrant.
+        let quad = Mesh {
+            vertices: vec![
+                Vertex {
+                    position: [-1.0, 1.0, 0.0],
+                    color: [0.0; 3],
+                    uv: [0.0, 0.0],
+                }, // top-left
+                Vertex {
+                    position: [1.0, 1.0, 0.0],
+                    color: [0.0; 3],
+                    uv: [1.0, 0.0],
+                }, // top-right
+                Vertex {
+                    position: [-1.0, -1.0, 0.0],
+                    color: [0.0; 3],
+                    uv: [0.0, 1.0],
+                }, // bottom-left
+                Vertex {
+                    position: [1.0, -1.0, 0.0],
+                    color: [0.0; 3],
+                    uv: [1.0, 1.0],
+                }, // bottom-right
+            ],
+            indices: vec![0, 2, 3, 0, 3, 1],
+        };
+
+        // 2×2 checker, row-major top-left origin: white, red / green, blue.
+        let checker = crate::texture::ImageTexture::from_rgba(
+            2,
+            2,
+            vec![
+                255, 255, 255, 255, 255, 0, 0, 255, // white, red
+                0, 255, 0, 255, 0, 0, 255, 255, // green, blue
+            ],
+        )
+        .unwrap();
+
+        let mut mesh = MeshRenderer::new(&device, format, &quad);
+        mesh.set_texture(&checker);
+        let scene = [DrawableObject::Mesh {
+            mesh_id: 0,
+            model: Matrix4::IDENTITY.to_cols_array(),
+            mode: RenderMode::Textured,
+        }];
+        let pixels = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
+            mesh.encode(
+                q,
+                e,
+                v,
+                FrameParams::IDENTITY,
+                &scene,
+                Viewport { width, height },
+            );
+        });
+
+        // Read a pixel at the center of each screen quadrant (well away from the
+        // uv=0.5 seams, so any bilinear bleed is negligible).
+        let at = |x: u32, y: u32| -> [u8; 3] {
+            let i = ((y * width + x) * 4) as usize;
+            [pixels[i], pixels[i + 1], pixels[i + 2]]
+        };
+        let tl = at(width / 4, height / 4);
+        let tr = at(3 * width / 4, height / 4);
+        let bl = at(width / 4, 3 * height / 4);
+        let br = at(3 * width / 4, 3 * height / 4);
+
+        let dominant =
+            |c: [u8; 3], hi: [bool; 3]| (0..3).all(|k| if hi[k] { c[k] > 200 } else { c[k] < 70 });
+        assert!(
+            dominant(tl, [true, true, true]),
+            "top-left must be white, got {tl:?}"
+        );
+        assert!(
+            dominant(tr, [true, false, false]),
+            "top-right must be red, got {tr:?}"
+        );
+        assert!(
+            dominant(bl, [false, true, false]),
+            "bottom-left must be green, got {bl:?}"
+        );
+        assert!(
+            dominant(br, [false, false, true]),
+            "bottom-right must be blue, got {br:?}"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    #[cfg(not(target_arch = "wasm32"))]
     fn mesh_renderer_aabb_overlay_draws_green_box() {
         let (device, queue) = pollster::block_on(test_device());
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
