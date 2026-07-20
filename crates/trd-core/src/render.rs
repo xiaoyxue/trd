@@ -528,6 +528,7 @@ pub fn create_mesh_pipeline(
         format,
         &layout,
         wgpu::PrimitiveTopology::TriangleList,
+        None,
     )
 }
 
@@ -552,15 +553,87 @@ pub(crate) fn create_mesh_bind_group_layout(device: &wgpu::Device) -> wgpu::Bind
     })
 }
 
+/// The depth buffer format used by the mesh pass. `Depth32Float` is guaranteed
+/// by WebGPU (and supported by the GL/WebGL2 downlevel backend), matching the
+/// renderer's portability target.
+pub(crate) const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+
+/// Depth state for **solid** geometry (filled + textured): write depth and keep
+/// the nearest fragment (`Less`, clip z ∈ [0, 1] with near at 0). This is what
+/// makes an opaque mesh occlude its own back faces instead of the last-drawn
+/// triangle winning (there is no submission-order z otherwise).
+fn solid_depth_stencil() -> wgpu::DepthStencilState {
+    wgpu::DepthStencilState {
+        format: DEPTH_FORMAT,
+        depth_write_enabled: Some(true),
+        depth_compare: Some(wgpu::CompareFunction::Less),
+        stencil: wgpu::StencilState::default(),
+        bias: wgpu::DepthBiasState::default(),
+    }
+}
+
+/// Depth state for **line overlays** (wireframe, AABB boxes, coordinate axes):
+/// always pass and never write, so they composite on top of the solid meshes in
+/// submission order (preserving the pre-depth-buffer overlay behavior) while
+/// still being valid in a pass that carries a depth attachment.
+fn overlay_depth_stencil() -> wgpu::DepthStencilState {
+    wgpu::DepthStencilState {
+        format: DEPTH_FORMAT,
+        depth_write_enabled: Some(false),
+        depth_compare: Some(wgpu::CompareFunction::Always),
+        stencil: wgpu::StencilState::default(),
+        bias: wgpu::DepthBiasState::default(),
+    }
+}
+
+/// A depth attachment sized to a render target. The [`MeshRenderer`] owns one
+/// and recreates it when the viewport changes, so the mesh pass always has a
+/// matching depth buffer for solid occlusion.
+struct DepthTarget {
+    view: wgpu::TextureView,
+    width: u32,
+    height: u32,
+}
+
+/// Creates a [`DEPTH_FORMAT`] depth texture + view of `width`×`height` (each
+/// clamped to ≥ 1) for use as a render-pass depth attachment.
+fn create_depth_target(device: &wgpu::Device, width: u32, height: u32) -> DepthTarget {
+    let width = width.max(1);
+    let height = height.max(1);
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("trd depth texture"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: DEPTH_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    DepthTarget {
+        view,
+        width,
+        height,
+    }
+}
+
 /// Builds an indexed mesh pipeline for `format` and `topology` (filled
 /// `TriangleList` or wireframe `LineList`) over the shared explicit `layout`.
 /// Both topologies use the same `mesh.wgsl` (the vertex shader only transforms
-/// positions; line rasterization needs no extra WebGPU features).
+/// positions; line rasterization needs no extra WebGPU features). `depth_stencil`
+/// is `None` for the standalone/legacy pass (no depth attachment) or a state
+/// matching the mesh pass's [`DEPTH_FORMAT`] attachment.
 fn create_mesh_pipeline_with(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
     layout: &wgpu::PipelineLayout,
     topology: wgpu::PrimitiveTopology,
+    depth_stencil: Option<wgpu::DepthStencilState>,
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::include_wgsl!("mesh.wgsl"));
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -582,7 +655,7 @@ fn create_mesh_pipeline_with(
             topology,
             ..Default::default()
         },
-        depth_stencil: None,
+        depth_stencil,
         multisample: wgpu::MultisampleState::default(),
         multiview_mask: None,
         cache: None,
@@ -644,7 +717,7 @@ fn create_textured_pipeline(
             topology: wgpu::PrimitiveTopology::TriangleList,
             ..Default::default()
         },
-        depth_stencil: None,
+        depth_stencil: Some(solid_depth_stencil()),
         multisample: wgpu::MultisampleState::default(),
         multiview_mask: None,
         cache: None,
@@ -652,14 +725,18 @@ fn create_textured_pipeline(
 }
 
 /// Uploads `image` to a fresh `Rgba8UnormSrgb` `wgpu::Texture` and builds the
-/// group-1 bind group (texture view + a linear, clamp-to-edge sampler) over
-/// `layout`. sRGB storage so texels linearize on sample (#20).
+/// group-1 bind group (texture view + a trilinear, clamp-to-edge sampler) over
+/// `layout`. sRGB storage so texels linearize on sample (#20). A full mipmap
+/// chain is generated on the CPU (box-filtered in *linear* space, matching the
+/// sRGB storage) and uploaded per level, so minified/foreshortened surfaces
+/// filter smoothly instead of aliasing the atlas detail into speckle.
 fn upload_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     layout: &wgpu::BindGroupLayout,
     image: &ImageData,
 ) -> wgpu::BindGroup {
+    let mip_level_count = 1 + image.width.max(image.height).max(1).ilog2();
     let size = wgpu::Extent3d {
         width: image.width,
         height: image.height,
@@ -668,28 +745,44 @@ fn upload_texture(
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("trd texture"),
         size,
-        mip_level_count: 1,
+        mip_level_count,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8UnormSrgb,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
-    queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: &texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        &image.rgba,
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(image.width * 4),
-            rows_per_image: Some(image.height),
-        },
-        size,
-    );
+    // Upload the base level, then repeatedly box-downsample it to fill the chain.
+    let mut level_w = image.width.max(1);
+    let mut level_h = image.height.max(1);
+    let mut level_rgba = image.rgba.clone();
+    for mip in 0..mip_level_count {
+        if mip > 0 {
+            let (w, h, rgba) = downsample_srgb(level_w, level_h, &level_rgba);
+            level_w = w;
+            level_h = h;
+            level_rgba = rgba;
+        }
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: mip,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &level_rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(level_w * 4),
+                rows_per_image: Some(level_h),
+            },
+            wgpu::Extent3d {
+                width: level_w,
+                height: level_h,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
         label: Some("trd texture sampler"),
@@ -698,7 +791,7 @@ fn upload_texture(
         address_mode_w: wgpu::AddressMode::ClampToEdge,
         mag_filter: wgpu::FilterMode::Linear,
         min_filter: wgpu::FilterMode::Linear,
-        mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+        mipmap_filter: wgpu::MipmapFilterMode::Linear,
         ..Default::default()
     });
     device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -715,6 +808,59 @@ fn upload_texture(
             },
         ],
     })
+}
+
+/// sRGB byte (`0..=255`) → linear `[0, 1]`.
+fn srgb_to_linear(c: u8) -> f32 {
+    let c = c as f32 / 255.0;
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// Linear `[0, 1]` → sRGB byte (`0..=255`), rounded.
+fn linear_to_srgb(l: f32) -> u8 {
+    let l = l.clamp(0.0, 1.0);
+    let s = if l <= 0.0031308 {
+        12.92 * l
+    } else {
+        1.055 * l.powf(1.0 / 2.4) - 0.055
+    };
+    (s * 255.0 + 0.5) as u8
+}
+
+/// Box-downsamples one tightly-packed RGBA8 level to half size (min 1px). Color
+/// is averaged in **linear** space (the texture is sRGB) and re-encoded; alpha is
+/// averaged linearly. Returns `(width, height, rgba)` of the smaller level.
+fn downsample_srgb(w: u32, h: u32, src: &[u8]) -> (u32, u32, Vec<u8>) {
+    let w2 = (w / 2).max(1);
+    let h2 = (h / 2).max(1);
+    let mut dst = vec![0u8; (w2 * h2 * 4) as usize];
+    for y in 0..h2 {
+        let y0 = (2 * y).min(h - 1);
+        let y1 = (2 * y + 1).min(h - 1);
+        for x in 0..w2 {
+            let x0 = (2 * x).min(w - 1);
+            let x1 = (2 * x + 1).min(w - 1);
+            let mut lin = [0.0f32; 3];
+            let mut a = 0.0f32;
+            for (sx, sy) in [(x0, y0), (x1, y0), (x0, y1), (x1, y1)] {
+                let i = ((sy * w + sx) * 4) as usize;
+                lin[0] += srgb_to_linear(src[i]);
+                lin[1] += srgb_to_linear(src[i + 1]);
+                lin[2] += srgb_to_linear(src[i + 2]);
+                a += src[i + 3] as f32;
+            }
+            let di = ((y * w2 + x) * 4) as usize;
+            dst[di] = linear_to_srgb(lin[0] / 4.0);
+            dst[di + 1] = linear_to_srgb(lin[1] / 4.0);
+            dst[di + 2] = linear_to_srgb(lin[2] / 4.0);
+            dst[di + 3] = (a / 4.0 + 0.5) as u8;
+        }
+    }
+    (w2, h2, dst)
 }
 
 /// Creates the params uniform buffer + bind group for `pipeline`, initialised
@@ -1182,6 +1328,9 @@ pub struct MeshRenderer {
     axes_vertex_buffer: wgpu::Buffer,
     instance_buffer: wgpu::Buffer,
     instance_capacity: u32,
+    /// The mesh pass's depth attachment, (re)created lazily in `encode` to match
+    /// the viewport. Gives solid (filled/textured) meshes real z-occlusion.
+    depth: Option<DepthTarget>,
     /// Retained so `encode` can grow the instance buffer on demand without the
     /// caller threading a `&Device` through every call (`wgpu::Device` is a
     /// cheap `Arc` handle).
@@ -1263,12 +1412,14 @@ impl MeshRenderer {
             format,
             &pipeline_layout,
             wgpu::PrimitiveTopology::TriangleList,
+            Some(solid_depth_stencil()),
         );
         let wireframe_pipeline = create_mesh_pipeline_with(
             device,
             format,
             &pipeline_layout,
             wgpu::PrimitiveTopology::LineList,
+            Some(overlay_depth_stencil()),
         );
         // Textured pipeline (#20): group 0 = the shared view-proj uniform, group
         // 1 = the bound texture + sampler.
@@ -1325,6 +1476,7 @@ impl MeshRenderer {
             axes_vertex_buffer,
             instance_buffer,
             instance_capacity,
+            depth: None,
             device: device.clone(),
         }
     }
@@ -1354,8 +1506,9 @@ impl MeshRenderer {
     /// (its model pre-multiplied over the mesh base model, `effective = model ·
     /// base`), [`DrawableObject::AabbBox`] by `mesh_id` (same `model · base` as
     /// the mesh it boxes), and [`DrawableObject::CoordinateAxes`] under its own
-    /// model. Gizmo overlays (AABB boxes, axes) are composited after all mesh
-    /// geometry so they stay visible (this path has no depth buffer).
+    /// model. Gizmo overlays (AABB boxes, axes) and wireframes are composited
+    /// after all solid geometry and drawn depth-`Always`/no-write, so they stay
+    /// visible on top even though solid meshes now z-occlude via a depth buffer.
     ///
     /// Out-of-range `mesh_id`s are skipped (callers should validate first).
     pub fn encode(
@@ -1471,6 +1624,19 @@ impl MeshRenderer {
             queue.write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(&instances));
         }
 
+        // Ensure the depth attachment matches the viewport (solid meshes need it
+        // for z-occlusion; recreated only when the target size changes).
+        let dw = viewport.width.max(1);
+        let dh = viewport.height.max(1);
+        if self
+            .depth
+            .as_ref()
+            .is_none_or(|d| d.width != dw || d.height != dh)
+        {
+            self.depth = Some(create_depth_target(&self.device, dw, dh));
+        }
+        let depth_view = &self.depth.as_ref().unwrap().view;
+
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("trd mesh pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1482,7 +1648,14 @@ impl MeshRenderer {
                     store: wgpu::StoreOp::Store,
                 },
             })],
-            depth_stencil_attachment: None,
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: depth_view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
             timestamp_writes: None,
             occlusion_query_set: None,
             multiview_mask: None,
@@ -2143,6 +2316,84 @@ mod tests {
         assert!(
             has_color_in(2 * width / 3..width),
             "right instance is missing"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn mesh_renderer_depth_buffer_occludes_far_behind_near() {
+        // Two full-screen quads fully overlapping in screen space: a RED quad
+        // nearer the camera (NDC z=0.25) and a GREEN quad farther (z=0.75). The
+        // scene submits RED first (mesh 0) and GREEN last (mesh 1), so *without* a
+        // depth buffer the later-drawn GREEN would overwrite RED (submission-order
+        // painter's algorithm). With the depth buffer the nearer RED must win —
+        // proving solid meshes z-occlude instead of last-draw-wins (the bug that
+        // let textured meshes sample back faces over the front, #20).
+        let (device, queue) = pollster::block_on(test_device());
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let (width, height) = (64, 64);
+
+        let quad = |rgb: [f32; 3]| Mesh {
+            vertices: vec![
+                Vertex {
+                    position: [-1.0, 1.0, 0.0],
+                    color: rgb,
+                    uv: [0.0, 0.0],
+                },
+                Vertex {
+                    position: [1.0, 1.0, 0.0],
+                    color: rgb,
+                    uv: [0.0, 0.0],
+                },
+                Vertex {
+                    position: [-1.0, -1.0, 0.0],
+                    color: rgb,
+                    uv: [0.0, 0.0],
+                },
+                Vertex {
+                    position: [1.0, -1.0, 0.0],
+                    color: rgb,
+                    uv: [0.0, 0.0],
+                },
+            ],
+            indices: vec![0, 2, 3, 0, 3, 1],
+        };
+        // mesh 0 = red (drawn first), mesh 1 = green (drawn last).
+        let mut mesh = MeshRenderer::with_meshes(
+            &device,
+            format,
+            &[quad([1.0, 0.0, 0.0]), quad([0.0, 1.0, 0.0])],
+            &[Matrix4::IDENTITY, Matrix4::IDENTITY],
+        );
+        let scene = [
+            DrawableObject::Mesh {
+                mesh_id: 0,
+                model: Matrix4::from_translation(Vector3::new(0.0, 0.0, 0.25)).to_cols_array(),
+                mode: RenderMode::Filled,
+            },
+            DrawableObject::Mesh {
+                mesh_id: 1,
+                model: Matrix4::from_translation(Vector3::new(0.0, 0.0, 0.75)).to_cols_array(),
+                mode: RenderMode::Filled,
+            },
+        ];
+        let px = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
+            mesh.encode(
+                q,
+                e,
+                v,
+                FrameParams::IDENTITY,
+                &scene,
+                Viewport { width, height },
+            );
+        });
+        let c = ((height / 2 * width + width / 2) * 4) as usize;
+        let (r, g, b) = (px[c], px[c + 1], px[c + 2]);
+        assert!(
+            r > 200 && g < 70 && b < 70,
+            "nearer red quad must occlude the farther green quad drawn after it, \
+             got rgb=({r},{g},{b})"
         );
     }
 

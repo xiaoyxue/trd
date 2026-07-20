@@ -15,7 +15,7 @@ while a mesh has a different number of vertices and indices — each mesh travel
   * ``color``    — ``List<FixedSizeList<Float32>[3]>``, optional; emitted only when
                    *every* mesh carries the ``v x y z r g b`` vertex-color extension.
   * ``uv``       — ``List<FixedSizeList<Float32>[2]>``, optional (0.0.4); emitted
-                   when *any* mesh carries ``vt`` texcoords. One uv per position
+                   when *any* mesh carries ``vt`` texcoords. One uv per (split)
                    vertex, parallel to ``position``, already V-flipped to the
                    top-left texel origin (see below). Meshes lacking texcoords get
                    all-zero uvs so every column stays equal length.
@@ -29,10 +29,13 @@ references use the position index (``a/vt/vn`` → ``a``) and, when present, the
 texcoord index (the middle field). Negative indices are relative to the current
 vertex/texcoord count.
 
-Because OBJ allows a position vertex to pair with different texcoords on different
-faces (while trd carries **one uv per position vertex**), each position is
-assigned the uv of the *last* face corner that references it — a close match to
-the tobj ``single_index`` expansion used by ``trd_core::Mesh::from_obj``. OBJ
+Because OBJ indexes positions and texcoords **independently**, one position can
+pair with different texcoords on different faces (as it does at every UV-unwrap
+seam). trd carries **one uv per vertex**, so each unique ``(position, texcoord)``
+corner is emitted as its own output vertex and the indices are remapped — the
+standard OBJ→GPU de-duplication, matching the tobj ``single_index`` expansion used
+by ``trd_core::Mesh::from_obj``. (Collapsing to one uv per *position* would
+stretch seam triangles across the whole atlas, sampling the wrong islands.) OBJ
 ``vt`` v runs bottom-up, so uv is emitted V-flipped as ``[u, 1.0 - v]`` to match
 that loader's top-left texel origin, keeping Arrow-loaded and OBJ-loaded meshes
 in agreement.
@@ -59,12 +62,42 @@ def parse_obj(text):
     parallel to ``positions`` (empty unless the mesh carried ``vt`` texcoords),
     already V-flipped to the top-left texel origin; ``indices`` is a flat triangle
     list of 0-based ``uint32`` vertex indices.
+
+    OBJ indexes positions and texcoords **independently** (``f v/vt/vn``), so one
+    position can pair with *different* texcoords on different faces — exactly what
+    happens at every UV-unwrap seam (where atlas islands meet). trd carries **one
+    uv per vertex**, so each unique ``(position, texcoord)`` corner is emitted as
+    its own output vertex (the standard OBJ→GPU de-duplication, matching tobj's
+    ``single_index`` expansion). Collapsing to one uv per *position* instead would
+    stretch seam triangles across the whole atlas (sampling the wrong islands, the
+    background, even a watermark banner) — visible as garbled seams (#20).
     """
-    positions = []
-    colors = []
+    positions = []  # raw `v x y z`
+    colors = []  # raw `v ... r g b` (parallel to positions when present)
     texcoords = []  # raw `vt u v`, bottom-up (OBJ origin)
-    pos_texcoord = {}  # position index -> texcoord index (last face corner wins)
+    out_positions = []  # split: one entry per unique (position, texcoord) corner
+    out_pos_index = []  # source position index for each split vertex (for colors)
+    out_uvs = []  # split, V-flipped to the top-left texel origin
     indices = []
+    corner_map = {}  # (position index, texcoord index|None) -> split vertex index
+    have_texcoords = False
+
+    def corner_vertex(pi, ti):
+        """Return the split-vertex index for the ``(pi, ti)`` face corner."""
+        key = (pi, ti)
+        idx = corner_map.get(key)
+        if idx is None:
+            idx = len(out_positions)
+            corner_map[key] = idx
+            out_positions.append(positions[pi])
+            out_pos_index.append(pi)
+            if ti is not None and 0 <= ti < len(texcoords):
+                u, v = texcoords[ti]
+                out_uvs.append([u, 1.0 - v])
+            else:
+                out_uvs.append([0.0, 0.0])
+        return idx
+
     for line in text.splitlines():
         parts = line.split()
         if not parts:
@@ -79,42 +112,34 @@ def parse_obj(text):
             uv = [float(v) for v in parts[1:3]]
             if len(uv) == 2:
                 texcoords.append(uv)
+                have_texcoords = True
         elif tag == "f":
             # Resolve each face-vertex reference to a 0-based position index (and
-            # optional texcoord index), then fan-triangulate the (possibly n-gon)
-            # polygon.
+            # optional texcoord index), split it into a unique corner vertex, then
+            # fan-triangulate the (possibly n-gon) polygon.
             verts = []
             for token in parts[1:]:
                 fields = token.split("/")
                 raw = int(fields[0])
                 pi = raw - 1 if raw > 0 else len(positions) + raw
-                verts.append(pi)
+                ti = None
                 if len(fields) >= 2 and fields[1] != "":
                     traw = int(fields[1])
                     ti = traw - 1 if traw > 0 else len(texcoords) + traw
-                    # The last face corner referencing this position wins — a
-                    # close match to tobj's single_index expansion.
-                    pos_texcoord[pi] = ti
+                verts.append(corner_vertex(pi, ti))
             for i in range(1, len(verts) - 1):
                 indices.extend((verts[0], verts[i], verts[i + 1]))
 
-    if len(colors) != len(positions):
-        # Vertex colors are all-or-nothing; drop partial colors (default white).
-        colors = []
+    # Vertex colors are all-or-nothing; keep them only when every position carried
+    # one, expanding per split vertex (duplicated corners share their source color).
+    out_colors = []
+    if colors and len(colors) == len(positions):
+        out_colors = [colors[pi] for pi in out_pos_index]
 
-    # Build a `uv` parallel to `positions`, V-flipped to match the Rust OBJ loader
-    # (mesh.rs `from_obj`: `[u, 1.0 - v]`). Positions with no texcoord reference
-    # default to [0, 0]. Emitted only when the mesh carried `vt` lines.
-    uvs = []
-    if texcoords:
-        for pi in range(len(positions)):
-            ti = pos_texcoord.get(pi)
-            if ti is not None and 0 <= ti < len(texcoords):
-                u, v = texcoords[ti]
-                uvs.append([u, 1.0 - v])
-            else:
-                uvs.append([0.0, 0.0])
-    return positions, colors, uvs, indices
+    # `uv` is emitted only when the mesh carried `vt` lines (V-flipped to the
+    # top-left texel origin, matching mesh.rs `from_obj`: `[u, 1.0 - v]`).
+    uvs = out_uvs if have_texcoords else []
+    return out_positions, out_colors, uvs, indices
 
 
 def mesh_batch(meshes):
