@@ -293,7 +293,7 @@ QC
   trap 'rm -f "$quad_obj"' EXIT
   cat > "$quad_obj" <<QUAD
 # canonical placement-quad overlay (render.sh --placement-quad): centred, extent 2, corners ±1.
-# `v x y z r g b` bakes the outline color into the vertices (wireframe uses them).
+# 'v x y z r g b' bakes the outline color into the vertices (wireframe uses them).
 v -1 -1 0 $qr $qg $qb
 v 1 -1 0 $qr $qg $qb
 v 1 1 0 $qr $qg $qb
