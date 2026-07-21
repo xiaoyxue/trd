@@ -167,8 +167,14 @@ impl App {
     /// The instant the next frame boundary is due, for scheduling a wakeup.
     fn next_boundary(&self) -> Option<Instant> {
         let start = self.playback_start?;
-        let next = self.shown_index.map_or(0, |i| i + 1) as f64;
-        Some(start + Duration::from_secs_f64(next / self.rate()))
+        // The next absolute frame boundary after *now* (wall-clock), so the wakeup
+        // is always in the future. Deriving it from `shown_index` breaks once
+        // playback loops (the looped index is small, e.g. 0..len), scheduling an
+        // instant in the past that turns the `WaitUntil` sleep into a busy-loop
+        // (100% CPU, and the render thread never gets to pace/present cleanly).
+        let elapsed = start.elapsed().as_secs_f64();
+        let next_frame = (elapsed * self.rate()).floor() + 1.0;
+        Some(start + Duration::from_secs_f64(next_frame / self.rate()))
     }
 
     /// True once the stream is finished and there is nothing left to play (a
@@ -315,7 +321,7 @@ pub fn run() -> Result<(), AppError> {
     };
 
     let (tx, rx) = mpsc::channel();
-    spawn_stdin_reader(tx, cli.frames_base.clone());
+    spawn_stdin_reader(tx, cli.frames_base.clone(), (cli.width, cli.height));
 
     let event_loop = EventLoop::new()?;
     // Playback is paced with `ControlFlow::WaitUntil` in `about_to_wait`; start

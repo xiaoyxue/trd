@@ -68,15 +68,21 @@ async function decodeBackground(url: string, width: number, height: number): Pro
   if (!response.ok) {
     fail(`failed to load background ${url}: ${response.status}`);
   }
-  const bitmap = await createImageBitmap(await response.blob());
+  // Decode AND downscale to the render resolution in one step: `resizeWidth/
+  // Height` lets the browser decode straight to the target size (a much cheaper
+  // path than decoding the full-resolution still then scaling it), so the first
+  // playback pass — which populates the cache — does not stutter on large stills.
+  const bitmap = await createImageBitmap(await response.blob(), {
+    resizeWidth: width,
+    resizeHeight: height,
+    resizeQuality: "high",
+  });
   const offscreen = new OffscreenCanvas(width, height);
   const context = offscreen.getContext("2d");
   if (!context) {
     fail("failed to acquire OffscreenCanvas 2D context");
   }
-  context.imageSmoothingEnabled = true;
-  context.imageSmoothingQuality = "high";
-  context.drawImage(bitmap, 0, 0, width, height);
+  context.drawImage(bitmap, 0, 0);
   bitmap.close();
   const rgba = new Uint8Array(context.getImageData(0, 0, width, height).data.buffer.slice(0));
   backgroundCache.set(url, rgba);

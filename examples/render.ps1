@@ -74,9 +74,9 @@
 # producer as -Mesh.
 # With -FramesBase DIR trd composites each frame's 0.0.5 background still (its
 # `frame_path`, relative to DIR) BENEATH the scene via a FramePlane (#63). Extract
-# the stills first, e.g.:
+# the stills first, at the render height so each per-frame decode stays cheap:
 #   uv run --with pyarrow scripts\extract_frames.py `
-#     assets\videos\cornellbox\CameraMovement.mp4 --format jpg -o output\cornellbox
+#     assets\videos\cornellbox\CameraMovement.mp4 --format jpg --height 540 -o output\cornellbox
 #
 # Dolly-camera capstone (#49): examples\bunny_dolly.py authors the same 45°
 # bird's-eye dolly camera twice - CG (eye/target/fovy) and CV (K + pose) - as two

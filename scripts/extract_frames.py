@@ -117,12 +117,13 @@ def probe_video(video):
     return width, height, fps, nb_frames
 
 
-def extract(video, frames_dir, fmt):
+def extract(video, frames_dir, fmt, vf=None):
     """Decode ``video`` into ``frames_dir/frame_%06d.<fmt>`` (0-based, passthrough).
 
     ``-fps_mode passthrough`` keeps exactly one output image per decoded frame
     (no drop/dup, no rate conversion) so ``row N == frame N`` holds; ``-start_number
-    0`` makes the index 0-based to match Arrow row 0.
+    0`` makes the index 0-based to match Arrow row 0. ``vf`` (e.g. ``scale=-2:540``)
+    downscales the stills so the disk/decode/upload cost stays small.
     """
     os.makedirs(frames_dir, exist_ok=True)
     pattern = os.path.join(frames_dir, f"{FRAME_STEM}%0{FRAME_DIGITS}d.{fmt}")
@@ -130,12 +131,30 @@ def extract(video, frames_dir, fmt):
         "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
         "-i", video, "-fps_mode", "passthrough", "-start_number", "0",
     ]
+    if vf:
+        cmd += ["-vf", vf]
     if fmt == "png":
         cmd += ["-pix_fmt", "rgb24"]  # deterministic, lossless
     else:
         cmd += ["-q:v", "2"]
     cmd.append(pattern)
     run(cmd)
+
+
+def scale_filter(src_w, src_h, want_w, want_h):
+    """Resolve a ``--width``/``--height`` request to an ffmpeg ``scale`` filter and
+    the resulting even output dimensions. ``-2`` lets ffmpeg pick the missing axis
+    to preserve aspect (rounded to an even number, required by most encoders).
+    Returns ``(vf_or_None, out_w, out_h)``."""
+    if not want_w and not want_h:
+        return None, src_w, src_h
+    if want_w and want_h:
+        return f"scale={want_w}:{want_h}", want_w, want_h
+    if want_h:
+        out_w = round(src_w * want_h / src_h / 2) * 2
+        return f"scale=-2:{want_h}", out_w, want_h
+    out_h = round(src_h * want_w / src_w / 2) * 2
+    return f"scale={want_w}:-2", want_w, out_h
 
 
 def frame_files(frames_dir, fmt):
@@ -213,6 +232,12 @@ def main() -> None:
     ap.add_argument("video", help="input video file (e.g. a .mp4)")
     ap.add_argument("-o", "--out", default=None, help="output directory (default: output/<stem>)")
     ap.add_argument("--format", choices=["png", "jpg"], default="png", help="still format")
+    ap.add_argument("--width", type=int, default=None,
+                    help="scale stills to this width (px); with --height forces exact WxH")
+    ap.add_argument("--height", type=int, default=None,
+                    help="scale stills to this height (px), preserving aspect (width auto, even). "
+                         "Extract at the render resolution to keep decode/upload cheap on both "
+                         "the native viewer and the browser.")
     ap.add_argument("--url-base", default="frames", help="served-base prefix for frame_url")
     ap.add_argument("--fps", type=float, default=None, help="override source fps in the manifest")
     ap.add_argument("--no-arrow", action="store_true", help="skip frames.arrow (JSON only)")
@@ -229,10 +254,13 @@ def main() -> None:
     width, height, probed_fps, nb_frames = probe_video(args.video)
     fps = args.fps if args.fps is not None else probed_fps
 
+    vf, out_w, out_h = scale_filter(width, height, args.width, args.height)
+    scale_note = f" -> {out_w}x{out_h}" if vf else ""
     print(f"probed: {width}x{height} @ {probed_fps:g} fps"
-          + (f", {nb_frames} frames" if nb_frames else "") + f" -> {frames_dir}",
+          + (f", {nb_frames} frames" if nb_frames else "")
+          + scale_note + f" -> {frames_dir}",
           file=sys.stderr)
-    extract(args.video, frames_dir, args.format)
+    extract(args.video, frames_dir, args.format, vf)
 
     names = frame_files(frames_dir, args.format)
     if not names:
@@ -240,14 +268,14 @@ def main() -> None:
     rows = build_rows(names, args.url_base)
 
     json_path = os.path.join(out_dir, "frames.json")
-    write_json_manifest(json_path, rows, width, height, fps)
+    write_json_manifest(json_path, rows, out_w, out_h, fps)
     emitted = [json_path]
     if not args.no_arrow:
         arrow_path = os.path.join(out_dir, "frames.arrow")
-        write_arrow_manifest(arrow_path, rows, width, height, fps)
+        write_arrow_manifest(arrow_path, rows, out_w, out_h, fps)
         emitted.append(arrow_path)
 
-    print(f"extracted {len(rows)} frames ({args.format}, {width}x{height} @ {fps:g} fps)",
+    print(f"extracted {len(rows)} frames ({args.format}, {out_w}x{out_h} @ {fps:g} fps)",
           file=sys.stderr)
     print("wrote " + " + ".join(emitted), file=sys.stderr)
 
