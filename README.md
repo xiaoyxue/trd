@@ -169,6 +169,7 @@ schema reference + [changelog](docs/protocol/CHANGELOG.md)).
 | `web/` | bun-managed thin TypeScript wrapper that loads `trd-wasm` |
 | `examples/` | `frames.0.0.2.jsonl` (+ legacy `frames.0.0.1.jsonl`) demo + `render.sh` / `render.ps1` wrappers |
 | `scripts/jsonl_to_arrow.py` | JSONL → Arrow params stream (pyarrow; duckdb-free producer) |
+| `scripts/extract_frames.py` | video → still `frames/` + [frame-to-row mapping manifest](docs/frame-extraction.md) (ffmpeg; boundary tooling for the #62 compositing pipeline) |
 | `scripts/encode.py` | Arrow image stream → ffmpeg GIF/WebP |
 | `scripts/dev-env.ps1` | Windows dev-environment setup (the `nix develop` counterpart) |
 
