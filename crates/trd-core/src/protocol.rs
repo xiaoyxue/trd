@@ -76,10 +76,6 @@ pub enum ProtocolError {
     NoProgress,
     #[error("input schema is missing required field `{0}`")]
     MissingColumn(&'static str),
-    #[error("input field `{0}` must be non-nullable")]
-    NullableField(&'static str),
-    #[error("input field `{0}` has a nullable FixedSizeList child")]
-    NullableChild(&'static str),
     #[error("input column `{column}` has type {actual:?}, expected {expected}")]
     ColumnType {
         column: &'static str,
@@ -669,26 +665,26 @@ fn validate_vec2_field(field: &Field, name: &'static str) -> Result<(), Protocol
     validate_fixed_f32_list(field, name, 2)
 }
 
-/// Validates that `field` is a non-nullable `FixedSizeList<Float32>[len]` with a
-/// non-nullable child.
+/// Validates that `field` is a `FixedSizeList<Float32>[len]` column.
+///
+/// The declared *nullability flags* of the field and its list child are
+/// intentionally not rejected here. The native decoder (`stream.rs`) only
+/// type-checks columns and rejects null *values* at decode time, and producers
+/// (e.g. pyarrow) emit nullable-by-default fields carrying non-null values.
+/// Rejecting on the flag alone broke the "same stream renders natively and in
+/// the browser" invariant (a stream the CLI rendered failed to load in wasm),
+/// so this decoder matches native leniency; null *values* are still rejected in
+/// `decode_batch` / `optional_fixed_list`.
 fn validate_fixed_f32_list(
     field: &Field,
     name: &'static str,
     len: i32,
 ) -> Result<(), ProtocolError> {
-    if field.is_nullable() {
-        return Err(ProtocolError::NullableField(name));
-    }
-
     match field.data_type() {
         DataType::FixedSizeList(item, actual_len)
             if *actual_len == len && item.data_type() == &DataType::Float32 =>
         {
-            if item.is_nullable() {
-                Err(ProtocolError::NullableChild(name))
-            } else {
-                Ok(())
-            }
+            Ok(())
         }
         actual => Err(ProtocolError::ColumnType {
             column: name,
@@ -710,10 +706,8 @@ fn fixed_f32_list_expectation(len: i32) -> &'static str {
 }
 
 fn validate_f32_field(field: &Field, name: &'static str) -> Result<(), ProtocolError> {
-    if field.is_nullable() {
-        return Err(ProtocolError::NullableField(name));
-    }
-
+    // Nullability flag intentionally not rejected (see `validate_fixed_f32_list`);
+    // null *values* are still rejected at decode time.
     if field.data_type() == &DataType::Float32 {
         Ok(())
     } else {
@@ -1149,26 +1143,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_schema_type_nullability_and_runtime_nulls() {
-        let nullable_center = test_batch_with(
-            input_schema_with(
-                Some(PROTOCOL_VERSION),
-                vec2_field("center", true, false),
-                vec2_field("size", false, false),
-                Field::new("theta", DataType::Float32, false),
-            ),
-            &[FrameParams::IDENTITY],
-        );
-        let nullable_child = test_batch_with(
-            input_schema_with(
-                Some(PROTOCOL_VERSION),
-                vec2_field("center", false, true),
-                vec2_field("size", false, false),
-                Field::new("theta", DataType::Float32, false),
-            ),
-            &[FrameParams::IDENTITY],
-        );
-
+    fn rejects_schema_type_errors_and_runtime_nulls() {
         let mut missing = InputSession::new();
         assert!(matches!(
             missing.push(&test_stream(&[missing_theta_batch()])),
@@ -1182,18 +1157,6 @@ mod tests {
                 column: "theta",
                 ..
             })
-        ));
-
-        let mut nullable = InputSession::new();
-        assert!(matches!(
-            nullable.push(&test_stream(&[nullable_center])),
-            Err(ProtocolError::NullableField("center"))
-        ));
-
-        let mut child = InputSession::new();
-        assert!(matches!(
-            child.push(&test_stream(&[nullable_child])),
-            Err(ProtocolError::NullableChild("center"))
         ));
 
         assert!(matches!(
@@ -1600,14 +1563,47 @@ mod tests {
     }
 
     #[test]
-    fn validate_if_present_rejects_nullable_matrix_column() {
-        let nullable_field =
+    fn accepts_nullable_declared_fields_with_non_null_values() {
+        // Producers (e.g. pyarrow) emit nullable-by-default fields whose *values*
+        // are non-null. The native decoder (`stream.rs`) accepts these, so this
+        // cross-platform/wasm decoder must too — otherwise the same stream
+        // renders on the CLI but fails to load in the browser. Only null
+        // *values* are rejected (see `rejects_schema_type_errors_and_runtime_nulls`).
+        let nullable_center = test_batch_with(
+            input_schema_with(
+                Some(PROTOCOL_VERSION),
+                vec2_field("center", true, false),
+                vec2_field("size", false, false),
+                Field::new("theta", DataType::Float32, false),
+            ),
+            &[FrameParams::IDENTITY],
+        );
+        let mut center = InputSession::new();
+        assert_eq!(
+            center.push(&test_stream(&[nullable_center])).unwrap(),
+            vec![plain(vec![FrameParams::IDENTITY])]
+        );
+
+        let nullable_child = test_batch_with(
+            input_schema_with(
+                Some(PROTOCOL_VERSION),
+                vec2_field("center", false, true),
+                vec2_field("size", false, false),
+                Field::new("theta", DataType::Float32, false),
+            ),
+            &[FrameParams::IDENTITY],
+        );
+        let mut child = InputSession::new();
+        assert_eq!(
+            child.push(&test_stream(&[nullable_child])).unwrap(),
+            vec![plain(vec![FrameParams::IDENTITY])]
+        );
+
+        // A nullable-declared optional matrix column with non-null values also decodes.
+        let nullable_pose =
             batch_with_matrix(Some("0.0.2"), "pose", 16, &[vec![0.0; 16]], true, false);
-        let mut session = InputSession::new();
-        assert!(matches!(
-            session.push(&test_stream(&[nullable_field])),
-            Err(ProtocolError::NullableField("pose"))
-        ));
+        let mut pose = InputSession::new();
+        assert!(pose.push(&test_stream(&[nullable_pose])).is_ok());
     }
 
     #[test]
