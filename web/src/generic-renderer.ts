@@ -131,6 +131,37 @@ async function main(): Promise<void> {
   }
 }
 
+/// Pre-decodes every distinct background still into the cache before playback
+/// starts, so the first loop does not stutter on per-frame JPEG decode (the
+/// browser twin of trd-app buffering the whole stream up front). Decoded
+/// concurrently in small batches; a status line reports progress.
+async function preloadBackgrounds(
+  renderer: CanvasRenderer | ArrowRenderer,
+  total: number,
+  config: RenderConfig,
+): Promise<void> {
+  if (!config.background) {
+    return;
+  }
+  const refs: string[] = [];
+  const seen = new Set<string>();
+  for (let i = 0; i < total; i++) {
+    const ref = renderer.frameRef(i);
+    if (ref && !seen.has(ref)) {
+      seen.add(ref);
+      refs.push(ref);
+    }
+  }
+  const batch = 8;
+  for (let start = 0; start < refs.length; start += batch) {
+    const slice = refs.slice(start, start + batch);
+    await Promise.all(
+      slice.map((ref) => decodeBackground(`./${ref}`, config.width, config.height)),
+    );
+    setStatus(`decoding backgrounds… ${Math.min(start + batch, refs.length)}/${refs.length}`);
+  }
+}
+
 async function runCanvas(
   canvas: HTMLCanvasElement,
   config: RenderConfig,
@@ -143,6 +174,7 @@ async function runCanvas(
   if (total === 0) {
     fail("stream carried no frames");
   }
+  await preloadBackgrounds(renderer, total, config);
 
   const interval = 1000 / fps;
   let index = 0;
@@ -173,6 +205,7 @@ async function runOffscreen(
   if (total === 0) {
     fail("stream carried no frames");
   }
+  await preloadBackgrounds(renderer, total, config);
 
   const interval = 1000 / fps;
   let index = 0;
