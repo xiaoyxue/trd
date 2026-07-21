@@ -15,7 +15,10 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use trd_core::{ImageTexture, Mesh, RenderMode};
 use winit::application::ApplicationHandler;
+#[cfg(not(target_os = "windows"))]
 use winit::dpi::LogicalSize;
+#[cfg(target_os = "windows")]
+use winit::dpi::PhysicalSize;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
@@ -185,9 +188,22 @@ impl ApplicationHandler for App {
             return;
         }
 
+        // The CV camera `k` intrinsics (fx/fy/cx/cy) are render-resolution-specific,
+        // so the GPU surface must be exactly the authored `--width`×`--height`. On
+        // Windows, per-monitor DPI scaling turns a `LogicalSize` request into a
+        // larger physical surface (e.g. 960×540 → 1440×810 at 150%), which
+        // misprojects the scene over the stretched background frame (the mesh
+        // "floats" off its placement quad). Request the size in physical pixels
+        // there so the surface matches the authored resolution; other platforms
+        // (validated at 100% scale) keep the logical-size request.
+        #[cfg(target_os = "windows")]
+        let size_attr = PhysicalSize::new(self.window_size.0, self.window_size.1);
+        #[cfg(not(target_os = "windows"))]
+        let size_attr = LogicalSize::new(self.window_size.0, self.window_size.1);
+
         let attributes = Window::default_attributes()
             .with_title("trd — stream viewer")
-            .with_inner_size(LogicalSize::new(self.window_size.0, self.window_size.1));
+            .with_inner_size(size_attr);
 
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
