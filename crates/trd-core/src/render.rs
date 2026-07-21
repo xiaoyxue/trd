@@ -1150,6 +1150,30 @@ pub enum RenderMode {
     Textured,
 }
 
+/// Wire byte meaning "inherit the renderer's global mode" in the optional
+/// per-draw `draw_mode` (`List<UInt8>`) protocol column (see
+/// [`RenderMode::from_wire`]). A draw carrying this value defers to the `mode`
+/// argument of [`build_scene`], so a stream can override only *some* draws
+/// (e.g. draw a wireframe overlay quad while every other draw follows the
+/// front-end's global mode).
+pub const DRAW_MODE_INHERIT: u8 = 255;
+
+impl RenderMode {
+    /// Decodes an optional per-draw `draw_mode` wire byte into a [`Draw::mode`]
+    /// override: `0`→`Filled`, `1`→`Wireframe`, `2`→`Textured`, and
+    /// [`DRAW_MODE_INHERIT`]→`None` (inherit the global mode). Returns `None`
+    /// for an unrecognized byte so callers can raise a decode error.
+    pub fn from_wire(byte: u8) -> Option<Option<RenderMode>> {
+        match byte {
+            0 => Some(Some(RenderMode::Filled)),
+            1 => Some(Some(RenderMode::Wireframe)),
+            2 => Some(Some(RenderMode::Textured)),
+            DRAW_MODE_INHERIT => Some(None),
+            _ => None,
+        }
+    }
+}
+
 /// How a [`DrawableObject::FramePlane`] maps its background image onto the
 /// viewport (#63). Both modes fill the whole viewport (no letterbox bars); they
 /// differ only in how a mismatched image/viewport aspect is handled.
@@ -1203,6 +1227,11 @@ pub(crate) fn frame_fit_uv_scale(
 pub struct Draw {
     pub mesh_id: u32,
     pub model: [f32; 16],
+    /// Optional per-draw [`RenderMode`] override (protocol `draw_mode` column):
+    /// `Some(mode)` draws this instance in `mode` regardless of the front-end's
+    /// global mode; `None` inherits the global `mode` passed to [`build_scene`].
+    /// Lets one frame mix e.g. a textured mesh with a wireframe overlay quad.
+    pub mode: Option<RenderMode>,
 }
 
 /// The base interface for every primitive the renderer can draw (#41). A
@@ -1256,11 +1285,16 @@ pub type Scene = Vec<DrawableObject>;
 /// and overlay flags. When `frame` is `Some`, a background
 /// [`DrawableObject::FramePlane`] is pushed **first** so the mesh scene
 /// composites on top of it. Each [`Draw`] becomes one [`DrawableObject::Mesh`]
-/// in `mode`; with `show_aabb`, each also emits a tracking
-/// [`DrawableObject::AabbBox`]; with `show_axes`, one origin
-/// [`DrawableObject::CoordinateAxes`] is appended. The order (frame plane, then
-/// all meshes, then all boxes, then axes) matches the renderer's draw buckets so
-/// output is pixel-identical to the pre-scene, flag-driven path.
+/// in the draw's own [`Draw::mode`] when set, else the passed `mode`; with
+/// `show_aabb`, each also emits a tracking
+/// [`DrawableObject::AabbBox`]; with `show_axes`, one **world-origin**
+/// [`DrawableObject::CoordinateAxes`] is appended; with `show_local_axes`, each
+/// draw also emits a [`DrawableObject::CoordinateAxes`] at **its own `model`** —
+/// i.e. that object's *local* coordinate frame (its model-space X/Y/Z axes as
+/// placed, e.g. #77's `(e1,e2,e3)` quad frame). The order (frame plane, then all
+/// meshes, then all boxes, then per-draw local axes, then the world-origin axes)
+/// matches the renderer's draw buckets so output is pixel-identical to the
+/// pre-scene, flag-driven path.
 ///
 /// Shared by the native ([`crate::run_stream`]) and wasm front-ends so neither
 /// branches per primitive type: both author the same ordered `Scene` and hand
@@ -1270,10 +1304,11 @@ pub fn build_scene(
     mode: RenderMode,
     show_aabb: bool,
     show_axes: bool,
+    show_local_axes: bool,
     frame: Option<FrameFit>,
 ) -> Scene {
     let mut scene = Vec::with_capacity(
-        draws.len() * (1 + usize::from(show_aabb))
+        draws.len() * (1 + usize::from(show_aabb) + usize::from(show_local_axes))
             + usize::from(show_axes)
             + usize::from(frame.is_some()),
     );
@@ -1284,7 +1319,7 @@ pub fn build_scene(
         scene.push(DrawableObject::Mesh {
             mesh_id: draw.mesh_id,
             model: draw.model,
-            mode,
+            mode: draw.mode.unwrap_or(mode),
         });
     }
     if show_aabb {
@@ -1293,6 +1328,11 @@ pub fn build_scene(
                 mesh_id: draw.mesh_id,
                 model: draw.model,
             });
+        }
+    }
+    if show_local_axes {
+        for draw in draws {
+            scene.push(DrawableObject::CoordinateAxes { model: draw.model });
         }
     }
     if show_axes {
@@ -3471,11 +3511,12 @@ f 1 2 6 5
         let draws = [Draw {
             mesh_id: 0,
             model: Matrix4::IDENTITY.to_cols_array(),
+            mode: None,
         }];
 
         // No frame ⇒ no FramePlane in the scene (byte-identical to the pre-0.0.5
         // scene).
-        let scene = build_scene(&draws, RenderMode::Filled, true, true, None);
+        let scene = build_scene(&draws, RenderMode::Filled, true, true, false, None);
         assert!(
             !scene
                 .iter()
@@ -3490,6 +3531,7 @@ f 1 2 6 5
             RenderMode::Filled,
             true,
             true,
+            false,
             Some(FrameFit::Cover),
         );
         assert!(
@@ -3514,6 +3556,138 @@ f 1 2 6 5
         assert!(matches!(scene[1], DrawableObject::Mesh { .. }));
         assert!(matches!(scene[2], DrawableObject::AabbBox { .. }));
         assert!(matches!(scene[3], DrawableObject::CoordinateAxes { .. }));
+    }
+
+    #[test]
+    fn build_scene_per_draw_mode_overrides_default() {
+        // Per-draw draw_mode (#79 slice): a draw with an explicit `mode` renders
+        // in THAT mode regardless of the scene default, while `mode: None`
+        // inherits the default. This lets one frame mix, e.g., a textured mesh
+        // and a wireframe placement quad (the two-stage cornellbox scene).
+        let model = Matrix4::IDENTITY.to_cols_array();
+        let draws = [
+            Draw {
+                mesh_id: 0,
+                model,
+                mode: None,
+            }, // inherits the scene default
+            Draw {
+                mesh_id: 1,
+                model,
+                mode: Some(RenderMode::Wireframe),
+            }, // overrides
+            Draw {
+                mesh_id: 2,
+                model,
+                mode: Some(RenderMode::Textured),
+            }, // overrides
+        ];
+
+        let mesh_modes = |scene: &[DrawableObject]| -> Vec<RenderMode> {
+            scene
+                .iter()
+                .filter_map(|o| match o {
+                    DrawableObject::Mesh { mode, .. } => Some(*mode),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        // Filled default: only the `None` draw is Filled; the overrides stand.
+        let scene = build_scene(&draws, RenderMode::Filled, false, false, false, None);
+        assert_eq!(
+            mesh_modes(&scene),
+            vec![
+                RenderMode::Filled,
+                RenderMode::Wireframe,
+                RenderMode::Textured
+            ],
+            "None inherits the scene default (Filled); Some(..) overrides it"
+        );
+
+        // Wireframe default: only the `None` draw changes (now Wireframe); the two
+        // explicit overrides are unaffected — the override is per draw, not global.
+        let scene = build_scene(&draws, RenderMode::Wireframe, false, false, false, None);
+        assert_eq!(
+            mesh_modes(&scene),
+            vec![
+                RenderMode::Wireframe,
+                RenderMode::Wireframe,
+                RenderMode::Textured
+            ],
+        );
+    }
+
+    #[test]
+    fn build_scene_local_axes_one_gizmo_per_draw_at_its_own_model() {
+        // --axes-local (#77 slice) overlays a coordinate gizmo at EACH drawn
+        // object's own local frame (its `model`), distinct from the single
+        // world-origin gizmo of --axes. With two draws (e.g. a placed bunny and
+        // its placement quad) the scene carries TWO local gizmos (one per draw
+        // model) plus, when --axes is also set, ONE world gizmo at the identity —
+        // the "two axes" a placed-mesh-on-quad frame shows.
+        let mut model_a = Matrix4::IDENTITY.to_cols_array();
+        model_a[12] = 1.0; // distinct translation (col-major tx)
+        let mut model_b = Matrix4::IDENTITY.to_cols_array();
+        model_b[12] = 5.0;
+        let draws = [
+            Draw {
+                mesh_id: 0,
+                model: model_a,
+                mode: None,
+            },
+            Draw {
+                mesh_id: 1,
+                model: model_b,
+                mode: None,
+            },
+        ];
+
+        let axes_models = |scene: &[DrawableObject]| -> Vec<[f32; 16]> {
+            scene
+                .iter()
+                .filter_map(|o| match o {
+                    DrawableObject::CoordinateAxes { model } => Some(*model),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        // Everything on: frame + aabb + world axes + local axes.
+        let scene = build_scene(
+            &draws,
+            RenderMode::Filled,
+            true,                  // show_aabb
+            true,                  // show_axes (world)
+            true,                  // show_local_axes
+            Some(FrameFit::Cover), // background frame plane
+        );
+
+        // Counts: 1 frame + 2 meshes + 2 aabb + 2 local axes + 1 world axis = 8.
+        assert_eq!(scene.len(), 8, "scene = {scene:?}");
+        // Order: FramePlane, Mesh×2, AabbBox×2, CoordinateAxes(local)×2, CoordinateAxes(world).
+        assert!(matches!(scene[0], DrawableObject::FramePlane { .. }));
+        assert!(matches!(scene[1], DrawableObject::Mesh { .. }));
+        assert!(matches!(scene[2], DrawableObject::Mesh { .. }));
+        assert!(matches!(scene[3], DrawableObject::AabbBox { .. }));
+        assert!(matches!(scene[4], DrawableObject::AabbBox { .. }));
+
+        // The local gizmos carry each draw's own model (in draw order); the world
+        // gizmo is last, at the identity (origin).
+        assert_eq!(
+            axes_models(&scene),
+            vec![model_a, model_b, Matrix4::IDENTITY.to_cols_array()],
+            "two local gizmos (per draw model) then one world gizmo at identity"
+        );
+
+        // --axes-local WITHOUT --axes ⇒ only the per-draw local gizmos, no world
+        // one (both draw models are non-identity, so this is unambiguous).
+        let scene = build_scene(&draws, RenderMode::Filled, false, false, true, None);
+        assert_eq!(
+            axes_models(&scene),
+            vec![model_a, model_b],
+            "local gizmos only; no extra world-origin gizmo"
+        );
     }
 
     #[test]

@@ -2,13 +2,14 @@ use std::collections::HashMap;
 
 use arrow::array::{
     Array, FixedSizeListArray, Float32Array, ListArray, RecordBatch, StringArray, UInt32Array,
+    UInt8Array,
 };
 use arrow::buffer::Buffer;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::error::ArrowError;
 use arrow::ipc::reader::StreamDecoder;
 
-use crate::render::Draw;
+use crate::render::{Draw, RenderMode};
 use crate::texture::{ImageTexture, TextureError, TEXTURE_COLUMN};
 use crate::{CameraFormError, FrameParams, Mesh, MeshError};
 
@@ -109,6 +110,17 @@ pub enum ProtocolError {
         mesh_len: usize,
         model_len: usize,
     },
+    #[error(
+        "per-frame draw mode list length mismatch at row {row}: \
+         `draw_mode` has {mode_len} entries but there are {draw_len} draw(s)"
+    )]
+    MismatchedDrawModes {
+        row: usize,
+        mode_len: usize,
+        draw_len: usize,
+    },
+    #[error("draw_mode byte {value} is not a valid render mode (0/1/2/255)")]
+    InvalidDrawMode { value: u8 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -439,11 +451,14 @@ fn decode_frame_refs(batch: &RecordBatch) -> Result<Option<Vec<Option<String>>>,
 }
 
 /// Decodes the optional per-frame **instanced draw list** columns `draw_mesh`
-/// (`List<UInt32>`) and `draw_model` (`List<FixedSizeList<Float32>[16]>`) into
-/// one `Vec<Draw>` per row. Returns `Some(rows)` when both columns are present,
-/// `None` when neither is (legacy single-object streams). Having exactly one of
-/// the pair, or a per-row length mismatch, is an error. Mirrors the native
-/// `stream::decode_draws`.
+/// (`List<UInt32>`) and `draw_model` (`List<FixedSizeList<Float32>[16]>`), plus
+/// the optional per-draw `draw_mode` (`List<UInt8>`) render-mode override, into
+/// one `Vec<Draw>` per row. Returns `Some(rows)` when both required columns are
+/// present, `None` when neither is (legacy single-object streams). Having
+/// exactly one of the `draw_mesh`/`draw_model` pair, or a per-row length
+/// mismatch, is an error. `draw_mode` bytes decode via
+/// [`RenderMode::from_wire`] (`255` = inherit); an absent column leaves every
+/// [`Draw::mode`] `None`. Mirrors the native `stream::decode_draws`.
 fn decode_draws(batch: &RecordBatch) -> Result<Option<Vec<Vec<Draw>>>, ProtocolError> {
     let (mesh_col, model_col) = match (
         batch.column_by_name("draw_mesh"),
@@ -477,6 +492,24 @@ fn decode_draws(batch: &RecordBatch) -> Result<Option<Vec<Vec<Draw>>>, ProtocolE
     if model_list.null_count() > 0 {
         return Err(ProtocolError::NullValues("draw_model"));
     }
+
+    // Optional per-draw render-mode override (`draw_mode`, `List<UInt8>`).
+    let mode_list = match batch.column_by_name("draw_mode") {
+        None => None,
+        Some(col) => {
+            let list = col.as_any().downcast_ref::<ListArray>().ok_or_else(|| {
+                ProtocolError::ColumnType {
+                    column: "draw_mode",
+                    expected: "List<UInt8>",
+                    actual: col.data_type().clone(),
+                }
+            })?;
+            if list.null_count() > 0 {
+                return Err(ProtocolError::NullValues("draw_mode"));
+            }
+            Some(list.clone())
+        }
+    };
 
     let mut rows = Vec::with_capacity(batch.num_rows());
     for row in 0..batch.num_rows() {
@@ -523,10 +556,46 @@ fn decode_draws(batch: &RecordBatch) -> Result<Option<Vec<Vec<Draw>>>, ProtocolE
                 actual: models.values().data_type().clone(),
             })?;
 
+        // Per-draw modes for this row (empty ⇒ every draw inherits the global).
+        let modes: Vec<Option<RenderMode>> = match &mode_list {
+            None => Vec::new(),
+            Some(mode_list) => {
+                let modes_ref = mode_list.value(row);
+                let bytes = modes_ref
+                    .as_any()
+                    .downcast_ref::<UInt8Array>()
+                    .ok_or_else(|| ProtocolError::ColumnType {
+                        column: "draw_mode",
+                        expected: "List<UInt8>",
+                        actual: modes_ref.data_type().clone(),
+                    })?;
+                if bytes.null_count() > 0 {
+                    return Err(ProtocolError::NullValues("draw_mode"));
+                }
+                if bytes.len() != ids.len() {
+                    return Err(ProtocolError::MismatchedDrawModes {
+                        row,
+                        mode_len: bytes.len(),
+                        draw_len: ids.len(),
+                    });
+                }
+                (0..bytes.len())
+                    .map(|j| {
+                        RenderMode::from_wire(bytes.value(j)).ok_or(
+                            ProtocolError::InvalidDrawMode {
+                                value: bytes.value(j),
+                            },
+                        )
+                    })
+                    .collect::<Result<_, _>>()?
+            }
+        };
+
         let draws = (0..ids.len())
             .map(|j| Draw {
                 mesh_id: ids.value(j),
                 model: read_fixed::<16>(models, model_values, j),
+                mode: modes.get(j).copied().flatten(),
             })
             .collect();
         rows.push(draws);
@@ -855,7 +924,9 @@ fn require_f32<'a>(
 mod tests {
     use std::sync::Arc;
 
-    use arrow::array::{ArrayRef, FixedSizeListArray, Float32Array, Int32Array, RecordBatch};
+    use arrow::array::{
+        ArrayRef, FixedSizeListArray, Float32Array, Int32Array, RecordBatch, StringArray,
+    };
     use arrow::buffer::NullBuffer;
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::ipc::writer::StreamWriter;
@@ -1382,6 +1453,105 @@ mod tests {
     }
 
     #[test]
+    fn decodes_frame_reference_column_prefers_url_and_maps_null_or_empty_to_none() {
+        // 0.0.5 background frame reference: `decode_frame_refs` surfaces one
+        // Option<String> per row — the value the browser shell (and CLI/app)
+        // resolves + composites beneath the scene, and the wasm renderers expose
+        // via `frameRef(i)`. Per-row null/empty ⇒ None (keep the previous
+        // background); an absent column ⇒ None for the whole batch.
+
+        // (a) frame_path only: null and empty decode to None; others pass through.
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "frame_path",
+                DataType::Utf8,
+                true,
+            )])),
+            vec![Arc::new(StringArray::from(vec![
+                Some("frames/frame_000000.jpg"),
+                None,
+                Some(""),
+                Some("frames/frame_000006.jpg"),
+            ])) as ArrayRef],
+        )
+        .unwrap();
+        assert_eq!(
+            decode_frame_refs(&batch).unwrap(),
+            Some(vec![
+                Some("frames/frame_000000.jpg".to_owned()),
+                None,
+                None,
+                Some("frames/frame_000006.jpg".to_owned()),
+            ])
+        );
+
+        // (b) both columns present ⇒ `frame_url` (browser) wins over `frame_path`.
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("frame_path", DataType::Utf8, true),
+                Field::new("frame_url", DataType::Utf8, true),
+            ])),
+            vec![
+                Arc::new(StringArray::from(vec![Some("local/a.jpg")])) as ArrayRef,
+                Arc::new(StringArray::from(vec![Some("https://cdn/x.jpg")])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            decode_frame_refs(&batch).unwrap(),
+            Some(vec![Some("https://cdn/x.jpg".to_owned())]),
+            "frame_url is preferred over frame_path"
+        );
+
+        // (c) neither column present ⇒ None for the whole batch (legacy stream).
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "theta",
+                DataType::Float32,
+                false,
+            )])),
+            vec![Arc::new(Float32Array::from(vec![0.0_f32])) as ArrayRef],
+        )
+        .unwrap();
+        assert_eq!(decode_frame_refs(&batch).unwrap(), None);
+
+        // (d) a non-Utf8 frame column is a schema error.
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "frame_path",
+                DataType::Int32,
+                true,
+            )])),
+            vec![Arc::new(Int32Array::from(vec![1])) as ArrayRef],
+        )
+        .unwrap();
+        assert!(matches!(
+            decode_frame_refs(&batch),
+            Err(ProtocolError::ColumnType {
+                column: "frame_path",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn decode_frame_batch_surfaces_frame_reference_on_decoded_frame() {
+        // End-to-end through the batch decoder: a params batch carrying a
+        // `frame_path` lands on DecodedFrame.frame_ref — what the wasm renderers
+        // buffer + expose via frameRef(i), and the CLI/app resolve to composite
+        // the background beneath the scene.
+        let batch = camera_batch(vec![(
+            Field::new("frame_path", DataType::Utf8, true),
+            Arc::new(StringArray::from(vec![Some("frames/frame_000000.jpg")])) as ArrayRef,
+        )]);
+        let frames = decode_frame_batch(&batch).unwrap();
+        assert_eq!(
+            frames[0].frame_ref,
+            Some("frames/frame_000000.jpg".to_owned())
+        );
+    }
+
+    #[test]
     fn rejects_incomplete_and_conflicting_camera_forms() {
         // `eye` alone (no look target/direction) is incomplete.
         let incomplete = camera_batch(vec![(
@@ -1680,11 +1850,13 @@ mod tests {
             vec![
                 Draw {
                     mesh_id: 0,
-                    model: a
+                    model: a,
+                    mode: None
                 },
                 Draw {
                     mesh_id: 1,
-                    model: b
+                    model: b,
+                    mode: None
                 },
             ]
         );

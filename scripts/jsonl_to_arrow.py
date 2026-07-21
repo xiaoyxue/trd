@@ -34,10 +34,15 @@ emitted only when *every* row provides it, matching trd-core's non-null column
 requirement. An omitted camera column decodes to the identity view/projection.
 
 **0.0.3 multi-mesh draw list (optional, per-frame).** A row may carry
-`"draws": [{"mesh": i, "model": [16 floats]}, ...]` to place several instances of
-the stream's meshes. Emitted as `draw_mesh` (`List<UInt32>`) + `draw_model`
-(`List<FixedSizeList<f32>[16]>`) only when *every* row provides `"draws"`. When
-absent, one instance of mesh 0 is placed by each frame's own `model`.
+`"draws": [{"mesh": i, "model": [16 floats], "mode": "wireframe"?}, ...]` to place
+several instances of the stream's meshes. Emitted as `draw_mesh` (`List<UInt32>`)
++ `draw_model` (`List<FixedSizeList<f32>[16]>`) only when *every* row provides
+`"draws"`. When absent, one instance of mesh 0 is placed by each frame's own
+`model`. Each draw may carry an optional `"mode"` (`"filled"`/`"wireframe"`/
+`"textured"`) render-mode override; when *any* draw names one, the per-draw
+`draw_mode` (`List<UInt8>`) column is emitted (`0`=filled, `1`=wireframe,
+`2`=textured, `255`=inherit the front-end's global mode for draws without one).
+This lets one frame mix e.g. a textured mesh with a wireframe overlay quad.
 
 Run via:
   uv run --with pyarrow scripts/jsonl_to_arrow.py examples/frames.0.0.2.jsonl   # -> stdout (0.0.3)
@@ -158,6 +163,29 @@ def main() -> None:
             fields.append(("draw_mesh", mesh_ids_type))
             columns.append(pa.array(models, type=models_type))
             fields.append(("draw_model", models_type))
+
+            # Optional per-draw render-mode override. Emitted (as `draw_mode`,
+            # List<UInt8>) when *any* draw names a "mode"; draws without one get
+            # 255 = "inherit the front-end's global mode". So a stream can flip
+            # just an overlay quad to wireframe while every other draw follows
+            # the renderer's `--wireframe`/`--textured`/default mode.
+            mode_wire = {"filled": 0, "wireframe": 1, "textured": 2, "inherit": 255}
+            if any("mode" in d for r in rows for d in r["draws"]):
+                def to_mode_byte(d):
+                    m = d.get("mode", "inherit")
+                    if isinstance(m, int):
+                        return m
+                    if m not in mode_wire:
+                        raise SystemExit(
+                            f"error: draw mode {m!r} must be one of "
+                            f"{sorted(mode_wire)} or an int 0/1/2/255"
+                        )
+                    return mode_wire[m]
+
+                modes_type = pa.list_(pa.uint8())
+                modes = [[to_mode_byte(d) for d in r["draws"]] for r in rows]
+                columns.append(pa.array(modes, type=modes_type))
+                fields.append(("draw_mode", modes_type))
 
     if ver >= (0, 0, 5):
         # Per-frame background frame reference (0.0.5): the still image the shell

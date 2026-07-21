@@ -35,6 +35,11 @@ struct Cli {
     /// origin.
     #[arg(long)]
     axes: bool,
+    /// Overlay a coordinate-axes gizmo at *each* drawn object's local frame (its
+    /// `model`), i.e. its model-space X/Y/Z axes as placed — e.g. #77's
+    /// `(e1,e2,e3)` quad frame the bunny is anchored in.
+    #[arg(long)]
+    axes_local: bool,
     /// Base directory for per-frame background images (`0.0.5`). When set, a
     /// frame's `frame_path` (relative, e.g. `frames/frame_000000.png`) is joined
     /// to this dir, decoded (PNG/JPEG), and composited beneath the scene as a
@@ -96,6 +101,7 @@ fn main() -> Result<(), trd_core::StreamError> {
             mode,
             show_aabb: cli.aabb,
             show_axes: cli.axes,
+            show_local_axes: cli.axes_local,
         },
         frame_resolver,
     )?;

@@ -12,8 +12,12 @@ while a mesh has a different number of vertices and indices — each mesh travel
 (matching ``trd_core::Mesh::from_arrow_all``):
 
   * ``position`` — ``List<FixedSizeList<Float32>[3]>`` (x, y, z), required.
-  * ``color``    — ``List<FixedSizeList<Float32>[3]>``, optional; emitted only when
-                   *every* mesh carries the ``v x y z r g b`` vertex-color extension.
+  * ``color``    — ``List<FixedSizeList<Float32>[3]>``, optional; emitted when
+                   *any* mesh carries the ``v x y z r g b`` vertex-color
+                   extension. Meshes lacking colors get all-white vertices so the
+                   column stays equal-length — letting a colored mesh (e.g. a
+                   wireframe overlay quad) share a table with an uncolored/textured
+                   one (which ignores its white color).
   * ``uv``       — ``List<FixedSizeList<Float32>[2]>``, optional (0.0.4); emitted
                    when *any* mesh carries ``vt`` texcoords. One uv per (split)
                    vertex, parallel to ``position``, already V-flipped to the
@@ -146,10 +150,10 @@ def mesh_batch(meshes):
     """Build the nested-list mesh ``RecordBatch`` — one row per mesh.
 
     ``meshes`` is a list of ``(positions, colors, uvs, indices)`` tuples. The
-    optional ``color`` column is emitted only when *every* mesh carries vertex
-    colors; the optional ``uv`` column is emitted when *any* mesh carries
-    texcoords (meshes lacking them get all-zero uvs so every column stays equal
-    length).
+    optional ``color`` column is emitted when *any* mesh carries vertex colors
+    (meshes lacking them get all-white vertices so every column stays
+    equal-length); the optional ``uv`` column is emitted when *any* mesh carries
+    texcoords (meshes lacking them get all-zero uvs).
     """
     f32 = pa.float32()
     vec3 = pa.list_(f32, 3)  # FixedSizeList<Float32>[3]
@@ -160,8 +164,15 @@ def mesh_batch(meshes):
 
     columns = [pa.array([m[0] for m in meshes], type=geom_type)]
     fields = [("position", geom_type)]
-    if all(m[1] for m in meshes):
-        columns.append(pa.array([m[1] for m in meshes], type=geom_type))
+    if any(m[1] for m in meshes):
+        # A mesh without vertex colors gets one white color per position so the
+        # `color` column stays parallel to `position` (equal-length Arrow
+        # columns) — letting a colored mesh (e.g. a wireframe overlay quad) share
+        # a table with an uncolored/textured one, which ignores its (white) color.
+        color_rows = [
+            m[1] if m[1] else [[1.0, 1.0, 1.0]] * len(m[0]) for m in meshes
+        ]
+        columns.append(pa.array(color_rows, type=geom_type))
         fields.append(("color", geom_type))
     if any(m[2] for m in meshes):
         # A mesh without texcoords gets one all-zero uv per position so the `uv`
