@@ -144,7 +144,11 @@ Resolve-Tool 'duckdb' @(
     (Join-Path $scoopShims 'duckdb.exe')
 ) | Out-Null
 
+# Honor uv's own UV_INSTALL_DIR (its official custom install-dir env var) first,
+# so a uv installed off the default paths (e.g. on another drive) is still found.
+$uvInstallDir = $env:UV_INSTALL_DIR
 $uvOk = Resolve-Tool 'uv' @(
+    ($(if ($uvInstallDir) { Join-Path $uvInstallDir 'uv.exe' })),
     (Join-Path $localBin 'uv.exe'),
     (Join-Path $cargoBin 'uv.exe'),
     (Join-Path $wingetLinks 'uv.exe'),
