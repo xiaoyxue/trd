@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use arrow::array::{Array, FixedSizeListArray, Float32Array, ListArray, RecordBatch, UInt32Array};
+use arrow::array::{
+    Array, FixedSizeListArray, Float32Array, ListArray, RecordBatch, StringArray, UInt32Array,
+};
 use arrow::buffer::Buffer;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::error::ArrowError;
@@ -10,17 +12,19 @@ use crate::render::Draw;
 use crate::texture::{ImageTexture, TextureError, TEXTURE_COLUMN};
 use crate::{CameraFormError, FrameParams, Mesh, MeshError};
 
-pub const PROTOCOL_VERSION: &str = "0.0.4";
+pub const PROTOCOL_VERSION: &str = "0.0.5";
 pub const PROTOCOL_VERSION_KEY: &str = "trd.protocol.version";
 
-/// Input schema versions this build accepts. `0.0.4` adds an optional **texture**
-/// Arrow stream (`[mesh][texture][params]` framing) plus a per-vertex `uv` mesh
-/// column; `0.0.3` adds an optional leading **mesh** Arrow stream (concatenated
-/// before the params stream); `0.0.2` adds the optional `model`, `k`, and `pose`
-/// matrix columns; `0.0.1` streams (2D affine only) still decode. The params
-/// stream itself is unchanged since `0.0.2`; the version bumps mark the
-/// multi-stream framing and additive columns.
-pub const SUPPORTED_INPUT_VERSIONS: &[&str] = &["0.0.1", "0.0.2", "0.0.3", "0.0.4"];
+/// Input schema versions this build accepts. `0.0.5` adds an optional per-frame
+/// background **frame reference** column (`frame_path` native / `frame_url`
+/// browser, `Utf8`) naming an image composited beneath the scene as a frame
+/// plane; `0.0.4` adds an optional **texture** Arrow stream
+/// (`[mesh][texture][params]` framing) plus a per-vertex `uv` mesh column;
+/// `0.0.3` adds an optional leading **mesh** Arrow stream (concatenated before
+/// the params stream); `0.0.2` adds the optional `model`, `k`, and `pose` matrix
+/// columns; `0.0.1` streams (2D affine only) still decode. All version bumps are
+/// additive columns/streams, so older decoders ignore the newer columns.
+pub const SUPPORTED_INPUT_VERSIONS: &[&str] = &["0.0.1", "0.0.2", "0.0.3", "0.0.4", "0.0.5"];
 
 /// Schema-metadata key declaring the stream's intended playback rate in frames
 /// per second. Optional and version-independent: it defines *animation speed* so
@@ -47,10 +51,14 @@ pub type FrameBatch = Vec<DecodedFrame>;
 /// draw list (`draw_mesh`/`draw_model`). `draws` is empty for legacy
 /// single-object streams, in which case the renderer draws one default instance
 /// of mesh `0` placed by the frame's own [`FrameParams::model_matrix`].
+/// `frame_ref` is the optional `0.0.5` background frame reference
+/// (`frame_path`/`frame_url`) the browser shell resolves + composites beneath the
+/// scene; `None` when the frame has no background.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecodedFrame {
     pub params: FrameParams,
     pub draws: Vec<Draw>,
+    pub frame_ref: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -371,11 +379,13 @@ fn check_version(schema: &Schema) -> Result<(), ProtocolError> {
 }
 
 /// Decodes one params batch into [`DecodedFrame`]s: each row's [`FrameParams`]
-/// zipped with its optional per-frame instanced draw list. Rows without draw
-/// columns get an empty `draws` (the renderer draws one default instance).
+/// zipped with its optional per-frame instanced draw list and optional background
+/// frame reference. Rows without draw columns get an empty `draws` (the renderer
+/// draws one default instance); rows without a frame column get `frame_ref: None`.
 fn decode_frame_batch(batch: &RecordBatch) -> Result<FrameBatch, ProtocolError> {
     let params = decode_batch(batch)?;
     let draws = decode_draws(batch)?;
+    let frame_refs = decode_frame_refs(batch)?;
     Ok(params
         .into_iter()
         .enumerate()
@@ -385,8 +395,47 @@ fn decode_frame_batch(batch: &RecordBatch) -> Result<FrameBatch, ProtocolError> 
                 .as_ref()
                 .map(|rows| rows[row].clone())
                 .unwrap_or_default(),
+            frame_ref: frame_refs.as_ref().and_then(|rows| rows[row].clone()),
         })
         .collect())
+}
+
+/// Decodes the optional per-frame **background frame reference** column (`0.0.5`)
+/// into one `Option<String>` per row, preferring `frame_url` (browser) then
+/// `frame_path`. Returns `None` when neither column is present; per-row nulls or
+/// empty strings decode to `None`. Mirrors the native `stream::decode_frame_refs`
+/// (which prefers `frame_path`). The core performs no I/O — it only surfaces the
+/// reference for the shell to resolve.
+fn decode_frame_refs(batch: &RecordBatch) -> Result<Option<Vec<Option<String>>>, ProtocolError> {
+    let (name, col) = match batch
+        .column_by_name("frame_url")
+        .map(|c| ("frame_url", c))
+        .or_else(|| {
+            batch
+                .column_by_name("frame_path")
+                .map(|c| ("frame_path", c))
+        }) {
+        Some(pair) => pair,
+        None => return Ok(None),
+    };
+    let strings =
+        col.as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| ProtocolError::ColumnType {
+                column: name,
+                expected: "Utf8",
+                actual: col.data_type().clone(),
+            })?;
+    let refs = (0..batch.num_rows())
+        .map(|row| {
+            if strings.is_null(row) || strings.value(row).is_empty() {
+                None
+            } else {
+                Some(strings.value(row).to_owned())
+            }
+        })
+        .collect();
+    Ok(Some(refs))
 }
 
 /// Decodes the optional per-frame **instanced draw list** columns `draw_mesh`
@@ -900,6 +949,7 @@ mod tests {
             .map(|params| DecodedFrame {
                 params,
                 draws: Vec::new(),
+                frame_ref: None,
             })
             .collect()
     }
@@ -1216,15 +1266,15 @@ mod tests {
 
     #[test]
     fn accepts_supported_versions_and_rejects_unknown() {
-        for version in ["0.0.1", "0.0.2", "0.0.3", "0.0.4"] {
+        for version in ["0.0.1", "0.0.2", "0.0.3", "0.0.4", "0.0.5"] {
             let mut session = InputSession::new();
             session.push(&version_stream(version)).unwrap();
             session.finish().unwrap();
         }
         let mut session = InputSession::new();
         assert!(matches!(
-            session.push(&version_stream("0.0.5")),
-            Err(ProtocolError::UnsupportedVersion(v)) if v == "0.0.5"
+            session.push(&version_stream("0.0.6")),
+            Err(ProtocolError::UnsupportedVersion(v)) if v == "0.0.6"
         ));
     }
 

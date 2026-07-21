@@ -46,7 +46,7 @@ Platform-agnostic wgpu logic, shared verbatim by every target:
 - **`protocol.rs`** — the cross-platform (native + wasm) incremental Arrow IPC
   decoder. `InputSession` feeds arbitrary byte chunks through `arrow`'s
   `StreamDecoder`, validates the protocol schema once (accepts
-  `0.0.1`/`0.0.2`/`0.0.3`/`0.0.4`), and yields one `FrameBatch` (`Vec<FrameParams>`) per
+  `0.0.1`/`0.0.2`/`0.0.3`/`0.0.4`/`0.0.5`), and yields one `FrameBatch` (`Vec<FrameParams>`) per
   record batch — the
   browser's input path.
 - **`output.rs`** — the cross-platform Arrow IPC *output* serialization.
@@ -111,6 +111,7 @@ columns as an Arrow IPC stream can drive the renderer. The current version is
 | | `fovy`, `aspect`, `znear`, `zfar` *(opt, 0.0.3)* | `f32` (**CG** perspective) |
 | | `draw_mesh` *(opt, 0.0.3)* | `List<u32>` (per-instance mesh index) |
 | | `draw_model` *(opt, 0.0.3)* | `List<FixedSizeList<f32>[16]>` (per-instance 4×4 model) |
+| | `frame_path` / `frame_url` *(opt, 0.0.5)* | `Utf8` (per-frame background image path / URL) |
 | **Input** (mesh, *opt, 0.0.3*) | `position`, `color` | `List<FixedSizeList<f32>[3]>` |
 | | `uv` *(opt, 0.0.4)* | `List<FixedSizeList<f32>[2]>` (per-vertex texture coords) |
 | | `index` | `List<u32>` |
@@ -153,6 +154,16 @@ texture stream samples a default 1×1 white. Encode an image with
 -Texture`) wires it end-to-end, and the browser demo is at `?textured`.
 
 A params-only stream (no leading mesh) still renders the built-in hello-triangle.
+
+**0.0.5** adds an optional per-frame **background frame**: a `frame_path` (native)
+or `frame_url` (browser) `Utf8` params column naming an image composited **beneath**
+the scene by a new `FramePlane` drawable (a fullscreen quad sampling a reused
+`Rgba8UnormSrgb` texture, depth-write off so the mesh scene + gizmos draw on top;
+`Stretch`/`Cover` fit). The core decodes the reference only; the shell does the
+image I/O — `trd --frames-base <dir>` / `trd-app --frames-base <dir>` load the
+PNG/JPEG (relative to `<dir>`). Produce the stills + manifest with
+`scripts/extract_frames.py`. Without `--frames-base`, `frame_path` is ignored and
+the scene renders over the black clear.
 
 **Full, versioned specification: [`docs/protocol/`](docs/protocol/)** (per-version
 schema reference + [changelog](docs/protocol/CHANGELOG.md)).
@@ -286,6 +297,7 @@ map straight onto `trd-cli`:
 | `--wireframe` | Draw mesh **edges** as a line list (`trd --wireframe`) instead of filled triangles (protocol #38). Reveals topology; on a dense asset (e.g. the ~70k-tri bunny) the edges read as a fine mesh. |
 | `--aabb` | Overlay each drawn mesh instance's **axis-aligned bounding box** as a green (`[0, 1, 0]`) wireframe box (`trd --aabb`, #42). The box uses the *same* per-instance model as the mesh, so it tracks the mesh through the preview + per-frame transforms. Combine freely with `--wireframe`. |
 | `--axes` | Overlay a **coordinate-axes gizmo** (X=red, Y=green, Z=blue lines) at the world origin (`trd --axes`, #42), under the camera `P·V` with an identity model, marking the world frame the camera looks at. |
+| `--frames-base <dir>` | Composite each frame's **background still** beneath the scene via a `FramePlane` (`trd --frames-base <dir>`, #63). A frame's 0.0.5 `frame_path` column (relative to `<dir>`) is loaded + decoded at the boundary into a reused GPU texture; the mesh + gizmos draw on top. Without it, `frame_path` is ignored (no background). |
 
 ```sh
 # Single bunny turntable, filled, with its bounding box:
@@ -332,6 +344,28 @@ examples/render.sh --cli --wireframe --mesh assets/meshes/bunny.obj \
 The CV `K` is in **pixel** units, so the CV stream is authored for a specific
 square resolution (`--width`/`--height`, default 1024²) and must be rendered at
 that resolution to match the CG stream.
+
+#### Background frame plane (#63)
+
+[`examples/bunny_frameplane.py`](examples/bunny_frameplane.py) authors the
+end-to-end **frame-compositing** demo: a folder of animated background stills plus
+a turntable JSONL whose per-frame `frame_path` column (protocol **0.0.5**) names
+each still. `trd --frames-base <dir>` loads each image at the boundary and
+composites it *beneath* the spinning bunny via a `FramePlane`; the mesh + axes/AABB
+gizmos draw on top. The backgrounds sweep a bright bar left→right over a
+hue-shifting gradient, so the GIF visibly proves the plane texture updates every
+frame (one reused GPU texture). The stills are written with a stdlib-only PNG
+encoder (no Pillow), and land under `output/` (gitignored).
+
+```sh
+python examples/bunny_frameplane.py --out-dir output/fp_demo   # 24 stills + turntable_fp.jsonl
+
+# Composite the stills under a wireframe turntable bunny + axes + AABB:
+examples/render.sh --cli --wireframe --axes --aabb \
+  --mesh assets/meshes/bunny.obj \
+  --frames-base output/fp_demo \
+  output/fp_demo/turntable_fp.jsonl output/fp_demo.gif 512 512 24
+```
 
 #### The render pipeline
 

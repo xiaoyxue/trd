@@ -724,6 +724,81 @@ fn create_textured_pipeline(
     })
 }
 
+/// The group-0 bind-group layout for the background frame-plane pipeline (#63):
+/// a filterable `texture_2d<f32>` (binding 0) + a filtering `sampler` (binding 1),
+/// both fragment-visible, plus a small **fit** uniform (binding 2, vertex-visible)
+/// carrying the centered UV scale. Kept separate from the mesh albedo texture
+/// (#62 §D1): same bind pattern, different update rate.
+pub(crate) fn create_frame_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("trd frame plane bind group layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    })
+}
+
+/// Builds the fullscreen **background frame-plane** pipeline (#63):
+/// `frame_plane.wgsl` with **no vertex buffers** (a shader-generated fullscreen
+/// triangle), drawn first with depth writes disabled + compare `Always`
+/// ([`overlay_depth_stencil`]) so the mesh scene composites on top.
+fn create_frame_plane_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    layout: &wgpu::PipelineLayout,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::include_wgsl!("frame_plane.wgsl"));
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("trd frame plane pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            compilation_options: Default::default(),
+            targets: &[Some(format.into())],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            ..Default::default()
+        },
+        depth_stencil: Some(overlay_depth_stencil()),
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
 /// Uploads `image` to a fresh `Rgba8UnormSrgb` `wgpu::Texture` and builds the
 /// group-1 bind group (texture view + a trilinear, clamp-to-edge sampler) over
 /// `layout`. sRGB storage so texels linearize on sample (#20). A full mipmap
@@ -1075,6 +1150,50 @@ pub enum RenderMode {
     Textured,
 }
 
+/// How a [`DrawableObject::FramePlane`] maps its background image onto the
+/// viewport (#63). Both modes fill the whole viewport (no letterbox bars); they
+/// differ only in how a mismatched image/viewport aspect is handled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FrameFit {
+    /// Stretch the image to exactly fill the viewport, ignoring aspect ratio.
+    /// The natural choice when the frame image already matches the render aspect
+    /// (e.g. a 16:9 video rendered at 16:9).
+    #[default]
+    Stretch,
+    /// Scale the image to cover the viewport preserving aspect, center-cropping
+    /// the overflowing axis (no bars, some content cropped).
+    Cover,
+}
+
+/// The centered UV scale that realizes `fit` for an image of `tex_w`×`tex_h`
+/// displayed on a `view_w`×`view_h` viewport. Applied in `frame_plane.wgsl` as
+/// `uv' = (uv − 0.5)·scale + 0.5`, so `1.0` fills and `< 1.0` crops (zooms in).
+/// [`FrameFit::Stretch`] is always `(1, 1)`; [`FrameFit::Cover`] shrinks the UV
+/// range on the longer axis so the shorter one fills.
+pub(crate) fn frame_fit_uv_scale(
+    fit: FrameFit,
+    tex_w: u32,
+    tex_h: u32,
+    view_w: u32,
+    view_h: u32,
+) -> [f32; 2] {
+    match fit {
+        FrameFit::Stretch => [1.0, 1.0],
+        FrameFit::Cover => {
+            let tex_aspect = tex_w.max(1) as f32 / tex_h.max(1) as f32;
+            let view_aspect = view_w.max(1) as f32 / view_h.max(1) as f32;
+            if tex_aspect > view_aspect {
+                // Image wider than the viewport: crop its width (sample a
+                // narrower horizontal UV range).
+                [view_aspect / tex_aspect, 1.0]
+            } else {
+                // Image taller than the viewport: crop its height.
+                [1.0, tex_aspect / view_aspect]
+            }
+        }
+    }
+}
+
 /// A single instance placement decoded from a frame's protocol draw list
 /// (`draw_mesh` / `draw_model`): which mesh to draw (index into the leading mesh
 /// table) and the per-instance model matrix (column-major), applied beneath that
@@ -1116,6 +1235,14 @@ pub enum DrawableObject {
     /// along +X/+Y/+Z, colored red/green/blue. Placed by `model` (identity marks
     /// the world origin); not tied to any mesh, so no base model is applied.
     CoordinateAxes { model: [f32; 16] },
+    /// A screen-aligned **background frame plane** (#63): a fullscreen quad that
+    /// samples the renderer's bound background frame texture (set via
+    /// [`MeshRenderer::update_frame_texture_rgba`]), composited **under** the
+    /// mesh scene. `fit` selects how the image maps to the viewport. Carries no
+    /// model — it is authored directly in clip space and ignores the camera.
+    /// Drawn only when a background texture is bound (else skipped), so an absent
+    /// `frame_path`/`frame_url` renders with no background (back-compat).
+    FramePlane { fit: FrameFit },
 }
 
 /// A frame's ordered list of [`DrawableObject`]s the renderer walks and encodes
@@ -1126,18 +1253,33 @@ pub enum DrawableObject {
 pub type Scene = Vec<DrawableObject>;
 
 /// Builds a per-frame [`Scene`] from a wire `draws` list plus the render `mode`
-/// and overlay flags. Each [`Draw`] becomes one [`DrawableObject::Mesh`] in
-/// `mode`; with `show_aabb`, each also emits a tracking
+/// and overlay flags. When `frame` is `Some`, a background
+/// [`DrawableObject::FramePlane`] is pushed **first** so the mesh scene
+/// composites on top of it. Each [`Draw`] becomes one [`DrawableObject::Mesh`]
+/// in `mode`; with `show_aabb`, each also emits a tracking
 /// [`DrawableObject::AabbBox`]; with `show_axes`, one origin
-/// [`DrawableObject::CoordinateAxes`] is appended. The order (all meshes, then
-/// all boxes, then axes) matches the renderer's draw buckets so output is
-/// pixel-identical to the pre-scene, flag-driven path.
+/// [`DrawableObject::CoordinateAxes`] is appended. The order (frame plane, then
+/// all meshes, then all boxes, then axes) matches the renderer's draw buckets so
+/// output is pixel-identical to the pre-scene, flag-driven path.
 ///
 /// Shared by the native ([`crate::run_stream`]) and wasm front-ends so neither
 /// branches per primitive type: both author the same ordered `Scene` and hand
 /// it to [`MeshRenderer::encode`].
-pub fn build_scene(draws: &[Draw], mode: RenderMode, show_aabb: bool, show_axes: bool) -> Scene {
-    let mut scene = Vec::with_capacity(draws.len() * (1 + usize::from(show_aabb)) + 1);
+pub fn build_scene(
+    draws: &[Draw],
+    mode: RenderMode,
+    show_aabb: bool,
+    show_axes: bool,
+    frame: Option<FrameFit>,
+) -> Scene {
+    let mut scene = Vec::with_capacity(
+        draws.len() * (1 + usize::from(show_aabb))
+            + usize::from(show_axes)
+            + usize::from(frame.is_some()),
+    );
+    if let Some(fit) = frame {
+        scene.push(DrawableObject::FramePlane { fit });
+    }
     for draw in draws {
         scene.push(DrawableObject::Mesh {
             mesh_id: draw.mesh_id,
@@ -1304,6 +1446,23 @@ fn push_command(
 /// [`Scene`] — an ordered list of [`DrawableObject`]s — grouping instances by
 /// geometry so each buffer is drawn once over a contiguous instance range. The
 /// renderer holds no mode/overlay state: what to draw is entirely the scene.
+///
+/// The **background frame texture** (#63) is a second, separately-updated texture
+/// binding (`frame_texture`): the mesh albedo above arrives inside the Arrow
+/// scene channel and skins the meshes, while this one is uploaded at the boundary
+/// from `frame_path`/`frame_url` and skins a [`DrawableObject::FramePlane`]. It is
+/// reused across frames (grown only on a resolution change) so per-frame updates
+/// never reallocate.
+struct FrameTextureGpu {
+    texture: wgpu::Texture,
+    bind_group: wgpu::BindGroup,
+    /// `vec4` fit uniform (`uv_scale.xy` + padding), rewritten each frame from the
+    /// [`FrameFit`] + texture/viewport aspect.
+    fit_uniform: wgpu::Buffer,
+    width: u32,
+    height: u32,
+}
+
 pub struct MeshRenderer {
     pipeline: wgpu::RenderPipeline,
     wireframe_pipeline: wgpu::RenderPipeline,
@@ -1335,6 +1494,17 @@ pub struct MeshRenderer {
     /// caller threading a `&Device` through every call (`wgpu::Device` is a
     /// cheap `Arc` handle).
     device: wgpu::Device,
+    /// The background frame-plane pipeline (#63): a fullscreen textured quad drawn
+    /// first (depth-write off) beneath the mesh scene.
+    frame_plane_pipeline: wgpu::RenderPipeline,
+    /// Group-0 layout for the background frame texture + sampler + fit uniform.
+    frame_bind_group_layout: wgpu::BindGroupLayout,
+    /// Linear, clamp-to-edge sampler shared by every background frame texture.
+    frame_sampler: wgpu::Sampler,
+    /// The reused background frame texture + its bind group; `None` until the
+    /// first [`update_frame_texture_rgba`](Self::update_frame_texture_rgba). A
+    /// [`DrawableObject::FramePlane`] is skipped while this is `None`.
+    frame_texture: Option<FrameTextureGpu>,
 }
 
 impl MeshRenderer {
@@ -1431,6 +1601,28 @@ impl MeshRenderer {
                 immediate_size: 0,
             });
         let textured_pipeline = create_textured_pipeline(device, format, &textured_pipeline_layout);
+        // Background frame-plane pipeline (#63): group 0 = the frame texture +
+        // sampler + fit uniform, no vertex buffers. Its own bind-group layout,
+        // separate from the mesh albedo texture (different update rate).
+        let frame_bind_group_layout = create_frame_bind_group_layout(device);
+        let frame_plane_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("trd frame plane pipeline layout"),
+                bind_group_layouts: &[Some(&frame_bind_group_layout)],
+                immediate_size: 0,
+            });
+        let frame_plane_pipeline =
+            create_frame_plane_pipeline(device, format, &frame_plane_pipeline_layout);
+        let frame_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("trd frame plane sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
         // The identity params ignore the viewport (no intrinsics); each `encode`
         // supplies the real target dimensions.
         let (uniform, bind_group) = create_view_proj_binding(
@@ -1478,6 +1670,10 @@ impl MeshRenderer {
             instance_capacity,
             depth: None,
             device: device.clone(),
+            frame_plane_pipeline,
+            frame_bind_group_layout,
+            frame_sampler,
+            frame_texture: None,
         }
     }
 
@@ -1495,6 +1691,118 @@ impl MeshRenderer {
     pub fn set_texture(&mut self, texture: &dyn Texture) {
         self.texture_image = texture.to_image();
         self.texture_bind_group = None;
+    }
+
+    /// Uploads `rgba` (tightly-packed, row-major `height`×`width`×4) as the
+    /// **background frame texture** (#63) sampled by a
+    /// [`DrawableObject::FramePlane`]. The GPU texture is **reused** across
+    /// frames — it is (re)created only when the dimensions change, so streaming a
+    /// fixed-resolution video allocates once and every later frame is a plain
+    /// `queue.write_texture` into the same texture (no per-frame realloc). The
+    /// texture is `Rgba8UnormSrgb` (linearized on sample) and carries **no
+    /// mipmaps** (a near-fullscreen background samples ~1:1, and per-frame mip
+    /// regeneration would dominate the update cost).
+    ///
+    /// Panics if `rgba.len() != width * height * 4` or either dimension is zero.
+    pub fn update_frame_texture_rgba(
+        &mut self,
+        queue: &wgpu::Queue,
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+    ) {
+        assert!(
+            width > 0 && height > 0,
+            "frame texture dimensions must be non-zero"
+        );
+        assert_eq!(
+            rgba.len(),
+            width as usize * height as usize * 4,
+            "frame texture rgba length must be width*height*4"
+        );
+
+        let needs_new = self
+            .frame_texture
+            .as_ref()
+            .is_none_or(|ft| ft.width != width || ft.height != height);
+        if needs_new {
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("trd frame texture"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let fit_uniform = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("trd frame fit uniform"),
+                size: 16,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("trd frame plane bind group"),
+                layout: &self.frame_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.frame_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: fit_uniform.as_entire_binding(),
+                    },
+                ],
+            });
+            self.frame_texture = Some(FrameTextureGpu {
+                texture,
+                bind_group,
+                fit_uniform,
+                width,
+                height,
+            });
+        }
+
+        let ft = self
+            .frame_texture
+            .as_ref()
+            .expect("frame texture set above");
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &ft.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
+    /// Whether a background frame texture is currently bound (so a
+    /// [`DrawableObject::FramePlane`] would render).
+    pub fn has_frame_texture(&self) -> bool {
+        self.frame_texture.is_some()
     }
 
     /// Encodes one frame's [`Scene`] — an ordered list of [`DrawableObject`]s —
@@ -1541,6 +1849,9 @@ impl MeshRenderer {
         let mut wireframe: Vec<Vec<InstanceRaw>> = vec![Vec::new(); mesh_count];
         let mut aabb: Vec<Vec<InstanceRaw>> = vec![Vec::new(); mesh_count];
         let mut axes: Vec<InstanceRaw> = Vec::new();
+        // The background frame plane is a singleton overlay (there is one bound
+        // frame texture); the last FramePlane in the scene wins its fit.
+        let mut frame_plane: Option<FrameFit> = None;
 
         for object in scene {
             match *object {
@@ -1573,6 +1884,9 @@ impl MeshRenderer {
                 }
                 DrawableObject::CoordinateAxes { model } => {
                     axes.push(InstanceRaw { model });
+                }
+                DrawableObject::FramePlane { fit } => {
+                    frame_plane = Some(fit);
                 }
             }
         }
@@ -1637,6 +1951,17 @@ impl MeshRenderer {
         }
         let depth_view = &self.depth.as_ref().unwrap().view;
 
+        // Background frame plane (#63): compute + upload its centered fit scale for
+        // the current viewport before the pass, so the fullscreen quad samples the
+        // reused frame texture with the right crop/fill. Skipped when no FramePlane
+        // is in the scene or no frame texture has been uploaded yet.
+        if let (Some(fit), Some(ft)) = (frame_plane, self.frame_texture.as_ref()) {
+            let scale =
+                frame_fit_uv_scale(fit, ft.width, ft.height, viewport.width, viewport.height);
+            let fit_data: [f32; 4] = [scale[0], scale[1], 0.0, 0.0];
+            queue.write_buffer(&ft.fit_uniform, 0, bytemuck::cast_slice(&fit_data));
+        }
+
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("trd mesh pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1660,6 +1985,17 @@ impl MeshRenderer {
             occlusion_query_set: None,
             multiview_mask: None,
         });
+        // Draw the background frame plane first (#63): its own pipeline + group-0
+        // bind (texture/sampler/fit), depth-write off, so it fills color under the
+        // cleared depth and the mesh scene z-composites on top. Only when a frame
+        // texture is bound.
+        if frame_plane.is_some() {
+            if let Some(ft) = self.frame_texture.as_ref() {
+                pass.set_pipeline(&self.frame_plane_pipeline);
+                pass.set_bind_group(0, &ft.bind_group, &[]);
+                pass.draw(0..3, 0..1);
+            }
+        }
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
         for command in &commands {
@@ -3126,6 +3462,216 @@ f 1 2 6 5
             assert!(
                 near_lit > far_lit,
                 "dolly-in ({near_d}, {near_lit}px) must cover more than dolly-out ({far_d}, {far_lit}px)"
+            );
+        }
+    }
+
+    #[test]
+    fn build_scene_prepends_frame_plane_first() {
+        let draws = [Draw {
+            mesh_id: 0,
+            model: Matrix4::IDENTITY.to_cols_array(),
+        }];
+
+        // No frame ⇒ no FramePlane in the scene (byte-identical to the pre-0.0.5
+        // scene).
+        let scene = build_scene(&draws, RenderMode::Filled, true, true, None);
+        assert!(
+            !scene
+                .iter()
+                .any(|o| matches!(o, DrawableObject::FramePlane { .. })),
+            "no frame ⇒ no FramePlane, got {scene:?}"
+        );
+
+        // Some(fit) ⇒ exactly one FramePlane, pushed FIRST (before every mesh /
+        // aabb / axes), so it composites under the scene.
+        let scene = build_scene(
+            &draws,
+            RenderMode::Filled,
+            true,
+            true,
+            Some(FrameFit::Cover),
+        );
+        assert!(
+            matches!(
+                scene[0],
+                DrawableObject::FramePlane {
+                    fit: FrameFit::Cover
+                }
+            ),
+            "FramePlane must be first, got {:?}",
+            scene[0]
+        );
+        assert_eq!(
+            scene
+                .iter()
+                .filter(|o| matches!(o, DrawableObject::FramePlane { .. }))
+                .count(),
+            1,
+            "exactly one FramePlane"
+        );
+        // The remainder keeps the mesh → aabb → axes order.
+        assert!(matches!(scene[1], DrawableObject::Mesh { .. }));
+        assert!(matches!(scene[2], DrawableObject::AabbBox { .. }));
+        assert!(matches!(scene[3], DrawableObject::CoordinateAxes { .. }));
+    }
+
+    #[test]
+    fn frame_fit_uv_scale_stretch_and_cover() {
+        // Stretch always fills exactly (no crop), regardless of aspect mismatch.
+        assert_eq!(
+            frame_fit_uv_scale(FrameFit::Stretch, 200, 100, 100, 100),
+            [1.0, 1.0]
+        );
+
+        // Cover a 2:1 image on a 1:1 viewport: crop width (sample a narrower
+        // horizontal UV range), full height.
+        let s = frame_fit_uv_scale(FrameFit::Cover, 200, 100, 100, 100);
+        assert!(
+            (s[0] - 0.5).abs() < 1e-6 && (s[1] - 1.0).abs() < 1e-6,
+            "wide image over square viewport crops width, got {s:?}"
+        );
+
+        // Cover a 1:2 image on a 1:1 viewport: crop height, full width.
+        let s = frame_fit_uv_scale(FrameFit::Cover, 100, 200, 100, 100);
+        assert!(
+            (s[0] - 1.0).abs() < 1e-6 && (s[1] - 0.5).abs() < 1e-6,
+            "tall image over square viewport crops height, got {s:?}"
+        );
+
+        // Matching aspect ⇒ no crop either way.
+        assert_eq!(
+            frame_fit_uv_scale(FrameFit::Cover, 160, 90, 320, 180),
+            [1.0, 1.0]
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn frame_plane_composites_background_under_scene() {
+        // A FramePlane fills the background from a reused 2×2 texture (upload +
+        // fullscreen sample + top-left `v=0` orientation), and a solid mesh drawn
+        // in the same scene z-composites ON TOP of it (depth-write-off plane).
+        let (device, queue) = pollster::block_on(test_device());
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let (width, height) = (64, 64);
+
+        // A green fullscreen quad at z=0.5 (in front of the plane's cleared depth
+        // 1.0), used to prove the mesh occludes the background.
+        let quad = Mesh {
+            vertices: vec![
+                Vertex {
+                    position: [-1.0, 1.0, 0.5],
+                    color: [0.0, 1.0, 0.0],
+                    uv: [0.0, 0.0],
+                },
+                Vertex {
+                    position: [1.0, 1.0, 0.5],
+                    color: [0.0, 1.0, 0.0],
+                    uv: [1.0, 0.0],
+                },
+                Vertex {
+                    position: [-1.0, -1.0, 0.5],
+                    color: [0.0, 1.0, 0.0],
+                    uv: [0.0, 1.0],
+                },
+                Vertex {
+                    position: [1.0, -1.0, 0.5],
+                    color: [0.0, 1.0, 0.0],
+                    uv: [1.0, 1.0],
+                },
+            ],
+            indices: vec![0, 2, 3, 0, 3, 1],
+        };
+        let mut mesh = MeshRenderer::new(&device, format, &quad);
+
+        // 2×2 background, row-major top-left origin: white, red / green, blue.
+        assert!(!mesh.has_frame_texture());
+        mesh.update_frame_texture_rgba(
+            &queue,
+            &[
+                255, 255, 255, 255, 255, 0, 0, 255, // white, red
+                0, 255, 0, 255, 0, 0, 255, 255, // green, blue
+            ],
+            2,
+            2,
+        );
+        assert!(mesh.has_frame_texture());
+
+        // (a) Plane only: each screen quadrant shows the matching background texel.
+        let plane_only = [DrawableObject::FramePlane {
+            fit: FrameFit::Stretch,
+        }];
+        let bg = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
+            mesh.encode(
+                q,
+                e,
+                v,
+                FrameParams::IDENTITY,
+                &plane_only,
+                Viewport { width, height },
+            );
+        });
+        let at = |px: &[u8], x: u32, y: u32| -> [u8; 3] {
+            let i = ((y * width + x) * 4) as usize;
+            [px[i], px[i + 1], px[i + 2]]
+        };
+        let dominant =
+            |c: [u8; 3], hi: [bool; 3]| (0..3).all(|k| if hi[k] { c[k] > 200 } else { c[k] < 70 });
+        assert!(
+            dominant(at(&bg, width / 4, height / 4), [true, true, true]),
+            "background top-left must be white, got {:?}",
+            at(&bg, width / 4, height / 4)
+        );
+        assert!(
+            dominant(at(&bg, 3 * width / 4, height / 4), [true, false, false]),
+            "background top-right must be red, got {:?}",
+            at(&bg, 3 * width / 4, height / 4)
+        );
+        assert!(
+            dominant(at(&bg, width / 4, 3 * height / 4), [false, true, false]),
+            "background bottom-left must be green, got {:?}",
+            at(&bg, width / 4, 3 * height / 4)
+        );
+        assert!(
+            dominant(at(&bg, 3 * width / 4, 3 * height / 4), [false, false, true]),
+            "background bottom-right must be blue, got {:?}",
+            at(&bg, 3 * width / 4, 3 * height / 4)
+        );
+
+        // (b) Plane + solid green mesh (built first in the scene, drawn on top):
+        // the whole frame is green, proving the mesh composites over the plane.
+        let composited = [
+            DrawableObject::FramePlane {
+                fit: FrameFit::Stretch,
+            },
+            DrawableObject::Mesh {
+                mesh_id: 0,
+                model: Matrix4::IDENTITY.to_cols_array(),
+                mode: RenderMode::Filled,
+            },
+        ];
+        let over = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
+            mesh.encode(
+                q,
+                e,
+                v,
+                FrameParams::IDENTITY,
+                &composited,
+                Viewport { width, height },
+            );
+        });
+        for &(x, y) in &[
+            (width / 4, height / 4),
+            (3 * width / 4, height / 4),
+            (width / 4, 3 * height / 4),
+            (3 * width / 4, 3 * height / 4),
+        ] {
+            assert!(
+                dominant(at(&over, x, y), [false, true, false]),
+                "mesh must occlude the background at ({x},{y}), got {:?}",
+                at(&over, x, y)
             );
         }
     }

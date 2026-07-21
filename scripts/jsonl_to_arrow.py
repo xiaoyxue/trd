@@ -8,8 +8,15 @@ carry either the legacy 0.0.1 params or the 0.0.2 matrix directly:
   0.0.1:  {"center": [x, y], "size": [sx, sy], "theta": t}
   0.0.2:  {"model": [16 floats]}   # column-major 4x4 triangle transform
 
-`--version` selects the wire protocol (default: the latest, `0.0.3`):
+`--version` selects the wire protocol (default: the latest, `0.0.5`):
 
+  * `0.0.5` emits everything `0.0.3` does **plus** an optional per-frame
+    **background frame reference** column: `frame_path` (native filesystem path)
+    and/or `frame_url` (browser URL). A row names the still image the shell loads
+    and composites *beneath* the scene via a `FramePlane`; a row without one
+    renders with no background. Emitted when *any* row provides it.
+  * `0.0.4` behaves like `0.0.3` here (the 0.0.4 mesh-albedo texture rides on the
+    separate scene channel, not this params batch).
   * `0.0.3` emits everything `0.0.2` does **plus** optional per-frame camera and
     multi-mesh draw-list columns (see below).
   * `0.0.2` emits `center`/`size`/`theta` **plus** an explicit `model` column
@@ -77,9 +84,9 @@ def main() -> None:
     ap.add_argument("-o", "--output", default="-", help="output path ('-' = stdout)")
     ap.add_argument(
         "--version",
-        choices=["0.0.1", "0.0.2", "0.0.3"],
-        default="0.0.3",
-        help="wire protocol version to emit (default: latest, 0.0.3)",
+        choices=["0.0.1", "0.0.2", "0.0.3", "0.0.4", "0.0.5"],
+        default="0.0.5",
+        help="wire protocol version to emit (default: latest, 0.0.5)",
     )
     ap.add_argument(
         "--fps",
@@ -111,6 +118,8 @@ def main() -> None:
     if args.fps and args.fps > 0:
         metadata[FRAME_RATE_KEY] = str(args.fps).encode()
 
+    ver = tuple(int(x) for x in args.version.split("."))
+
     columns = [
         pa.array([center(r) for r in rows], type=fsl2),
         pa.array([size(r) for r in rows], type=fsl2),
@@ -118,7 +127,7 @@ def main() -> None:
     ]
     fields = [("center", fsl2), ("size", fsl2), ("theta", f32)]
 
-    if args.version in ("0.0.2", "0.0.3"):
+    if ver >= (0, 0, 2):
         # A `model` row is the explicit matrix if provided, else synthesized.
         model_rows = [
             r["model"] if "model" in r else model_matrix(center(r), size(r), theta(r))
@@ -127,7 +136,7 @@ def main() -> None:
         columns.append(pa.array(model_rows, type=fsl16))
         fields.append(("model", fsl16))
 
-    if args.version == "0.0.3":
+    if ver >= (0, 0, 3):
         # Camera columns are all-or-nothing (every row must provide them).
         for name, length in CAMERA_VEC:
             if all(name in r for r in rows):
@@ -149,6 +158,18 @@ def main() -> None:
             fields.append(("draw_mesh", mesh_ids_type))
             columns.append(pa.array(models, type=models_type))
             fields.append(("draw_model", models_type))
+
+    if ver >= (0, 0, 5):
+        # Per-frame background frame reference (0.0.5): the still image the shell
+        # loads and composites beneath the scene via a FramePlane. Emitted when
+        # *any* row names one; a row without it decodes to "no background" (null).
+        # `frame_path` (native filesystem path) and `frame_url` (browser URL) are
+        # independent — a stream may carry either or both.
+        utf8 = pa.utf8()
+        for name in ("frame_path", "frame_url"):
+            if any(name in r for r in rows):
+                columns.append(pa.array([r.get(name) for r in rows], type=utf8))
+                fields.append((name, utf8))
 
     schema = pa.schema(fields, metadata=metadata)
     batch = pa.record_batch(columns, schema=schema)

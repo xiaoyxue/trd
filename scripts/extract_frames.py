@@ -52,7 +52,7 @@ import sys
 FRAME_STEM = "frame_"
 FRAME_DIGITS = 6
 PROTOCOL_VERSION_KEY = b"trd.protocol.version"
-PROTOCOL_VERSION = b"0.0.4"
+PROTOCOL_VERSION = b"0.0.5"
 FRAME_RATE_KEY = b"trd.stream.frame_rate"
 
 

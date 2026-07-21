@@ -281,7 +281,7 @@ impl ArrowRenderer {
                         ));
                     }
                 }
-                let scene = build_scene(&draws, self.mode, self.show_aabb, self.show_axes);
+                let scene = build_scene(&draws, self.mode, self.show_aabb, self.show_axes, None);
                 images.push(self.render_frame(params, &scene).await?);
             }
 

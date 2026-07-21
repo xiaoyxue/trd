@@ -160,7 +160,8 @@ impl CanvasRenderer {
                             )));
                         }
                     }
-                    let scene = build_scene(&draws, self.mode, self.show_aabb, self.show_axes);
+                    let scene =
+                        build_scene(&draws, self.mode, self.show_aabb, self.show_axes, None);
 
                     measure("trd.canvas.render-submit", || {
                         let acquired = self.acquire_frame()?;

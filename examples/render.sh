@@ -6,7 +6,7 @@
 #
 # Usage:
 #   examples/render.sh [--cli | --native | --web [--arrow-renderer|--canvas-renderer|--textured-renderer]] \
-#                      [--mesh OBJ]... [--texture IMG] [--wireframe] [--aabb] [--axes] [INPUT.jsonl] [OUTPUT.gif|.webp] [WIDTH] [HEIGHT] [FPS]
+#                      [--mesh OBJ]... [--texture IMG] [--wireframe] [--aabb] [--axes] [--frames-base DIR] [INPUT.jsonl] [OUTPUT.gif|.webp] [WIDTH] [HEIGHT] [FPS]
 # Defaults: examples/frames.0.0.2.jsonl  output/out.gif  256 256 30
 # Run with no arguments (or -h/--help) to print the flag guidance and exit; pass
 # --cli to render the default demo.
@@ -125,6 +125,8 @@ CONTENT FLAGS (--cli and --native):
   --wireframe         Draw mesh edges as a line list instead of filled triangles (#38).
   --aabb              Overlay each mesh's axis-aligned bounding box as a green box (#42).
   --axes              Overlay a coordinate-axes gizmo (X=red, Y=green, Z=blue) at the origin (#42).
+  --frames-base DIR   Composite each frame's 0.0.5 background still (its `frame_path`,
+                      resolved relative to DIR) *beneath* the scene via a FramePlane (#63).
 
   -h, --help          Show this guidance and exit.
 
@@ -175,6 +177,7 @@ aabb=0
 axes=0
 meshes=()
 texture=""
+frames_base=""
 positional=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -192,6 +195,8 @@ while [ $# -gt 0 ]; do
     --mesh=*) meshes+=("${1#--mesh=}") ;;
     --texture) shift; texture="${1:?--texture requires an image path}" ;;
     --texture=*) texture="${1#--texture=}" ;;
+    --frames-base) shift; frames_base="${1:?--frames-base requires a directory}" ;;
+    --frames-base=*) frames_base="${1#--frames-base=}" ;;
     *) positional+=("$1") ;;
   esac
   shift
@@ -364,12 +369,14 @@ fi
 
 # DuckDB's producer only understands the 0.0.1/0.0.2 columns (center/size/theta/
 # model); its SQL silently DROPS the additive 0.0.3 camera (eye/target/direction/
-# up/k/pose/fovy/aspect/znear/zfar) and instanced draw-list (draws) columns. If
-# the input carries any of those, fall back to the pyarrow producer (which emits
-# them) so the camera/draw data actually reaches trd — otherwise an authored
-# camera is lost and trd renders with the identity camera (z-clipping).
+# up/k/pose/fovy/aspect/znear/zfar) and instanced draw-list (draws) columns, as
+# well as the 0.0.5 background frame reference (frame_path/frame_url). If the
+# input carries any of those, fall back to the pyarrow producer (which emits
+# them) so the camera/draw/frame data actually reaches trd — otherwise an authored
+# camera is lost (identity-camera z-clipping) or the background frame plane never
+# appears.
 if [ "$producer" = duckdb ] \
-  && grep -Eq '"(eye|target|direction|up|k|pose|fovy|aspect|znear|zfar|draws)"[[:space:]]*:' "$input"; then
+  && grep -Eq '"(eye|target|direction|up|k|pose|fovy|aspect|znear|zfar|draws|frame_path|frame_url)"[[:space:]]*:' "$input"; then
   if command -v uv >/dev/null 2>&1; then
     producer=uv
   elif command -v python3 >/dev/null 2>&1 && python3 -c 'import pyarrow' >/dev/null 2>&1; then
@@ -484,18 +491,22 @@ aabb_flag=()
 [ "$aabb" -eq 1 ] && aabb_flag=(--aabb)
 axes_flag=()
 [ "$axes" -eq 1 ] && axes_flag=(--axes)
+# --frames-base resolves each frame's 0.0.5 `frame_path` (relative to this dir)
+# to the still image trd composites *beneath* the scene via a FramePlane (#63).
+frames_base_flag=()
+[ -n "$frames_base" ] && frames_base_flag=(--frames-base "$frames_base")
 
 if [ "$native" -eq 1 ]; then
   # Play the frame stream live in the interactive trd-app window (trd-native).
   # The appearance flags pass through to trd-app too (it now renders the mesh
   # Scene via the shared trd-core MeshRenderer, like trd-cli).
   stream \
-    | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-app -- --width "$width" --height "$height" --fps "$fps" "${wireframe_flag[@]}" "${textured_flag[@]}" "${aabb_flag[@]}" "${axes_flag[@]}"
+    | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-app -- --width "$width" --height "$height" --fps "$fps" "${wireframe_flag[@]}" "${textured_flag[@]}" "${aabb_flag[@]}" "${axes_flag[@]}" "${frames_base_flag[@]}"
   echo "streamed $input to the trd-app window (${width}x${height}, ${fps}fps)"
 else
   mkdir -p "$(dirname "$output")"
   stream \
-    | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-cli -- --width "$width" --height "$height" "${wireframe_flag[@]}" "${textured_flag[@]}" "${aabb_flag[@]}" "${axes_flag[@]}" \
+    | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-cli -- --width "$width" --height "$height" "${wireframe_flag[@]}" "${textured_flag[@]}" "${aabb_flag[@]}" "${axes_flag[@]}" "${frames_base_flag[@]}" \
     | uv run --with pyarrow --with numpy "$root/scripts/encode.py" --fps "$fps" -o "$output"
   echo "wrote $output (${width}x${height}, ${fps}fps) from $input"
 fi

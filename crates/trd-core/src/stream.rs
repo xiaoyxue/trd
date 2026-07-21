@@ -1,4 +1,4 @@
-//! Native-only Arrow streaming protocol (trd protocol 0.0.4).
+//! Native-only Arrow streaming protocol (trd protocol 0.0.5).
 //!
 //! Input is one to three concatenated Arrow IPC streams on stdin. A `0.0.4`
 //! stream is `[mesh][texture?][params]`: a leading **mesh** table (one row = one
@@ -17,7 +17,9 @@
 
 use std::sync::Arc;
 
-use arrow::array::{Array, FixedSizeListArray, Float32Array, ListArray, RecordBatch, UInt32Array};
+use arrow::array::{
+    Array, FixedSizeListArray, Float32Array, ListArray, RecordBatch, StringArray, UInt32Array,
+};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::error::ArrowError;
 use arrow::ipc::reader::StreamReader;
@@ -29,7 +31,7 @@ use crate::protocol::{
     PROTOCOL_VERSION_KEY, SUPPORTED_INPUT_VERSIONS,
 };
 use crate::render::{
-    CameraFormError, Draw, DrawableObject, FrameParams, Mesh, MeshRenderer, RenderMode,
+    CameraFormError, Draw, DrawableObject, FrameFit, FrameParams, Mesh, MeshRenderer, RenderMode,
 };
 use crate::texture::ImageTexture;
 use crate::OutputSession;
@@ -409,7 +411,48 @@ fn decode_draws(batch: &RecordBatch) -> Result<Option<Vec<Vec<Draw>>>, StreamErr
     Ok(Some(rows))
 }
 
-/// Reads an Arrow IPC frame-params stream from `input`, invoking `on_frame` for
+/// Decodes the optional per-frame **background frame reference** column (`0.0.5`)
+/// into one `Option<String>` per row. The column names a per-frame image the
+/// shell loads at the boundary and composites beneath the scene via a
+/// [`DrawableObject::FramePlane`]: `frame_path` (a filesystem path, native) is
+/// preferred, else `frame_url` (a URL, browser). Returns `None` when neither
+/// column is present (a stream without background frames); per-row nulls decode
+/// to `None` (that frame has no background). The core never performs the I/O —
+/// it only surfaces the reference string for the shell to resolve.
+fn decode_frame_refs(batch: &RecordBatch) -> Result<Option<Vec<Option<String>>>, StreamError> {
+    let (name, col) = match batch
+        .column_by_name("frame_path")
+        .map(|c| ("frame_path", c))
+        .or_else(|| batch.column_by_name("frame_url").map(|c| ("frame_url", c)))
+    {
+        Some(pair) => pair,
+        None => return Ok(None),
+    };
+    let strings =
+        col.as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| StreamError::ColumnType {
+                column: name,
+                expected: "Utf8",
+                actual: col.data_type().clone(),
+            })?;
+    let refs = (0..batch.num_rows())
+        .map(|row| {
+            if strings.is_null(row) {
+                None
+            } else {
+                let s = strings.value(row);
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(s.to_owned())
+                }
+            }
+        })
+        .collect();
+    Ok(Some(refs))
+}
+
 /// each decoded [`FrameParams`] in stream order.
 ///
 /// Convenience wrapper over [`read_frame_stream_with_meta`] that ignores the
@@ -631,24 +674,48 @@ impl BatchRenderer {
         self.show_axes = show;
     }
 
-    /// Builds the per-frame [`Scene`](crate::Scene) from a wire `draws` list and
-    /// this renderer's mode/overlay flags (delegates to [`build_scene`]).
-    fn build_scene(&self, draws: &[Draw]) -> Vec<DrawableObject> {
-        crate::render::build_scene(draws, self.mode, self.show_aabb, self.show_axes)
+    /// Uploads `image` as the **background frame texture** (#63) sampled by a
+    /// [`DrawableObject::FramePlane`]. The GPU texture is reused across frames
+    /// (grown only on a resolution change). Call before a
+    /// [`render_frame`](Self::render_frame) with a `Some(fit)` to composite the
+    /// image beneath the mesh scene.
+    pub fn update_frame_texture(&mut self, image: &crate::texture::ImageData) {
+        self.renderer.update_frame_texture_rgba(
+            &self.queue,
+            &image.rgba,
+            image.width,
+            image.height,
+        );
     }
 
-    /// Renders `params` with the given per-frame instance `draws` and returns
+    /// Builds the per-frame [`Scene`](crate::Scene) from a wire `draws` list and
+    /// this renderer's mode/overlay flags (delegates to [`build_scene`]). A
+    /// `Some(fit)` prepends a background [`DrawableObject::FramePlane`] (#63).
+    fn build_scene(&self, draws: &[Draw], frame: Option<FrameFit>) -> Vec<DrawableObject> {
+        crate::render::build_scene(draws, self.mode, self.show_aabb, self.show_axes, frame)
+    }
+
+    /// Renders `params` with the given per-frame instance `draws`, compositing a
+    /// background [`DrawableObject::FramePlane`] (#63) beneath the scene when
+    /// `frame` is `Some(fit)` and a frame texture has been uploaded via
+    /// [`update_frame_texture`](Self::update_frame_texture). Returns
     /// tightly-packed row-major RGBA bytes (`width*height*4`).
-    pub fn render(&mut self, params: FrameParams, draws: &[Draw]) -> Result<Vec<u8>, StreamError> {
-        pollster::block_on(self.render_async(params, draws))
+    pub fn render_frame(
+        &mut self,
+        params: FrameParams,
+        draws: &[Draw],
+        frame: Option<FrameFit>,
+    ) -> Result<Vec<u8>, StreamError> {
+        pollster::block_on(self.render_async(params, draws, frame))
     }
 
     async fn render_async(
         &mut self,
         params: FrameParams,
         draws: &[Draw],
+        frame: Option<FrameFit>,
     ) -> Result<Vec<u8>, StreamError> {
-        let scene = self.build_scene(draws);
+        let scene = self.build_scene(draws, frame);
         let view = self
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -799,19 +866,21 @@ pub fn read_scene_stream_with_meta<R: Read>(
     on_meshes: impl FnOnce(Vec<Mesh>),
     on_texture: impl FnOnce(Option<ImageTexture>),
     on_meta: impl FnOnce(f64),
-    mut on_frame: impl FnMut(FrameParams, Vec<Draw>),
+    mut on_frame: impl FnMut(FrameParams, Vec<Draw>, Option<String>),
 ) -> Result<(), StreamError> {
     let mut first = StreamReader::try_new(input, None)?;
     check_version(first.schema().as_ref())?;
 
-    // Decodes one params batch into `(FrameParams, draws)` callbacks, validating
-    // draw mesh ids against `mesh_count`.
+    // Decodes one params batch into `(FrameParams, draws, frame_ref)` callbacks,
+    // validating draw mesh ids against `mesh_count`.
     let mut emit = |batch: &RecordBatch, mesh_count: usize| -> Result<(), StreamError> {
         let frames = decode_frames(batch)?;
         let draw_lists = decode_draws(batch)?;
+        let frame_refs = decode_frame_refs(batch)?;
         for (i, params) in frames.iter().enumerate() {
             let draws = resolve_draws(params, &draw_lists, i, mesh_count)?;
-            on_frame(*params, draws);
+            let frame_ref = frame_refs.as_ref().and_then(|r| r[i].clone());
+            on_frame(*params, draws, frame_ref);
         }
         Ok(())
     };
@@ -855,14 +924,27 @@ pub fn read_scene_stream_with_meta<R: Read>(
     Ok(())
 }
 
+/// A shell-provided closure that resolves a per-frame background frame reference
+/// (a `frame_path`/`frame_url` string, `0.0.5`) into decoded RGBA pixels. Kept
+/// out of `trd-core` so the core performs no file/network I/O: the native CLI
+/// supplies one backed by the `image` crate + a `--frames-base` dir; a stream
+/// without background frames (or a shell that doesn't load them) passes `None`.
+/// Returning `None` for a given reference renders that frame without a
+/// background plane (the shell decides how to report the miss).
+pub type FrameResolver<'a> = &'a dyn Fn(&str) -> Option<crate::texture::ImageData>;
+
 /// Renders every frame of the `params` batch stream to `output`, one Arrow
 /// output batch per input batch. Shared by both the mesh-first and legacy paths.
+/// When `frame_resolver` is `Some`, a frame carrying a `frame_path`/`frame_url`
+/// reference (`0.0.5`) has its background image resolved + uploaded and composited
+/// beneath the scene via a [`DrawableObject`](crate::render::DrawableObject)`::FramePlane`.
 fn render_params<I, W>(
     params: I,
     mut renderer: BatchRenderer,
     frame_rate: f64,
     width: u32,
     height: u32,
+    frame_resolver: Option<FrameResolver>,
     mut output: W,
 ) -> Result<(), StreamError>
 where
@@ -872,26 +954,55 @@ where
     let mut output_session = OutputSession::with_frame_rate(width, height, Some(frame_rate))?;
     output.write_all(&output_session.drain_new()?)?;
     let mesh_count = renderer.mesh_count();
+    // The path of the frame texture currently uploaded, so consecutive frames
+    // sharing a background image skip the decode + re-upload.
+    let mut last_frame_ref: Option<String> = None;
     for batch in params {
         let batch = batch?;
         let frames = decode_frames(&batch)?;
         // Optional per-frame instanced draw list; absent ⇒ one instance of mesh 0
         // placed by the frame's own model (legacy single-object behavior).
         let draw_lists = decode_draws(&batch)?;
-        let planes: Vec<Vec<u8>> = frames
-            .iter()
-            .enumerate()
-            .map(|(i, params)| {
-                let draws = resolve_draws(params, &draw_lists, i, mesh_count)?;
-                renderer.render(*params, &draws)
-            })
-            .collect::<Result<_, _>>()?;
+        // Optional per-frame background frame reference (0.0.5).
+        let frame_refs = decode_frame_refs(&batch)?;
+        let mut planes: Vec<Vec<u8>> = Vec::with_capacity(frames.len());
+        for (i, params) in frames.iter().enumerate() {
+            let draws = resolve_draws(params, &draw_lists, i, mesh_count)?;
+            let frame_ref = frame_refs.as_ref().and_then(|r| r[i].as_deref());
+            let mut frame_fit = None;
+            if let (Some(path), Some(resolve)) = (frame_ref, frame_resolver) {
+                if last_frame_ref.as_deref() != Some(path) {
+                    if let Some(image) = resolve(path) {
+                        renderer.update_frame_texture(&image);
+                        last_frame_ref = Some(path.to_owned());
+                        frame_fit = Some(FrameFit::Stretch);
+                    }
+                } else {
+                    frame_fit = Some(FrameFit::Stretch);
+                }
+            }
+            planes.push(renderer.render_frame(*params, &draws, frame_fit)?);
+        }
         output_session.write_rgba_batch(&planes)?;
         output.write_all(&output_session.drain_new()?)?;
     }
     output_session.finish()?;
     output.write_all(&output_session.drain_new()?)?;
     Ok(())
+}
+
+/// Appearance options for [`run_stream`]: the mesh draw [`RenderMode`] plus the
+/// optional AABB / coordinate-axes gizmo overlays. Bundled into one value so the
+/// entry point threads a single struct instead of three positional flags (and
+/// stays within clippy's argument budget). [`Default`] is filled, no overlays.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RenderOptions {
+    /// How meshes are drawn (filled / wireframe / textured).
+    pub mode: RenderMode,
+    /// Overlay each drawn mesh instance's axis-aligned bounding box (#42).
+    pub show_aabb: bool,
+    /// Overlay a world-origin coordinate-axes gizmo (#42).
+    pub show_axes: bool,
 }
 
 /// Reads a trd input stream, renders each frame, and writes an Arrow IPC stream
@@ -909,10 +1020,14 @@ pub fn run_stream<R: Read, W: Write>(
     output: W,
     width: u32,
     height: u32,
-    mode: RenderMode,
-    show_aabb: bool,
-    show_axes: bool,
+    options: RenderOptions,
+    frame_resolver: Option<FrameResolver>,
 ) -> Result<(), StreamError> {
+    let RenderOptions {
+        mode,
+        show_aabb,
+        show_axes,
+    } = options;
     // Validate dimensions up front so schema construction (which multiplies
     // width*height) can't overflow before BatchRenderer's guard runs.
     check_dimensions(width, height)?;
@@ -940,10 +1055,26 @@ pub fn run_stream<R: Read, W: Write>(
             let params = StreamReader::try_new(next.get_mut(), None)?;
             check_version(params.schema().as_ref())?;
             let frame_rate = frame_rate_from_metadata(params.schema().metadata());
-            render_params(params, renderer, frame_rate, width, height, output)
+            render_params(
+                params,
+                renderer,
+                frame_rate,
+                width,
+                height,
+                frame_resolver,
+                output,
+            )
         } else {
             let frame_rate = frame_rate_from_metadata(next.schema().metadata());
-            render_params(next, renderer, frame_rate, width, height, output)
+            render_params(
+                next,
+                renderer,
+                frame_rate,
+                width,
+                height,
+                frame_resolver,
+                output,
+            )
         }
     } else {
         // Legacy params-only stream → built-in hello-triangle.
@@ -952,7 +1083,15 @@ pub fn run_stream<R: Read, W: Write>(
         renderer.set_show_aabb(show_aabb);
         renderer.set_show_axes(show_axes);
         let frame_rate = frame_rate_from_metadata(first.schema().metadata());
-        render_params(first, renderer, frame_rate, width, height, output)
+        render_params(
+            first,
+            renderer,
+            frame_rate,
+            width,
+            height,
+            frame_resolver,
+            output,
+        )
     }
 }
 
@@ -1174,6 +1313,61 @@ mod tests {
         assert!(decode_draws(&batch).unwrap().is_none());
     }
 
+    /// A `Utf8` column of `frame_path`/`frame_url` references from optional strings.
+    fn frame_ref_batch(name: &str, refs: &[Option<&str>]) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new(name, DataType::Utf8, true)]));
+        let col = StringArray::from(refs.to_vec());
+        RecordBatch::try_new(schema, vec![Arc::new(col) as ArrayRef]).unwrap()
+    }
+
+    #[test]
+    fn decode_frame_refs_absent_returns_none() {
+        // A stream with no background-frame column decodes to `None` (soft skip).
+        let batch = build_input_batch(&[FrameParams::IDENTITY]);
+        assert!(decode_frame_refs(&batch).unwrap().is_none());
+    }
+
+    #[test]
+    fn decode_frame_refs_reads_paths_nulls_and_empty() {
+        // Native prefers `frame_path`; per-row null or empty ⇒ `None` (no
+        // background for that frame), a non-empty string ⇒ the reference.
+        let batch = frame_ref_batch(
+            "frame_path",
+            &[Some("frames/frame_000000.png"), None, Some("")],
+        );
+        let refs = decode_frame_refs(&batch).unwrap().unwrap();
+        assert_eq!(
+            refs,
+            vec![Some("frames/frame_000000.png".to_owned()), None, None]
+        );
+    }
+
+    #[test]
+    fn decode_frame_refs_falls_back_to_frame_url() {
+        // With no `frame_path`, the `frame_url` column (browser) is used instead.
+        let batch = frame_ref_batch("frame_url", &[Some("https://host/a.png"), None]);
+        let refs = decode_frame_refs(&batch).unwrap().unwrap();
+        assert_eq!(refs, vec![Some("https://host/a.png".to_owned()), None]);
+    }
+
+    #[test]
+    fn decode_frame_refs_prefers_frame_path_over_url() {
+        // Both columns present ⇒ native path wins.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("frame_path", DataType::Utf8, true),
+            Field::new("frame_url", DataType::Utf8, true),
+        ]));
+        let path = StringArray::from(vec![Some("local/a.png")]);
+        let url = StringArray::from(vec![Some("https://host/a.png")]);
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(path) as ArrayRef, Arc::new(url) as ArrayRef],
+        )
+        .unwrap();
+        let refs = decode_frame_refs(&batch).unwrap().unwrap();
+        assert_eq!(refs, vec![Some("local/a.png".to_owned())]);
+    }
+
     #[test]
     fn decodes_variable_length_draw_lists() {
         let a = [
@@ -1268,7 +1462,7 @@ mod tests {
 
         // Plain filled: exactly one Mesh drawable per draw, no gizmos.
         assert_eq!(
-            build_scene(&draws, RenderMode::Filled, false, false),
+            build_scene(&draws, RenderMode::Filled, false, false, None),
             vec![
                 DrawableObject::Mesh {
                     mesh_id: 0,
@@ -1285,7 +1479,7 @@ mod tests {
 
         // Wireframe propagates the mode to every mesh drawable.
         assert_eq!(
-            build_scene(&draws, RenderMode::Wireframe, false, false),
+            build_scene(&draws, RenderMode::Wireframe, false, false, None),
             vec![
                 DrawableObject::Mesh {
                     mesh_id: 0,
@@ -1302,7 +1496,7 @@ mod tests {
 
         // Both overlays: meshes, then a tracking box per draw, then one gizmo.
         assert_eq!(
-            build_scene(&draws, RenderMode::Filled, true, true),
+            build_scene(&draws, RenderMode::Filled, true, true, None),
             vec![
                 DrawableObject::Mesh {
                     mesh_id: 0,
@@ -1501,9 +1695,8 @@ mod tests {
             &mut output_bytes,
             w,
             h,
-            RenderMode::Filled,
-            false,
-            false,
+            RenderOptions::default(),
+            None,
         )
         .unwrap();
 
@@ -1696,9 +1889,8 @@ mod tests {
             &mut output_bytes,
             w,
             h,
-            RenderMode::Filled,
-            false,
-            false,
+            RenderOptions::default(),
+            None,
         )
         .unwrap();
 

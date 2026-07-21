@@ -13,9 +13,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
+use std::path::PathBuf;
 use trd_core::{
-    build_scene, read_scene_stream_with_meta, Draw, FrameParams, ImageTexture, Mesh, MeshRenderer,
-    RenderMode, Viewport,
+    build_scene, read_scene_stream_with_meta, Draw, FrameFit, FrameParams, ImageData, ImageTexture,
+    Mesh, MeshRenderer, RenderMode, Viewport,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
@@ -68,6 +69,12 @@ struct Cli {
     /// origin (#42).
     #[arg(long)]
     axes: bool,
+    /// Base directory for per-frame background images (`0.0.5`, #63). When set, a
+    /// frame's `frame_path` (relative) is joined to this dir, decoded (PNG/JPEG),
+    /// and composited beneath the scene as a background frame plane. Without it,
+    /// `frame_path` columns are ignored.
+    #[arg(long, value_name = "DIR")]
+    frames_base: Option<PathBuf>,
 }
 
 /// Errors that can occur while setting up the window or GPU.
@@ -238,8 +245,13 @@ impl Gpu {
 
         // Author the frame's Scene from its draw list + the render mode/overlay
         // flags, then hand it to the shared MeshRenderer — the same Scene the
-        // headless CLI and wasm front-ends build.
-        let scene = build_scene(&frame.draws, mode, show_aabb, show_axes);
+        // headless CLI and wasm front-ends build. A per-frame background image
+        // (#63) is uploaded first, then composited beneath the scene.
+        let frame_fit = frame.frame_image.as_ref().map(|img| {
+            renderer.update_frame_texture_rgba(&self.queue, &img.rgba, img.width, img.height);
+            FrameFit::Stretch
+        });
+        let scene = build_scene(&frame.draws, mode, show_aabb, show_axes, frame_fit);
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -277,11 +289,15 @@ enum StreamMsg {
 }
 
 /// One decoded frame: its camera/transform params and resolved instanced draw
-/// list, built into a [`trd_core::Scene`] at render time.
+/// list, built into a [`trd_core::Scene`] at render time. `frame_image` holds a
+/// per-frame background image (`0.0.5`, #63) already decoded to RGBA off the
+/// render thread (from `frame_path` + `--frames-base`), uploaded + composited
+/// beneath the scene at render time; `None` when the frame has no background.
 #[derive(Clone)]
 struct FrameData {
     params: FrameParams,
     draws: Vec<Draw>,
+    frame_image: Option<ImageData>,
 }
 
 /// The winit application: owns the GPU state and drives stream playback.
@@ -537,8 +553,10 @@ impl ApplicationHandler for App {
 
 /// Reads the Arrow IPC frame-params stream from stdin on a background thread,
 /// forwarding the stream's declared playback rate then each decoded frame over
-/// `tx` until the stream ends.
-fn spawn_stdin_reader(tx: mpsc::Sender<StreamMsg>) {
+/// `tx` until the stream ends. When `frames_base` is set, a frame's `frame_path`
+/// (`0.0.5`, #63) is loaded + decoded to RGBA off the render thread and shipped
+/// with the frame for compositing.
+fn spawn_stdin_reader(tx: mpsc::Sender<StreamMsg>, frames_base: Option<PathBuf>) {
     let spawned = std::thread::Builder::new()
         .name("trd-stdin-reader".to_string())
         .spawn(move || {
@@ -560,8 +578,16 @@ fn spawn_stdin_reader(tx: mpsc::Sender<StreamMsg>) {
                 |rate| {
                     let _ = rate_tx.send(StreamMsg::Rate(rate));
                 },
-                |params, draws| {
-                    let _ = tx.send(StreamMsg::Frame(Box::new(FrameData { params, draws })));
+                |params, draws, frame_ref| {
+                    let frame_image = frame_ref
+                        .as_deref()
+                        .zip(frames_base.as_ref())
+                        .and_then(|(rel, base)| load_frame_image(&base.join(rel)));
+                    let _ = tx.send(StreamMsg::Frame(Box::new(FrameData {
+                        params,
+                        draws,
+                        frame_image,
+                    })));
                 },
             ) {
                 log::error!("input stream error: {err}");
@@ -569,6 +595,27 @@ fn spawn_stdin_reader(tx: mpsc::Sender<StreamMsg>) {
         });
     if let Err(err) = spawned {
         log::error!("failed to spawn stdin reader thread: {err}");
+    }
+}
+
+/// Decodes a background frame image file (PNG/JPEG) to RGBA (#63). Kept in the
+/// shell so trd-core does no image I/O; a load failure logs and yields `None`
+/// (that frame renders without a background).
+fn load_frame_image(path: &std::path::Path) -> Option<ImageData> {
+    match image::open(path) {
+        Ok(img) => {
+            let rgba = img.to_rgba8();
+            let (width, height) = rgba.dimensions();
+            Some(ImageData {
+                width,
+                height,
+                rgba: rgba.into_raw(),
+            })
+        }
+        Err(err) => {
+            log::warn!("skipping frame background {}: {err}", path.display());
+            None
+        }
     }
 }
 
@@ -590,7 +637,7 @@ pub fn run() -> Result<(), AppError> {
     };
 
     let (tx, rx) = mpsc::channel();
-    spawn_stdin_reader(tx);
+    spawn_stdin_reader(tx, cli.frames_base.clone());
 
     let event_loop = EventLoop::new()?;
     // Playback is paced with `ControlFlow::WaitUntil` in `about_to_wait`; start
