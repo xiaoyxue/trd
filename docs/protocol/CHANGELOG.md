@@ -41,8 +41,11 @@ follows `MAJOR.MINOR.PATCH`.
   reference string only; the native CLI (`trd --frames-base <dir>`) and window
   (`trd-app --frames-base <dir>`) decode the PNG/JPEG (`image` crate) and upload it
   via a `FrameResolver` closure passed to `run_stream` / loaded on the reader
-  thread. The browser path is not wired yet (deferred). `scripts/extract_frames.py`
-  (#76) is the reference producer of the stills + `frame_path`/`frame_url` manifest.
+  thread. The browser shell wires it too: the config-driven web renderer
+  (`render.sh --web --frames-base <dir>`) fetches each still by its decoded
+  `frame_ref`, decodes it in JS, and uploads it via `updateFrameTextureRgba`.
+  `scripts/extract_frames.py` (#76) is the reference producer of the stills +
+  `frame_path`/`frame_url` manifest.
 
 ### Compatibility
 - **Backward-compatible with 0.0.4, 0.0.3, 0.0.2 and 0.0.1.** The `frame_path`/

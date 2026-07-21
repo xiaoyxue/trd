@@ -69,7 +69,7 @@ Each is a *thin shell* that only supplies a render target and calls the core:
 |---|---|---|---|
 | **`trd-cli`** | Arrow params stream (stdin) | offscreen texture → pixel read-back | Arrow image stream (stdout) |
 | **`trd-app`** | Arrow params stream (stdin) | live window swapchain | frames on screen |
-| **`trd-wasm`** | Arrow params stream (via `pushIpc`) | live canvas surface | frames in the browser |
+| **`trd-wasm`** | Arrow stream (buffered via `loadIpc`) | live canvas surface (or offscreen texture) | frames in the browser |
 
 - **`trd-cli` — headless Arrow filter.** For each input frame it renders to an
   offscreen texture, copies the pixels back (`copy_texture_to_buffer`), and writes
@@ -81,18 +81,22 @@ Each is a *thin shell* that only supplies a render target and calls the core:
   screen. With no stdin it shows the identity triangle.
 - **`trd-wasm` / `web/` — browser.** `CanvasRenderer.create(canvas)` obtains a wgpu
   surface from the `<canvas>` and holds a persistent `MeshRenderer` plus an
-  `InputSession`. It renders the **same mesh Scene** as the native CLI: push a
-  leading `[mesh]` Arrow table (`canvas.pushIpc(meshBytes)`) and it uploads the
-  geometry; each subsequent params batch is decoded and drawn straight to the
-  canvas via the shared `build_scene`/`MeshRenderer` path — no per-frontend
-  branching, no pixel read-back. Overlays toggle from JS with `setWireframe`,
-  `setShowAabb`, `setShowAxes`, and `setTextured`. `web/src/canvas-demo.ts` authors a colored
-  cube mesh table in TypeScript, enables the AABB + axes overlays, and spins it
-  with the `frames.turntable.jsonl` turntable frames (one one-row batch per
-  `requestAnimationFrame`). The `?textured` demo (`web/src/textured-demo.ts`) authors
-  a `[mesh][texture][params]` stream — a UV quad + a 2×2 RGBA checker — and calls
-  `setTextured(true)` to sample it (#20). JS only moves Arrow bytes and schedules
-  frames; it never touches the WebGPU API. Packaged as the `trd-wasm` npm library.
+  `InputSession`, rendering the **same mesh Scene** as the native CLI through the
+  shared `build_scene`/`MeshRenderer` path — no per-frontend branching. There is
+  **one** config-driven front-end: `render.sh --web` runs the *same* Arrow producers
+  and scene flags as `--cli` and writes `stream.arrow` + `config.json` into the
+  served directory; the tiny [`web/src/main.ts`](web/src/main.ts) loads
+  [`web/src/generic-renderer.ts`](web/src/generic-renderer.ts), which fetches both,
+  decodes the whole stream once with `loadIpc` (buffering every frame), and replays
+  it by index with `renderIndex(i)`. Two targets share the bundle — the on-screen
+  `CanvasRenderer` (default) and the offscreen `ArrowRenderer` (renders to a texture,
+  reads it back to RGBA, and paints it to a 2D canvas). Modes/overlays come from the
+  config via `setWireframe`/`setTextured`/`setShowAabb`/`setShowAxes`/`setShowLocalAxes`,
+  and `setCompositeFrame` + `updateFrameTextureRgba` composite each frame's 0.0.5
+  background still. JS only moves Arrow bytes and schedules frames; it never touches
+  the WebGPU API. The crate root is glue only — the two renderers live in
+  `crates/trd-wasm/src/{canvas_renderer,arrow_renderer}.rs` — and it ships as the
+  `trd-wasm` npm library.
 
 ### Stream protocol
 
@@ -150,8 +154,8 @@ self-describing) — plus an optional per-vertex **`uv`** mesh column. With
 `--textured` (`setTextured(true)`) meshes sample the bound texture at each UV
 (`textureSample`, `Rgba8UnormSrgb` linear clamp-to-edge); a textured draw with no
 texture stream samples a default 1×1 white. Encode an image with
-`scripts/texture_to_arrow.py`; `examples/render.sh --texture <img>` (`.ps1
--Texture`) wires it end-to-end, and the browser demo is at `?textured`.
+`scripts/texture_to_arrow.py`; `examples/render.sh --texture <img>` wires it
+end-to-end for `--cli` and `--web` alike (`.ps1 -Texture` on Windows).
 
 A params-only stream (no leading mesh) still renders the built-in hello-triangle.
 
@@ -175,9 +179,9 @@ schema reference + [changelog](docs/protocol/CHANGELOG.md)).
 |---|---|
 | `crates/trd-core` | the unified render core (`render.rs`, `triangle.wgsl`, `stream.rs`) |
 | `crates/trd-cli` | headless CLI: Arrow params in → Arrow image out |
-| `crates/trd-app` | native interactive window (winit + live wgpu surface) |
-| `crates/trd-wasm` | `wasm-bindgen` entry point; packaged as the `trd-wasm` npm library |
-| `web/` | bun-managed thin TypeScript wrapper that loads `trd-wasm` |
+| `crates/trd-app` | native interactive window (winit + live wgpu surface); split into `main`/`cli`/`error`/`renderer`/`stream`/`app` modules |
+| `crates/trd-wasm` | `wasm-bindgen` entry point (crate-root glue + `canvas_renderer`/`arrow_renderer` modules); packaged as the `trd-wasm` npm library |
+| `web/` | bun-managed thin TypeScript wrapper (`main.ts` → config-driven `generic-renderer.ts`) that loads `trd-wasm` |
 | `examples/` | `frames.0.0.2.jsonl` (+ legacy `frames.0.0.1.jsonl`) demo + `render.sh` / `render.ps1` wrappers |
 | `scripts/jsonl_to_arrow.py` | JSONL → Arrow params stream (pyarrow; duckdb-free producer) |
 | `scripts/extract_frames.py` | video → still `frames/` + [frame-to-row mapping manifest](docs/frame-extraction.md) (ffmpeg; boundary tooling for the #62 compositing pipeline) |
@@ -234,8 +238,8 @@ examples\render.ps1 -Native   # play live in a window
 
 ```sh
 # Linux / macOS / WSL
-examples/render.sh --web   # build + serve, printing the URL + SSH-tunnel command
-nix run .#web              # equivalent: build + serve at http://localhost:8080
+examples/render.sh --web   # generate the demo's stream.arrow + config.json, then build + serve
+nix run .#web              # serve a prebuilt dist/ (populate it first via render.sh --web)
 ```
 
 ```powershell
@@ -276,7 +280,7 @@ examples/render.sh  [MODE] [INPUT.jsonl] [OUT.gif|.webp] [WIDTH] [HEIGHT] [FPS] 
 examples\render.ps1 [MODE] [-InputPath]  [-Output]       [-Width] [-Height] [-Fps]  # Windows (PS7)
 # Defaults: examples/frames.0.0.2.jsonl → output/out.gif, 256×256 @ 30 fps
 # MODE (pick one): --cli/-CLI (default: headless GIF/WebP) · --native/-Native (live window) ·
-#   --web/-Wasm (browser; --arrow-renderer/-ArrowRenderer default, or --canvas-renderer/-CanvasRenderer)
+#   --web/-Wasm (browser; --canvas-renderer default, or --offscreen-renderer/--arrow-renderer)
 # Run either wrapper with no arguments (or -h/--help / -Help) to print the flag
 # guidance and exit; pass a mode (e.g. --cli) to render the default demo.
 ```
@@ -461,53 +465,71 @@ nix build .#web    # Rust core → wasm-bindgen lib → bun dist/  (in ./result)
 nix run   .#web    # serve dist/ over HTTP  (PORT, default 8080)
 ```
 
-The [`examples/render.sh`](examples/render.sh) wrapper wraps that build-and-serve
-step behind a `--web` (alias `--wasm`) flag, and — handy for a remote GPU box —
-prints the machine URL plus a ready-to-copy SSH-tunnel command before serving
-(`PORT` overrides the port, default 8080; all positional arguments are ignored,
-since the demo generates its own frames in-browser):
+The [`examples/render.sh`](examples/render.sh) `--web` (alias `--wasm`) flag makes
+the browser the **in-browser twin of `--cli`**: it runs the *same* Arrow producers
+(mesh + texture + params) at the *same* scene flags, writes the resulting
+`stream.arrow` plus a small `config.json` — and, with `--frames-base`, the
+background stills — next to the bundled `index.html`, then serves the directory
+with `static-web-server`. Handy for a remote GPU box, it prints the machine URL and
+a ready-to-copy SSH-tunnel command first (`PORT` overrides the port, default 8080):
 
 ```sh
-examples/render.sh --web                    # ArrowRenderer (default): offscreen output-stream smoke
-examples/render.sh --web --canvas-renderer  # CanvasRenderer: on-screen canvas demo
-PORT=9000 examples/render.sh --wasm         # serve on a custom port
+# On-screen WebGPU canvas (default target); tune fps live, resolution is baked in:
+examples/render.sh --web --canvas-renderer --placement-quad --axes-local \
+  --frames-base output/cornellbox \
+  examples/frames.cornellbox.stage1.jsonl '' 960 540 25   # then open http://localhost:8080/?fps=30
+
+# Offscreen ArrowRenderer texture read back to a 2D canvas (browser twin of --cli output):
+examples/render.sh --web --offscreen-renderer --placement-quad --axes-local --aabb \
+  --mesh assets/meshes/bunny_with_texture/bunny.obj \
+  --texture assets/meshes/bunny_with_texture/bunny_uv_map1.jpg \
+  --frames-base output/cornellbox \
+  examples/frames.cornellbox.stage2.jsonl '' 960 540 25
+
+PORT=9000 examples/render.sh --web          # serve on a custom port
 ```
+
+Every `--cli` content flag applies to `--web` unchanged — `--mesh`, `--texture`,
+`--wireframe`, `--aabb`, `--axes`, `--axes-local`, `--placement-quad`,
+`--frames-base`, and the positional `WIDTH`/`HEIGHT`. The render resolution is baked
+into the stream's CV `k`, so it is a positional argument, **not** a URL param; the
+only live URL param is **`?fps=N`** (1..240, default = the `FPS` positional). Two
+render targets share the one bundle: **`--canvas-renderer`** (default) draws to the
+on-screen WebGPU `CanvasRenderer`; **`--offscreen-renderer`** (alias
+`--arrow-renderer`) draws to an offscreen `ArrowRenderer` texture read back to RGBA
+and painted to a 2D canvas.
 
 The server binds all interfaces, so browse to `http://<host-ip>:PORT` directly,
 or forward it — `ssh -L 8080:localhost:8080 <user>@<host>`, then open
 <http://localhost:8080>.
 
-Both in-browser renderers ship in one bundle ([`web/src/main.ts`](web/src/main.ts)
-routes on the `?arrow-smoke` query param), so the flag only changes which URL the
-wrapper points you at: `--arrow-renderer` (default) opens the offscreen
-`ArrowRenderer` output-stream roundtrip — the browser counterpart of the headless
-`--cli` render — while `--canvas-renderer` opens the on-screen `CanvasRenderer` demo.
-
-On Windows (no Nix), [`examples/render.ps1`](examples/render.ps1) exposes the same
-flag as `-Web` (alias `-Wasm`): it builds the bundle with `wasm-pack` + `bun`
-(`web`'s `bun run build`) and serves `web/dist` with a small Bun static server,
-printing the same URLs + SSH-tunnel command (`$env:PORT` overrides the port,
-default 8088; positional arguments are ignored):
-
-```powershell
-examples\render.ps1 -Web                    # ArrowRenderer (default): offscreen output-stream smoke
-examples\render.ps1 -Web -CanvasRenderer    # CanvasRenderer: on-screen canvas demo
-$env:PORT = 9000; examples\render.ps1 -Wasm # serve on a custom port
-```
+> **Windows:** [`examples/render.ps1`](examples/render.ps1) `-Web` (alias `-Wasm`)
+> has **not** yet been ported to this config-driven model — it still builds the old
+> `wasm-pack` demo bundle. The generic `render.sh --web` flow above is the current
+> Nix/Linux path; aligning the PowerShell wrapper with it is a pending Windows
+> follow-up.
 
 The wasm core is a standard, TypeScript-typed npm package (`nix build .#trd-wasm`,
-built with `wasm-bindgen-cli` + `wasm-opt`). `web/` imports it and drives it with
-Apache Arrow JS — the browser produces the same protocol-0.0.2 IPC stream the CLI
-consumes and pumps it into the renderer:
+built with `wasm-bindgen-cli` + `wasm-opt`); its crate root is glue only, with the
+two renderers in `crates/trd-wasm/src/{canvas_renderer,arrow_renderer}.rs`. The
+generic renderer fetches the prebuilt Arrow stream and replays it by index —
+decoding it **once** with `loadIpc` (buffering every frame) rather than pushing
+frame-by-frame:
 
 ```ts
 import init, { CanvasRenderer } from "trd-wasm"; // fully typed
 
 await init({ module_or_path: wasmUrl });
 const canvas = await CanvasRenderer.create(canvasEl);
-const rendered = canvas.pushIpc(ipcChunk); // rows drawn this chunk
-canvas.finish();                           // end of stream
+const total = canvas.loadIpc(streamBytes); // decode + buffer all frames
+canvas.renderIndex(0);                     // draw buffered frame 0
 ```
+
+`ArrowRenderer` is the offscreen counterpart: it renders each buffered frame to an
+offscreen texture, and its `renderIndex(i)` is **async**, returning that frame's
+tightly-packed RGBA `Uint8Array` to paint onto a 2D canvas. Both renderers also
+keep the streaming `pushIpc` path (append input / emit output, `finish()` → EOS)
+for producer-driven pipelines.
 
 `web/`'s npm dependencies (`apache-arrow` and its tree) are installed offline in
 the Nix sandbox via [bun2nix](https://github.com/nix-community/bun2nix):
@@ -523,32 +545,6 @@ bun run dev        # dev server; open the printed URL in a WebGPU browser
 bun run check      # Biome format-check + lint (local @biomejs/biome)
 bun run typecheck  # tsc --noEmit
 ```
-
-The demo animates one Arrow one-row batch per frame. Two query flags help testing:
-`?smoke=1` renders a single two-row batch then stops (sets
-`#trd-status[data-rows-rendered="2"]`); `?benchmarkRate=60` / `?benchmarkRate=120`
-drive a fixed-rate run and log p50/p95/p99 timings (Arrow generation, `pushIpc`
-total, render-submit, and derived transfer-plus-decode) to the console.
-
-A second browser type, **`ArrowRenderer`**, is the offscreen counterpart of the CLI:
-it renders to an offscreen texture and returns the same protocol-0.0.2 Arrow **output**
-stream (four `fixed_shape_tensor<u8>` channels `r,g,b,a`) instead of drawing to a canvas.
-
-```ts
-import init, { ArrowRenderer } from "trd-wasm";
-
-await init({ module_or_path: wasmUrl });
-const arrow = await ArrowRenderer.create(width, height);
-const outChunk = await arrow.pushIpc(inputIpcChunk); // new output IPC bytes
-const eos = arrow.finish();                           // output EOS
-```
-
-Input is one persistent Arrow IPC stream (arbitrary chunk boundaries); `pushIpc`
-returns only newly produced output bytes, one output record batch per input batch,
-with the schema on the first productive result; `finish()` emits EOS; calls after
-`finish()` reject. The `?arrow-smoke` flag runs an in-page roundtrip that feeds a
-two-batch input through `ArrowRenderer` and validates the decoded output
-(sets `document.body[data-arrow-smoke="pass"]`).
 
 (The `web` wasm-bindgen target is used because bun does not instantiate the
 `bundler` target's ESM-imported wasm.)
