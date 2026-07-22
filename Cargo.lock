@@ -2668,6 +2668,7 @@ dependencies = [
  "arrow-schema",
  "bytemuck",
  "glam",
+ "image",
  "log",
  "pollster",
  "proptest",

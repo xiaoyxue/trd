@@ -621,3 +621,18 @@ the `nix develop` Vulkan loader finds the host driver:
 NIXPKGS_ALLOW_UNFREE=1 nix run --impure github:nix-community/nixGL#nixGLNvidia -- \
   cargo test --workspace -- --ignored   # #nixGLIntel for Intel/Mesa; WSL uses WGPU_BACKEND=gl
 ```
+
+The **golden / snapshot render test** (`crates/trd-core/tests/golden_render.rs`,
+#88) is one of these `--ignored` GPU tests: it runs committed Arrow fixtures
+(`crates/trd-core/tests/golden/stage{1,2}.arrow`) through the real `run_stream`
+pipeline and pixel-diffs the frames against committed golden PNGs. Regenerate
+after changing the fixtures or making an intended visual change:
+
+```sh
+python3 scripts/golden_fixtures.py                                   # rebuild the .arrow inputs (needs uv)
+TRD_UPDATE_GOLDENS=1 cargo test -p trd-core --test golden_render -- --ignored   # refresh golden PNGs (GPU)
+```
+
+The companion `tests/decoder_parity.rs` decodes the same fixtures through both
+the native and wasm decoders and asserts identical frames; it needs no GPU and
+runs in the normal `cargo test` / `nix flake check` gate.
