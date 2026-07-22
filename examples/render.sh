@@ -134,8 +134,9 @@ CONTENT FLAGS (--cli and --native):
                       Implies --placement-quad's mesh.
   --frames-base DIR   Composite each frame's 0.0.5 background still (its `frame_path`,
                       resolved relative to DIR) *beneath* the scene via a FramePlane (#63).
-                      Extract the stills at the render height so per-frame decode stays
-                      cheap, e.g. scripts/extract_frames.py <video> --format jpg --height H.
+                      Stills are decoded at full resolution; extract them with
+                      scripts/extract_frames.py <video> --format jpg (add --height H to
+                      extract smaller stills and save memory).
 
   -h, --help          Show this guidance and exit.
 

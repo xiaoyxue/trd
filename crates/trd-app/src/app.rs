@@ -321,7 +321,7 @@ pub fn run() -> Result<(), AppError> {
     };
 
     let (tx, rx) = mpsc::channel();
-    spawn_stdin_reader(tx, cli.frames_base.clone(), (cli.width, cli.height));
+    spawn_stdin_reader(tx, cli.frames_base.clone());
 
     let event_loop = EventLoop::new()?;
     // Playback is paced with `ControlFlow::WaitUntil` in `about_to_wait`; start
