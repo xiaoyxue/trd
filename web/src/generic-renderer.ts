@@ -98,8 +98,6 @@ function resolveFps(configFps: number): number {
   return configFps >= 1 && configFps <= 240 ? configFps : 24;
 }
 
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
-
 async function main(): Promise<void> {
   setStatus("loading config…");
   const configResponse = await fetch("./config.json");
@@ -176,17 +174,28 @@ async function runCanvas(
   }
   await preloadBackgrounds(renderer, total, config);
 
-  const interval = 1000 / fps;
-  let index = 0;
   setStatus(`canvas — ${total} frames @ ${fps}fps (${config.width}×${config.height})`);
-  for (;;) {
+  // Present on the display's vsync via requestAnimationFrame, but choose WHICH
+  // frame to show from wall-clock elapsed time, so playback runs at exactly `fps`
+  // regardless of the monitor refresh rate (the browser twin of trd-app's
+  // wall-clock advance()). rAF is capped at the refresh rate, so a slower `fps`
+  // simply repeats the same frame across several callbacks; we re-render only
+  // when the selected frame index changes.
+  const start = performance.now();
+  let shown = -1;
+  const tick = (now: number): void => {
+    requestAnimationFrame(tick);
+    const index = Math.floor(((now - start) / 1000) * fps) % total;
+    if (index === shown) {
+      return;
+    }
+    shown = index;
     if (config.background) {
-      await uploadBackground(renderer, renderer.frameRef(index), config);
+      uploadCachedBackground(renderer, renderer.frameRef(index), config);
     }
     renderer.renderIndex(index);
-    index = (index + 1) % total;
-    await sleep(interval);
-  }
+  };
+  requestAnimationFrame(tick);
 }
 
 async function runOffscreen(
@@ -207,19 +216,38 @@ async function runOffscreen(
   }
   await preloadBackgrounds(renderer, total, config);
 
-  const interval = 1000 / fps;
-  let index = 0;
   setStatus(`offscreen — ${total} frames @ ${fps}fps (${config.width}×${config.height})`);
-  for (;;) {
-    if (config.background) {
-      await uploadBackground(renderer, renderer.frameRef(index), config);
+  // Same wall-clock frame selection as the canvas path, scheduled on rAF. Here
+  // `renderIndex` is async (offscreen texture → RGBA readback), so a `busy` guard
+  // skips ticks while a readback is still in flight rather than overlapping them.
+  const start = performance.now();
+  let shown = -1;
+  let busy = false;
+  const tick = (now: number): void => {
+    requestAnimationFrame(tick);
+    if (busy) {
+      return;
     }
-    const rgba = await renderer.renderIndex(index);
-    const image = new ImageData(new Uint8ClampedArray(rgba), config.width, config.height);
-    context.putImageData(image, 0, 0);
-    index = (index + 1) % total;
-    await sleep(interval);
-  }
+    const index = Math.floor(((now - start) / 1000) * fps) % total;
+    if (index === shown) {
+      return;
+    }
+    shown = index;
+    busy = true;
+    void (async () => {
+      if (config.background) {
+        uploadCachedBackground(renderer, renderer.frameRef(index), config);
+      }
+      const rgba = await renderer.renderIndex(index);
+      context.putImageData(
+        new ImageData(new Uint8ClampedArray(rgba), config.width, config.height),
+        0,
+        0,
+      );
+      busy = false;
+    })();
+  };
+  requestAnimationFrame(tick);
 }
 
 /// The scene-mode + overlay flags are identical across both renderers; applied
@@ -239,18 +267,22 @@ function applyMode(renderer: CanvasRenderer | ArrowRenderer, config: RenderConfi
   }
 }
 
-/// Resolves a frame's background reference to RGBA and uploads it as the reused
-/// frame-plane texture. A frame with no reference keeps the previous background.
-async function uploadBackground(
+/// Uploads a frame's background from the preloaded cache as the reused
+/// frame-plane texture. Synchronous (no decode) so it can run inside the rAF
+/// callback; `preloadBackgrounds` guarantees the cache hit. A frame with no
+/// reference — or one not yet cached — keeps the previous background.
+function uploadCachedBackground(
   renderer: CanvasRenderer | ArrowRenderer,
   ref: string | undefined,
   config: RenderConfig,
-): Promise<void> {
+): void {
   if (!ref) {
     return;
   }
-  const rgba = await decodeBackground(`./${ref}`, config.width, config.height);
-  renderer.updateFrameTextureRgba(rgba, config.width, config.height);
+  const rgba = backgroundCache.get(`./${ref}`);
+  if (rgba) {
+    renderer.updateFrameTextureRgba(rgba, config.width, config.height);
+  }
 }
 
 await main();
