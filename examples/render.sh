@@ -5,8 +5,8 @@
 #   JSONL --(Arrow IPC: duckdb or pyarrow)--> trd --(tensors)--> ffmpeg
 #
 # Usage:
-#   examples/render.sh [--cli | --native | --web [--arrow-renderer|--canvas-renderer|--textured-renderer]] \
-#                      [--mesh OBJ]... [--texture IMG] [--wireframe] [--aabb] [--axes] [INPUT.jsonl] [OUTPUT.gif|.webp] [WIDTH] [HEIGHT] [FPS]
+#   examples/render.sh [--cli | --native | --web [--canvas-renderer|--offscreen-renderer]] \
+#                      [--mesh OBJ]... [--texture IMG] [--wireframe] [--aabb] [--axes] [--frames-base DIR] [INPUT.jsonl] [OUTPUT.gif|.webp] [WIDTH] [HEIGHT] [FPS]
 # Defaults: examples/frames.0.0.2.jsonl  output/out.gif  256 256 30
 # Run with no arguments (or -h/--help) to print the flag guidance and exit; pass
 # --cli to render the default demo.
@@ -24,9 +24,9 @@
 # `draws` list then references them by 0-based index. Try the two-mesh demo:
 # examples/render.sh --cli --wireframe --mesh assets/meshes/bunny.obj \
 # --mesh examples/cube.obj examples/frames.multimesh.jsonl output/scene.gif.
-# (--mesh needs pyarrow via uv/python3 and is ignored by --web.)
-# The appearance flags below (--wireframe/--aabb/--axes) apply to both --cli and
-# --native: trd-cli and trd-app share trd-core's mesh Scene renderer.
+# (--mesh needs pyarrow via uv/python3; it applies to --web too.)
+# The appearance flags below (--wireframe/--aabb/--axes/--axes-local) apply to
+# both --cli and --native: trd-cli and trd-app share trd-core's mesh Scene renderer.
 # With --wireframe trd draws mesh edges as a line list instead of filled
 # triangles (protocol #38); combine with --mesh for a wireframe asset.
 # With --aabb trd overlays each drawn mesh's axis-aligned bounding box as a green
@@ -34,6 +34,18 @@
 # turntable to see its box track the rotation).
 # With --axes trd overlays a coordinate-axes gizmo (X=red, Y=green, Z=blue) at
 # the world origin (#42), marking the world frame the camera looks at.
+# With --axes-local trd overlays a coordinate-axes gizmo at EACH drawn object's
+# local frame (its own `model`) — its model-space X/Y/Z axes as placed. This
+# visualizes e.g. #77's (e1,e2,e3) quad frame the mesh is anchored in
+# (pair it with examples/placement_quad_by_local_coord.py, ideally --turns 0 to freeze
+# the spin so the axes show the fixed placement frame).
+# With --placement-quad trd draws the reconstructed placement quad itself as a
+# colored wireframe outline (--placement-quad-color "R G B", default cyan) — a
+# debug check that the surface the mesh is anchored to matches the filmed poster.
+# --placement-quad appends a canonical quad mesh that a per-frame draw references;
+# author it with examples/placement_quad_by_local_coord.py --placement-quad (which emits the
+# {mesh:idx, mode:"wireframe"} draw). The quad geometry travels in the Arrow mesh
+# table and its placement in the per-frame draw list — no hardcoded gizmo.
 #
 # Dolly-camera capstone (#49): examples/bunny_dolly.py authors the same 45°
 # bird's-eye *dolly* camera twice — CG (eye/target/fovy) and CV (K + pose) — as
@@ -46,38 +58,29 @@
 #     examples/frames.bunny_dolly.cg.jsonl output/bunny_dolly_cg.gif 1024 1024 24
 #   examples/render.sh --cli --wireframe --aabb --axes --mesh assets/meshes/bunny.obj \
 #     examples/frames.bunny_dolly.cv.jsonl output/bunny_dolly_cv.gif 1024 1024 24
-# With --web (alias --wasm) it builds the browser (wasm) bundle via nix and serves
-# it, printing the URLs and an SSH-tunnel command. The web demo generates its own
-# Arrow frame stream in-browser, so all positional arguments are ignored. Three
-# in-browser renderers share the bundle: --arrow-renderer (default) runs the
-# offscreen output-stream smoke (the browser counterpart of the CLI);
-# --canvas-renderer runs the on-screen wireframe canvas demo; --textured-renderer
-# runs the on-screen textured bunny demo (#20). Override the port with PORT
-# (default 8080); the server binds all interfaces.
-#
-# The --canvas-renderer demo is the browser twin of the dolly capstone: it parses
-# assets/meshes/bunny.obj in-browser and renders it under the same 45° bird's-eye
-# dolly camera (frames.bunny_dolly.cg.jsonl) with wireframe + AABB + axes. The
-# --textured-renderer demo is the browser twin of the textured render: it parses
-# assets/meshes/bunny_with_texture/bunny.obj (with UVs) + decodes bunny_uv_map1.jpg
-# in-browser and renders the same dolly camera *textured* + AABB + axes — the exact
-# `--cli --mesh …/bunny.obj --texture …/bunny_uv_map1.jpg --aabb --axes` scene. Both
-# demos' resolution and playback speed are tuned live via URL query params (no
-# rebuild):
-#   ?size=N   square render resolution, N px (16..4096; default 1024; aspect=1.0)
-#   ?fps=N    playback frame rate (1..240; default 24; render-bound above the
-#             achievable rate — playback never exceeds what the GPU can draw)
-#   ?smoke=1  render only the 2-row smoke batch, then stop (used by tests;
-#             --canvas-renderer only)
-#   ?benchmarkRate=60|120   fixed-rate throughput benchmark (overrides ?fps;
-#             --canvas-renderer only)
-# Combine them, e.g. http://localhost:8080/?size=2048&fps=30 (the textured demo
-# keeps its ?textured route, e.g. http://localhost:8080/?textured&size=2048).
+# With --web (alias --wasm) it renders the SAME scene as --cli, but in a WebGPU
+# browser. It builds the config-driven web bundle via nix (.#web), copies it to a
+# writable serve dir, and drops in the runtime inputs the generic renderer
+# (web/src/generic-renderer.ts) fetches at load: `stream.arrow` (the identical
+# mesh++texture++params bytes trd-cli reads on stdin, from the same producers),
+# `config.json` (the chosen renderer target + scene flags + baked resolution +
+# default fps), and — when --frames-base is set — the background stills, so the
+# browser replays exactly what --cli would render. static-web-server then serves
+# the dir (override the port with PORT, default 8080; it binds all interfaces).
+# Two in-browser targets share the bundle: --canvas-renderer (default) draws to
+# the on-screen WebGPU CanvasRenderer; --offscreen-renderer (alias --arrow-
+# renderer) draws to an offscreen ArrowRenderer texture read back to a 2D canvas
+# (the browser twin of the CLI output stream). All the content flags below
+# (--mesh/--texture/--wireframe/--aabb/--axes/--axes-local/--placement-quad/
+# --frames-base) and the positional WIDTH/HEIGHT apply to --web exactly as to
+# --cli; only the playback rate is a live URL param:
+#   ?fps=N    playback frame rate (1..240; default = the FPS positional arg)
+# e.g. examples/render.sh --web --canvas-renderer --placement-quad --axes-local \
+#        --frames-base output/cornellbox examples/frames.cornellbox.stage1.jsonl \
+#        '' 960 540 25   then open http://localhost:8080/?fps=30
 # WebGPU needs a secure context, so open http://localhost:<port> (an SSH tunnel
 # makes a remote machine's origin "localhost" too); a bare http://<ip> is NOT a
-# secure context. The server sends a long cache-control on the page, so after a
-# rebuild hard-refresh (Ctrl+Shift+R) — and if you restarted the server behind an
-# SSH tunnel, reconnect the tunnel too — to avoid replaying a stale bundle.
+# secure context.
 #
 # Run from `nix develop`. The Arrow frame stream is built with duckdb's 'arrow'
 # community extension when it loads, otherwise with pyarrow (via uv/python3).
@@ -97,23 +100,19 @@ Defaults: INPUT=examples/frames.0.0.2.jsonl  OUTPUT=output/out.gif  WIDTH=256  H
 MODE (pick one; default --cli):
   --cli, --headless   Render to a GIF/WebP via the headless trd-cli (default).
   --native, --app     Play live in the interactive trd-app window (OUTPUT ignored).
-  --web, --wasm       Build the browser (wasm) bundle and serve it (positional args ignored).
-                        --arrow-renderer    offscreen output-stream smoke (default)
-                        --canvas-renderer   on-screen wireframe demo (bunny dolly capstone)
-                        --textured-renderer on-screen textured demo (#20: texture + AABB + axes)
+  --web, --wasm       Build the web (wasm) bundle and serve the SAME scene as --cli
+                      in a WebGPU browser (generates stream.arrow + config.json).
+                        --canvas-renderer     on-screen WebGPU surface (default)
+                        --offscreen-renderer  offscreen texture read back to a canvas
+                                              (alias --arrow-renderer)
 
-BROWSER QUERY PARAMS (--web --canvas-renderer / --textured-renderer; append to the URL, no rebuild):
-  ?size=N             square render resolution in px (16..4096; default 1024).
-  ?fps=N              playback frame rate (1..240; default 24). Render-bound: it
-                      never plays faster than the GPU can draw a frame.
-  ?smoke=1            render only the 2-row smoke batch, then stop (--canvas-renderer only).
-  ?benchmarkRate=60|120   fixed-rate throughput benchmark (overrides ?fps; --canvas-renderer only).
-                      Combine, e.g. http://localhost:8080/?size=2048&fps=30
-                      (the textured demo keeps its route: ?textured&size=2048&fps=30)
+BROWSER QUERY PARAM (--web; append to the URL, no rebuild):
+  ?fps=N              playback frame rate (1..240; default = the FPS positional arg).
+                      The render resolution is baked into the stream's CV `k`, so it
+                      is the WIDTH/HEIGHT positional args (not a URL param).
+                      e.g. http://localhost:PORT/?fps=30
   Open http://localhost:PORT (WebGPU needs this secure context; a bare IP is not
-  one — use the printed SSH tunnel for a remote browser). After a rebuild
-  hard-refresh (Ctrl+Shift+R); if you also restarted the server, reconnect the
-  SSH tunnel so the browser drops the cached bundle.
+  one — use the printed SSH tunnel for a remote browser).
 
 CONTENT FLAGS (--cli and --native):
   --mesh OBJ          Load OBJ as a protocol 0.0.3 mesh (centered + scaled to fit).
@@ -125,6 +124,19 @@ CONTENT FLAGS (--cli and --native):
   --wireframe         Draw mesh edges as a line list instead of filled triangles (#38).
   --aabb              Overlay each mesh's axis-aligned bounding box as a green box (#42).
   --axes              Overlay a coordinate-axes gizmo (X=red, Y=green, Z=blue) at the origin (#42).
+  --axes-local        Overlay a coordinate-axes gizmo at EACH drawn object's own local
+                      frame (its model), e.g. #77's (e1,e2,e3) quad placement frame.
+  --placement-quad    Draw the reconstructed placement quad as a colored wireframe outline
+                      (debug check vs. the filmed poster). Appends a canonical quad mesh;
+                      author its per-frame draw with placement_quad_by_local_coord.py --placement-quad.
+  --placement-quad-color "R G B"
+                      Placement-quad outline color, 0..1 floats (default: "0 1 1" cyan).
+                      Implies --placement-quad's mesh.
+  --frames-base DIR   Composite each frame's 0.0.5 background still (its `frame_path`,
+                      resolved relative to DIR) *beneath* the scene via a FramePlane (#63).
+                      Stills are decoded at full resolution; extract them with
+                      scripts/extract_frames.py <video> --format jpg (add --height H to
+                      extract smaller stills and save memory).
 
   -h, --help          Show this guidance and exit.
 
@@ -143,11 +155,33 @@ Examples:
     examples/frames.multimesh.jsonl output/scene.gif 1024 1024 24
   examples/render.sh --cli --wireframe --axes --aabb --mesh assets/meshes/bunny.obj \
     examples/frames.bunny_dolly.cg.jsonl output/bunny_dolly.gif 1024 1024 24  # dolly capstone (#49; auto-generates the frames)
-  examples/render.sh --web                                   # build + serve the wasm demo
-  examples/render.sh --web --canvas-renderer                 # on-screen wireframe bunny dolly demo
-  #   then open http://localhost:8080/?size=2048&fps=30       (size/fps tuned live)
-  examples/render.sh --web --textured-renderer               # on-screen textured bunny (#20: texture+AABB+axes)
-  #   then open http://localhost:8080/?textured&size=2048     (size/fps tuned live)
+  # Two-stage placement-quad pipeline (#77): stage 1 = placement quad + local frame
+  # (before placing the mesh); stage 2 = mesh anchored on it, with AABB + local frame.
+  #   uv run --with pyarrow --with numpy scripts/perception_to_arrow.py \
+  #     --assets assets/videos/cornellbox -o examples/frames.cornellbox.perception.arrow
+  #   uv run --with pyarrow --with numpy examples/placement_quad_by_local_coord.py --from-perception \
+  #     examples/frames.cornellbox.perception.arrow --no-place-mesh --placement-quad \
+  #     --placement-quad-mesh-index 0 -o examples/frames.cornellbox.stage1.jsonl
+  examples/render.sh --cli --placement-quad --axes-local --frames-base output/cornellbox \
+    examples/frames.cornellbox.stage1.jsonl output/cornellbox_stage1.gif 960 540 25  # stage 1: placement quad only
+  #   uv run --with pyarrow --with numpy examples/placement_quad_by_local_coord.py --from-perception \
+  #     examples/frames.cornellbox.perception.arrow --placement-quad \
+  #     -o examples/frames.cornellbox.stage2.jsonl
+  examples/render.sh --cli --placement-quad --axes-local --aabb \
+    --mesh assets/meshes/bunny_with_texture/bunny.obj \
+    --texture assets/meshes/bunny_with_texture/bunny_uv_map1.jpg \
+    --frames-base output/cornellbox \
+    examples/frames.cornellbox.stage2.jsonl output/cornellbox_stage2.gif 960 540 25  # stage 2: mesh placed
+  # --web replays any --cli scene in the browser (same flags + positional W H FPS):
+  examples/render.sh --web --canvas-renderer --placement-quad --axes-local \
+    --frames-base output/cornellbox \
+    examples/frames.cornellbox.stage1.jsonl '' 960 540 25   # stage 1 on-screen (WebGPU canvas)
+  #   then open http://localhost:8080/?fps=30                (fps tuned live; size baked)
+  examples/render.sh --web --offscreen-renderer --placement-quad --axes-local --aabb \
+    --mesh assets/meshes/bunny_with_texture/bunny.obj \
+    --texture assets/meshes/bunny_with_texture/bunny_uv_map1.jpg \
+    --frames-base output/cornellbox \
+    examples/frames.cornellbox.stage2.jsonl '' 960 540 25   # stage 2 via offscreen texture readback
 
 Run from `nix develop`. On WSL, prefix with WGPU_BACKEND=gl for GPU rendering.
 USAGE
@@ -161,20 +195,23 @@ if [ $# -eq 0 ]; then
 fi
 
 # Extract the optional mode flags (--cli/--native/--web), the --web renderer
-# sub-flags (--arrow-renderer/--canvas-renderer), and repeatable --mesh <obj>
+# sub-flags (--canvas-renderer/--offscreen-renderer), and repeatable --mesh <obj>
 # flags that prepend a mesh Arrow stream (0.0.3 [mesh][params]); the rest are
 # positional.
 cli=0
 native=0
 web=0
-arrow_renderer=0
+offscreen_renderer=0
 canvas_renderer=0
-textured_renderer=0
 wireframe=0
 aabb=0
 axes=0
+axes_local=0
+quad=0
+quad_color="0 1 1"
 meshes=()
 texture=""
+frames_base=""
 positional=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -182,16 +219,21 @@ while [ $# -gt 0 ]; do
     --cli|--headless) cli=1 ;;
     --native|--app) native=1 ;;
     --web|--wasm) web=1 ;;
-    --arrow-renderer) arrow_renderer=1 ;;
+    --offscreen-renderer|--arrow-renderer) offscreen_renderer=1 ;;
     --canvas-renderer) canvas_renderer=1 ;;
-    --textured-renderer) textured_renderer=1 ;;
     --wireframe) wireframe=1 ;;
     --aabb) aabb=1 ;;
     --axes) axes=1 ;;
+    --axes-local) axes_local=1 ;;
+    --placement-quad) quad=1 ;;
+    --placement-quad-color) shift; quad=1; quad_color="${1:?--placement-quad-color requires \"R G B\" (0..1 floats)}" ;;
+    --placement-quad-color=*) quad=1; quad_color="${1#--placement-quad-color=}" ;;
     --mesh) shift; meshes+=("${1:?--mesh requires an OBJ path}") ;;
     --mesh=*) meshes+=("${1#--mesh=}") ;;
     --texture) shift; texture="${1:?--texture requires an image path}" ;;
     --texture=*) texture="${1#--texture=}" ;;
+    --frames-base) shift; frames_base="${1:?--frames-base requires a directory}" ;;
+    --frames-base=*) frames_base="${1#--frames-base=}" ;;
     *) positional+=("$1") ;;
   esac
   shift
@@ -203,19 +245,19 @@ if [ $((cli + native + web)) -gt 1 ]; then
   echo "error: choose only one of --cli, --native, --web" >&2
   exit 1
 fi
-if [ $((arrow_renderer + canvas_renderer + textured_renderer)) -gt 1 ]; then
-  echo "error: choose only one of --arrow-renderer, --canvas-renderer, --textured-renderer" >&2
+if [ $((offscreen_renderer + canvas_renderer)) -gt 1 ]; then
+  echo "error: choose only one of --canvas-renderer, --offscreen-renderer" >&2
   exit 1
 fi
-if [ $((arrow_renderer + canvas_renderer + textured_renderer)) -ge 1 ] && [ "$web" -ne 1 ]; then
-  echo "error: --arrow-renderer / --canvas-renderer / --textured-renderer apply only to --web/--wasm" >&2
+if [ $((offscreen_renderer + canvas_renderer)) -ge 1 ] && [ "$web" -ne 1 ]; then
+  echo "error: --canvas-renderer / --offscreen-renderer apply only to --web/--wasm" >&2
   exit 1
 fi
 
 # --texture provides a 0.0.4 texture table (bound as the sampled albedo) and
 # renders textured. It needs a --mesh (UVs to sample the texture) and is
-# mutually exclusive with --wireframe. --web ignores it (browser demos are
-# their own pipeline).
+# mutually exclusive with --wireframe. It applies to --web too (the browser
+# renderer replays the same generated [mesh][texture][params] stream).
 if [ -n "$texture" ]; then
   if [ ${#meshes[@]} -eq 0 ]; then
     echo "error: --texture requires at least one --mesh (with UVs to sample)" >&2
@@ -235,6 +277,35 @@ height="${4:-256}"
 fps="${5:-30}"
 # DuckDB SQL string literals escape a single quote by doubling it.
 sql_input=${input//\'/\'\'}
+
+# --placement-quad appends a canonical colored quad mesh (an origin-centred,
+# extent-2 unit square, corners ±1) as the LAST --mesh, so a stream can draw the
+# reconstructed placement quad as a wireframe overlay (a debug check that it
+# matches the filmed poster). Its ±1 corners map straight to the camera-space quad
+# — the producer (examples/placement_quad_by_local_coord.py --placement-quad) emits a per-frame
+# `draws` entry {mesh: idx, mode: "wireframe"} placing it. --placement-quad-color
+# "R G B" (0..1 floats) tints it (default cyan). The quad rides the mesh table
+# (Arrow), so it needs the same pyarrow producer as --mesh.
+quad_obj=""
+if [ "$quad" -eq 1 ]; then
+  read -r qr qg qb <<QC
+$quad_color
+QC
+  : "${qr:=0}" "${qg:=1}" "${qb:=1}"
+  quad_obj="$(mktemp --suffix=.obj)"
+  trap 'rm -f "$quad_obj"' EXIT
+  cat > "$quad_obj" <<QUAD
+# canonical placement-quad overlay (render.sh --placement-quad): centred, extent 2, corners ±1.
+# 'v x y z r g b' bakes the outline color into the vertices (wireframe uses them).
+v -1 -1 0 $qr $qg $qb
+v 1 -1 0 $qr $qg $qb
+v 1 1 0 $qr $qg $qb
+v -1 1 0 $qr $qg $qb
+f 1 2 3
+f 1 3 4
+QUAD
+  meshes+=("$quad_obj")
+fi
 
 # examples/bunny_dolly.py authors the 45° bird's-eye *dolly* camera capstone (#49)
 # as two JSONL streams — CG (eye/target/fovy) and CV (K + pose) — that render
@@ -275,79 +346,6 @@ for tool in $tools; do
   fi
 done
 
-# --web/--wasm: build the browser (wasm) bundle and serve it. The demo generates
-# its own Arrow frame stream in-browser, so the positional arguments are ignored.
-if [ "$web" -eq 1 ]; then
-  port="${PORT:-8080}"
-  user="$(whoami)"
-  # First non-loopback IPv4 of this host (for the direct / SSH-tunnel URLs).
-  ip="$(hostname -I 2>/dev/null | awk '{print $1; exit}')"
-  [ -n "$ip" ] || ip="<server-ip>"
-
-  # All three browser renderers ship in one bundle; web/src/main.ts routes on the
-  # `arrow-smoke` / `textured` query params, so only the opened URL differs.
-  # Default (or --arrow-renderer) = the offscreen ArrowRenderer output-stream smoke
-  # (the browser counterpart of --cli); --canvas-renderer = the on-screen wireframe
-  # canvas demo; --textured-renderer = the on-screen textured bunny demo (?textured).
-  if [ "$canvas_renderer" -eq 1 ]; then
-    demo_query=""
-    renderer_label="CanvasRenderer (on-screen canvas demo — bunny dolly capstone)"
-    # Live-tunable URL params for the canvas demo (no rebuild needed).
-    demo_params=$(cat <<PARAMS
-
-  Tune the canvas demo live via URL query params (no rebuild):
-    ?size=N   square resolution px (16..4096, default 1024)
-    ?fps=N    playback rate (1..240, default 24; render-bound above achievable)
-    ?smoke=1  render the 2-row smoke batch then stop
-    ?benchmarkRate=60|120  throughput benchmark (overrides ?fps)
-  e.g.  http://localhost:$port/?size=2048&fps=30
-  (After a rebuild hard-refresh Ctrl+Shift+R; if you restarted the server behind
-  an SSH tunnel, reconnect the tunnel too, to drop the cached bundle.)
-PARAMS
-)
-  elif [ "$textured_renderer" -eq 1 ]; then
-    demo_query="?textured"
-    renderer_label="CanvasRenderer (on-screen textured bunny — #20: texture + AABB + axes)"
-    # Live-tunable URL params for the textured demo (no rebuild needed).
-    demo_params=$(cat <<PARAMS
-
-  Tune the textured demo live via URL query params (no rebuild):
-    ?size=N   square resolution px (16..4096, default 1024)
-    ?fps=N    playback rate (1..240, default 24)
-  e.g.  http://localhost:$port/?textured&size=2048&fps=30
-  (After a rebuild hard-refresh Ctrl+Shift+R; if you restarted the server behind
-  an SSH tunnel, reconnect the tunnel too, to drop the cached bundle.)
-PARAMS
-)
-  else
-    demo_query="?arrow-smoke"
-    renderer_label="ArrowRenderer (offscreen output-stream smoke)"
-    demo_params=""
-  fi
-
-  echo "building trd web (wasm) bundle via nix (.#web)…" >&2
-  (cd "$root" && nix build --no-link ".#web")
-
-  cat <<EOF
-
-trd web (wasm) server — port $port  (press Ctrl-C to stop)
-  renderer: $renderer_label
-
-  On this machine:        http://localhost:$port$demo_query
-  Direct (same network):  http://$ip:$port$demo_query
-
-  SSH tunnel (recommended if the port is not directly reachable):
-    ssh -L $port:localhost:$port $user@$ip
-  then open in a WebGPU browser (Chrome/Edge):
-                          http://localhost:$port$demo_query
-$demo_params
-
-EOF
-
-  cd "$root"
-  exec env PORT="$port" nix run ".#web"
-fi
-
 # Choose a frame producer: DuckDB's 'arrow' community extension if it loads,
 # otherwise scripts/jsonl_to_arrow.py via uv (or python3 with pyarrow).
 if command -v duckdb >/dev/null 2>&1 && duckdb -c "INSTALL arrow FROM community; LOAD arrow;" >/dev/null 2>&1; then
@@ -364,12 +362,14 @@ fi
 
 # DuckDB's producer only understands the 0.0.1/0.0.2 columns (center/size/theta/
 # model); its SQL silently DROPS the additive 0.0.3 camera (eye/target/direction/
-# up/k/pose/fovy/aspect/znear/zfar) and instanced draw-list (draws) columns. If
-# the input carries any of those, fall back to the pyarrow producer (which emits
-# them) so the camera/draw data actually reaches trd — otherwise an authored
-# camera is lost and trd renders with the identity camera (z-clipping).
+# up/k/pose/fovy/aspect/znear/zfar) and instanced draw-list (draws) columns, as
+# well as the 0.0.5 background frame reference (frame_path/frame_url). If the
+# input carries any of those, fall back to the pyarrow producer (which emits
+# them) so the camera/draw/frame data actually reaches trd — otherwise an authored
+# camera is lost (identity-camera z-clipping) or the background frame plane never
+# appears.
 if [ "$producer" = duckdb ] \
-  && grep -Eq '"(eye|target|direction|up|k|pose|fovy|aspect|znear|zfar|draws)"[[:space:]]*:' "$input"; then
+  && grep -Eq '"(eye|target|direction|up|k|pose|fovy|aspect|znear|zfar|draws|frame_path|frame_url)"[[:space:]]*:' "$input"; then
   if command -v uv >/dev/null 2>&1; then
     producer=uv
   elif command -v python3 >/dev/null 2>&1 && python3 -c 'import pyarrow' >/dev/null 2>&1; then
@@ -484,18 +484,126 @@ aabb_flag=()
 [ "$aabb" -eq 1 ] && aabb_flag=(--aabb)
 axes_flag=()
 [ "$axes" -eq 1 ] && axes_flag=(--axes)
+axes_local_flag=()
+[ "$axes_local" -eq 1 ] && axes_local_flag=(--axes-local)
+# --frames-base resolves each frame's 0.0.5 `frame_path` (relative to this dir)
+# to the still image trd composites *beneath* the scene via a FramePlane (#63).
+frames_base_flag=()
+[ -n "$frames_base" ] && frames_base_flag=(--frames-base "$frames_base")
+
+# --web/--wasm: replay the SAME stream + scene flags as --cli, but in the browser.
+# Build the config-driven web bundle (nix .#web) once, copy it to a writable serve
+# dir, then drop in the runtime inputs the generic renderer (web/src/generic-
+# renderer.ts) fetches at load:
+#   stream.arrow  — mesh++texture++params, the identical bytes trd-cli reads on stdin
+#   config.json   — target renderer + scene flags + baked resolution + default fps
+#   frames/…      — the 0.0.5 background stills (copied from --frames-base) so each
+#                   frame's `frame_path` resolves under the served root
+# static-web-server serves the directory; only ?fps is a live URL override (the
+# render resolution is baked into the CV `k`, so it is a render.sh positional arg).
+# --canvas-renderer (default) draws to the on-screen WebGPU CanvasRenderer;
+# --offscreen-renderer draws to an offscreen ArrowRenderer texture read back to a
+# 2D canvas (the browser twin of the CLI output stream).
+if [ "$web" -eq 1 ]; then
+  port="${PORT:-8080}"
+  user="$(whoami)"
+  # First non-loopback IPv4 of this host (for the direct / SSH-tunnel URLs).
+  ip="$(hostname -I 2>/dev/null | awk '{print $1; exit}')"
+  [ -n "$ip" ] || ip="<server-ip>"
+
+  # Renderer target: on-screen canvas (default) vs. offscreen texture readback.
+  if [ "$offscreen_renderer" -eq 1 ]; then
+    target="offscreen"
+    renderer_label="ArrowRenderer (offscreen texture -> RGBA readback -> 2D canvas)"
+  else
+    target="canvas"
+    renderer_label="CanvasRenderer (on-screen WebGPU surface)"
+  fi
+
+  # Base mesh mode mirrors the --cli precedence: textured > wireframe > filled.
+  if [ -n "$texture" ]; then
+    mode="textured"
+  elif [ "$wireframe" -eq 1 ]; then
+    mode="wireframe"
+  else
+    mode="filled"
+  fi
+
+  # Render an int flag as a JSON boolean for config.json.
+  bool() { if [ "$1" -eq 1 ]; then printf true; else printf false; fi; }
+  background=false
+  [ -n "$frames_base" ] && background=true
+
+  echo "building trd web (wasm) bundle via nix (.#web)…" >&2
+  dist="$(cd "$root" && nix build --no-link --print-out-paths ".#web")"
+
+  serve="$(mktemp -d)"
+  trap 'rm -rf "$serve"' EXIT
+  # nix store outputs are read-only; copy the bundle out and make it writable so we
+  # can drop the generated stream/config/frames next to index.html.
+  cp -RL "$dist"/. "$serve"/
+  chmod -R u+w "$serve"
+
+  echo "generating web stream.arrow + config.json (same producers as --cli)…" >&2
+  stream > "$serve/stream.arrow"
+  cat > "$serve/config.json" <<CFG
+{
+  "target": "$target",
+  "mode": "$mode",
+  "showAabb": $(bool "$aabb"),
+  "showAxes": $(bool "$axes"),
+  "showLocalAxes": $(bool "$axes_local"),
+  "background": $background,
+  "width": $width,
+  "height": $height,
+  "fps": $fps
+}
+CFG
+
+  # Background stills: copy the --frames-base tree in so each frame's `frame_path`
+  # ("frames/frame_xxxxxx.jpg", relative to it) resolves under the served root.
+  if [ -n "$frames_base" ]; then
+    echo "copying background stills from $frames_base…" >&2
+    cp -RL "$frames_base"/. "$serve"/
+    chmod -R u+w "$serve"
+  fi
+
+  cat <<EOF
+
+trd web (wasm) server — port $port  (press Ctrl-C to stop)
+  renderer: $renderer_label
+  scene:    mode=$mode aabb=$(bool "$aabb") axes=$(bool "$axes") axes-local=$(bool "$axes_local") background=$background
+  stream:   ${width}x${height}, default ${fps}fps  (override live with ?fps=N)
+
+  On this machine:        http://localhost:$port
+  Direct (same network):  http://$ip:$port
+
+  SSH tunnel (recommended if the port is not directly reachable):
+    ssh -L $port:localhost:$port $user@$ip
+  then open in a WebGPU browser (Chrome/Edge):
+                          http://localhost:$port
+
+  WebGPU needs a secure context, so open http://localhost:$port (an SSH tunnel
+  makes a remote machine's origin "localhost" too); a bare http://<ip> is NOT
+  a secure context.
+
+EOF
+
+  echo "serving $serve on port $port…" >&2
+  exec nix run nixpkgs#static-web-server -- --root "$serve" --port "$port"
+fi
 
 if [ "$native" -eq 1 ]; then
   # Play the frame stream live in the interactive trd-app window (trd-native).
   # The appearance flags pass through to trd-app too (it now renders the mesh
   # Scene via the shared trd-core MeshRenderer, like trd-cli).
   stream \
-    | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-app -- --width "$width" --height "$height" --fps "$fps" "${wireframe_flag[@]}" "${textured_flag[@]}" "${aabb_flag[@]}" "${axes_flag[@]}"
+    | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-app -- --width "$width" --height "$height" --fps "$fps" "${wireframe_flag[@]}" "${textured_flag[@]}" "${aabb_flag[@]}" "${axes_flag[@]}" "${axes_local_flag[@]}" "${frames_base_flag[@]}"
   echo "streamed $input to the trd-app window (${width}x${height}, ${fps}fps)"
 else
   mkdir -p "$(dirname "$output")"
   stream \
-    | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-cli -- --width "$width" --height "$height" "${wireframe_flag[@]}" "${textured_flag[@]}" "${aabb_flag[@]}" "${axes_flag[@]}" \
+    | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-cli -- --width "$width" --height "$height" "${wireframe_flag[@]}" "${textured_flag[@]}" "${aabb_flag[@]}" "${axes_flag[@]}" "${axes_local_flag[@]}" "${frames_base_flag[@]}" \
     | uv run --with pyarrow --with numpy "$root/scripts/encode.py" --fps "$fps" -o "$output"
   echo "wrote $output (${width}x${height}, ${fps}fps) from $input"
 fi

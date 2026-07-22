@@ -2,8 +2,9 @@ use futures_channel::oneshot;
 use wasm_bindgen::prelude::*;
 
 use trd_core::{
-    build_scene, tightly_pack_rgba, Draw, DrawableObject, FrameBatch, FrameParams, InputSession,
-    Matrix4, Mesh, MeshRenderer, OutputSession, RenderMode, Viewport, DEFAULT_PREVIEW_TARGET,
+    build_scene, tightly_pack_rgba, DecodedFrame, Draw, DrawableObject, FrameBatch, FrameFit,
+    FrameParams, InputSession, Matrix4, Mesh, MeshRenderer, OutputSession, RenderMode, Viewport,
+    DEFAULT_PREVIEW_TARGET,
 };
 
 fn error_message(context: &str, error: impl std::fmt::Display) -> String {
@@ -38,9 +39,20 @@ pub struct ArrowRenderer {
     mode: RenderMode,
     show_aabb: bool,
     show_axes: bool,
+    /// Per-draw *local* coordinate-axes gizmos (each object's own model frame) —
+    /// the browser twin of the native `--axes-local` flag.
+    show_local_axes: bool,
+    /// Composite the uploaded background frame texture beneath the scene as a
+    /// [`DrawableObject::FramePlane`] (#63); a no-op until a background is
+    /// uploaded via [`update_frame_texture_rgba`](Self::update_frame_texture_rgba).
+    composite_frame: bool,
     target: wgpu::Texture,
     staging: wgpu::Buffer,
     input: InputSession,
+    /// Frames decoded by [`load_ipc`](Self::load_ipc) but not yet rendered,
+    /// replayed on demand by [`render_index`](Self::render_index) (the generic
+    /// offscreen renderer's paced playback).
+    frames: Vec<DecodedFrame>,
     output: OutputSession,
     width: u32,
     height: u32,
@@ -127,9 +139,12 @@ impl ArrowRenderer {
             mode: RenderMode::Filled,
             show_aabb: false,
             show_axes: false,
+            show_local_axes: false,
+            composite_frame: false,
             target,
             staging,
             input: InputSession::new(),
+            frames: Vec::new(),
             output,
             width,
             height,
@@ -207,6 +222,123 @@ impl ArrowRenderer {
     pub fn set_show_axes(&mut self, enabled: bool) {
         self.show_axes = enabled;
     }
+
+    /// Toggles the per-draw **local** coordinate-axes gizmo for later frames — one
+    /// [`DrawableObject::CoordinateAxes`] at each object's own `model`. The
+    /// browser twin of the native `--axes-local` flag.
+    #[wasm_bindgen(js_name = setShowLocalAxes)]
+    pub fn set_show_local_axes(&mut self, enabled: bool) {
+        self.show_local_axes = enabled;
+    }
+
+    /// Toggles compositing the uploaded background frame beneath the scene as a
+    /// [`DrawableObject::FramePlane`] (#63). Enable it, then upload one background
+    /// per frame via [`update_frame_texture_rgba`](Self::update_frame_texture_rgba)
+    /// before that frame's [`render_index`](Self::render_index).
+    #[wasm_bindgen(js_name = setCompositeFrame)]
+    pub fn set_composite_frame(&mut self, enabled: bool) {
+        self.composite_frame = enabled;
+    }
+
+    /// Uploads one RGBA background image as the reused frame-plane texture (#63),
+    /// composited beneath the scene when [`set_composite_frame`](Self::set_composite_frame)
+    /// is enabled. `rgba` must be exactly `width * height * 4` bytes (tightly
+    /// packed) and neither dimension may be zero.
+    #[wasm_bindgen(js_name = updateFrameTextureRgba)]
+    pub fn update_frame_texture_rgba(
+        &mut self,
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<(), JsValue> {
+        self.state.ensure_open().map_err(crate::js_error)?;
+        let expected = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|wh| wh.checked_mul(4));
+        if width == 0 || height == 0 || expected != Some(rgba.len()) {
+            return Err(crate::js_error(format!(
+                "frame texture rgba must be width*height*4 bytes (got {} for {width}x{height})",
+                rgba.len()
+            )));
+        }
+        self.ensure_renderer();
+        let queue = &self.queue;
+        self.renderer
+            .as_mut()
+            .expect("renderer built above")
+            .update_frame_texture_rgba(queue, rgba, width, height);
+        Ok(())
+    }
+
+    /// Decodes frames from an Arrow IPC chunk and **buffers** them without
+    /// rendering, returning the running total. Unlike [`push_ipc`](Self::push_ipc)
+    /// (which renders and emits an output stream), this only stages frames for
+    /// paced replay by [`render_index`](Self::render_index). Push the whole
+    /// `[mesh?][texture?][params]` stream once, then render by index.
+    #[wasm_bindgen(js_name = loadIpc)]
+    pub fn load_ipc(&mut self, chunk: Vec<u8>) -> Result<u32, JsValue> {
+        if let Err(message) = self.state.ensure_open() {
+            return Err(crate::js_error(message));
+        }
+        let result = (|| {
+            let batches = self
+                .input
+                .push(&chunk)
+                .map_err(|error| error_message("input IPC decode failed", error))?;
+            for batch in batches {
+                self.frames.extend(batch);
+            }
+            u32::try_from(self.frames.len())
+                .map_err(|_| "buffered frame count does not fit u32".to_string())
+        })();
+        match result {
+            Ok(count) => Ok(count),
+            Err(message) => self.fail(message),
+        }
+    }
+
+    /// The number of frames buffered by [`load_ipc`](Self::load_ipc).
+    #[wasm_bindgen(js_name = frameCount)]
+    pub fn frame_count(&self) -> u32 {
+        u32::try_from(self.frames.len()).unwrap_or(u32::MAX)
+    }
+
+    /// The buffered frame's optional `0.0.5` background reference
+    /// (`frame_path`/`frame_url`) the JS shell resolves + uploads before
+    /// [`render_index`](Self::render_index). `None` when out of range or absent.
+    #[wasm_bindgen(js_name = frameRef)]
+    pub fn frame_ref(&self, index: u32) -> Option<String> {
+        self.frames
+            .get(index as usize)
+            .and_then(|frame| frame.frame_ref.clone())
+    }
+
+    /// Renders one buffered frame (by index) to the offscreen texture and returns
+    /// its tightly-packed RGBA (`width * height * 4` bytes) for the JS shell to
+    /// display — the generic offscreen renderer's per-tick call.
+    #[wasm_bindgen(js_name = renderIndex)]
+    pub async fn render_index(&mut self, index: u32) -> Result<Vec<u8>, JsValue> {
+        if let Err(message) = self.state.ensure_open() {
+            return Err(crate::js_error(message));
+        }
+        let frame = match self.frames.get(index as usize).cloned() {
+            Some(frame) => frame,
+            None => {
+                return self.fail(format!(
+                    "frame index {index} out of range ({} buffered)",
+                    self.frames.len()
+                ));
+            }
+        };
+        let (params, scene) = match self.scene_for(&frame) {
+            Ok(pair) => pair,
+            Err(message) => return self.fail(message),
+        };
+        match self.render_frame(params, &scene).await {
+            Ok(rgba) => Ok(rgba),
+            Err(message) => self.fail(message),
+        }
+    }
 }
 
 impl ArrowRenderer {
@@ -250,6 +382,48 @@ impl ArrowRenderer {
         self.renderer.as_mut().expect("renderer just built")
     }
 
+    /// Resolves a decoded frame into its params + scene: defaults the draw list
+    /// to one instance of mesh `0` for a legacy single-object frame, validates
+    /// the mesh ids, then builds the scene with the current flags + optional
+    /// background compositing. Shared by [`push_open`](Self::push_open) (the
+    /// output-stream path) and [`render_index`](Self::render_index) (paced replay).
+    fn scene_for(
+        &mut self,
+        frame: &DecodedFrame,
+    ) -> Result<(FrameParams, Vec<DrawableObject>), String> {
+        let params = frame.params;
+        // Absent per-frame draw list ⇒ one instance of mesh 0 placed by the
+        // frame's own model (legacy single-object behavior).
+        let draws: Vec<Draw> = if frame.draws.is_empty() {
+            vec![Draw {
+                mesh_id: 0,
+                model: params.model_matrix().to_cols_array(),
+                mode: None,
+            }]
+        } else {
+            frame.draws.clone()
+        };
+
+        let mesh_count = self.ensure_renderer().mesh_count();
+        for draw in &draws {
+            if draw.mesh_id as usize >= mesh_count {
+                return Err(format!(
+                    "draw references mesh {} but only {mesh_count} mesh(es) are loaded",
+                    draw.mesh_id
+                ));
+            }
+        }
+        let scene = build_scene(
+            &draws,
+            self.mode,
+            self.show_aabb,
+            self.show_axes,
+            self.show_local_axes,
+            self.composite_frame.then_some(FrameFit::Stretch),
+        );
+        Ok((params, scene))
+    }
+
     async fn push_open(&mut self, chunk: Vec<u8>) -> Result<Vec<u8>, String> {
         let frame_batches: Vec<FrameBatch> = self
             .input
@@ -260,28 +434,7 @@ impl ArrowRenderer {
             let mut images = Vec::with_capacity(frame_batch.len());
 
             for frame in frame_batch {
-                let params = frame.params;
-                // Absent per-frame draw list ⇒ one instance of mesh 0 placed by
-                // the frame's own model (legacy single-object behavior).
-                let draws: Vec<Draw> = if frame.draws.is_empty() {
-                    vec![Draw {
-                        mesh_id: 0,
-                        model: params.model_matrix().to_cols_array(),
-                    }]
-                } else {
-                    frame.draws
-                };
-
-                let mesh_count = self.ensure_renderer().mesh_count();
-                for draw in &draws {
-                    if draw.mesh_id as usize >= mesh_count {
-                        return Err(format!(
-                            "draw references mesh {} but only {mesh_count} mesh(es) are loaded",
-                            draw.mesh_id
-                        ));
-                    }
-                }
-                let scene = build_scene(&draws, self.mode, self.show_aabb, self.show_axes);
+                let (params, scene) = self.scene_for(&frame)?;
                 images.push(self.render_frame(params, &scene).await?);
             }
 

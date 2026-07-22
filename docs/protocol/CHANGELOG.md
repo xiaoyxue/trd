@@ -13,7 +13,47 @@ follows `MAJOR.MINOR.PATCH`.
   it as the default GIF/WebP frame rate; `trd-app` plays at this rate (or `--fps`)
   and, by default, presents decoupled from the monitor refresh (`--vsync` to lock).
 
-## 0.0.4 — Current
+## 0.0.5 — Current
+
+### Added
+- Optional per-frame **background frame reference** params column — one of two
+  interchangeable `Utf8` columns: **`frame_path`** (a filesystem path, resolved by
+  the native shell relative to `--frames-base`) or **`frame_url`** (a URL, resolved
+  by the browser shell). Per-row (one row = one frame), so the background image can
+  change every frame; a null/empty value means that frame has no background. When
+  both are present the native decoder prefers `frame_path`, the browser decoder
+  `frame_url`. Decoded by `stream::decode_frame_refs` (native) /
+  `protocol::decode_frame_refs` (wasm).
+- New **`DrawableObject::FramePlane { fit }`** primitive: a shader-generated
+  fullscreen triangle (authored in clip space, ignoring the camera) sampling a
+  background texture, drawn **first** in the mesh pass with **depth writes off** +
+  compare `Always` so the mesh scene and gizmos z-composite on top. `FrameFit` is
+  `Stretch` (default, ignores aspect) or `Cover` (preserve aspect, center-crop);
+  both fill the viewport with no letterbox bars.
+- **Reused background frame texture**: uploaded to a `Rgba8UnormSrgb` GPU texture
+  (texels linearized on read, matching the mesh textured path and the sRGB output),
+  **linear** filtering, **clamp-to-edge**, **no mipmaps**. (Re)created only when the
+  image resolution changes, so a fixed-resolution video allocates once and every
+  later frame is a plain texture write (`MeshRenderer::update_frame_texture_rgba`).
+  This is a **second** texture binding, distinct from the 0.0.4 mesh albedo (which
+  arrives in the Arrow texture stream); the background arrives at the shell boundary.
+- **Boundary image I/O in the shell, not the core.** `trd-core` decodes the
+  reference string only; the native CLI (`trd --frames-base <dir>`) and window
+  (`trd-app --frames-base <dir>`) decode the PNG/JPEG (`image` crate) and upload it
+  via a `FrameResolver` closure passed to `run_stream` / loaded on the reader
+  thread. The browser shell wires it too: the config-driven web renderer
+  (`render.sh --web --frames-base <dir>`) fetches each still by its decoded
+  `frame_ref`, decodes it in JS, and uploads it via `updateFrameTextureRgba`.
+  `scripts/extract_frames.py` (#76) is the reference producer of the stills +
+  `frame_path`/`frame_url` manifest.
+
+### Compatibility
+- **Backward-compatible with 0.0.4, 0.0.3, 0.0.2 and 0.0.1.** The `frame_path`/
+  `frame_url` column is optional; a stream without it (or a shell without
+  `--frames-base`) renders identically over the black clear. Decoders accept
+  `{0.0.1, 0.0.2, 0.0.3, 0.0.4, 0.0.5}`.
+
+## 0.0.4 — Superseded
 
 ### Added
 - Optional **texture Arrow stream**, spliced between the mesh and params streams

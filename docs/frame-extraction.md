@@ -70,7 +70,7 @@ Schema-level metadata:
 
 | Key | Value |
 |---|---|
-| `trd.protocol.version` | `0.0.4` |
+| `trd.protocol.version` | `0.0.5` |
 | `trd.stream.frame_rate` | source fps (e.g. `25.0`) — the intended **playback rate**, matching the stream protocol's [`trd.stream.frame_rate`](protocol/README.md) so display/egress plays back at the right speed. |
 | `trd.frames.width` / `trd.frames.height` | frame pixel dimensions. |
 | `trd.frames.count` | number of frames. |

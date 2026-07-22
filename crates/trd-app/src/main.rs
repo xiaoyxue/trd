@@ -11,6 +11,14 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 mod app;
+#[cfg(not(target_arch = "wasm32"))]
+mod cli;
+#[cfg(not(target_arch = "wasm32"))]
+mod error;
+#[cfg(not(target_arch = "wasm32"))]
+mod renderer;
+#[cfg(not(target_arch = "wasm32"))]
+mod stream;
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() {

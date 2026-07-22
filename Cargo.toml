@@ -18,3 +18,11 @@ trd-core = { path = "crates/trd-core" }
 
 [workspace.metadata.crane]
 name = "trd"
+
+# Optimize dependencies even in dev/debug builds. Workspace crates stay
+# unoptimized (fast incremental `cargo build`/`run`), but compute-heavy deps —
+# notably `image`/`zune-jpeg` (per-frame background decode in trd-app, #63) and
+# the wgpu/naga stack — run at release speed, so the native viewer decodes and
+# uploads frames quickly instead of stalling on a debug-mode JPEG decoder.
+[profile.dev.package."*"]
+opt-level = 3
