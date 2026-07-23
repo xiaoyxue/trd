@@ -9,8 +9,11 @@
 //! decoder divergence, GPU `Uniform` byte drift, and camera-math regressions.
 //!
 //! The fixtures are the two-stage cornellbox *placement* demo (#77), reduced to
-//! a few frames at a small resolution and made self-contained (mesh + texture
-//! embedded, background dropped) by `scripts/golden_fixtures.py`:
+//! a few frames at a small resolution by `scripts/golden_fixtures.py`. The mesh,
+//! texture, and params are embedded in one Arrow byte stream; each frame keeps
+//! its `0.0.5` `frame_path`, which the test resolves against `tests/golden/`
+//! (the committed cornellbox stills, decoded from the demo video) and composites
+//! the scene over — an AR composite over the cornellbox background:
 //!
 //! * `stage1.arrow` — the reconstructed placement quad (wireframe) + local axes;
 //! * `stage2.arrow` — a textured bunny anchored on that quad, with AABB + local
@@ -32,7 +35,7 @@ use std::path::{Path, PathBuf};
 
 use arrow::array::{Array, FixedSizeListArray, UInt8Array};
 use arrow::ipc::reader::StreamReader;
-use trd_core::{run_stream, RenderMode, RenderOptions};
+use trd_core::{run_stream, ImageData, RenderMode, RenderOptions};
 
 /// Golden render resolution (16:9; the fixtures' CV `k` is rescaled to match).
 const WIDTH: u32 = 320;
@@ -52,6 +55,22 @@ fn update_goldens() -> bool {
     std::env::var_os("TRD_UPDATE_GOLDENS").is_some()
 }
 
+/// Resolve a fixture's `frame_path` background reference against `golden/`,
+/// decoding the committed cornellbox still to RGBA — the test-side equivalent of
+/// the CLI's `--frames-base`, so the scene composites over the AR background.
+fn resolve_background(path: &str) -> Option<ImageData> {
+    let full = golden_dir().join(path);
+    let img = image::open(&full)
+        .unwrap_or_else(|e| panic!("open background still {}: {e}", full.display()))
+        .to_rgba8();
+    let (width, height) = img.dimensions();
+    Some(ImageData {
+        width,
+        height,
+        rgba: img.into_raw(),
+    })
+}
+
 /// Run the committed fixture through the real pipeline and decode the output
 /// Arrow stream back into per-frame tightly-packed RGBA.
 fn render_fixture(fixture: &str, options: RenderOptions) -> Vec<Vec<u8>> {
@@ -59,8 +78,16 @@ fn render_fixture(fixture: &str, options: RenderOptions) -> Vec<Vec<u8>> {
         .unwrap_or_else(|e| panic!("read fixture {fixture}: {e}"));
 
     let mut out = Vec::new();
-    run_stream(&bytes[..], &mut out, WIDTH, HEIGHT, options, None)
-        .unwrap_or_else(|e| panic!("run_stream on {fixture}: {e:?}"));
+    let resolver = resolve_background;
+    run_stream(
+        &bytes[..],
+        &mut out,
+        WIDTH,
+        HEIGHT,
+        options,
+        Some(&resolver),
+    )
+    .unwrap_or_else(|e| panic!("run_stream on {fixture}: {e:?}"));
 
     let pixels = (WIDTH * HEIGHT) as usize;
     let reader = StreamReader::try_new(&out[..], None).expect("output arrow reader");

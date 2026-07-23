@@ -77,11 +77,14 @@ Guidance for agents working in this repository.
   feeds committed Arrow fixtures (`crates/trd-core/tests/golden/stage{1,2}.arrow`,
   the reduced two-stage cornellbox placement demo) through the real
   `run_stream` pipeline and pixel-diffs the frames against committed golden PNGs
-  (same dir) — the regression net for the #82 refactor. It is GPU-gated
+  (same dir) — the regression net for the #82 refactor. Each frame keeps its
+  `0.0.5` `frame_path`, which the test resolves against `tests/golden/frames/`
+  (committed cornellbox stills) and composites the scene over — an AR composite
+  over the cornellbox background (test-side `--frames-base`). It is GPU-gated
   (`#[ignore]`), so run it with the nixGL wrapper below. After changing the
   fixtures or making an *intended* visual change, regenerate:
   ```sh
-  # 1. rebuild the .arrow fixtures (needs uv on PATH; also after editing the demo)
+  # 1. rebuild the .arrow fixtures + stills (needs uv + ffmpeg on PATH)
   python3 scripts/golden_fixtures.py
   # 2. refresh the golden PNGs from the current renderer (GPU box)
   TRD_UPDATE_GOLDENS=1 cargo test -p trd-core --test golden_render -- --ignored
