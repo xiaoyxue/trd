@@ -1,27 +1,63 @@
-//! The persistent [`MeshRenderer`]: decode-once GPU mesh store, instance
+//! The persistent [`MeshRenderer`]: a decode-once GPU mesh store, instance
 //! batching, and the branch-free [`Scene`](super::Scene) encode.
+//!
+//! The renderer is a composition of a few cohesive parts, each with a single
+//! job, so no one struct is a grab-bag of wgpu handles:
+//! - [`MeshPass`] — the three mesh pipelines (filled/wireframe/textured) and the
+//!   camera `P·V` uniform they share.
+//! - [`MeshStore`] — the uploaded [`MeshGpu`]s, the shared axes gizmo, and the
+//!   growable per-instance model buffer; also walks a [`Scene`] into draw batches.
+//! - [`BoundTexture`](super::BoundTexture) — the mesh albedo sampled by textured
+//!   draws (#20).
+//! - [`FramePlane`](super::FramePlane) — the background video frame plane (#63).
 
+use std::ops::Range;
+
+use super::bound_texture::BoundTexture;
+use super::frame_plane::FramePlane;
 use super::*;
 
 use crate::math::Matrix4;
-use crate::texture::{ImageData, Texture};
+use crate::texture::Texture;
 
-/// A mesh uploaded to the GPU: its vertex buffer, the filled **triangle** index
-/// buffer, the deduped **edge** (`LineList`) index buffer for wireframe (#38),
-/// and the base (preview) model pre-multiplied beneath every per-frame instance
-/// model.
+/// An index buffer plus its element count — one `draw_indexed` range.
+struct IndexBuf {
+    buffer: wgpu::Buffer,
+    count: u32,
+}
+
+impl IndexBuf {
+    fn new(device: &wgpu::Device, label: &str, indices: &[u32]) -> Self {
+        use wgpu::util::DeviceExt;
+        let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents: bytemuck::cast_slice(indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        let count = u32::try_from(indices.len()).expect("index count exceeds u32::MAX");
+        Self { buffer, count }
+    }
+}
+
+/// A vertex buffer paired with one index buffer: a self-contained indexed draw
+/// (e.g. a mesh's AABB box, which carries its own corner vertices). Meshes reuse
+/// one vertex buffer for both their filled triangles and wireframe edges, so
+/// those keep a shared vertex buffer plus two [`IndexBuf`]s instead.
+struct IndexedGeometry {
+    vertex_buffer: wgpu::Buffer,
+    index: IndexBuf,
+}
+
+/// A mesh uploaded to the GPU. Its `vertex_buffer` feeds both the filled
+/// `triangles` and the deduped wireframe `edges` (#38); the `aabb` overlay (#42)
+/// is a standalone box (own corner vertices + 12-edge `LineList`). `base_model`
+/// is the base (preview) transform pre-multiplied beneath every per-frame
+/// instance model (`effective = model · base`).
 struct MeshGpu {
     vertex_buffer: wgpu::Buffer,
-    index_buffer: wgpu::Buffer,
-    index_count: u32,
-    edge_buffer: wgpu::Buffer,
-    edge_count: u32,
-    /// AABB overlay (#42): 8 corner vertices (mesh-local coords, [`AABB_COLOR`])
-    /// and their 12-edge `LineList` index buffer, drawn beneath the same
-    /// per-instance model as the mesh so the box tracks it exactly.
-    aabb_vertex_buffer: wgpu::Buffer,
-    aabb_edge_buffer: wgpu::Buffer,
-    aabb_edge_count: u32,
+    triangles: IndexBuf,
+    edges: IndexBuf,
+    aabb: IndexedGeometry,
     base_model: Matrix4,
 }
 
@@ -33,24 +69,13 @@ fn upload_mesh(device: &wgpu::Device, mesh: &Mesh, base_model: Matrix4) -> MeshG
         contents: bytemuck::cast_slice(&mesh.vertices),
         usage: wgpu::BufferUsages::VERTEX,
     });
-    let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("trd mesh index buffer"),
-        contents: bytemuck::cast_slice(&mesh.indices),
-        usage: wgpu::BufferUsages::INDEX,
-    });
-    let index_count = u32::try_from(mesh.indices.len()).expect("mesh index count exceeds u32::MAX");
-
+    let triangles = IndexBuf::new(device, "trd mesh index buffer", &mesh.indices);
     let edges = mesh.edge_indices();
-    let edge_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("trd mesh edge buffer"),
-        contents: bytemuck::cast_slice(&edges),
-        usage: wgpu::BufferUsages::INDEX,
-    });
-    let edge_count = u32::try_from(edges.len()).expect("mesh edge index count exceeds u32::MAX");
+    let edges = IndexBuf::new(device, "trd mesh edge buffer", &edges);
 
     // AABB overlay box: the mesh's own bounding box (mesh-local coords) as 8
     // colored corner vertices + a 12-edge line list. Built once per mesh; drawn
-    // only when the renderer's `show_aabb` is set.
+    // only when the scene contains an `AabbBox` for this mesh.
     let aabb_vertices: Vec<Vertex> = mesh
         .aabb()
         .corners()
@@ -66,22 +91,16 @@ fn upload_mesh(device: &wgpu::Device, mesh: &Mesh, base_model: Matrix4) -> MeshG
         contents: bytemuck::cast_slice(&aabb_vertices),
         usage: wgpu::BufferUsages::VERTEX,
     });
-    let aabb_edge_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("trd mesh aabb edge buffer"),
-        contents: bytemuck::cast_slice(&AABB_EDGE_INDICES),
-        usage: wgpu::BufferUsages::INDEX,
-    });
-    let aabb_edge_count = AABB_EDGE_INDICES.len() as u32;
+    let aabb_edges = IndexBuf::new(device, "trd mesh aabb edge buffer", &AABB_EDGE_INDICES);
 
     MeshGpu {
         vertex_buffer,
-        index_buffer,
-        index_count,
-        edge_buffer,
-        edge_count,
-        aabb_vertex_buffer,
-        aabb_edge_buffer,
-        aabb_edge_count,
+        triangles,
+        edges,
+        aabb: IndexedGeometry {
+            vertex_buffer: aabb_vertex_buffer,
+            index: aabb_edges,
+        },
         base_model,
     }
 }
@@ -95,8 +114,22 @@ fn create_instance_buffer(device: &wgpu::Device, capacity: u32) -> wgpu::Buffer 
     })
 }
 
+/// Binds `vertex_buffer` at slot 0 and `index`, then draws it over `instances`
+/// (the per-instance model buffer stays bound at slot 1). Pipeline + group
+/// bindings are the caller's responsibility.
+fn draw_indexed(
+    pass: &mut wgpu::RenderPass,
+    vertex_buffer: &wgpu::Buffer,
+    index: &IndexBuf,
+    instances: Range<u32>,
+) {
+    pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+    pass.set_index_buffer(index.buffer.slice(..), wgpu::IndexFormat::Uint32);
+    pass.draw_indexed(0..index.count, 0, instances);
+}
+
 /// Which geometry a [`DrawCommand`] binds. The `usize` is a mesh id (index into
-/// [`MeshRenderer::meshes`]); `Axes` uses the renderer's shared gizmo geometry.
+/// [`MeshStore::meshes`]); `Axes` uses the shared gizmo geometry.
 enum DrawKind {
     /// Filled triangles of a mesh (its triangle index buffer + filled pipeline).
     Filled(usize),
@@ -140,49 +173,100 @@ fn push_command(
     });
 }
 
-/// Persistent indexed mesh renderer. Owns a filled (`TriangleList`) and a
-/// wireframe (`LineList`) pipeline sharing one bind-group layout, a camera
-/// (`P·V`) uniform buffer + bind group, a decode-once store of GPU meshes (each
-/// with a base/preview model + triangle, edge and AABB-box index buffers), the
-/// shared coordinate-axes gizmo geometry, and a growable per-instance
-/// model-matrix buffer. Each [`MeshRenderer::encode`] draws a frame's
-/// [`Scene`] — an ordered list of [`DrawableObject`]s — grouping instances by
-/// geometry so each buffer is drawn once over a contiguous instance range. The
-/// renderer holds no mode/overlay state: what to draw is entirely the scene.
-///
-/// The **background frame texture** (#63) is a second, separately-updated texture
-/// binding (`frame_texture`): the mesh albedo above arrives inside the Arrow
-/// scene channel and skins the meshes, while this one is uploaded at the boundary
-/// from `frame_path`/`frame_url` and skins a [`DrawableObject::FramePlane`]. It is
-/// reused across frames (grown only on a resolution change) so per-frame updates
-/// never reallocate.
-struct FrameTextureGpu {
-    texture: wgpu::Texture,
-    bind_group: wgpu::BindGroup,
-    /// `vec4` fit uniform (`uv_scale.xy` + padding), rewritten each frame from the
-    /// [`FrameFit`] + texture/viewport aspect.
-    fit_uniform: wgpu::Buffer,
-    width: u32,
-    height: u32,
+/// The result of walking a [`Scene`] once ([`MeshStore::build_batches`]): the
+/// flattened per-instance models, the [`DrawCommand`]s over them (already in
+/// draw order), and the singleton background frame-plane fit (if any).
+struct Batches {
+    instances: Vec<InstanceRaw>,
+    commands: Vec<DrawCommand>,
+    frame_fit: Option<FrameFit>,
 }
 
-pub struct MeshRenderer {
-    pipeline: wgpu::RenderPipeline,
-    wireframe_pipeline: wgpu::RenderPipeline,
-    /// Textured pipeline (#20): draws filled triangles sampling the bound
-    /// texture at each vertex UV.
-    textured_pipeline: wgpu::RenderPipeline,
-    uniform: wgpu::Buffer,
-    bind_group: wgpu::BindGroup,
-    /// Group-1 layout for the bound texture + sampler (kept to rebuild the bind
-    /// group when [`set_texture`](MeshRenderer::set_texture) swaps the image).
-    texture_bind_group_layout: wgpu::BindGroupLayout,
-    /// The bound texture's group-1 bind group; `None` until `texture_image` is
-    /// (re)uploaded on the next `encode` (which supplies the GPU queue).
-    texture_bind_group: Option<wgpu::BindGroup>,
-    /// The RGBA8 image uploaded as the bound texture (default: 1x1 white, the
-    /// identity albedo).
-    texture_image: ImageData,
+/// The three mesh pipelines sharing one bind-group layout, plus the camera
+/// (`P·V`) uniform buffer + bind group they all bind at group 0. Filled and
+/// wireframe share one explicit layout so a single camera bind group is valid
+/// whichever [`RenderMode`] is active; the textured pipeline adds the albedo
+/// texture at group 1.
+struct MeshPass {
+    filled: wgpu::RenderPipeline,
+    wireframe: wgpu::RenderPipeline,
+    textured: wgpu::RenderPipeline,
+    camera_uniform: wgpu::Buffer,
+    camera_bind_group: wgpu::BindGroup,
+}
+
+impl MeshPass {
+    /// Constructs a `MeshPass` for `format`, building all three pipelines over a
+    /// shared camera bind-group layout. `texture_layout` is the albedo texture's
+    /// group-1 layout (from [`BoundTexture::layout`]), needed by the textured
+    /// pipeline's layout.
+    fn new(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        texture_layout: &wgpu::BindGroupLayout,
+    ) -> Self {
+        // One explicit bind-group layout shared by both untextured pipelines, so
+        // the single camera bind group is valid whichever RenderMode is active.
+        let camera_layout = create_mesh_bind_group_layout(device);
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("trd mesh pipeline layout"),
+            bind_group_layouts: &[Some(&camera_layout)],
+            immediate_size: 0,
+        });
+        let filled = create_mesh_pipeline_with(
+            device,
+            format,
+            &pipeline_layout,
+            wgpu::PrimitiveTopology::TriangleList,
+            Some(solid_depth_stencil()),
+        );
+        let wireframe = create_mesh_pipeline_with(
+            device,
+            format,
+            &pipeline_layout,
+            wgpu::PrimitiveTopology::LineList,
+            Some(overlay_depth_stencil()),
+        );
+        // Textured pipeline (#20): group 0 = the shared camera uniform, group 1 =
+        // the bound albedo texture + sampler.
+        let textured_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("trd textured pipeline layout"),
+                bind_group_layouts: &[Some(&camera_layout), Some(texture_layout)],
+                immediate_size: 0,
+            });
+        let textured = create_textured_pipeline(device, format, &textured_pipeline_layout);
+        // Identity params ignore the viewport (no intrinsics); each frame's
+        // `write_camera` supplies the real target dimensions.
+        let (camera_uniform, camera_bind_group) = create_view_proj_binding(
+            device,
+            &camera_layout,
+            FrameParams::IDENTITY,
+            Viewport {
+                width: 1,
+                height: 1,
+            },
+        );
+        Self {
+            filled,
+            wireframe,
+            textured,
+            camera_uniform,
+            camera_bind_group,
+        }
+    }
+
+    /// Rewrites the camera `P·V` uniform for this frame's `params`/`viewport`.
+    fn write_camera(&self, queue: &wgpu::Queue, params: FrameParams, viewport: Viewport) {
+        write_view_proj(queue, &self.camera_uniform, params, viewport);
+    }
+}
+
+/// The decode-once geometry store: the uploaded [`MeshGpu`]s (referenced by a
+/// scene's mesh ids), the shared coordinate-axes gizmo vertices, and the
+/// growable per-instance model-matrix buffer. Also walks a [`Scene`] into
+/// [`Batches`], the one place mesh base models are applied.
+struct MeshStore {
     meshes: Vec<MeshGpu>,
     /// The coordinate-axes gizmo geometry (six `LineList` vertices); each
     /// [`DrawableObject::CoordinateAxes`] draws it under its own model, supplied
@@ -190,138 +274,14 @@ pub struct MeshRenderer {
     axes_vertex_buffer: wgpu::Buffer,
     instance_buffer: wgpu::Buffer,
     instance_capacity: u32,
-    /// The mesh pass's depth attachment, (re)created lazily in `encode` to match
-    /// the viewport. Gives solid (filled/textured) meshes real z-occlusion.
-    depth: Option<DepthTarget>,
-    /// Retained so `encode` can grow the instance buffer on demand without the
-    /// caller threading a `&Device` through every call (`wgpu::Device` is a
-    /// cheap `Arc` handle).
-    device: wgpu::Device,
-    /// The background frame-plane pipeline (#63): a fullscreen textured quad drawn
-    /// first (depth-write off) beneath the mesh scene.
-    frame_plane_pipeline: wgpu::RenderPipeline,
-    /// Group-0 layout for the background frame texture + sampler + fit uniform.
-    frame_bind_group_layout: wgpu::BindGroupLayout,
-    /// Linear, clamp-to-edge sampler shared by every background frame texture.
-    frame_sampler: wgpu::Sampler,
-    /// The reused background frame texture + its bind group; `None` until the
-    /// first [`update_frame_texture_rgba`](Self::update_frame_texture_rgba). A
-    /// [`DrawableObject::FramePlane`] is skipped while this is `None`.
-    frame_texture: Option<FrameTextureGpu>,
 }
 
-impl MeshRenderer {
-    /// Constructs a `MeshRenderer` that derives each mesh's base (preview) model
-    /// automatically via [`Mesh::preview_transform`]
-    /// ([`crate::DEFAULT_PREVIEW_TARGET`]) — center + uniform scale-to-fit — so an
-    /// arbitrary-unit asset renders centered at a reasonable size. A convenience
-    /// constructor over [`new`](Self::new); shared by the headless
-    /// [`crate::run_stream`]/`BatchRenderer` and the windowed `trd-app`.
-    pub fn auto_fit(
-        device: &wgpu::Device,
-        format: wgpu::TextureFormat,
-        meshes: &[Mesh],
-    ) -> Self {
-        let base_models: Vec<Matrix4> = meshes
-            .iter()
-            .map(|mesh| {
-                mesh.preview_transform(crate::DEFAULT_PREVIEW_TARGET)
-                    .matrix()
-            })
-            .collect();
-        Self::new(device, format, meshes, &base_models)
-    }
-
-    /// Constructs a `MeshRenderer` over one or more meshes, each paired with an
-    /// explicit base (preview) model that is pre-multiplied beneath every
-    /// per-frame instance model (`effective = model · base`). This is the primary
-    /// constructor; [`auto_fit`](Self::auto_fit) derives the base models for you.
-    /// A frame's [`Scene`] references these meshes by id (row index).
-    ///
-    /// Panics if `meshes` is empty or `meshes`/`base_models` differ in length.
-    pub fn new(
-        device: &wgpu::Device,
-        format: wgpu::TextureFormat,
-        meshes: &[Mesh],
-        base_models: &[Matrix4],
-    ) -> Self {
+impl MeshStore {
+    /// Constructs a `MeshStore`, uploading each mesh with its base (preview)
+    /// model and sizing the instance buffer to at least one instance.
+    fn new(device: &wgpu::Device, meshes: &[Mesh], base_models: &[Matrix4]) -> Self {
         use wgpu::util::DeviceExt;
 
-        assert!(
-            !meshes.is_empty(),
-            "MeshRenderer requires at least one mesh"
-        );
-        assert_eq!(
-            meshes.len(),
-            base_models.len(),
-            "meshes and base_models must have equal length"
-        );
-
-        // One explicit bind-group layout shared by both pipelines, so the single
-        // params bind group is valid whichever RenderMode is active.
-        let bind_group_layout = create_mesh_bind_group_layout(device);
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("trd mesh pipeline layout"),
-            bind_group_layouts: &[Some(&bind_group_layout)],
-            immediate_size: 0,
-        });
-        let pipeline = create_mesh_pipeline_with(
-            device,
-            format,
-            &pipeline_layout,
-            wgpu::PrimitiveTopology::TriangleList,
-            Some(solid_depth_stencil()),
-        );
-        let wireframe_pipeline = create_mesh_pipeline_with(
-            device,
-            format,
-            &pipeline_layout,
-            wgpu::PrimitiveTopology::LineList,
-            Some(overlay_depth_stencil()),
-        );
-        // Textured pipeline (#20): group 0 = the shared view-proj uniform, group
-        // 1 = the bound texture + sampler.
-        let texture_bind_group_layout = create_texture_bind_group_layout(device);
-        let textured_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("trd textured pipeline layout"),
-                bind_group_layouts: &[Some(&bind_group_layout), Some(&texture_bind_group_layout)],
-                immediate_size: 0,
-            });
-        let textured_pipeline = create_textured_pipeline(device, format, &textured_pipeline_layout);
-        // Background frame-plane pipeline (#63): group 0 = the frame texture +
-        // sampler + fit uniform, no vertex buffers. Its own bind-group layout,
-        // separate from the mesh albedo texture (different update rate).
-        let frame_bind_group_layout = create_frame_bind_group_layout(device);
-        let frame_plane_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("trd frame plane pipeline layout"),
-                bind_group_layouts: &[Some(&frame_bind_group_layout)],
-                immediate_size: 0,
-            });
-        let frame_plane_pipeline =
-            create_frame_plane_pipeline(device, format, &frame_plane_pipeline_layout);
-        let frame_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("trd frame plane sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
-            ..Default::default()
-        });
-        // The identity params ignore the viewport (no intrinsics); each `encode`
-        // supplies the real target dimensions.
-        let (uniform, bind_group) = create_view_proj_binding(
-            device,
-            &bind_group_layout,
-            FrameParams::IDENTITY,
-            Viewport {
-                width: 1,
-                height: 1,
-            },
-        );
         let gpu_meshes = meshes
             .iter()
             .zip(base_models)
@@ -340,197 +300,24 @@ impl MeshRenderer {
         });
 
         Self {
-            pipeline,
-            wireframe_pipeline,
-            textured_pipeline,
-            uniform,
-            bind_group,
-            texture_bind_group_layout,
-            texture_bind_group: None,
-            texture_image: ImageData {
-                width: 1,
-                height: 1,
-                rgba: vec![255, 255, 255, 255],
-            },
             meshes: gpu_meshes,
             axes_vertex_buffer,
             instance_buffer,
             instance_capacity,
-            depth: None,
-            device: device.clone(),
-            frame_plane_pipeline,
-            frame_bind_group_layout,
-            frame_sampler,
-            frame_texture: None,
         }
     }
 
-    /// The number of meshes this renderer can draw; valid mesh ids in a
-    /// [`DrawableObject::Mesh`]/[`DrawableObject::AabbBox`] are in
-    /// `0..mesh_count()`.
-    pub fn mesh_count(&self) -> usize {
+    fn len(&self) -> usize {
         self.meshes.len()
     }
 
-    /// Binds `texture` as the source sampled by [`RenderMode::Textured`] meshes
-    /// (#20). The image is (re)uploaded lazily on the next
-    /// [`encode`](Self::encode) (which supplies the GPU queue). Until set, the
-    /// bound texture is 1x1 white (the identity albedo).
-    pub fn set_texture(&mut self, texture: &dyn Texture) {
-        self.texture_image = texture.to_image();
-        self.texture_bind_group = None;
-    }
-
-    /// Uploads `rgba` (tightly-packed, row-major `height`×`width`×4) as the
-    /// **background frame texture** (#63) sampled by a
-    /// [`DrawableObject::FramePlane`]. The GPU texture is **reused** across
-    /// frames — it is (re)created only when the dimensions change, so streaming a
-    /// fixed-resolution video allocates once and every later frame is a plain
-    /// `queue.write_texture` into the same texture (no per-frame realloc). The
-    /// texture is `Rgba8UnormSrgb` (linearized on sample) and carries **no
-    /// mipmaps** (a near-fullscreen background samples ~1:1, and per-frame mip
-    /// regeneration would dominate the update cost).
-    ///
-    /// Panics if `rgba.len() != width * height * 4` or either dimension is zero.
-    pub fn update_frame_texture_rgba(
-        &mut self,
-        queue: &wgpu::Queue,
-        rgba: &[u8],
-        width: u32,
-        height: u32,
-    ) {
-        assert!(
-            width > 0 && height > 0,
-            "frame texture dimensions must be non-zero"
-        );
-        assert_eq!(
-            rgba.len(),
-            width as usize * height as usize * 4,
-            "frame texture rgba length must be width*height*4"
-        );
-
-        let needs_new = self
-            .frame_texture
-            .as_ref()
-            .is_none_or(|ft| ft.width != width || ft.height != height);
-        if needs_new {
-            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("trd frame texture"),
-                size: wgpu::Extent3d {
-                    width,
-                    height,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                view_formats: &[],
-            });
-            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            let fit_uniform = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("trd frame fit uniform"),
-                size: 16,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("trd frame plane bind group"),
-                layout: &self.frame_bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.frame_sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: fit_uniform.as_entire_binding(),
-                    },
-                ],
-            });
-            self.frame_texture = Some(FrameTextureGpu {
-                texture,
-                bind_group,
-                fit_uniform,
-                width,
-                height,
-            });
-        }
-
-        let ft = self
-            .frame_texture
-            .as_ref()
-            .expect("frame texture set above");
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &ft.texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            rgba,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(width * 4),
-                rows_per_image: Some(height),
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
-    }
-
-    /// Whether a background frame texture is currently bound (so a
-    /// [`DrawableObject::FramePlane`] would render).
-    pub fn has_frame_texture(&self) -> bool {
-        self.frame_texture.is_some()
-    }
-
-    /// Encodes one frame's [`Scene`] — an ordered list of [`DrawableObject`]s —
-    /// under the shared camera `P·V` uniform. `viewport` gives the target's pixel
-    /// dimensions, used to project camera intrinsics (`FrameParams::k`).
-    ///
-    /// Instances are grouped by geometry so each buffer is drawn once over a
-    /// contiguous instance range: [`DrawableObject::Mesh`] by `(mesh_id, mode)`
-    /// (its model pre-multiplied over the mesh base model, `effective = model ·
-    /// base`), [`DrawableObject::AabbBox`] by `mesh_id` (same `model · base` as
-    /// the mesh it boxes), and [`DrawableObject::CoordinateAxes`] under its own
-    /// model. Gizmo overlays (AABB boxes, axes) and wireframes are composited
-    /// after all solid geometry and drawn depth-`Always`/no-write, so they stay
-    /// visible on top even though solid meshes now z-occlude via a depth buffer.
-    ///
-    /// Out-of-range `mesh_id`s are skipped (callers should validate first).
-    pub fn encode(
-        &mut self,
-        queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
-        view: &wgpu::TextureView,
-        params: FrameParams,
-        scene: &[DrawableObject],
-        viewport: Viewport,
-    ) {
-        write_view_proj(queue, &self.uniform, params, viewport);
-
-        // (Re)upload the bound texture on first use / after `set_texture` (#20):
-        // `encode` is where a GPU queue is available.
-        if self.texture_bind_group.is_none() {
-            self.texture_bind_group = Some(upload_texture(
-                &self.device,
-                queue,
-                &self.texture_bind_group_layout,
-                &self.texture_image,
-            ));
-        }
-
-        // Walk the scene once, bucketing each drawable's instance model by the
-        // geometry it draws so same-geometry instances share one draw call.
+    /// Walks `scene` once, bucketing each drawable's instance model by the
+    /// geometry it draws (its base model pre-multiplied in, `effective = model ·
+    /// base`), then flattens the buckets into one instance list + ordered
+    /// [`DrawCommand`]s. Draw order: filled, textured, wireframe, AABB boxes,
+    /// then axes — so opaque meshes precede the line overlays that composite on
+    /// top. Out-of-range mesh ids are skipped.
+    fn build_batches(&self, scene: &[DrawableObject]) -> Batches {
         let mesh_count = self.meshes.len();
         let mut filled: Vec<Vec<InstanceRaw>> = vec![Vec::new(); mesh_count];
         let mut textured: Vec<Vec<InstanceRaw>> = vec![Vec::new(); mesh_count];
@@ -539,7 +326,7 @@ impl MeshRenderer {
         let mut axes: Vec<InstanceRaw> = Vec::new();
         // The background frame plane is a singleton overlay (there is one bound
         // frame texture); the last FramePlane in the scene wins its fit.
-        let mut frame_plane: Option<FrameFit> = None;
+        let mut frame_fit: Option<FrameFit> = None;
 
         for object in scene {
             match *object {
@@ -574,82 +361,221 @@ impl MeshRenderer {
                     axes.push(InstanceRaw { model });
                 }
                 DrawableObject::FramePlane { fit } => {
-                    frame_plane = Some(fit);
+                    frame_fit = Some(fit);
                 }
             }
         }
 
         // Flatten every instance model into one buffer, recording a draw command
-        // per non-empty group. Order = filled meshes, wireframe meshes, then the
-        // gizmo overlays (AABB boxes, then axes) on top.
+        // per non-empty group in the layered draw order.
         let mut instances: Vec<InstanceRaw> = Vec::with_capacity(scene.len());
         let mut commands: Vec<DrawCommand> = Vec::new();
-        for (mesh_id, bucket) in filled.iter().enumerate() {
+        for (id, bucket) in filled.iter().enumerate() {
+            push_command(&mut instances, &mut commands, DrawKind::Filled(id), bucket);
+        }
+        for (id, bucket) in textured.iter().enumerate() {
             push_command(
                 &mut instances,
                 &mut commands,
-                DrawKind::Filled(mesh_id),
+                DrawKind::Textured(id),
                 bucket,
             );
         }
-        for (mesh_id, bucket) in textured.iter().enumerate() {
+        for (id, bucket) in wireframe.iter().enumerate() {
             push_command(
                 &mut instances,
                 &mut commands,
-                DrawKind::Textured(mesh_id),
+                DrawKind::Wireframe(id),
                 bucket,
             );
         }
-        for (mesh_id, bucket) in wireframe.iter().enumerate() {
-            push_command(
-                &mut instances,
-                &mut commands,
-                DrawKind::Wireframe(mesh_id),
-                bucket,
-            );
-        }
-        for (mesh_id, bucket) in aabb.iter().enumerate() {
-            push_command(
-                &mut instances,
-                &mut commands,
-                DrawKind::Aabb(mesh_id),
-                bucket,
-            );
+        for (id, bucket) in aabb.iter().enumerate() {
+            push_command(&mut instances, &mut commands, DrawKind::Aabb(id), bucket);
         }
         push_command(&mut instances, &mut commands, DrawKind::Axes, &axes);
 
+        Batches {
+            instances,
+            commands,
+            frame_fit,
+        }
+    }
+
+    /// Uploads the flattened instance models, growing the buffer (to the next
+    /// power of two) when the frame needs more instances than it holds.
+    fn upload_instances(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        instances: &[InstanceRaw],
+    ) {
         if instances.len() as u32 > self.instance_capacity {
             self.instance_capacity = (instances.len() as u32).next_power_of_two();
-            self.instance_buffer = create_instance_buffer(&self.device, self.instance_capacity);
+            self.instance_buffer = create_instance_buffer(device, self.instance_capacity);
         }
         if !instances.is_empty() {
-            queue.write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(&instances));
+            queue.write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(instances));
+        }
+    }
+}
+
+/// Persistent indexed mesh renderer. A composition of a [`MeshPass`] (pipelines
+/// and camera uniform), a [`MeshStore`] (decode-once geometry and instance
+/// buffer), a [`BoundTexture`] (mesh albedo, #20), and a [`FramePlane`]
+/// (background video frame, #63), plus a viewport-sized depth attachment. Each
+/// [`encode`](Self::encode) draws a frame's [`Scene`] — an ordered list of
+/// [`DrawableObject`]s — grouping instances by geometry so each buffer is drawn
+/// once over a contiguous instance range. The renderer holds no mode/overlay
+/// state; what to draw is entirely the scene.
+pub struct MeshRenderer {
+    pass: MeshPass,
+    texture: BoundTexture,
+    store: MeshStore,
+    frame_plane: FramePlane,
+    /// The mesh pass's depth attachment, (re)created lazily in `encode` to match
+    /// the viewport. Gives solid (filled/textured) meshes real z-occlusion.
+    depth: Option<DepthTarget>,
+    /// Retained so `encode` can grow GPU resources on demand without the caller
+    /// threading a `&Device` through every call (`wgpu::Device` is a cheap `Arc`).
+    device: wgpu::Device,
+}
+
+impl MeshRenderer {
+    /// Constructs a `MeshRenderer` that derives each mesh's base (preview) model
+    /// automatically via [`Mesh::preview_transform`]
+    /// ([`crate::DEFAULT_PREVIEW_TARGET`]) — center + uniform scale-to-fit — so an
+    /// arbitrary-unit asset renders centered at a reasonable size. A convenience
+    /// constructor over [`new`](Self::new); shared by the headless
+    /// [`crate::run_stream`]/`BatchRenderer` and the windowed `trd-app`.
+    pub fn auto_fit(device: &wgpu::Device, format: wgpu::TextureFormat, meshes: &[Mesh]) -> Self {
+        let base_models: Vec<Matrix4> = meshes
+            .iter()
+            .map(|mesh| {
+                mesh.preview_transform(crate::DEFAULT_PREVIEW_TARGET)
+                    .matrix()
+            })
+            .collect();
+        Self::new(device, format, meshes, &base_models)
+    }
+
+    /// Constructs a `MeshRenderer` over one or more meshes, each paired with an
+    /// explicit base (preview) model that is pre-multiplied beneath every
+    /// per-frame instance model (`effective = model · base`). This is the primary
+    /// constructor; [`auto_fit`](Self::auto_fit) derives the base models for you.
+    /// A frame's [`Scene`] references these meshes by id (row index).
+    ///
+    /// Panics if `meshes` is empty or `meshes`/`base_models` differ in length.
+    pub fn new(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        meshes: &[Mesh],
+        base_models: &[Matrix4],
+    ) -> Self {
+        assert!(
+            !meshes.is_empty(),
+            "MeshRenderer requires at least one mesh"
+        );
+        assert_eq!(
+            meshes.len(),
+            base_models.len(),
+            "meshes and base_models must have equal length"
+        );
+
+        let texture = BoundTexture::new(device);
+        let pass = MeshPass::new(device, format, texture.layout());
+        let store = MeshStore::new(device, meshes, base_models);
+        let frame_plane = FramePlane::new(device, format);
+
+        Self {
+            pass,
+            texture,
+            store,
+            frame_plane,
+            depth: None,
+            device: device.clone(),
+        }
+    }
+
+    /// The number of meshes this renderer can draw; valid mesh ids in a
+    /// [`DrawableObject::Mesh`]/[`DrawableObject::AabbBox`] are in
+    /// `0..mesh_count()`.
+    pub fn mesh_count(&self) -> usize {
+        self.store.len()
+    }
+
+    /// Binds `texture` as the albedo sampled by [`RenderMode::Textured`] meshes
+    /// (#20). The image is (re)uploaded lazily on the next
+    /// [`encode`](Self::encode). Until set, the bound texture is 1×1 white.
+    pub fn set_texture(&mut self, texture: &dyn Texture) {
+        self.texture.set(texture);
+    }
+
+    /// Uploads `rgba` (tightly-packed, row-major `height`×`width`×4) as the
+    /// **background frame texture** (#63) sampled by a
+    /// [`DrawableObject::FramePlane`]. Delegates to [`FramePlane::upload_rgba`],
+    /// which reuses the GPU texture across same-resolution frames.
+    ///
+    /// Panics if `rgba.len() != width * height * 4` or either dimension is zero.
+    pub fn update_frame_texture_rgba(
+        &mut self,
+        queue: &wgpu::Queue,
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+    ) {
+        self.frame_plane
+            .upload_rgba(&self.device, queue, rgba, width, height);
+    }
+
+    /// Whether a background frame texture is currently bound (so a
+    /// [`DrawableObject::FramePlane`] would render).
+    pub fn has_frame_texture(&self) -> bool {
+        self.frame_plane.is_bound()
+    }
+
+    /// Encodes one frame's [`Scene`] — an ordered list of [`DrawableObject`]s —
+    /// under the shared camera `P·V` uniform. `viewport` gives the target's pixel
+    /// dimensions, used to project camera intrinsics (`FrameParams::k`).
+    ///
+    /// The steps read top-to-bottom: set the camera, walk the scene into
+    /// per-geometry instance batches, upload them, size the depth buffer, then
+    /// record the pass — the background frame plane first (depth-write off) so
+    /// the mesh scene z-composites on top, then each batched draw. Instances are
+    /// grouped by geometry so each buffer is drawn once over a contiguous range.
+    /// Out-of-range `mesh_id`s are skipped (callers should validate first).
+    pub fn encode(
+        &mut self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        params: FrameParams,
+        scene: &[DrawableObject],
+        viewport: Viewport,
+    ) {
+        // 1. Camera P·V for this frame.
+        self.pass.write_camera(queue, params, viewport);
+
+        // 2. Walk the scene once into per-geometry instance batches, then upload
+        //    the flattened instance models (growing the buffer if needed).
+        let batches = self.store.build_batches(scene);
+        self.store
+            .upload_instances(&self.device, queue, &batches.instances);
+
+        // 3. Match the depth attachment to the viewport (solid meshes z-occlude).
+        self.ensure_depth(viewport);
+
+        // 4. Background frame-plane fit for this viewport (no-op if the scene has
+        //    no FramePlane or no frame texture is bound yet).
+        if let Some(fit) = batches.frame_fit {
+            self.frame_plane.write_fit(queue, fit, viewport);
         }
 
-        // Ensure the depth attachment matches the viewport (solid meshes need it
-        // for z-occlusion; recreated only when the target size changes).
-        let dw = viewport.width.max(1);
-        let dh = viewport.height.max(1);
-        if self
-            .depth
-            .as_ref()
-            .is_none_or(|d| d.width != dw || d.height != dh)
-        {
-            self.depth = Some(create_depth_target(&self.device, dw, dh));
-        }
-        let depth_view = &self.depth.as_ref().unwrap().view;
+        // 5. (Re)upload the bound albedo texture on first use / after set_texture
+        //    (#20): encode is where a GPU queue is available.
+        let texture_bind_group = self.texture.ensure_uploaded(&self.device, queue);
 
-        // Background frame plane (#63): compute + upload its centered fit scale for
-        // the current viewport before the pass, so the fullscreen quad samples the
-        // reused frame texture with the right crop/fill. Skipped when no FramePlane
-        // is in the scene or no frame texture has been uploaded yet.
-        if let (Some(fit), Some(ft)) = (frame_plane, self.frame_texture.as_ref()) {
-            let scale =
-                frame_fit_uv_scale(fit, ft.width, ft.height, viewport.width, viewport.height);
-            let fit_data: [f32; 4] = [scale[0], scale[1], 0.0, 0.0];
-            queue.write_buffer(&ft.fit_uniform, 0, bytemuck::cast_slice(&fit_data));
-        }
-
+        // 6. Record the pass.
+        let depth_view = &self.depth.as_ref().expect("depth set in step 3").view;
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("trd mesh pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -673,64 +599,63 @@ impl MeshRenderer {
             occlusion_query_set: None,
             multiview_mask: None,
         });
+
         // Draw the background frame plane first (#63): its own pipeline + group-0
-        // bind (texture/sampler/fit), depth-write off, so it fills color under the
-        // cleared depth and the mesh scene z-composites on top. Only when a frame
-        // texture is bound.
-        if frame_plane.is_some() {
-            if let Some(ft) = self.frame_texture.as_ref() {
-                pass.set_pipeline(&self.frame_plane_pipeline);
-                pass.set_bind_group(0, &ft.bind_group, &[]);
-                pass.draw(0..3, 0..1);
-            }
+        // bind, depth-write off, so the mesh scene composites on top. Only when
+        // the scene requested one (and a frame texture is bound).
+        if batches.frame_fit.is_some() {
+            self.frame_plane.draw(&mut pass);
         }
-        pass.set_bind_group(0, &self.bind_group, &[]);
-        pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
-        for command in &commands {
+
+        // The camera bind group (group 0) and the instance buffer (slot 1) stay
+        // bound across every mesh draw; each command only swaps pipeline +
+        // geometry (and, for textured, the group-1 albedo texture).
+        pass.set_bind_group(0, &self.pass.camera_bind_group, &[]);
+        pass.set_vertex_buffer(1, self.store.instance_buffer.slice(..));
+        for command in &batches.commands {
             let range = command.start..command.start + command.count;
             match command.kind {
-                DrawKind::Filled(mesh_id) => {
-                    let mesh = &self.meshes[mesh_id];
-                    pass.set_pipeline(&self.pipeline);
-                    pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                    pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..mesh.index_count, 0, range);
+                DrawKind::Filled(id) => {
+                    let mesh = &self.store.meshes[id];
+                    pass.set_pipeline(&self.pass.filled);
+                    draw_indexed(&mut pass, &mesh.vertex_buffer, &mesh.triangles, range);
                 }
-                DrawKind::Textured(mesh_id) => {
-                    let mesh = &self.meshes[mesh_id];
-                    pass.set_pipeline(&self.textured_pipeline);
-                    // group 0 (view-proj) stays bound from before the loop; bind
-                    // the texture as group 1 (uploaded above, always Some here).
-                    if let Some(texture) = self.texture_bind_group.as_ref() {
-                        pass.set_bind_group(1, texture, &[]);
-                    }
-                    pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                    pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..mesh.index_count, 0, range);
+                DrawKind::Textured(id) => {
+                    let mesh = &self.store.meshes[id];
+                    pass.set_pipeline(&self.pass.textured);
+                    pass.set_bind_group(1, texture_bind_group, &[]);
+                    draw_indexed(&mut pass, &mesh.vertex_buffer, &mesh.triangles, range);
                 }
-                DrawKind::Wireframe(mesh_id) => {
-                    let mesh = &self.meshes[mesh_id];
-                    pass.set_pipeline(&self.wireframe_pipeline);
-                    pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                    pass.set_index_buffer(mesh.edge_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..mesh.edge_count, 0, range);
+                DrawKind::Wireframe(id) => {
+                    let mesh = &self.store.meshes[id];
+                    pass.set_pipeline(&self.pass.wireframe);
+                    draw_indexed(&mut pass, &mesh.vertex_buffer, &mesh.edges, range);
                 }
-                DrawKind::Aabb(mesh_id) => {
-                    let mesh = &self.meshes[mesh_id];
-                    pass.set_pipeline(&self.wireframe_pipeline);
-                    pass.set_vertex_buffer(0, mesh.aabb_vertex_buffer.slice(..));
-                    pass.set_index_buffer(
-                        mesh.aabb_edge_buffer.slice(..),
-                        wgpu::IndexFormat::Uint32,
-                    );
-                    pass.draw_indexed(0..mesh.aabb_edge_count, 0, range);
+                DrawKind::Aabb(id) => {
+                    let mesh = &self.store.meshes[id];
+                    pass.set_pipeline(&self.pass.wireframe);
+                    draw_indexed(&mut pass, &mesh.aabb.vertex_buffer, &mesh.aabb.index, range);
                 }
                 DrawKind::Axes => {
-                    pass.set_pipeline(&self.wireframe_pipeline);
-                    pass.set_vertex_buffer(0, self.axes_vertex_buffer.slice(..));
+                    pass.set_pipeline(&self.pass.wireframe);
+                    pass.set_vertex_buffer(0, self.store.axes_vertex_buffer.slice(..));
                     pass.draw(0..AXES_VERTEX_COUNT, range);
                 }
             }
+        }
+    }
+
+    /// Ensures the depth attachment matches `viewport` (each dimension clamped to
+    /// ≥ 1), recreating it only when the target size changes.
+    fn ensure_depth(&mut self, viewport: Viewport) {
+        let dw = viewport.width.max(1);
+        let dh = viewport.height.max(1);
+        if self
+            .depth
+            .as_ref()
+            .is_none_or(|d| d.width != dw || d.height != dh)
+        {
+            self.depth = Some(create_depth_target(&self.device, dw, dh));
         }
     }
 }

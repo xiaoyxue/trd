@@ -11,7 +11,12 @@ use glam::{Mat4, Vec3};
 /// which only the GPU tests used.
 #[cfg(not(target_arch = "wasm32"))]
 fn single(device: &wgpu::Device, format: wgpu::TextureFormat, mesh: &Mesh) -> MeshRenderer {
-    MeshRenderer::new(device, format, std::slice::from_ref(mesh), &[Matrix4::IDENTITY])
+    MeshRenderer::new(
+        device,
+        format,
+        std::slice::from_ref(mesh),
+        &[Matrix4::IDENTITY],
+    )
 }
 
 #[cfg(not(target_arch = "wasm32"))]

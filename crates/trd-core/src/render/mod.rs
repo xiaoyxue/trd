@@ -3,8 +3,10 @@
 //! [`MeshRenderer`] rasterizes a [`Scene`] of [`DrawableObject`]s through the
 //! vertex/index-buffer path used by the native batch renderer and the browser.
 
+mod bound_texture;
 mod color;
 mod frame_params;
+mod frame_plane;
 mod gizmo;
 mod gpu_types;
 mod mesh_renderer;
