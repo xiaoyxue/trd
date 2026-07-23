@@ -16,16 +16,13 @@ use crate::{CameraFormError, FrameParams, Mesh, MeshError};
 pub const PROTOCOL_VERSION: &str = "0.0.5";
 pub const PROTOCOL_VERSION_KEY: &str = "trd.protocol.version";
 
-/// Input schema versions this build accepts. `0.0.5` adds an optional per-frame
-/// background **frame reference** column (`frame_path` native / `frame_url`
-/// browser, `Utf8`) naming an image composited beneath the scene as a frame
-/// plane; `0.0.4` adds an optional **texture** Arrow stream
-/// (`[mesh][texture][params]` framing) plus a per-vertex `uv` mesh column;
-/// `0.0.3` adds an optional leading **mesh** Arrow stream (concatenated before
-/// the params stream); `0.0.2` adds the optional `model`, `k`, and `pose` matrix
-/// columns; `0.0.1` streams (2D affine only) still decode. All version bumps are
-/// additive columns/streams, so older decoders ignore the newer columns.
-pub const SUPPORTED_INPUT_VERSIONS: &[&str] = &["0.0.1", "0.0.2", "0.0.3", "0.0.4", "0.0.5"];
+/// Input schema versions this build accepts. The protocol is **not** backward
+/// compatible: only the current [`PROTOCOL_VERSION`] (`0.0.5`) is accepted; a
+/// stream declaring `0.0.1`–`0.0.4` is hard-rejected (see `AGENTS.md`). A `0.0.5`
+/// stream is mesh-first `[mesh][texture?][params]` with an optional per-frame
+/// background `frame_path`/`frame_url` reference, optional camera columns, and an
+/// optional per-frame instanced draw list.
+pub const SUPPORTED_INPUT_VERSIONS: &[&str] = &[PROTOCOL_VERSION];
 
 /// Schema-metadata key declaring the stream's intended playback rate in frames
 /// per second. Optional and version-independent: it defines *animation speed* so
@@ -49,12 +46,12 @@ pub fn frame_rate_from_metadata(metadata: &HashMap<String, String>) -> f64 {
 pub type FrameBatch = Vec<DecodedFrame>;
 
 /// One decoded frame: its [`FrameParams`] plus the optional per-frame instanced
-/// draw list (`draw_mesh`/`draw_model`). `draws` is empty for legacy
-/// single-object streams, in which case the renderer draws one default instance
-/// of mesh `0` placed by the frame's own [`FrameParams::model_matrix`].
-/// `frame_ref` is the optional `0.0.5` background frame reference
-/// (`frame_path`/`frame_url`) the browser shell resolves + composites beneath the
-/// scene; `None` when the frame has no background.
+/// draw list (`draw_mesh`/`draw_model`). `draws` is empty for a single-object
+/// frame, in which case the renderer draws one default instance of mesh `0`
+/// placed by the frame's own [`FrameParams::model_matrix`]. `frame_ref` is the
+/// optional `0.0.5` background frame reference (`frame_path`/`frame_url`) the
+/// browser shell resolves + composites beneath the scene; `None` when the frame
+/// has no background.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecodedFrame {
     pub params: FrameParams,
@@ -127,11 +124,11 @@ enum SessionState {
 }
 
 /// Which kind of concatenated IPC sub-stream the session is currently decoding.
-/// A `0.0.4` stream is `[mesh?][texture?][params]`: zero or more leading data
-/// tables (a **mesh** table, then an optional **texture** table) followed by the
+/// A `0.0.5` stream is mesh-first `[mesh][texture?][params]`: a **required**
+/// leading **mesh** table, then an optional **texture** table, followed by the
 /// **params** stream. Each sub-stream is classified from its schema
 /// ([`is_mesh_schema`] / [`is_texture_schema`]); the params stream is the
-/// terminal one. A legacy `0.0.1`/`0.0.2` stream is params-only.
+/// terminal one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StreamKind {
     /// The leading **mesh** table (one row = one mesh); accumulated into `meshes`.
@@ -144,14 +141,15 @@ enum StreamKind {
 }
 
 /// Incremental decoder for the trd input protocol, mirroring the native
-/// [`crate::run_stream`] multi-stream framing but push-based for wasm. A `0.0.4`
-/// stream is `[mesh?][texture?][params]`: an optional leading **mesh** table
+/// [`crate::run_stream`] multi-stream framing but push-based for wasm. A `0.0.5`
+/// stream is mesh-first `[mesh][texture?][params]`: a leading **mesh** table
 /// (one row = one mesh) decoded via [`Mesh::from_arrow_all`] and exposed through
 /// [`InputSession::meshes`], an optional **texture** table decoded via
 /// [`ImageTexture::from_arrow`] and exposed through [`InputSession::texture`],
-/// then the terminal **params** stream driving per-frame rendering. Legacy
-/// `0.0.1`/`0.0.2`/`0.0.3` streams decode unchanged (a params-only stream has no
-/// leading tables; a `0.0.3` stream has a mesh table but no texture).
+/// then the terminal **params** stream driving per-frame rendering. Like the
+/// native decoder this is a pure framing decoder — it accepts a params-only
+/// stream; enforcing the mesh-first contract (a scene needs ≥1 mesh) is the
+/// renderer's job.
 pub struct InputSession {
     decoder: StreamDecoder,
     /// The kind of the sub-stream currently being decoded, or `None` until its
@@ -220,14 +218,14 @@ impl InputSession {
         self.params_schema_validated
     }
 
-    /// The meshes decoded from a stream's leading mesh table, in stream order
-    /// (mesh id = index). Empty for a legacy params-only stream (the front-end
-    /// renders the built-in hello-triangle instead).
+    /// The meshes decoded from a stream's (required) leading mesh table, in
+    /// stream order (mesh id = index). Non-empty for any accepted stream once its
+    /// params schema has been reached.
     pub fn meshes(&self) -> &[Mesh] {
         &self.meshes
     }
 
-    /// Whether the stream carried a leading mesh table (`0.0.3`+).
+    /// Whether the stream carried a leading mesh table (required by the protocol).
     pub fn has_meshes(&self) -> bool {
         !self.meshes.is_empty()
     }
@@ -602,26 +600,7 @@ fn decode_draws(batch: &RecordBatch) -> Result<Option<Vec<Vec<Draw>>>, ProtocolE
 fn validate_schema(schema: &Schema) -> Result<(), ProtocolError> {
     check_version(schema)?;
 
-    validate_vec2_field(
-        schema
-            .field_with_name("center")
-            .map_err(|_| ProtocolError::MissingColumn("center"))?,
-        "center",
-    )?;
-    validate_vec2_field(
-        schema
-            .field_with_name("size")
-            .map_err(|_| ProtocolError::MissingColumn("size"))?,
-        "size",
-    )?;
-    validate_f32_field(
-        schema
-            .field_with_name("theta")
-            .map_err(|_| ProtocolError::MissingColumn("theta"))?,
-        "theta",
-    )?;
-
-    // `0.0.2` matrix columns are optional (additive): validate only if present.
+    // Every params column is optional (additive): validate only if present.
     if let Ok(field) = schema.field_with_name("model") {
         validate_fixed_f32_list(field, "model", 16)?;
     }
@@ -631,7 +610,7 @@ fn validate_schema(schema: &Schema) -> Result<(), ProtocolError> {
     if let Ok(field) = schema.field_with_name("pose") {
         validate_fixed_f32_list(field, "pose", 16)?;
     }
-    // `0.0.3` CG camera columns are optional (additive) too.
+    // CG camera columns are optional too.
     for name in ["eye", "target", "direction", "up"] {
         if let Ok(field) = schema.field_with_name(name) {
             validate_fixed_f32_list(field, static_name(name), 3)?;
@@ -659,10 +638,6 @@ fn static_name(name: &str) -> &'static str {
         "zfar" => "zfar",
         _ => "camera",
     }
-}
-
-fn validate_vec2_field(field: &Field, name: &'static str) -> Result<(), ProtocolError> {
-    validate_fixed_f32_list(field, name, 2)
 }
 
 /// Validates that `field` is a `FixedSizeList<Float32>[len]` column.
@@ -720,44 +695,11 @@ fn validate_f32_field(field: &Field, name: &'static str) -> Result<(), ProtocolE
 }
 
 fn decode_batch(batch: &RecordBatch) -> Result<Vec<FrameParams>, ProtocolError> {
-    let center = require_vec2(batch, "center")?;
-    let size = require_vec2(batch, "size")?;
-    let theta = require_f32(batch, "theta")?;
-
-    if center.null_count() > 0 || center.values().null_count() > 0 {
-        return Err(ProtocolError::NullValues("center"));
-    }
-    if size.null_count() > 0 || size.values().null_count() > 0 {
-        return Err(ProtocolError::NullValues("size"));
-    }
-    if theta.null_count() > 0 {
-        return Err(ProtocolError::NullValues("theta"));
-    }
-
-    let center_values = center
-        .values()
-        .as_any()
-        .downcast_ref::<Float32Array>()
-        .ok_or_else(|| ProtocolError::ColumnType {
-            column: "center",
-            expected: "FixedSizeList<Float32>[2]",
-            actual: center.values().data_type().clone(),
-        })?;
-    let size_values = size
-        .values()
-        .as_any()
-        .downcast_ref::<Float32Array>()
-        .ok_or_else(|| ProtocolError::ColumnType {
-            column: "size",
-            expected: "FixedSizeList<Float32>[2]",
-            actual: size.values().data_type().clone(),
-        })?;
-
-    // Optional `0.0.2` matrix columns (validated + null-checked only if present).
+    // Optional matrix columns (validated + null-checked only if present).
     let model = optional_fixed_list(batch, "model", 16)?;
     let k = optional_fixed_list(batch, "k", 9)?;
     let pose = optional_fixed_list(batch, "pose", 16)?;
-    // Optional `0.0.3` CG camera columns.
+    // Optional CG camera columns.
     let eye = optional_fixed_list(batch, "eye", 3)?;
     let target = optional_fixed_list(batch, "target", 3)?;
     let direction = optional_fixed_list(batch, "direction", 3)?;
@@ -769,18 +711,7 @@ fn decode_batch(batch: &RecordBatch) -> Result<Vec<FrameParams>, ProtocolError> 
 
     (0..batch.num_rows())
         .map(|row| {
-            let center_offset = center.value_offset(row) as usize;
-            let size_offset = size.value_offset(row) as usize;
             let frame = FrameParams {
-                center: [
-                    center_values.value(center_offset),
-                    center_values.value(center_offset + 1),
-                ],
-                size: [
-                    size_values.value(size_offset),
-                    size_values.value(size_offset + 1),
-                ],
-                theta: theta.value(row),
                 model: model.map(|(list, values)| read_fixed::<16>(list, values, row)),
                 k: k.map(|(list, values)| read_fixed::<9>(list, values, row)),
                 pose: pose.map(|(list, values)| read_fixed::<16>(list, values, row)),
@@ -880,40 +811,6 @@ fn read_fixed<const N: usize>(
     std::array::from_fn(|i| values.value(offset + i))
 }
 
-fn require_vec2<'a>(
-    batch: &'a RecordBatch,
-    name: &'static str,
-) -> Result<&'a FixedSizeListArray, ProtocolError> {
-    let column = batch
-        .column_by_name(name)
-        .ok_or(ProtocolError::MissingColumn(name))?;
-    column
-        .as_any()
-        .downcast_ref::<FixedSizeListArray>()
-        .ok_or_else(|| ProtocolError::ColumnType {
-            column: name,
-            expected: "FixedSizeList<Float32>[2]",
-            actual: column.data_type().clone(),
-        })
-}
-
-fn require_f32<'a>(
-    batch: &'a RecordBatch,
-    name: &'static str,
-) -> Result<&'a Float32Array, ProtocolError> {
-    let column = batch
-        .column_by_name(name)
-        .ok_or(ProtocolError::MissingColumn(name))?;
-    column
-        .as_any()
-        .downcast_ref::<Float32Array>()
-        .ok_or_else(|| ProtocolError::ColumnType {
-            column: name,
-            expected: "Float32",
-            actual: column.data_type().clone(),
-        })
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -928,77 +825,60 @@ mod tests {
     use super::*;
     use crate::FrameParams;
 
-    fn vec2_field(name: &str, nullable: bool, child_nullable: bool) -> Field {
-        Field::new(
-            name,
-            DataType::FixedSizeList(
-                Arc::new(Field::new("item", DataType::Float32, child_nullable)),
-                2,
-            ),
-            nullable,
-        )
+    /// Column-major identity 4×4, the default `model` for the test helpers.
+    const IDENTITY_MODEL: [f32; 16] = [
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+    ];
+
+    /// The frame a `model`-only params batch decodes to: identity everywhere,
+    /// with the `model` column *present* (`Some(IDENTITY_MODEL)`), not absent.
+    fn identity_frame() -> FrameParams {
+        FrameParams {
+            model: Some(IDENTITY_MODEL),
+            ..FrameParams::IDENTITY
+        }
     }
 
-    fn input_schema_with(
-        version: Option<&str>,
-        center: Field,
-        size: Field,
-        theta: Field,
-    ) -> Arc<Schema> {
+    /// The `model` column `Field` (`FixedSizeList<Float32>[16]`).
+    fn model_field() -> Field {
+        fixed_list_field("model", 16, false, false)
+    }
+
+    /// A params schema of the given `fields`, optionally tagging the protocol
+    /// version in the metadata.
+    fn schema_with(version: Option<&str>, fields: Vec<Field>) -> Arc<Schema> {
         let mut metadata = std::collections::HashMap::new();
         if let Some(version) = version {
             metadata.insert(PROTOCOL_VERSION_KEY.to_owned(), version.to_owned());
         }
-        Arc::new(Schema::new(vec![center, size, theta]).with_metadata(metadata))
+        Arc::new(Schema::new(fields).with_metadata(metadata))
     }
 
+    /// The minimal valid 0.0.5 params schema: a single `model` column.
     fn valid_schema(version: Option<&str>) -> Arc<Schema> {
-        input_schema_with(
-            version,
-            vec2_field("center", false, false),
-            vec2_field("size", false, false),
-            Field::new("theta", DataType::Float32, false),
-        )
+        schema_with(version, vec![model_field()])
     }
 
+    /// A params batch whose single `model` column holds one row per frame
+    /// (`frame.model` or the identity when absent), reusing `schema`'s `model`
+    /// field so nullable-declared variants share the builder.
     fn test_batch_with(schema: Arc<Schema>, frames: &[FrameParams]) -> RecordBatch {
-        let center_item = match schema.field_with_name("center").unwrap().data_type() {
-            DataType::FixedSizeList(item, 2) => item.clone(),
-            data_type => panic!("unexpected center test type: {data_type:?}"),
+        let model_item = match schema.field_with_name("model").unwrap().data_type() {
+            DataType::FixedSizeList(item, 16) => item.clone(),
+            data_type => panic!("unexpected model test type: {data_type:?}"),
         };
-        let size_item = match schema.field_with_name("size").unwrap().data_type() {
-            DataType::FixedSizeList(item, 2) => item.clone(),
-            data_type => panic!("unexpected size test type: {data_type:?}"),
-        };
-        let center = FixedSizeListArray::new(
-            center_item,
-            2,
+        let model = FixedSizeListArray::new(
+            model_item,
+            16,
             Arc::new(Float32Array::from(
                 frames
                     .iter()
-                    .flat_map(|frame| frame.center)
+                    .flat_map(|frame| frame.model.unwrap_or(IDENTITY_MODEL))
                     .collect::<Vec<_>>(),
             )),
             None,
         );
-        let size = FixedSizeListArray::new(
-            size_item,
-            2,
-            Arc::new(Float32Array::from(
-                frames
-                    .iter()
-                    .flat_map(|frame| frame.size)
-                    .collect::<Vec<_>>(),
-            )),
-            None,
-        );
-        let theta = Float32Array::from(frames.iter().map(|frame| frame.theta).collect::<Vec<_>>());
-
-        RecordBatch::try_new(
-            schema,
-            vec![Arc::new(center), Arc::new(size), Arc::new(theta)],
-        )
-        .unwrap()
+        RecordBatch::try_new(schema, vec![Arc::new(model)]).unwrap()
     }
 
     fn test_batch(frames: &[FrameParams]) -> RecordBatch {
@@ -1033,63 +913,34 @@ mod tests {
         bytes
     }
 
-    fn missing_theta_batch() -> RecordBatch {
-        test_batch(&[FrameParams::IDENTITY])
-            .project(&[0, 1])
-            .unwrap()
-    }
-
-    fn wrong_theta_batch() -> RecordBatch {
-        let frame = FrameParams::IDENTITY;
-        let center = FixedSizeListArray::new(
-            Arc::new(Field::new("item", DataType::Float32, false)),
-            2,
-            Arc::new(Float32Array::from(vec![frame.center[0], frame.center[1]])),
-            None,
-        );
-        let size = FixedSizeListArray::new(
-            Arc::new(Field::new("item", DataType::Float32, false)),
-            2,
-            Arc::new(Float32Array::from(vec![frame.size[0], frame.size[1]])),
-            None,
+    /// A params batch whose `fovy` column is declared with the wrong type
+    /// (`Int32` instead of `Float32`) — a schema type error.
+    fn wrong_type_batch() -> RecordBatch {
+        let schema = schema_with(
+            Some(PROTOCOL_VERSION),
+            vec![Field::new("fovy", DataType::Int32, false)],
         );
         RecordBatch::try_new(
-            Arc::new(Schema::new(vec![
-                vec2_field("center", false, false),
-                vec2_field("size", false, false),
-                Field::new("theta", DataType::Int32, false),
-            ])),
-            vec![
-                Arc::new(center),
-                Arc::new(size),
-                Arc::new(Int32Array::from(vec![0])),
-            ],
+            schema,
+            vec![Arc::new(Int32Array::from(vec![0])) as ArrayRef],
         )
         .unwrap()
     }
 
-    fn null_center_batch() -> RecordBatch {
-        let center = FixedSizeListArray::new(
+    /// A params batch whose declared-non-null `model` column carries a null
+    /// value in its single row — a runtime null that must be rejected after
+    /// IPC decoding.
+    fn null_model_batch() -> RecordBatch {
+        let model = FixedSizeListArray::new(
             Arc::new(Field::new("item", DataType::Float32, false)),
-            2,
-            Arc::new(Float32Array::from(vec![0.0, 0.0])),
+            16,
+            Arc::new(Float32Array::from(vec![0.0_f32; 16])),
             Some(NullBuffer::new_null(1)),
         );
-        let size = FixedSizeListArray::new(
-            Arc::new(Field::new("item", DataType::Float32, false)),
-            2,
-            Arc::new(Float32Array::from(vec![1.0, 1.0])),
-            None,
-        );
         let schema = valid_schema(Some(PROTOCOL_VERSION));
-        let columns = vec![
-            Arc::new(center) as ArrayRef,
-            Arc::new(size) as ArrayRef,
-            Arc::new(Float32Array::from(vec![0.0])) as ArrayRef,
-        ];
         // SAFETY: This fixture intentionally violates non-nullability metadata
         // to verify runtime null rejection after IPC decoding.
-        unsafe { RecordBatch::new_unchecked(schema, columns, 1) }
+        unsafe { RecordBatch::new_unchecked(schema, vec![Arc::new(model) as ArrayRef], 1) }
     }
 
     fn version_stream(version: &str) -> Vec<u8> {
@@ -1102,11 +953,12 @@ mod tests {
     #[test]
     fn decodes_every_two_part_split() {
         let expected = vec![
-            FrameParams::IDENTITY,
+            identity_frame(),
             FrameParams {
-                center: [0.25, -0.5],
-                size: [0.75, 0.5],
-                theta: 1.0,
+                model: Some([
+                    0.75, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.25, -0.5, 0.0,
+                    1.0,
+                ]),
                 ..FrameParams::IDENTITY
             },
         ];
@@ -1123,11 +975,11 @@ mod tests {
 
     #[test]
     fn decodes_one_byte_fragments_and_multiple_batches() {
-        let first = vec![FrameParams::IDENTITY];
+        let first = vec![identity_frame()];
         let second = vec![FrameParams {
-            center: [0.5, 0.0],
-            size: [0.25, 0.75],
-            theta: 0.5,
+            model: Some([
+                0.25, 0.0, 0.0, 0.0, 0.0, 0.75, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.5, 0.0, 0.0, 1.0,
+            ]),
             ..FrameParams::IDENTITY
         }];
         let bytes = test_stream(&[test_batch(&first), test_batch(&second)]);
@@ -1144,24 +996,15 @@ mod tests {
 
     #[test]
     fn rejects_schema_type_errors_and_runtime_nulls() {
-        let mut missing = InputSession::new();
-        assert!(matches!(
-            missing.push(&test_stream(&[missing_theta_batch()])),
-            Err(ProtocolError::MissingColumn("theta"))
-        ));
-
         let mut wrong = InputSession::new();
         assert!(matches!(
-            wrong.push(&test_stream(&[wrong_theta_batch()])),
-            Err(ProtocolError::ColumnType {
-                column: "theta",
-                ..
-            })
+            wrong.push(&test_stream(&[wrong_type_batch()])),
+            Err(ProtocolError::ColumnType { column: "fovy", .. })
         ));
 
         assert!(matches!(
-            decode_batch(&null_center_batch()),
-            Err(ProtocolError::NullValues("center"))
+            decode_batch(&null_model_batch()),
+            Err(ProtocolError::NullValues("model"))
         ));
 
         let mut version = InputSession::new();
@@ -1170,11 +1013,12 @@ mod tests {
             Err(ProtocolError::UnsupportedVersion(value)) if value == "9.9.9"
         ));
 
-        let without_version = test_batch_with(valid_schema(None), &[FrameParams::IDENTITY]);
+        // Absent version metadata is still accepted (the version is optional).
+        let without_version = test_batch_with(valid_schema(None), &[identity_frame()]);
         let mut compatible = InputSession::new();
         assert_eq!(
             compatible.push(&test_stream(&[without_version])).unwrap(),
-            vec![plain(vec![FrameParams::IDENTITY])]
+            vec![plain(vec![identity_frame()])]
         );
         compatible.finish().unwrap();
     }
@@ -1239,8 +1083,9 @@ mod tests {
         )
     }
 
-    /// Builds a batch of `rows.len()` identity frames plus one extra fixed-size
-    /// list column (`name`) whose row `i` holds `rows[i]`.
+    /// Builds a batch of `rows.len()` rows carrying a single fixed-size list
+    /// column (`name`) whose row `i` holds `rows[i]`. The named column alone
+    /// drives the row count (every params column is optional).
     fn batch_with_matrix(
         version: Option<&str>,
         name: &str,
@@ -1249,21 +1094,6 @@ mod tests {
         nullable: bool,
         child_nullable: bool,
     ) -> RecordBatch {
-        let n = rows.len();
-        let item = Arc::new(Field::new("item", DataType::Float32, false));
-        let center = FixedSizeListArray::new(
-            item.clone(),
-            2,
-            Arc::new(Float32Array::from(vec![0.0_f32; n * 2])),
-            None,
-        );
-        let size = FixedSizeListArray::new(
-            item.clone(),
-            2,
-            Arc::new(Float32Array::from(vec![1.0_f32; n * 2])),
-            None,
-        );
-        let theta = Float32Array::from(vec![0.0_f32; n]);
         let flat: Vec<f32> = rows.iter().flatten().copied().collect();
         let matrix = FixedSizeListArray::new(
             Arc::new(Field::new("item", DataType::Float32, child_nullable)),
@@ -1271,45 +1101,31 @@ mod tests {
             Arc::new(Float32Array::from(flat)),
             None,
         );
-
-        let mut metadata = std::collections::HashMap::new();
-        if let Some(version) = version {
-            metadata.insert(PROTOCOL_VERSION_KEY.to_owned(), version.to_owned());
-        }
-        let schema = Arc::new(
-            Schema::new(vec![
-                vec2_field("center", false, false),
-                vec2_field("size", false, false),
-                Field::new("theta", DataType::Float32, false),
-                fixed_list_field(name, len, nullable, child_nullable),
-            ])
-            .with_metadata(metadata),
+        let schema = schema_with(
+            version,
+            vec![fixed_list_field(name, len, nullable, child_nullable)],
         );
-
-        RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(center),
-                Arc::new(size),
-                Arc::new(theta),
-                Arc::new(matrix),
-            ],
-        )
-        .unwrap()
+        RecordBatch::try_new(schema, vec![Arc::new(matrix)]).unwrap()
     }
 
     #[test]
-    fn accepts_supported_versions_and_rejects_unknown() {
-        for version in ["0.0.1", "0.0.2", "0.0.3", "0.0.4", "0.0.5"] {
-            let mut session = InputSession::new();
-            session.push(&version_stream(version)).unwrap();
-            session.finish().unwrap();
-        }
+    fn accepts_only_current_version_and_rejects_others() {
+        // 0.0.5 is the only supported version: there is no backward compat for
+        // 0.0.1–0.0.4, and future (0.0.6) versions are rejected too.
         let mut session = InputSession::new();
-        assert!(matches!(
-            session.push(&version_stream("0.0.6")),
-            Err(ProtocolError::UnsupportedVersion(v)) if v == "0.0.6"
-        ));
+        session.push(&version_stream(PROTOCOL_VERSION)).unwrap();
+        session.finish().unwrap();
+
+        for version in ["0.0.1", "0.0.2", "0.0.3", "0.0.4", "0.0.6"] {
+            let mut session = InputSession::new();
+            assert!(
+                matches!(
+                    session.push(&version_stream(version)),
+                    Err(ProtocolError::UnsupportedVersion(v)) if v == version
+                ),
+                "version {version} must be rejected"
+            );
+        }
     }
 
     #[test]
@@ -1320,7 +1136,7 @@ mod tests {
         let pose_row: Vec<f32> = (1..=16).map(|v| -(v as f32)).collect();
 
         let model_batch = batch_with_matrix(
-            Some("0.0.2"),
+            Some(PROTOCOL_VERSION),
             "model",
             16,
             std::slice::from_ref(&model_row),
@@ -1328,7 +1144,7 @@ mod tests {
             false,
         );
         let k_batch = batch_with_matrix(
-            Some("0.0.2"),
+            Some(PROTOCOL_VERSION),
             "k",
             9,
             std::slice::from_ref(&k_row),
@@ -1336,7 +1152,7 @@ mod tests {
             false,
         );
         let pose_batch = batch_with_matrix(
-            Some("0.0.2"),
+            Some(PROTOCOL_VERSION),
             "pose",
             16,
             std::slice::from_ref(&pose_row),
@@ -1368,26 +1184,16 @@ mod tests {
         )) as ArrayRef
     }
 
-    /// Builds a one-row `0.0.3` batch of identity center/size/theta plus the
-    /// given extra `(field, column)` pairs.
+    /// Builds a one-row `0.0.5` batch of an identity `model` plus the given
+    /// extra `(field, column)` pairs.
     fn camera_batch(extra: Vec<(Field, ArrayRef)>) -> RecordBatch {
-        let mut fields = vec![
-            vec2_field("center", false, false),
-            vec2_field("size", false, false),
-            Field::new("theta", DataType::Float32, false),
-        ];
-        let mut columns: Vec<ArrayRef> = vec![
-            list_col(2, vec![0.0, 0.0]),
-            list_col(2, vec![1.0, 1.0]),
-            Arc::new(Float32Array::from(vec![0.0_f32])) as ArrayRef,
-        ];
+        let mut fields = vec![model_field()];
+        let mut columns: Vec<ArrayRef> = vec![list_col(16, IDENTITY_MODEL.to_vec())];
         for (field, column) in extra {
             fields.push(field);
             columns.push(column);
         }
-        let mut metadata = std::collections::HashMap::new();
-        metadata.insert(PROTOCOL_VERSION_KEY.to_owned(), "0.0.3".to_owned());
-        let schema = Arc::new(Schema::new(fields).with_metadata(metadata));
+        let schema = schema_with(Some(PROTOCOL_VERSION), fields);
         RecordBatch::try_new(schema, columns).unwrap()
     }
 
@@ -1466,10 +1272,10 @@ mod tests {
             "frame_url is preferred over frame_path"
         );
 
-        // (c) neither column present ⇒ None for the whole batch (legacy stream).
+        // (c) neither column present ⇒ None for the whole batch (params-only stream).
         let batch = RecordBatch::try_new(
             Arc::new(Schema::new(vec![Field::new(
-                "theta",
+                "fovy",
                 DataType::Float32,
                 false,
             )])),
@@ -1547,7 +1353,14 @@ mod tests {
     fn rejects_wrong_size_matrix_column() {
         // A `model` column declared as length 9 (not 16) is a schema error, and
         // the session becomes terminal.
-        let bad = batch_with_matrix(Some("0.0.2"), "model", 9, &[vec![0.0; 9]], false, false);
+        let bad = batch_with_matrix(
+            Some(PROTOCOL_VERSION),
+            "model",
+            9,
+            &[vec![0.0; 9]],
+            false,
+            false,
+        );
         let mut session = InputSession::new();
         assert!(matches!(
             session.push(&test_stream(&[bad])),
@@ -1569,39 +1382,41 @@ mod tests {
         // cross-platform/wasm decoder must too — otherwise the same stream
         // renders on the CLI but fails to load in the browser. Only null
         // *values* are rejected (see `rejects_schema_type_errors_and_runtime_nulls`).
-        let nullable_center = test_batch_with(
-            input_schema_with(
+        let nullable_model = test_batch_with(
+            schema_with(
                 Some(PROTOCOL_VERSION),
-                vec2_field("center", true, false),
-                vec2_field("size", false, false),
-                Field::new("theta", DataType::Float32, false),
+                vec![fixed_list_field("model", 16, true, false)],
             ),
-            &[FrameParams::IDENTITY],
+            &[identity_frame()],
         );
-        let mut center = InputSession::new();
+        let mut model = InputSession::new();
         assert_eq!(
-            center.push(&test_stream(&[nullable_center])).unwrap(),
-            vec![plain(vec![FrameParams::IDENTITY])]
+            model.push(&test_stream(&[nullable_model])).unwrap(),
+            vec![plain(vec![identity_frame()])]
         );
 
         let nullable_child = test_batch_with(
-            input_schema_with(
+            schema_with(
                 Some(PROTOCOL_VERSION),
-                vec2_field("center", false, true),
-                vec2_field("size", false, false),
-                Field::new("theta", DataType::Float32, false),
+                vec![fixed_list_field("model", 16, false, true)],
             ),
-            &[FrameParams::IDENTITY],
+            &[identity_frame()],
         );
         let mut child = InputSession::new();
         assert_eq!(
             child.push(&test_stream(&[nullable_child])).unwrap(),
-            vec![plain(vec![FrameParams::IDENTITY])]
+            vec![plain(vec![identity_frame()])]
         );
 
         // A nullable-declared optional matrix column with non-null values also decodes.
-        let nullable_pose =
-            batch_with_matrix(Some("0.0.2"), "pose", 16, &[vec![0.0; 16]], true, false);
+        let nullable_pose = batch_with_matrix(
+            Some(PROTOCOL_VERSION),
+            "pose",
+            16,
+            &[vec![0.0; 16]],
+            true,
+            false,
+        );
         let mut pose = InputSession::new();
         assert!(pose.push(&test_stream(&[nullable_pose])).is_ok());
     }
@@ -1641,7 +1456,7 @@ mod tests {
     proptest::proptest! {
         #[test]
         fn model_column_roundtrips(values in proptest::collection::vec(-1000.0_f32..1000.0, 16)) {
-            let batch = batch_with_matrix(Some("0.0.2"), "model", 16, std::slice::from_ref(&values), false, false);
+            let batch = batch_with_matrix(Some(PROTOCOL_VERSION), "model", 16, std::slice::from_ref(&values), false, false);
             let decoded = decode_batch(&batch).unwrap();
             let expected = <[f32; 16]>::try_from(values).unwrap();
             proptest::prop_assert_eq!(decoded[0].model, Some(expected));
@@ -1718,16 +1533,8 @@ mod tests {
         use arrow::array::{ListArray, UInt32Array};
         use arrow::buffer::OffsetBuffer;
 
-        let mut fields = vec![
-            vec2_field("center", false, false),
-            vec2_field("size", false, false),
-            Field::new("theta", DataType::Float32, false),
-        ];
-        let mut columns: Vec<ArrayRef> = vec![
-            list_col(2, vec![0.0, 0.0]),
-            list_col(2, vec![1.0, 1.0]),
-            Arc::new(Float32Array::from(vec![0.0_f32])) as ArrayRef,
-        ];
+        let mut fields = vec![model_field()];
+        let mut columns: Vec<ArrayRef> = vec![list_col(16, IDENTITY_MODEL.to_vec())];
 
         let mesh_ids = UInt32Array::from(draws.iter().map(|(id, _)| *id).collect::<Vec<_>>());
         let draw_mesh: ArrayRef = Arc::new(ListArray::new(
@@ -1785,9 +1592,11 @@ mod tests {
     fn decodes_leading_mesh_table_then_params() {
         let mesh = crate::Mesh::hello_triangle();
         let frames = vec![
-            FrameParams::IDENTITY,
+            identity_frame(),
             FrameParams {
-                theta: 1.0,
+                model: Some([
+                    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.3, 0.0, 0.0, 1.0,
+                ]),
                 ..FrameParams::IDENTITY
             },
         ];
@@ -1809,7 +1618,7 @@ mod tests {
         // matter which byte the chunk boundary falls on, including inside the EOS
         // marker itself and after a clean mesh-only chunk.
         let mesh = crate::Mesh::hello_triangle();
-        let frames = vec![FrameParams::IDENTITY];
+        let frames = vec![identity_frame()];
         let mut bytes = write_mesh_stream(&mesh);
         bytes.extend(test_stream(&[test_batch(&frames)]));
 
@@ -1859,8 +1668,10 @@ mod tests {
     }
 
     #[test]
-    fn legacy_params_only_stream_has_no_meshes() {
-        let frames = vec![FrameParams::IDENTITY];
+    fn params_only_stream_has_no_meshes() {
+        // The push decoder itself accepts a params-only stream (mesh-first is
+        // enforced by the renderer, not the decoder).
+        let frames = vec![identity_frame()];
         let mut session = InputSession::new();
         let batches = session.push(&test_stream(&[test_batch(&frames)])).unwrap();
         session.finish().unwrap();
@@ -1920,14 +1731,14 @@ mod tests {
 
     #[test]
     fn decodes_mesh_then_texture_then_params() {
-        // A full 0.0.4 `[mesh][texture][params]` stream: the mesh table, a 2x2
+        // A full `[mesh][texture][params]` stream: the mesh table, a 2x2
         // checker texture, then a params frame all decode, with the texture bound.
         let mesh = crate::Mesh::hello_triangle();
         let rgba = vec![
             255, 255, 255, 255, 255, 0, 0, 255, // white, red
             0, 255, 0, 255, 0, 0, 255, 255, // green, blue
         ];
-        let frames = vec![FrameParams::IDENTITY];
+        let frames = vec![identity_frame()];
         let mut bytes = write_mesh_stream(&mesh);
         bytes.extend(write_texture_stream(2, 2, rgba.clone()));
         bytes.extend(test_stream(&[test_batch(&frames)]));
@@ -1951,7 +1762,7 @@ mod tests {
         // which byte the chunk boundary lands on.
         let mesh = crate::Mesh::hello_triangle();
         let rgba = vec![9u8; 2 * 2 * 4];
-        let frames = vec![FrameParams::IDENTITY];
+        let frames = vec![identity_frame()];
         let mut bytes = write_mesh_stream(&mesh);
         bytes.extend(write_texture_stream(2, 2, rgba.clone()));
         bytes.extend(test_stream(&[test_batch(&frames)]));
@@ -1973,9 +1784,9 @@ mod tests {
 
     #[test]
     fn mesh_then_params_has_no_texture() {
-        // A 0.0.3 `[mesh][params]` stream binds no texture.
+        // A `[mesh][params]` stream (no texture table) binds no texture.
         let mesh = crate::Mesh::hello_triangle();
-        let frames = vec![FrameParams::IDENTITY];
+        let frames = vec![identity_frame()];
         let mut bytes = write_mesh_stream(&mesh);
         bytes.extend(test_stream(&[test_batch(&frames)]));
 

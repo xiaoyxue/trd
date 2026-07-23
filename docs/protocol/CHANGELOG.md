@@ -6,12 +6,20 @@ follows `MAJOR.MINOR.PATCH`.
 
 ## Unreleased
 
+### Changed
+- **Dropped runtime support for protocol `0.0.1`–`0.0.4`.** To simplify the code,
+  the renderer now accepts **`0.0.5` only** and hard-rejects any other declared
+  `trd.protocol.version` (`SUPPORTED_INPUT_VERSIONS = [PROTOCOL_VERSION]`). Streams
+  are **mesh-first** (`[mesh][texture?][params]`); the retired `center`/`size`/
+  `theta` 2D-affine params columns and the params-only hello-triangle fallback are
+  gone. The `0.0.1`–`0.0.4` spec files remain as historical reference only.
+
 ### Added
 - Optional schema metadata **`trd.stream.frame_rate`** (float fps, default 30):
-  declares the stream's playback rate. Version-independent (applies to 0.0.1 and
-  0.0.2). `trd-cli` copies it into the rendered image stream so `encode.py` uses
-  it as the default GIF/WebP frame rate; `trd-app` plays at this rate (or `--fps`)
-  and, by default, presents decoupled from the monitor refresh (`--vsync` to lock).
+  declares the stream's playback rate. `trd-cli` copies it into the rendered image
+  stream so `encode.py` uses it as the default GIF/WebP frame rate; `trd-app` plays
+  at this rate (or `--fps`) and, by default, presents decoupled from the monitor
+  refresh (`--vsync` to lock).
 
 ## 0.0.5 — Current
 
@@ -48,10 +56,11 @@ follows `MAJOR.MINOR.PATCH`.
   `frame_path`/`frame_url` manifest.
 
 ### Compatibility
-- **Backward-compatible with 0.0.4, 0.0.3, 0.0.2 and 0.0.1.** The `frame_path`/
-  `frame_url` column is optional; a stream without it (or a shell without
-  `--frames-base`) renders identically over the black clear. Decoders accept
-  `{0.0.1, 0.0.2, 0.0.3, 0.0.4, 0.0.5}`.
+- As **originally released**, 0.0.5 was backward-compatible with 0.0.4–0.0.1. As of
+  the current refactor (see **Unreleased**) the renderer accepts **`0.0.5` only** —
+  older versions are no longer decoded. The `frame_path`/`frame_url` column remains
+  optional; a stream without it (or a shell without `--frames-base`) renders over
+  the black clear.
 
 ## 0.0.4 — Superseded
 

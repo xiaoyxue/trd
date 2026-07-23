@@ -1,14 +1,14 @@
 //! trd-cli: native headless entry point.
 //!
-//! Reads an Arrow IPC stream of per-frame params on stdin and writes an Arrow
-//! IPC stream of rendered images on stdout (trd protocol 0.0.1).
+//! Reads an Arrow IPC scene stream on stdin and writes an Arrow
+//! IPC stream of rendered images on stdout (trd protocol 0.0.5).
 
 use std::io::{self, Write};
 use std::path::PathBuf;
 
 use clap::Parser;
 
-/// Streaming Arrow renderer for trd (protocol 0.0.1).
+/// Streaming Arrow renderer for trd (protocol 0.0.5).
 #[derive(Parser)]
 #[command(name = "trd", version, about)]
 struct Cli {
@@ -23,7 +23,7 @@ struct Cli {
     #[arg(long)]
     wireframe: bool,
     /// Render meshes textured — sampling the stream's bound texture table at each
-    /// vertex UV — instead of the per-vertex color. Requires a `0.0.4` stream
+    /// vertex UV — instead of the per-vertex color. Requires a stream
     /// carrying a texture table (else the bound texture is 1×1 white).
     #[arg(long, conflicts_with = "wireframe")]
     textured: bool,

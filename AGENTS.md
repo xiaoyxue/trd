@@ -32,6 +32,18 @@ Guidance for agents working in this repository.
   by bolting flags onto the renderer. Wireframe is a *mode* of `Mesh`, not a
   separate variant.
 - Major input data is columnar (Apache Arrow tables) with simple glue logic.
+- **The input stream protocol is NOT backward compatible.** The wire format is
+  **mesh-first** `[mesh][texture?][params]` and only the current
+  `PROTOCOL_VERSION` (`trd_core::protocol::PROTOCOL_VERSION`, currently `0.0.5`)
+  is accepted — every batch's `trd.protocol.version` metadata is checked, and a
+  stream declaring any other version is **hard-rejected** (`UnsupportedVersion`),
+  never silently upgraded. When you evolve the protocol, **bump
+  `PROTOCOL_VERSION` and migrate all producers + fixtures to it in the same
+  change** (`scripts/{jsonl,obj,texture}_to_arrow.py` all stamp the version;
+  regenerate the golden `stage{1,2}.arrow` fixtures). Do **not** re-introduce
+  branches to decode retired versions or params-only (hello-triangle) streams —
+  dropping that legacy surface is a deliberate simplification (#82/#90). There is
+  no params-only fallback: every input must begin with a mesh table.
 
 ## Toolchain
 
@@ -122,6 +134,17 @@ Guidance for agents working in this repository.
 - **branch naming:** `feat/<topic>`, `fix/<topic>`, etc.
 - **merge strategy:** squash.
 - PRs that resolve an issue must include a `Closes #nn` keyword.
+- **Dual-platform verification (Windows + Linux).** Every task must be verified on
+  **both** platforms before it is considered done, because trd ships a native
+  Windows path (`trd-cli`/`trd-app`, `examples/render.ps1`) and a Linux/Nix path
+  (`nix flake check`, GPU-gated `#[ignore]` tests on the RTX box, `render.sh`):
+  - **Linux:** `nix flake check` (fmt, clippy native + wasm32, tests, tsc, biome)
+    plus the GPU-gated tests (`golden_render` etc.) via the nixGL wrapper.
+  - **Windows:** build/run the affected native path (`trd-cli`/`trd-app` with the
+    MSVC toolchain; `examples/render.ps1` for the demo) and confirm it renders.
+  - Whichever platform you cannot run yourself, leave an explicit **handoff** note
+    (exact commands + expected result) in the issue **and** the PR so the other
+    platform's verification can be completed and recorded there.
 - **Worktrees:** keep the git root checkout on `main` at all times. Do all
   branch/PR work in a git worktree under the root's `.worktree/` folder, e.g.:
   ```sh

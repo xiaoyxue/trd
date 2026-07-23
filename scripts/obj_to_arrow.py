@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Convert one or more Wavefront ``.obj`` meshes to a trd **mesh** Arrow IPC
-stream (0.0.4).
+stream (0.0.5).
 
 A trd input stream is two concatenated Arrow IPC streams — ``[mesh][params]``
 — so a mesh table is authored by this script and the per-frame params by
@@ -18,7 +18,7 @@ while a mesh has a different number of vertices and indices — each mesh travel
                    column stays equal-length — letting a colored mesh (e.g. a
                    wireframe overlay quad) share a table with an uncolored/textured
                    one (which ignores its white color).
-  * ``uv``       — ``List<FixedSizeList<Float32>[2]>``, optional (0.0.4); emitted
+  * ``uv``       — ``List<FixedSizeList<Float32>[2]>``, optional; emitted
                    when *any* mesh carries ``vt`` texcoords. One uv per (split)
                    vertex, parallel to ``position``, already V-flipped to the
                    top-left texel origin (see below). Meshes lacking texcoords get
@@ -55,7 +55,7 @@ import pyarrow as pa
 from pyarrow import ipc
 
 PROTOCOL_VERSION_KEY = b"trd.protocol.version"
-PROTOCOL_VERSION = b"0.0.4"
+PROTOCOL_VERSION = b"0.0.5"
 
 
 def parse_obj(text):

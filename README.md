@@ -23,10 +23,10 @@ params-stream ─┬─ trd-cli  → trd-core → offscreen readback → image-s
 
 Platform-agnostic wgpu logic, shared verbatim by every target:
 
-- **`render.rs` + `triangle.wgsl`** — `render_triangle(device, queue, view, format,
-  params)` draws one parametric triangle (`FrameParams` = `center`, `size`,
-  `theta`) into *any* `wgpu::TextureView`. That one function is why the same code
-  targets an offscreen texture, a window swapchain, or a browser canvas.
+- **`render.rs` + `mesh.wgsl` / `textured.wgsl`** — `MeshRenderer` rasterizes a
+  `Scene` of `DrawableObject`s into *any* `wgpu::TextureView`. That one renderer
+  is why the same code targets an offscreen texture, a window swapchain, or a
+  browser canvas.
 - **`DrawableObject` + `Scene` (`render.rs`)** — the base interface for every
   primitive the renderer can draw (#41). `DrawableObject` is a small `Copy` enum —
   `Mesh { mesh_id, model, mode }` (filled or **wireframe** mode), `AabbBox {
@@ -34,7 +34,7 @@ Platform-agnostic wgpu logic, shared verbatim by every target:
   is owned once by the renderer's decode-once mesh store and each variant carries
   only *which* primitive to draw plus its per-frame model. A `Scene = Vec<
   DrawableObject>` is rebuilt each frame; `MeshRenderer::encode` walks it once,
-  binds the shared `P·V·M` uniform, buckets the drawables (filled meshes → wireframe
+  binds the shared `P·V` camera uniform, buckets the drawables (filled meshes → wireframe
   meshes → AABB boxes → axes) into one instance buffer, and records the draws — with
   **no per-type branching** in any front-end. A single-object frame is the
   degenerate one-element scene, so there is no special case. Wireframe is a *mode*
@@ -45,9 +45,8 @@ Platform-agnostic wgpu logic, shared verbatim by every target:
   flight, so an animation of any length streams in constant memory.
 - **`protocol.rs`** — the cross-platform (native + wasm) incremental Arrow IPC
   decoder. `InputSession` feeds arbitrary byte chunks through `arrow`'s
-  `StreamDecoder`, validates the protocol schema once (accepts
-  `0.0.1`/`0.0.2`/`0.0.3`/`0.0.4`/`0.0.5`), and yields one `FrameBatch` (`Vec<FrameParams>`) per
-  record batch — the
+  `StreamDecoder`, validates the protocol schema once (accepts `0.0.5` only), and
+  yields one `FrameBatch` (`Vec<FrameParams>`) per record batch — the
   browser's input path.
 - **`output.rs`** — the cross-platform Arrow IPC *output* serialization.
   `OutputSession` writes the `r,g,b,a` `fixed_shape_tensor<u8>` stream
@@ -78,7 +77,7 @@ Each is a *thin shell* that only supplies a render target and calls the core:
 - **`trd-app` — native window.** A background thread reads the params stream from
   stdin; the window plays it at `--fps`, drawing each frame **straight into the
   swapchain surface** and presenting it. No read-back, no file — pixels go on
-  screen. With no stdin it shows the identity triangle.
+  screen. With no stdin it renders nothing (a black window) until a scene arrives.
 - **`trd-wasm` / `web/` — browser.** `CanvasRenderer.create(canvas)` obtains a wgpu
   surface from the `<canvas>` and holds a persistent `MeshRenderer` plus an
   `InputSession`, rendering the **same mesh Scene** as the native CLI through the
@@ -101,41 +100,38 @@ Each is a *thin shell* that only supplies a render target and calls the core:
 ### Stream protocol
 
 Frame parameters are plain columnar data, so **any** tool that emits the input
-columns as an Arrow IPC stream can drive the renderer. The current version is
-**0.0.4**; it is backward-compatible with 0.0.3, 0.0.2 and 0.0.1.
+columns as an Arrow IPC stream can drive the renderer. The current — and **only
+supported** — version is **0.0.5**: it is **mesh-first** (`[mesh][texture?][params]`)
+and is **not** backward-compatible with `0.0.1`–`0.0.4` (older streams are
+hard-rejected). See the [no-backward-compat policy](AGENTS.md).
 
 | Direction | Columns | Arrow type |
 |---|---|---|
-| **Input** (params) | `center`, `size` | `FixedSizeList<f32>[2]` |
-| | `theta` | `f32` |
-| | `model` *(opt, 0.0.2)* | `FixedSizeList<f32>[16]` (4×4 model matrix) |
-| | `k` *(opt, 0.0.2)* | `FixedSizeList<f32>[9]` (3×3 camera intrinsics, **CV**) |
-| | `pose` *(opt, 0.0.2)* | `FixedSizeList<f32>[16]` (4×4 camera-to-world pose, **CV**) |
-| | `eye`, `target`, `direction`, `up` *(opt, 0.0.3)* | `FixedSizeList<f32>[3]` (**CG** look-at) |
-| | `fovy`, `aspect`, `znear`, `zfar` *(opt, 0.0.3)* | `f32` (**CG** perspective) |
-| | `draw_mesh` *(opt, 0.0.3)* | `List<u32>` (per-instance mesh index) |
-| | `draw_model` *(opt, 0.0.3)* | `List<FixedSizeList<f32>[16]>` (per-instance 4×4 model) |
-| | `frame_path` / `frame_url` *(opt, 0.0.5)* | `Utf8` (per-frame background image path / URL) |
-| **Input** (mesh, *opt, 0.0.3*) | `position`, `color` | `List<FixedSizeList<f32>[3]>` |
-| | `uv` *(opt, 0.0.4)* | `List<FixedSizeList<f32>[2]>` (per-vertex texture coords) |
+| **Input** (params) | `model` *(opt)* | `FixedSizeList<f32>[16]` (4×4 model matrix) |
+| | `k` *(opt)* | `FixedSizeList<f32>[9]` (3×3 camera intrinsics, **CV**) |
+| | `pose` *(opt)* | `FixedSizeList<f32>[16]` (4×4 camera-to-world pose, **CV**) |
+| | `eye`, `target`, `direction`, `up` *(opt)* | `FixedSizeList<f32>[3]` (**CG** look-at) |
+| | `fovy`, `aspect`, `znear`, `zfar` *(opt)* | `f32` (**CG** perspective) |
+| | `draw_mesh` *(opt)* | `List<u32>` (per-instance mesh index) |
+| | `draw_model` *(opt)* | `List<FixedSizeList<f32>[16]>` (per-instance 4×4 model) |
+| | `frame_path` / `frame_url` *(opt)* | `Utf8` (per-frame background image path / URL) |
+| **Input** (mesh) | `position`, `color` | `List<FixedSizeList<f32>[3]>` |
+| | `uv` *(opt)* | `List<FixedSizeList<f32>[2]>` (per-vertex texture coords) |
 | | `index` | `List<u32>` |
-| **Input** (texture, *opt, 0.0.4*) | `rgba` | `fixed_shape_tensor<u8>` `[H, W, 4]` (interleaved RGBA) |
+| **Input** (texture, *opt*) | `rgba` | `fixed_shape_tensor<u8>` `[H, W, 4]` (interleaved RGBA) |
 | **Output** (image) | `r`, `g`, `b`, `a` | `fixed_shape_tensor<u8>` `[H, W]` |
 
-The `0.0.2` matrix columns are **optional/additive** and drive the MVP transform
-`clip = P · V · M · (pos, 0, 1)`; a stream with none of them (or identity
-matrices) renders identically to `0.0.1`. The protocol-version metadata is
-optional, so DuckDB and pyarrow streams are both accepted as-is.
+Every stream is **mesh-first**: a leading **mesh** Arrow stream (one row per mesh,
+geometry in nested list columns), optionally followed by a **texture** stream, then
+the per-frame **params** stream (`[mesh][texture?][params]`). **Both the native path
+and the browser `CanvasRenderer`** decode the mesh (`Mesh::from_arrow`), upload it,
+and render it **centered and uniformly scaled to fit** (a `base_model` beneath the
+per-frame `model`). Encode an OBJ with `scripts/obj_to_arrow.py`;
+`examples/render.sh --mesh <obj>` wires it end-to-end. The params columns are all
+**optional/additive** and drive the MVP transform `clip = P · V · M · (pos, 1)`.
 
-**0.0.3** adds three things on top of the params stream:
+The params stream carries three optional features on top of the mesh geometry:
 
-- an optional leading **mesh** Arrow stream, concatenated before the params
-  stream (`[mesh][params]`): one row per mesh, geometry in nested list columns.
-  **Both the native path and the browser `CanvasRenderer`** decode it
-  (`Mesh::from_arrow`), upload it, and render it **centered and uniformly scaled
-  to fit** (a `base_model` beneath the per-frame `model`), driven by the
-  following params. Encode an OBJ with `scripts/obj_to_arrow.py`;
-  `examples/render.sh --mesh <obj>` wires it end-to-end.
 - an optional per-frame **camera**, authored either **CV**-style (`k` intrinsics +
   `pose` extrinsics, resolved as `view = inverse(pose)`) or **CG**-style (a look-at
   from `eye` + `target`/`direction` + `up`, with `fovy`/`aspect`/`znear`/`zfar`
@@ -146,26 +142,22 @@ optional, so DuckDB and pyarrow streams are both accepted as-is.
   mesh `draw_mesh[i]` under model `draw_model[i]` (composed beneath that mesh's
   preview transform). Absent a draw list, one instance of mesh 0 is placed by the
   frame's own `model`.
+- optional **textured rendering**: a **texture** Arrow stream spliced between the
+  mesh and params streams (`[mesh][texture][params]`) — one row of interleaved-RGBA
+  `rgba` (`fixed_shape_tensor<u8>` `[H, W, 4]`, dimensions self-describing) — plus an
+  optional per-vertex **`uv`** mesh column. With `--textured` (`setTextured(true)`)
+  meshes sample the bound texture at each UV (`textureSample`, `Rgba8UnormSrgb` linear
+  clamp-to-edge); a textured draw with no texture stream samples a default 1×1 white.
+  Encode an image with `scripts/texture_to_arrow.py`; `examples/render.sh --texture
+  <img>` wires it end-to-end for `--cli` and `--web` alike (`.ps1 -Texture` on Windows).
 
-**0.0.4** adds **textured rendering**: an optional **texture** Arrow stream
-spliced between the mesh and params streams (`[mesh][texture][params]`) — one row
-of interleaved-RGBA `rgba` (`fixed_shape_tensor<u8>` `[H, W, 4]`, dimensions
-self-describing) — plus an optional per-vertex **`uv`** mesh column. With
-`--textured` (`setTextured(true)`) meshes sample the bound texture at each UV
-(`textureSample`, `Rgba8UnormSrgb` linear clamp-to-edge); a textured draw with no
-texture stream samples a default 1×1 white. Encode an image with
-`scripts/texture_to_arrow.py`; `examples/render.sh --texture <img>` wires it
-end-to-end for `--cli` and `--web` alike (`.ps1 -Texture` on Windows).
-
-A params-only stream (no leading mesh) still renders the built-in hello-triangle.
-
-**0.0.5** adds an optional per-frame **background frame**: a `frame_path` (native)
-or `frame_url` (browser) `Utf8` params column naming an image composited **beneath**
-the scene by a new `FramePlane` drawable (a fullscreen quad sampling a reused
-`Rgba8UnormSrgb` texture, depth-write off so the mesh scene + gizmos draw on top;
-`Stretch`/`Cover` fit). The core decodes the reference only; the shell does the
-image I/O — `trd --frames-base <dir>` / `trd-app --frames-base <dir>` load the
-PNG/JPEG (relative to `<dir>`). Produce the stills + manifest with
+The params stream also carries an optional per-frame **background frame**: a
+`frame_path` (native) or `frame_url` (browser) `Utf8` column naming an image
+composited **beneath** the scene by a `FramePlane` drawable (a fullscreen quad
+sampling a reused `Rgba8UnormSrgb` texture, depth-write off so the mesh scene +
+gizmos draw on top; `Stretch`/`Cover` fit). The core decodes the reference only; the
+shell does the image I/O — `trd --frames-base <dir>` / `trd-app --frames-base <dir>`
+load the PNG/JPEG (relative to `<dir>`). Produce the stills + manifest with
 `scripts/extract_frames.py`. Without `--frames-base`, `frame_path` is ignored and
 the scene renders over the black clear.
 
@@ -177,13 +169,13 @@ schema reference + [changelog](docs/protocol/CHANGELOG.md)).
 
 | Path | What it is |
 |---|---|
-| `crates/trd-core` | the unified render core (`render.rs`, `triangle.wgsl`, `stream.rs`) |
+| `crates/trd-core` | the unified render core (`render.rs`, `mesh.wgsl`, `stream.rs`) |
 | `crates/trd-cli` | headless CLI: Arrow params in → Arrow image out |
 | `crates/trd-app` | native interactive window (winit + live wgpu surface); split into `main`/`cli`/`error`/`renderer`/`stream`/`app` modules |
 | `crates/trd-wasm` | `wasm-bindgen` entry point (crate-root glue + `canvas_renderer`/`arrow_renderer` modules); packaged as the `trd-wasm` npm library |
 | `web/` | bun-managed thin TypeScript wrapper (`main.ts` → config-driven `generic-renderer.ts`) that loads `trd-wasm` |
-| `examples/` | `frames.0.0.2.jsonl` (+ legacy `frames.0.0.1.jsonl`) demo + `render.sh` / `render.ps1` wrappers |
-| `scripts/jsonl_to_arrow.py` | JSONL → Arrow params stream (pyarrow; duckdb-free producer) |
+| `examples/` | mesh-first demo streams (e.g. `frames.bunny_dolly.cg.jsonl`, `frames.turntable.jsonl`) + `render.sh` / `render.ps1` wrappers |
+| `scripts/jsonl_to_arrow.py` | JSONL → Arrow `0.0.5` params stream (pyarrow producer) |
 | `scripts/extract_frames.py` | video → still `frames/` + [frame-to-row mapping manifest](docs/frame-extraction.md) (ffmpeg; boundary tooling for the #62 compositing pipeline) |
 | `scripts/encode.py` | Arrow image stream → ffmpeg GIF/WebP |
 | `scripts/dev-env.ps1` | Windows dev-environment setup (the `nix develop` counterpart) |
@@ -206,7 +198,9 @@ schema reference + [changelog](docs/protocol/CHANGELOG.md)).
   . .\scripts\dev-env.ps1
   ```
 
-**2. Run the demo** — renders [`examples/frames.0.0.2.jsonl`](examples/frames.0.0.2.jsonl):
+**2. Run the demo** — renders the bunny dolly-camera capstone
+([`examples/frames.bunny_dolly.cg.jsonl`](examples/frames.bunny_dolly.cg.jsonl),
+loading `assets/meshes/bunny.obj`):
 
 ```sh
 # Linux / macOS / WSL
@@ -267,8 +261,7 @@ nix flake check       # every gate: fmt, clippy (native+wasm32), test, tsc, biom
 > before building.
 
 For fast iteration use plain `cargo` / `bun` inside `nix develop` (or, on Windows,
-after `. .\scripts\dev-env.ps1`). The sections below assume that. DuckDB is
-optional — see [the render pipeline](#the-render-pipeline).
+after `. .\scripts\dev-env.ps1`). The sections below assume that.
 
 ### Native CLI
 
@@ -278,16 +271,15 @@ out. The `examples/render.*` wrappers build the whole JSONL → GIF pipeline for
 ```sh
 examples/render.sh  [MODE] [INPUT.jsonl] [OUT.gif|.webp] [WIDTH] [HEIGHT] [FPS]   # Linux/macOS
 examples\render.ps1 [MODE] [-InputPath]  [-Output]       [-Width] [-Height] [-Fps]  # Windows (PS7)
-# Defaults: examples/frames.0.0.2.jsonl → output/out.gif, 256×256 @ 30 fps
+# Defaults: examples/frames.bunny_dolly.cg.jsonl (renders assets/meshes/bunny.obj) → output/out.gif, 256×256 @ 30 fps
 # MODE (pick one): --cli/-CLI (default: headless GIF/WebP) · --native/-Native (live window) ·
 #   --web/-Wasm (browser; --canvas-renderer default, or --offscreen-renderer/--arrow-renderer)
 # Run either wrapper with no arguments (or -h/--help / -Help) to print the flag
 # guidance and exit; pass a mode (e.g. --cli) to render the default demo.
 ```
 
-On Windows the Arrow stages are handed off through a temp dir (Windows DuckDB
-can't write to `/dev/stdout` and PowerShell pipelines aren't binary-safe); the
-output is identical.
+On Windows the Arrow stages are handed off through a temp dir (PowerShell
+pipelines aren't binary-safe); the output is identical.
 
 #### Mesh & render flags (`--cli`)
 
@@ -296,8 +288,8 @@ map straight onto `trd-cli`:
 
 | Flag | Effect |
 |---|---|
-| `--mesh <obj>` | Prepend a mesh Arrow stream (protocol 0.0.3 `[mesh][params]`) built from `<obj>` by [`scripts/obj_to_arrow.py`](scripts/obj_to_arrow.py); the mesh renders centered + scaled-to-fit, driven by the params `INPUT.jsonl`. **Repeatable** — pass `--mesh` several times to load several meshes (one table row each, in order); a frame's `draws` list then references them by 0-based index. Needs pyarrow (via uv/python3). |
-| `--texture <img>` | Splice a texture Arrow stream (protocol 0.0.4 `[mesh][texture][params]`) built from `<img>` by [`scripts/texture_to_arrow.py`](scripts/texture_to_arrow.py) and render **textured** (`trd --textured`, #20): meshes sample the image at each vertex UV. Requires `--mesh` (with UVs); mutually exclusive with `--wireframe`. Downscaled to ≤ 2048² (portable limit); needs pyarrow + pillow + numpy. |
+| `--mesh <obj>` | Prepend a mesh Arrow stream (mesh-first `[mesh][params]`) built from `<obj>` by [`scripts/obj_to_arrow.py`](scripts/obj_to_arrow.py); the mesh renders centered + scaled-to-fit, driven by the params `INPUT.jsonl`. **Repeatable** — pass `--mesh` several times to load several meshes (one table row each, in order); a frame's `draws` list then references them by 0-based index. Needs pyarrow (via uv/python3). |
+| `--texture <img>` | Splice a texture Arrow stream (`[mesh][texture][params]`) built from `<img>` by [`scripts/texture_to_arrow.py`](scripts/texture_to_arrow.py) and render **textured** (`trd --textured`, #20): meshes sample the image at each vertex UV. Requires `--mesh` (with UVs); mutually exclusive with `--wireframe`. Downscaled to ≤ 2048² (portable limit); needs pyarrow + pillow + numpy. |
 | `--wireframe` | Draw mesh **edges** as a line list (`trd --wireframe`) instead of filled triangles (protocol #38). Reveals topology; on a dense asset (e.g. the ~70k-tri bunny) the edges read as a fine mesh. |
 | `--aabb` | Overlay each drawn mesh instance's **axis-aligned bounding box** as a green (`[0, 1, 0]`) wireframe box (`trd --aabb`, #42). The box uses the *same* per-instance model as the mesh, so it tracks the mesh through the preview + per-frame transforms. Combine freely with `--wireframe`. |
 | `--axes` | Overlay a **coordinate-axes gizmo** (X=red, Y=green, Z=blue lines) at the world origin (`trd --axes`, #42), under the camera `P·V` with an identity model, marking the world frame the camera looks at. |
@@ -377,67 +369,32 @@ Under the hood it is a fully-piped `JSONL → Arrow → trd → ffmpeg` flow, no
 intermediate files:
 
 ```sh
-# producer → renderer → encoder   (duckdb-free; uses pyarrow)
-uv run --with pyarrow scripts/jsonl_to_arrow.py examples/frames.0.0.2.jsonl \
+# producer → renderer → encoder   (mesh-first; pyarrow producers)
+uv run --with pyarrow scripts/obj_to_arrow.py assets/meshes/bunny.obj > /tmp/stream.arrow
+uv run --with pyarrow scripts/jsonl_to_arrow.py examples/frames.bunny_dolly.cg.jsonl >> /tmp/stream.arrow
+cat /tmp/stream.arrow \
   | cargo run -q -p trd-cli -- --width 256 --height 256 \
   | uv run --with pyarrow --with numpy scripts/encode.py --fps 30 -o output/out.gif
 ```
 
-The producer's `--version` flag selects the input JSONL protocol (default
-`0.0.2`). [`examples/frames.0.0.2.jsonl`](examples/frames.0.0.2.jsonl) gives each
-frame's `model` transform as a 4×4 matrix directly; the legacy
-[`examples/frames.0.0.1.jsonl`](examples/frames.0.0.1.jsonl)
-(`--version 0.0.1`) uses `center`/`size`/`theta` fields instead. Regenerate the
-0.0.2 file from the 0.0.1 one with `scripts/gen_frames.py`.
+The stream protocol is **`0.0.5`-only** and **mesh-first**: every input is
+`[mesh][texture?][params]` (the leading mesh table authored by
+[`scripts/obj_to_arrow.py`](scripts/obj_to_arrow.py), the per-frame params by
+[`scripts/jsonl_to_arrow.py`](scripts/jsonl_to_arrow.py)). Each JSONL frame gives
+its `model` transform as a 4×4 matrix (defaulting to identity when the frame is
+driven entirely by its `draws` list), plus optional per-frame camera / draw-list /
+`frame_path` columns. Older wire formats (`0.0.1`–`0.0.4`) are **not** accepted —
+a stream declaring any other version is hard-rejected (see
+[`docs/protocol/`](docs/protocol/) for the version history).
 
-- **Producer** — emits the input params stream. The wrappers use `duckdb` when its
-  `arrow` community extension loads, else fall back to
-  [`scripts/jsonl_to_arrow.py`](scripts/jsonl_to_arrow.py) (pyarrow), so a missing
-  or broken duckdb extension never blocks a render.
+- **Producer** — emits the input stream via the pyarrow scripts
+  [`obj_to_arrow.py`](scripts/obj_to_arrow.py) (mesh),
+  [`texture_to_arrow.py`](scripts/texture_to_arrow.py) (optional texture) and
+  [`jsonl_to_arrow.py`](scripts/jsonl_to_arrow.py) (params).
 - **`trd-cli`** — renders each row to `r,g,b,a` tensors (the output stream).
 - **[`scripts/encode.py`](scripts/encode.py)** — pipes RGBA to ffmpeg, producing
   `.gif` or `.webp` by output extension. On WSL, prefix the `cargo` step with
   `WGPU_BACKEND=gl`.
-
-<details><summary>DuckDB producer (equivalent first stage)</summary>
-
-```sh
-duckdb -c "INSTALL arrow FROM community; LOAD arrow;
-  COPY (
-    WITH raw AS (
-      SELECT
-        COALESCE(center, [0.0, 0.0]) AS c,
-        COALESCE(size, [1.0, 1.0]) AS s,
-        COALESCE(theta, 0.0) AS th,
-        model AS m
-      FROM read_json('examples/frames.0.0.2.jsonl',
-        format = 'newline_delimited',
-        columns = {center: 'DOUBLE[]', size: 'DOUBLE[]', theta: 'DOUBLE', model: 'DOUBLE[]'})
-    )
-    SELECT
-      c::FLOAT[2] AS center,
-      s::FLOAT[2] AS size,
-      th::FLOAT AS theta,
-      COALESCE(m, [
-        s[1] * cos(th), s[1] * sin(th), 0.0, 0.0,
-        -s[2] * sin(th), s[2] * cos(th), 0.0, 0.0,
-        0.0, 0.0, 1.0, 0.0,
-        c[1], c[2], 0.0, 1.0
-      ])::FLOAT[16] AS model
-    FROM raw
-  ) TO '/dev/stdout' (FORMAT arrows);" \
-  | cargo run -q -p trd-cli -- --width 256 --height 256 \
-  | uv run --with pyarrow --with numpy scripts/encode.py --fps 30 -o output/out.gif
-```
-
-`FORMAT arrows` (plural) is the streaming IPC format. The explicit `columns=`
-schema forces every column to exist (`NULL` when a row omits it), so the same
-query serves both the 0.0.1 (`center`/`size`/`theta`) and 0.0.2 (`model`) example
-data: the required 0.0.1 columns default to the identity and the additive 0.0.2
-`model` matrix is used verbatim when present, else synthesized to match
-[`scripts/jsonl_to_arrow.py`](scripts/jsonl_to_arrow.py).
-
-</details>
 
 ### Native window
 
@@ -448,15 +405,16 @@ counterpart of the browser target). Use the wrappers, or drive it directly:
 examples/render.sh --native            # Linux/macOS
 examples\render.ps1 -Native            # Windows (PowerShell 7)
 
-# …or pipe any producer straight into trd-app:
-uv run --with pyarrow scripts/jsonl_to_arrow.py examples/frames.0.0.2.jsonl \
+# …or pipe the mesh-first stream straight into trd-app:
+cat <(uv run --with pyarrow scripts/obj_to_arrow.py assets/meshes/bunny.obj) \
+    <(uv run --with pyarrow scripts/jsonl_to_arrow.py examples/frames.bunny_dolly.cg.jsonl) \
   | cargo run -q -p trd-app -- --fps 30
 ```
 
 Options: `--width`/`--height` (initial size), `--fps`, `--once` (hold the last
-frame instead of looping). No stdin → the identity triangle. Honours
-`WGPU_BACKEND` / `RUST_LOG`. Close the window to exit. In `--native` mode the
-output file is ignored and neither `uv` nor `ffmpeg` is needed.
+frame instead of looping). Honours `WGPU_BACKEND` / `RUST_LOG`. Close the window
+to exit. In `--native` mode the output file is ignored and neither `uv` nor
+`ffmpeg` is needed.
 
 ### Web (wasm)
 
@@ -566,16 +524,15 @@ winget install --id Microsoft.VisualStudio.2022.BuildTools -e `
   --override "--quiet --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
 
 # Optional render-example tools. ffmpeg is only needed for the GIF/WebP path;
-# duckdb and uv are optional (the wrappers fall back to a system python that
+# uv is optional (the wrappers fall back to a system python that
 # already has pyarrow + numpy).
 winget install --id Gyan.FFmpeg -e
 winget install --id astral-sh.uv -e     # optional
-winget install --id DuckDB.cli -e       # optional
 ```
 
 **2. Prepare each shell.** Dot-source the setup script to put everything on `PATH`
 — cargo pinned to the MSVC host, the MSVC linker imported from `vcvars64.bat`, plus
-ffmpeg/duckdb/uv. It installs a missing `uv` via winget automatically (pass
+ffmpeg/uv. It installs a missing `uv` via winget automatically (pass
 `-NoInstall` to skip, `-Quiet` to hide the summary):
 
 ```powershell
@@ -586,7 +543,7 @@ ffmpeg/duckdb/uv. It installs a missing `uv` via winget automatically (pass
 
 ```powershell
 cargo build -p trd-cli      # cargo can now link native binaries
-examples\render.ps1 -CLI    # render examples\frames.0.0.2.jsonl → output\out.gif
+examples\render.ps1 -CLI    # render examples\frames.bunny_dolly.cg.jsonl → output\out.gif
 ```
 
 Notes:

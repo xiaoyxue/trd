@@ -1,27 +1,27 @@
 //! Native-only Arrow streaming protocol (trd protocol 0.0.5).
 //!
-//! Input is one to three concatenated Arrow IPC streams on stdin. A `0.0.4`
-//! stream is `[mesh][texture?][params]`: a leading **mesh** table (one row = one
-//! mesh, all rows decoded by [`Mesh::from_arrow_all`]), an optional **texture**
-//! table (one row = one `fixed_shape_tensor<u8>[H,W,4]` image, decoded by
-//! [`ImageTexture::from_arrow`] and bound as the sampled albedo), then the
-//! **params** stream (one row per frame: `center`, `size`, `theta`, + optional
-//! camera columns `model`/`k`/`pose`/`eye`/`target`/`direction`/`up`/`fovy`/
-//! `aspect`/`znear`/`zfar`, + an optional per-frame instanced draw list
+//! The protocol is **not backward compatible**: only `0.0.5` is accepted (see
+//! `AGENTS.md`). Input is a mesh-first `[mesh][texture?][params]` byte stream of
+//! one to three concatenated Arrow IPC streams on stdin:
+//! a **required** leading **mesh** table (one row = one mesh, all rows decoded
+//! by [`Mesh::from_arrow_all`]), an optional **texture** table (one row = one
+//! `fixed_shape_tensor<u8>[H,W,4]` image, decoded by [`ImageTexture::from_arrow`]
+//! and bound as the sampled albedo), then the **params** stream (one row per
+//! frame: optional camera columns `model`/`k`/`pose`/`eye`/`target`/`direction`/
+//! `up`/`fovy`/`aspect`/`znear`/`zfar`, an optional per-frame instanced draw list
 //! `draw_mesh` (`List<UInt32>`) / `draw_model`
-//! (`List<FixedSizeList<Float32>[16]>`) placing instances of the loaded meshes).
-//! When the draw list is absent, one instance of mesh 0 is placed by the frame's
-//! own model. A legacy `0.0.1`/`0.0.2` stream is just the params stream and
-//! renders the built-in hello-triangle. Output: one row per frame, four
+//! (`List<FixedSizeList<Float32>[16]>`) placing instances of the loaded meshes,
+//! and an optional per-frame background `frame_path` reference). When the draw
+//! list is absent, one instance of mesh 0 is placed by the frame's own `model`
+//! (identity when absent). A params stream with no leading mesh table is an error
+//! ([`StreamError::MissingMeshStream`]). Output: one row per frame, four
 //! `fixed_shape_tensor<u8>` channels `r,g,b,a` of shape `[H, W]`.
-
-use std::sync::Arc;
 
 use arrow::array::{
     Array, FixedSizeListArray, Float32Array, ListArray, RecordBatch, StringArray, UInt32Array,
     UInt8Array,
 };
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::datatypes::{DataType, Schema};
 use arrow::error::ArrowError;
 use arrow::ipc::reader::StreamReader;
 use std::io::{Read, Write};
@@ -110,6 +110,11 @@ pub enum StreamError {
     /// The stream declares a protocol version this build does not support.
     #[error("unsupported protocol version `{0}` (expected `{PROTOCOL_VERSION}`)")]
     UnsupportedVersion(String),
+    /// The input is not mesh-first: the protocol requires a leading mesh table
+    /// before the params stream (`[mesh][texture?][params]`). Legacy params-only
+    /// streams are no longer accepted.
+    #[error("input is missing the required leading mesh table (protocol is mesh-first)")]
+    MissingMeshStream,
     /// GPU rendering failed.
     #[error("render error: {0}")]
     Render(String),
@@ -123,31 +128,6 @@ pub enum StreamError {
     Output(#[from] crate::OutputError),
 }
 
-fn vec2_field(name: &str) -> Field {
-    Field::new(
-        name,
-        DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, false)), 2),
-        false,
-    )
-}
-
-/// Builds the protocol 0.0.1 input schema (with version metadata).
-pub fn input_schema() -> Schema {
-    Schema::new(vec![
-        vec2_field("center"),
-        vec2_field("size"),
-        Field::new("theta", DataType::Float32, false),
-    ])
-    .with_metadata(
-        [(
-            PROTOCOL_VERSION_KEY.to_string(),
-            PROTOCOL_VERSION.to_string(),
-        )]
-        .into_iter()
-        .collect(),
-    )
-}
-
 /// If the schema declares a protocol version, require it to be supported.
 pub fn check_version(schema: &Schema) -> Result<(), StreamError> {
     if let Some(v) = schema.metadata().get(PROTOCOL_VERSION_KEY) {
@@ -156,51 +136,6 @@ pub fn check_version(schema: &Schema) -> Result<(), StreamError> {
         }
     }
     Ok(())
-}
-
-fn require_vec2<'a>(
-    batch: &'a RecordBatch,
-    name: &'static str,
-) -> Result<&'a FixedSizeListArray, StreamError> {
-    let col = batch
-        .column_by_name(name)
-        .ok_or(StreamError::MissingColumn(name))?;
-    match col.data_type() {
-        DataType::FixedSizeList(f, 2) if *f.data_type() == DataType::Float32 => Ok(col
-            .as_any()
-            .downcast_ref::<FixedSizeListArray>()
-            .expect("checked FixedSizeList type")),
-        other => Err(StreamError::ColumnType {
-            column: name,
-            expected: "FixedSizeList<Float32>[2]",
-            actual: other.clone(),
-        }),
-    }
-}
-
-fn require_f32<'a>(
-    batch: &'a RecordBatch,
-    name: &'static str,
-) -> Result<&'a Float32Array, StreamError> {
-    let col = batch
-        .column_by_name(name)
-        .ok_or(StreamError::MissingColumn(name))?;
-    col.as_any()
-        .downcast_ref::<Float32Array>()
-        .ok_or_else(|| StreamError::ColumnType {
-            column: name,
-            expected: "Float32",
-            actual: col.data_type().clone(),
-        })
-}
-
-fn read_vec2(list: &FixedSizeListArray, row: usize) -> [f32; 2] {
-    let values = list
-        .values()
-        .as_any()
-        .downcast_ref::<Float32Array>()
-        .expect("vec2 values are Float32");
-    [values.value(row * 2), values.value(row * 2 + 1)]
 }
 
 /// Looks up an optional `FixedSizeList<Float32>[len]` column, validating type,
@@ -279,26 +214,12 @@ fn camera_form_error(error: CameraFormError) -> StreamError {
     }
 }
 
-/// Decodes every row of `batch` into [`FrameParams`], validating required
-/// columns, types, and non-nullness (including the fixed-size-list children).
-/// The optional `0.0.2` `model`/`k`/`pose` matrix columns and the `0.0.3` CG
-/// camera columns (`eye`/`target`/`direction`/`up`/`fovy`/`aspect`/`znear`/
-/// `zfar`) are decoded if present.
+/// Decodes every row of `batch` into [`FrameParams`], validating column types
+/// and non-nullness (including the fixed-size-list children). Every params column
+/// is optional (`model`/`k`/`pose` matrices and the CG camera columns
+/// `eye`/`target`/`direction`/`up`/`fovy`/`aspect`/`znear`/`zfar`); a params
+/// batch drives its row count via [`RecordBatch::num_rows`].
 pub fn decode_frames(batch: &RecordBatch) -> Result<Vec<FrameParams>, StreamError> {
-    let center = require_vec2(batch, "center")?;
-    let size = require_vec2(batch, "size")?;
-    let theta = require_f32(batch, "theta")?;
-    // Reject nulls at both the list level and the child-element level: a
-    // non-null list row may still contain null float components.
-    if center.null_count() > 0 || center.values().null_count() > 0 {
-        return Err(StreamError::NullValues("center"));
-    }
-    if size.null_count() > 0 || size.values().null_count() > 0 {
-        return Err(StreamError::NullValues("size"));
-    }
-    if theta.null_count() > 0 {
-        return Err(StreamError::NullValues("theta"));
-    }
     let model = optional_fixed_list(batch, "model", 16)?;
     let k = optional_fixed_list(batch, "k", 9)?;
     let pose = optional_fixed_list(batch, "pose", 16)?;
@@ -313,9 +234,6 @@ pub fn decode_frames(batch: &RecordBatch) -> Result<Vec<FrameParams>, StreamErro
     (0..batch.num_rows())
         .map(|i| {
             let frame = FrameParams {
-                center: read_vec2(center, i),
-                size: read_vec2(size, i),
-                theta: theta.value(i),
                 model: model.map(|(list, values)| read_fixed::<16>(list, values, i)),
                 k: k.map(|(list, values)| read_fixed::<9>(list, values, i)),
                 pose: pose.map(|(list, values)| read_fixed::<16>(list, values, i)),
@@ -608,17 +526,7 @@ pub struct BatchRenderer {
 
 impl BatchRenderer {
     /// Builds the GPU context (instance/adapter/device/pipeline/target/readback)
-    /// once for a fixed `width` x `height`, rendering the built-in hello-triangle.
-    pub fn new(width: u32, height: u32) -> Result<Self, StreamError> {
-        pollster::block_on(Self::new_async(
-            width,
-            height,
-            &[Mesh::hello_triangle()],
-            &[Matrix4::IDENTITY],
-        ))
-    }
-
-    /// Like [`BatchRenderer::new`] but renders the `meshes` of a `0.0.3` stream's
+    /// once for a fixed `width` x `height`, rendering the `meshes` of the stream's
     /// leading mesh table, applying each mesh's [`Mesh::preview_transform`]
     /// (center + uniform scale-to-fit) beneath its per-frame model so an
     /// arbitrary-unit asset renders centered and at a reasonable size. Per-frame
@@ -945,15 +853,15 @@ fn resolve_draws(
 /// [`Scene`](crate::Scene) itself, rather than the headless byte-stream path
 /// [`run_stream`] drives.
 ///
-/// Invokes `on_meshes` **once** with the decoded mesh table (a `0.0.3`+
-/// mesh-first stream) or the built-in hello-triangle (a legacy `0.0.1`/`0.0.2`
-/// params-only stream), then `on_texture` **once** with the optional bound
-/// texture (`Some` only for a `0.0.4` stream carrying a texture table), then
-/// `on_meta` with the stream's declared playback rate, then `on_frame` for each
-/// frame's `(FrameParams, draws)` in order. A frame carrying no wire draw list
-/// defaults to one instance of mesh 0 placed by the frame's own model — matching
-/// [`run_stream`]. The mesh table's rows are referenced by 0-based index;
-/// out-of-range `mesh_id`s are an error.
+/// Invokes `on_meshes` **once** with the decoded (required) leading mesh table,
+/// then `on_texture` **once** with the optional bound texture (`Some` only when
+/// the stream carries a texture table), then `on_meta` with the stream's declared
+/// playback rate, then `on_frame` for each frame's `(FrameParams, draws)` in
+/// order. A frame carrying no wire draw list defaults to one instance of mesh 0
+/// placed by the frame's own model — matching [`run_stream`]. The mesh table's
+/// rows are referenced by 0-based index; out-of-range `mesh_id`s are an error. A
+/// params-only stream with no leading mesh table is a
+/// [`StreamError::MissingMeshStream`].
 pub fn read_scene_stream_with_meta<R: Read>(
     input: R,
     on_meshes: impl FnOnce(Vec<Mesh>),
@@ -978,40 +886,33 @@ pub fn read_scene_stream_with_meta<R: Read>(
         Ok(())
     };
 
-    if is_mesh_schema(first.schema().as_ref()) {
-        // 0.0.3+ mesh-first: decode the leading mesh table, then the optional
-        // texture table, then the params stream — all in the same byte stream.
-        let meshes = read_meshes(&mut first)?;
-        let mesh_count = meshes.len();
-        on_meshes(meshes);
+    if !is_mesh_schema(first.schema().as_ref()) {
+        // The protocol is mesh-first; a params-only stream is no longer accepted.
+        return Err(StreamError::MissingMeshStream);
+    }
+    // Mesh-first: decode the leading mesh table, then the optional texture
+    // table, then the params stream — all in the same byte stream.
+    let meshes = read_meshes(&mut first)?;
+    let mesh_count = meshes.len();
+    on_meshes(meshes);
 
-        // The stream after the mesh table is either a 0.0.4 texture table or the
-        // params stream; sniff its schema to decide.
-        let mut next = StreamReader::try_new(first.get_mut(), None)?;
-        check_version(next.schema().as_ref())?;
-        if is_texture_schema(next.schema().as_ref()) {
-            on_texture(Some(read_texture(&mut next)?));
-            let params = StreamReader::try_new(next.get_mut(), None)?;
-            check_version(params.schema().as_ref())?;
-            on_meta(frame_rate_from_metadata(params.schema().metadata()));
-            for batch in params {
-                emit(&batch?, mesh_count)?;
-            }
-        } else {
-            on_texture(None);
-            on_meta(frame_rate_from_metadata(next.schema().metadata()));
-            for batch in next {
-                emit(&batch?, mesh_count)?;
-            }
+    // The stream after the mesh table is either a texture table or the params
+    // stream; sniff its schema to decide.
+    let mut next = StreamReader::try_new(first.get_mut(), None)?;
+    check_version(next.schema().as_ref())?;
+    if is_texture_schema(next.schema().as_ref()) {
+        on_texture(Some(read_texture(&mut next)?));
+        let params = StreamReader::try_new(next.get_mut(), None)?;
+        check_version(params.schema().as_ref())?;
+        on_meta(frame_rate_from_metadata(params.schema().metadata()));
+        for batch in params {
+            emit(&batch?, mesh_count)?;
         }
     } else {
-        // Legacy params-only stream → the built-in hello-triangle, so the live
-        // renderer draws the same demo the headless CLI does.
-        on_meshes(vec![Mesh::hello_triangle()]);
         on_texture(None);
-        on_meta(frame_rate_from_metadata(first.schema().metadata()));
-        for batch in first {
-            emit(&batch?, 1)?;
+        on_meta(frame_rate_from_metadata(next.schema().metadata()));
+        for batch in next {
+            emit(&batch?, mesh_count)?;
         }
     }
     Ok(())
@@ -1105,12 +1006,13 @@ pub struct RenderOptions {
 /// of `fixed_shape_tensor` images to `output`. Output batch boundaries mirror
 /// input batches (one batch in flight).
 ///
-/// A `0.0.4` stream is `[mesh][texture?][params]`: the leading mesh table is
-/// decoded once (via [`Mesh::from_arrow_all`]) and uploaded, then an optional
-/// texture table is uploaded as the bound albedo, then the following params
-/// stream drives per-frame rendering. A legacy `0.0.1`/`0.0.2` params-only stream
-/// renders the built-in hello-triangle. The sub-streams are told apart by
-/// sniffing each schema ([`is_mesh_schema`] / [`is_texture_schema`]).
+/// The protocol is mesh-first `[mesh][texture?][params]`: the **required**
+/// leading mesh table is decoded once (via [`Mesh::from_arrow_all`]) and
+/// uploaded, then an optional texture table is uploaded as the bound albedo,
+/// then the following params stream drives per-frame rendering. A params-only
+/// stream with no leading mesh table is a [`StreamError::MissingMeshStream`]. The
+/// sub-streams are told apart by sniffing each schema ([`is_mesh_schema`] /
+/// [`is_texture_schema`]).
 pub fn run_stream<R: Read, W: Write>(
     input: R,
     output: W,
@@ -1132,58 +1034,43 @@ pub fn run_stream<R: Read, W: Write>(
     let mut first = StreamReader::try_new(input, None)?;
     check_version(first.schema().as_ref())?;
 
-    if is_mesh_schema(first.schema().as_ref()) {
-        // 0.0.3+ mesh-first: decode + upload the mesh table (one mesh per row),
-        // then the optional texture table, then render the params stream that
-        // follows them in the same byte stream.
-        let meshes = read_meshes(&mut first)?;
-        let mut renderer = BatchRenderer::with_meshes(width, height, &meshes)?;
-        renderer.set_mode(mode);
-        renderer.set_show_aabb(show_aabb);
-        renderer.set_show_axes(show_axes);
-        renderer.set_show_local_axes(show_local_axes);
+    if !is_mesh_schema(first.schema().as_ref()) {
+        // The protocol is mesh-first; a params-only stream is no longer accepted.
+        return Err(StreamError::MissingMeshStream);
+    }
+    // Mesh-first: decode + upload the mesh table (one mesh per row), then the
+    // optional texture table, then render the params stream that follows them in
+    // the same byte stream.
+    let meshes = read_meshes(&mut first)?;
+    let mut renderer = BatchRenderer::with_meshes(width, height, &meshes)?;
+    renderer.set_mode(mode);
+    renderer.set_show_aabb(show_aabb);
+    renderer.set_show_axes(show_axes);
+    renderer.set_show_local_axes(show_local_axes);
 
-        // The stream after the mesh table is either a 0.0.4 texture table or the
-        // params stream; sniff its schema to decide.
-        let mut next = StreamReader::try_new(first.get_mut(), None)?;
-        check_version(next.schema().as_ref())?;
-        if is_texture_schema(next.schema().as_ref()) {
-            let texture = read_texture(&mut next)?;
-            renderer.set_texture(&texture);
-            let params = StreamReader::try_new(next.get_mut(), None)?;
-            check_version(params.schema().as_ref())?;
-            let frame_rate = frame_rate_from_metadata(params.schema().metadata());
-            render_params(
-                params,
-                renderer,
-                frame_rate,
-                width,
-                height,
-                frame_resolver,
-                output,
-            )
-        } else {
-            let frame_rate = frame_rate_from_metadata(next.schema().metadata());
-            render_params(
-                next,
-                renderer,
-                frame_rate,
-                width,
-                height,
-                frame_resolver,
-                output,
-            )
-        }
-    } else {
-        // Legacy params-only stream → built-in hello-triangle.
-        let mut renderer = BatchRenderer::new(width, height)?;
-        renderer.set_mode(mode);
-        renderer.set_show_aabb(show_aabb);
-        renderer.set_show_axes(show_axes);
-        renderer.set_show_local_axes(show_local_axes);
-        let frame_rate = frame_rate_from_metadata(first.schema().metadata());
+    // The stream after the mesh table is either a texture table or the params
+    // stream; sniff its schema to decide.
+    let mut next = StreamReader::try_new(first.get_mut(), None)?;
+    check_version(next.schema().as_ref())?;
+    if is_texture_schema(next.schema().as_ref()) {
+        let texture = read_texture(&mut next)?;
+        renderer.set_texture(&texture);
+        let params = StreamReader::try_new(next.get_mut(), None)?;
+        check_version(params.schema().as_ref())?;
+        let frame_rate = frame_rate_from_metadata(params.schema().metadata());
         render_params(
-            first,
+            params,
+            renderer,
+            frame_rate,
+            width,
+            height,
+            frame_resolver,
+            output,
+        )
+    } else {
+        let frame_rate = frame_rate_from_metadata(next.schema().metadata());
+        render_params(
+            next,
             renderer,
             frame_rate,
             width,
@@ -1199,41 +1086,60 @@ mod tests {
     use super::*;
     use crate::render::build_scene;
     use arrow::array::{ArrayRef, FixedSizeListArray as U8List, UInt8Array};
+    use arrow::datatypes::Field;
     use arrow::ipc::writer::StreamWriter;
+    use std::sync::Arc;
 
     fn build_input_batch(frames: &[FrameParams]) -> RecordBatch {
-        let schema = Arc::new(input_schema());
-        let flat_center: Vec<f32> = frames.iter().flat_map(|f| f.center).collect();
-        let flat_size: Vec<f32> = frames.iter().flat_map(|f| f.size).collect();
-        let thetas: Vec<f32> = frames.iter().map(|f| f.theta).collect();
-        let item = Arc::new(Field::new("item", DataType::Float32, false));
-        let center = FixedSizeListArray::new(
-            item.clone(),
-            2,
-            Arc::new(Float32Array::from(flat_center)),
-            None,
+        // A minimal 0.0.5 params batch carries a single `model` column; every
+        // params column is optional, and `model` alone drives the row count.
+        let flat: Vec<f32> = frames
+            .iter()
+            .flat_map(|f| f.model.unwrap_or(IDENTITY_MODEL))
+            .collect();
+        let schema = Arc::new(
+            Schema::new(vec![model_field()]).with_metadata(
+                [(
+                    PROTOCOL_VERSION_KEY.to_string(),
+                    PROTOCOL_VERSION.to_string(),
+                )]
+                .into_iter()
+                .collect(),
+            ),
         );
-        let size = FixedSizeListArray::new(item, 2, Arc::new(Float32Array::from(flat_size)), None);
-        let theta = Float32Array::from(thetas);
-        RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(center) as ArrayRef,
-                Arc::new(size) as ArrayRef,
-                Arc::new(theta) as ArrayRef,
-            ],
+        RecordBatch::try_new(schema, vec![list_col(16, flat)]).unwrap()
+    }
+
+    /// Column-major identity 4×4, the default `model` for the test helpers.
+    const IDENTITY_MODEL: [f32; 16] = [
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+    ];
+
+    /// The `model` column `Field` (`FixedSizeList<Float32>[16]`).
+    fn model_field() -> Field {
+        Field::new(
+            "model",
+            DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, false)), 16),
+            false,
         )
-        .unwrap()
+    }
+
+    /// A `model` column of `n` identity matrices.
+    fn model_col(n: usize) -> ArrayRef {
+        list_col(16, (0..n).flat_map(|_| IDENTITY_MODEL).collect())
     }
 
     #[test]
     fn decodes_frames_roundtrip() {
         let frames = vec![
-            FrameParams::IDENTITY,
             FrameParams {
-                center: [0.1, -0.2],
-                size: [0.5, 0.5],
-                theta: 1.25,
+                model: Some(IDENTITY_MODEL),
+                ..FrameParams::IDENTITY
+            },
+            FrameParams {
+                model: Some([
+                    0.5, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.1, -0.2, 0.0, 1.0,
+                ]),
                 ..FrameParams::IDENTITY
             },
         ];
@@ -1252,26 +1158,11 @@ mod tests {
         )) as ArrayRef
     }
 
-    /// Builds a one-row batch of identity center/size/theta plus the given extra
+    /// Builds a one-row batch of an identity `model` plus the given extra
     /// `(field, column)` pairs.
     fn camera_batch(extra: Vec<(Field, ArrayRef)>) -> RecordBatch {
-        let vec2 = |name| {
-            Field::new(
-                name,
-                DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, false)), 2),
-                false,
-            )
-        };
-        let mut fields = vec![
-            vec2("center"),
-            vec2("size"),
-            Field::new("theta", DataType::Float32, false),
-        ];
-        let mut columns: Vec<ArrayRef> = vec![
-            list_col(2, vec![0.0, 0.0]),
-            list_col(2, vec![1.0, 1.0]),
-            Arc::new(Float32Array::from(vec![0.0_f32])) as ArrayRef,
-        ];
+        let mut fields = vec![model_field()];
+        let mut columns: Vec<ArrayRef> = vec![model_col(1)];
         for (field, column) in extra {
             fields.push(field);
             columns.push(column);
@@ -1375,18 +1266,9 @@ mod tests {
     }
 
     fn draw_batch(mesh_rows: &[Vec<u32>], model_rows: &[Vec<[f32; 16]>]) -> RecordBatch {
-        let vec2 = |name| {
-            Field::new(
-                name,
-                DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, false)), 2),
-                false,
-            )
-        };
         let n = mesh_rows.len();
         let schema = Arc::new(Schema::new(vec![
-            vec2("center"),
-            vec2("size"),
-            Field::new("theta", DataType::Float32, false),
+            model_field(),
             draw_field("draw_mesh", DataType::UInt32),
             draw_field(
                 "draw_model",
@@ -1396,9 +1278,7 @@ mod tests {
         RecordBatch::try_new(
             schema,
             vec![
-                list_col(2, vec![0.0; n * 2]),
-                list_col(2, vec![1.0; n * 2]),
-                Arc::new(Float32Array::from(vec![0.0_f32; n])) as ArrayRef,
+                model_col(n),
                 draw_mesh_col(mesh_rows),
                 draw_model_col(model_rows),
             ],
@@ -1527,17 +1407,7 @@ mod tests {
     ) -> RecordBatch {
         let n = mesh_rows.len();
         let mut fields = vec![
-            Field::new(
-                "center",
-                DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, false)), 2),
-                false,
-            ),
-            Field::new(
-                "size",
-                DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, false)), 2),
-                false,
-            ),
-            Field::new("theta", DataType::Float32, false),
+            model_field(),
             draw_field("draw_mesh", DataType::UInt32),
             draw_field(
                 "draw_model",
@@ -1545,9 +1415,7 @@ mod tests {
             ),
         ];
         let mut cols: Vec<ArrayRef> = vec![
-            list_col(2, vec![0.0; n * 2]),
-            list_col(2, vec![1.0; n * 2]),
-            Arc::new(Float32Array::from(vec![0.0_f32; n])) as ArrayRef,
+            model_col(n),
             draw_mesh_col(mesh_rows),
             draw_model_col(model_rows),
         ];
@@ -1612,18 +1480,11 @@ mod tests {
         let batch = build_input_batch(&[FrameParams::IDENTITY]);
         let schema = Arc::new(Schema::new(vec![
             batch.schema().field(0).clone(),
-            batch.schema().field(1).clone(),
-            batch.schema().field(2).clone(),
             draw_field("draw_mesh", DataType::UInt32),
         ]));
         let with_mesh_only = RecordBatch::try_new(
             schema,
-            vec![
-                batch.column(0).clone(),
-                batch.column(1).clone(),
-                batch.column(2).clone(),
-                draw_mesh_col(&[vec![0]]),
-            ],
+            vec![batch.column(0).clone(), draw_mesh_col(&[vec![0]])],
         )
         .unwrap();
         assert!(matches!(
@@ -1770,11 +1631,14 @@ mod tests {
         use arrow::ipc::writer::StreamWriter;
 
         let frames = vec![
-            FrameParams::IDENTITY,
             FrameParams {
-                center: [0.2, -0.1],
-                size: [0.5, 0.5],
-                theta: 1.0,
+                model: Some(IDENTITY_MODEL),
+                ..FrameParams::IDENTITY
+            },
+            FrameParams {
+                model: Some([
+                    0.5, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.2, -0.1, 0.0, 1.0,
+                ]),
                 ..FrameParams::IDENTITY
             },
         ];
@@ -1795,81 +1659,37 @@ mod tests {
     }
 
     #[test]
-    fn missing_column_is_error() {
-        let batch = build_input_batch(&[FrameParams::IDENTITY]);
-        let reduced = batch.project(&[0, 1]).unwrap(); // drop `theta`
-        assert!(matches!(
-            decode_frames(&reduced),
-            Err(StreamError::MissingColumn("theta"))
-        ));
-    }
-
-    #[test]
-    fn child_null_in_vec2_is_error() {
-        // A non-null list row whose child float is null must be rejected.
+    fn child_null_in_camera_list_is_error() {
+        // A non-null camera-list row whose child float is null must be rejected.
         let item = Arc::new(Field::new("item", DataType::Float32, true));
-        let center_values = Float32Array::from(vec![Some(0.0), None]);
-        let center = FixedSizeListArray::new(item.clone(), 2, Arc::new(center_values), None);
-        let size = FixedSizeListArray::new(
-            Arc::new(Field::new("item", DataType::Float32, false)),
-            2,
-            Arc::new(Float32Array::from(vec![1.0, 1.0])),
-            None,
-        );
-        let theta = Float32Array::from(vec![0.0]);
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("center", center.data_type().clone(), false),
-            Field::new("size", size.data_type().clone(), false),
-            Field::new("theta", DataType::Float32, false),
-        ]));
-        let batch = RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(center) as ArrayRef,
-                Arc::new(size),
-                Arc::new(theta),
-            ],
-        )
-        .unwrap();
+        let eye_values = Float32Array::from(vec![Some(0.0), Some(0.0), None]);
+        let eye = FixedSizeListArray::new(item, 3, Arc::new(eye_values), None);
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "eye",
+            eye.data_type().clone(),
+            false,
+        )]));
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(eye) as ArrayRef]).unwrap();
         assert!(matches!(
             decode_frames(&batch),
-            Err(StreamError::NullValues("center"))
+            Err(StreamError::NullValues("eye"))
         ));
     }
 
     #[test]
     fn wrong_type_is_error() {
         use arrow::array::Int32Array;
-        let schema = Arc::new(Schema::new(vec![
-            super::vec2_field("center"),
-            super::vec2_field("size"),
-            Field::new("theta", DataType::Int32, false),
-        ]));
-        let item = Arc::new(Field::new("item", DataType::Float32, false));
-        let center = FixedSizeListArray::new(
-            item.clone(),
-            2,
-            Arc::new(Float32Array::from(vec![0.0, 0.0])),
-            None,
-        );
-        let size =
-            FixedSizeListArray::new(item, 2, Arc::new(Float32Array::from(vec![1.0, 1.0])), None);
-        let theta = Int32Array::from(vec![3]);
-        let batch = RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(center) as ArrayRef,
-                Arc::new(size),
-                Arc::new(theta),
-            ],
-        )
-        .unwrap();
+        // A camera scalar column of the wrong Arrow type must be rejected.
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "fovy",
+            DataType::Int32,
+            false,
+        )]));
+        let fovy = Int32Array::from(vec![3]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(fovy) as ArrayRef]).unwrap();
         assert!(matches!(
             decode_frames(&batch),
-            Err(StreamError::ColumnType {
-                column: "theta",
-                ..
-            })
+            Err(StreamError::ColumnType { column: "fovy", .. })
         ));
     }
 
@@ -1889,7 +1709,15 @@ mod tests {
     #[test]
     fn version_check_allows_absent_and_matching() {
         assert!(check_version(&Schema::empty()).is_ok());
-        assert!(check_version(&input_schema()).is_ok());
+        let versioned = Schema::empty().with_metadata(
+            [(
+                PROTOCOL_VERSION_KEY.to_string(),
+                PROTOCOL_VERSION.to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        assert!(check_version(&versioned).is_ok());
     }
 
     #[test]
@@ -1906,99 +1734,7 @@ mod tests {
         ));
     }
 
-    #[test]
-    #[ignore = "requires a GPU adapter"]
-    fn run_stream_renders_rotating_triangle() {
-        let (w, h) = (32u32, 32u32);
-        let frames: Vec<FrameParams> = (0..6)
-            .map(|i| FrameParams {
-                center: [0.0, 0.0],
-                size: [1.0, 1.0],
-                theta: i as f32 * std::f32::consts::PI / 6.0,
-                ..FrameParams::IDENTITY
-            })
-            .collect();
-
-        // Encode two input batches to an in-memory Arrow IPC stream.
-        let first = build_input_batch(&frames[..1]);
-        let second = build_input_batch(&frames[1..]);
-        let mut input_bytes = Vec::new();
-        {
-            let schema = Arc::new(input_schema());
-            let mut wr = StreamWriter::try_new(&mut input_bytes, &schema).unwrap();
-            wr.write(&first).unwrap();
-            wr.write(&second).unwrap();
-            wr.finish().unwrap();
-        }
-
-        let mut output_bytes = Vec::new();
-        run_stream(
-            &input_bytes[..],
-            &mut output_bytes,
-            w,
-            h,
-            RenderOptions::default(),
-            None,
-        )
-        .unwrap();
-
-        // Decode output and assert per-frame invariants.
-        let reader = StreamReader::try_new(&output_bytes[..], None).unwrap();
-        let batches = reader.collect::<Result<Vec<_>, _>>().unwrap();
-        assert_eq!(
-            batches
-                .iter()
-                .map(RecordBatch::num_rows)
-                .collect::<Vec<_>>(),
-            vec![1, frames.len() - 1]
-        );
-        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-        assert_eq!(total_rows, frames.len());
-
-        let pixels = (w * h) as usize;
-        let get = |batch: &RecordBatch, name: &str| -> U8List {
-            batch
-                .column_by_name(name)
-                .unwrap()
-                .as_any()
-                .downcast_ref::<U8List>()
-                .unwrap()
-                .clone()
-        };
-        let (r, g, b, a) = (
-            get(&batches[0], "r"),
-            get(&batches[0], "g"),
-            get(&batches[0], "b"),
-            get(&batches[0], "a"),
-        );
-        assert_eq!(r.value_length(), pixels as i32);
-
-        let row0 = |ch: &U8List, row: usize, i: usize| -> u8 {
-            ch.value(row)
-                .as_any()
-                .downcast_ref::<UInt8Array>()
-                .unwrap()
-                .value(i)
-        };
-        // Top-left corner is background black; alpha opaque everywhere.
-        let corner = 0usize;
-        assert_eq!(row0(&r, 0, corner), 0);
-        assert_eq!(row0(&g, 0, corner), 0);
-        assert_eq!(row0(&b, 0, corner), 0);
-        assert_eq!(row0(&a, 0, corner), 255);
-        // Center pixel is inside the triangle (non-black).
-        let center = (h as usize / 2) * w as usize + w as usize / 2;
-        let cbright =
-            row0(&r, 0, center) as u32 + row0(&g, 0, center) as u32 + row0(&b, 0, center) as u32;
-        assert!(cbright > 0, "center should be inside the triangle");
-        // Rotation changes the image between the first and a later frame.
-        let last = get(&batches[1], "r");
-        let last_row = frames.len() - 2;
-        let differs = (0..pixels).any(|i| row0(&r, 0, i) != row0(&last, last_row, i));
-        assert!(differs, "rotation should change pixels across frames");
-    }
-
-    // ---- 0.0.3 two-stream [mesh][params] framing ----
+    // ---- two-stream [mesh][params] framing ----
 
     /// Serializes a mesh as a one-row Arrow IPC **mesh stream** (nested list
     /// columns: `position`/`color` `List<FixedSizeList<Float32>[3]>`, `index`
@@ -2061,7 +1797,7 @@ mod tests {
     /// Serializes frames as an Arrow IPC **params stream**.
     fn write_params_stream(buf: &mut Vec<u8>, frames: &[FrameParams]) {
         let batch = build_input_batch(frames);
-        let mut wr = StreamWriter::try_new(buf, &input_schema()).unwrap();
+        let mut wr = StreamWriter::try_new(buf, batch.schema().as_ref()).unwrap();
         wr.write(&batch).unwrap();
         wr.finish().unwrap();
     }
@@ -2073,9 +1809,14 @@ mod tests {
         // Build a concatenated [mesh][params] byte stream in memory.
         let mesh = Mesh::hello_triangle();
         let frames = vec![
-            FrameParams::IDENTITY,
             FrameParams {
-                theta: 1.0,
+                model: Some(IDENTITY_MODEL),
+                ..FrameParams::IDENTITY
+            },
+            FrameParams {
+                model: Some([
+                    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.3, 0.0, 0.0, 1.0,
+                ]),
                 ..FrameParams::IDENTITY
             },
         ];
@@ -2100,7 +1841,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_params_only_stream_has_no_mesh_schema() {
+    fn params_stream_is_not_mesh_schema() {
         let mut bytes = Vec::new();
         write_params_stream(&mut bytes, &[FrameParams::IDENTITY]);
         let reader = StreamReader::try_new(bytes.as_slice(), None).unwrap();
@@ -2117,7 +1858,9 @@ mod tests {
         let frames = vec![
             FrameParams::IDENTITY,
             FrameParams {
-                theta: 0.5,
+                model: Some([
+                    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.2, 0.0, 0.0, 1.0,
+                ]),
                 ..FrameParams::IDENTITY
             },
         ];
