@@ -73,6 +73,26 @@ Guidance for agents working in this repository.
   won't include them.
 - We always work on GPU machines. GPU-dependent tests are marked `#[ignore]`
   and run locally; CI skips them.
+- **Golden / snapshot render test (#88).** `crates/trd-core/tests/golden_render.rs`
+  feeds committed Arrow fixtures (`crates/trd-core/tests/golden/stage{1,2}.arrow`,
+  the reduced two-stage cornellbox placement demo) through the real
+  `run_stream` pipeline and pixel-diffs the frames against committed golden PNGs
+  (same dir) — the regression net for the #82 refactor. Each frame keeps its
+  `0.0.5` `frame_path`, which the test resolves against `tests/golden/frames/`
+  (committed cornellbox stills) and composites the scene over — an AR composite
+  over the cornellbox background (test-side `--frames-base`). It is GPU-gated
+  (`#[ignore]`), so run it with the nixGL wrapper below. After changing the
+  fixtures or making an *intended* visual change, regenerate:
+  ```sh
+  # 1. rebuild the .arrow fixtures + stills (needs uv + ffmpeg on PATH)
+  python3 scripts/golden_fixtures.py
+  # 2. refresh the golden PNGs from the current renderer (GPU box)
+  TRD_UPDATE_GOLDENS=1 cargo test -p trd-core --test golden_render -- --ignored
+  ```
+  A companion **non-GPU** test, `tests/decoder_parity.rs`, decodes the same
+  fixtures through both the native (`stream.rs`) and wasm (`protocol.rs`)
+  decoders and asserts identical frames — it runs in `nix flake check` and
+  guards against decoder divergence (e.g. the `center` non-nullable bug).
 - **Native Linux GPU (non-NixOS, e.g. Ubuntu) — use nixGL.** The dev shell's
   `nix develop` Vulkan loader can't load the host NVIDIA/Mesa driver (its ICD
   points at host libs the nix loader won't `dlopen`), so GPU commands fail with

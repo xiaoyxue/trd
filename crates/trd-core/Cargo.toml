@@ -24,3 +24,9 @@ pollster = "0.4"
 [dev-dependencies]
 proptest = "1"
 approx = "0.5"
+# Golden e2e render test (#88): decode/encode + compare the committed golden
+# PNGs. Only compiled for tests, so it never enters the production graph.
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+] }
