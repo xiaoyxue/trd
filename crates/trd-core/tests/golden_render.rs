@@ -30,6 +30,14 @@
 //! ```text
 //! TRD_UPDATE_GOLDENS=1 cargo test -p trd-core --test golden_render -- --ignored
 //! ```
+//!
+//! On a mismatch (or when `TRD_DUMP_ACTUAL=1`) the *actual* rendered frames and
+//! an 8x-amplified per-pixel diff are written to the git-ignored `output/actual/`
+//! so the render can be eyeballed without re-running — handy for cross-GPU
+//! validation (e.g. on Windows):
+//! ```text
+//! TRD_DUMP_ACTUAL=1 cargo test -p trd-core --test golden_render -- --ignored
+//! ```
 
 use std::path::{Path, PathBuf};
 
@@ -53,6 +61,46 @@ fn golden_dir() -> PathBuf {
 
 fn update_goldens() -> bool {
     std::env::var_os("TRD_UPDATE_GOLDENS").is_some()
+}
+
+/// Git-ignored `output/actual/` (relative to the repo root) where the *actual*
+/// rendered frames — plus an 8x-amplified per-pixel diff vs the golden — are
+/// written on a mismatch, or whenever `TRD_DUMP_ACTUAL` is set. Lets a failing
+/// render be eyeballed without re-running (e.g. cross-GPU validation on Windows).
+fn dump_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../output/actual")
+}
+
+fn should_dump() -> bool {
+    std::env::var_os("TRD_DUMP_ACTUAL").is_some()
+}
+
+/// Best-effort dump of one actual frame + its amplified diff into `output/actual/`
+/// (failures are logged, never fatal — this is a debugging aid).
+fn dump_actual(name: &str, index: usize, actual: &[u8], golden: &Path) {
+    let dir = dump_dir();
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("dump: create {}: {e}", dir.display());
+        return;
+    }
+    if let Some(img) = image::RgbaImage::from_raw(WIDTH, HEIGHT, actual.to_vec()) {
+        let _ = img.save(dir.join(format!("{name}_frame_{index}.actual.png")));
+    }
+    if let Ok(golden_img) = image::open(golden) {
+        let golden_img = golden_img.to_rgba8().into_raw();
+        let mut diff = vec![0u8; actual.len()];
+        for p in 0..(WIDTH * HEIGHT) as usize {
+            for c in 0..3 {
+                diff[p * 4 + c] = actual[p * 4 + c]
+                    .abs_diff(golden_img[p * 4 + c])
+                    .saturating_mul(8);
+            }
+            diff[p * 4 + 3] = 255;
+        }
+        if let Some(img) = image::RgbaImage::from_raw(WIDTH, HEIGHT, diff) {
+            let _ = img.save(dir.join(format!("{name}_frame_{index}.diff8x.png")));
+        }
+    }
 }
 
 /// Resolve a fixture's `frame_path` background reference against `golden/`,
@@ -203,8 +251,13 @@ fn check_fixture(name: &str, fixture: &str, options: RenderOptions) {
     let mut failures = Vec::new();
     for (i, frame) in frames.iter().enumerate() {
         let golden = dir.join(format!("{name}_frame_{i}.png"));
-        if let Err(reason) = compare_or_update(frame, &golden) {
-            failures.push(reason);
+        match compare_or_update(frame, &golden) {
+            Err(reason) => {
+                dump_actual(name, i, frame, &golden);
+                failures.push(reason);
+            }
+            Ok(()) if !update_goldens() && should_dump() => dump_actual(name, i, frame, &golden),
+            Ok(()) => {}
         }
     }
 
@@ -213,7 +266,8 @@ fn check_fixture(name: &str, fixture: &str, options: RenderOptions) {
     }
     assert!(
         failures.is_empty(),
-        "golden mismatch:\n{}",
+        "golden mismatch (actual frames + diffs dumped under {}):\n{}",
+        dump_dir().display(),
         failures.join("\n")
     );
 }
