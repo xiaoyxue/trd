@@ -12,6 +12,7 @@ mod gpu_types;
 mod mesh_renderer;
 mod pipeline;
 mod scene;
+mod triangle_renderer;
 
 #[cfg(test)]
 mod gpu_tests;
@@ -22,6 +23,7 @@ pub use gpu_types::{Mesh, Vertex};
 pub use mesh_renderer::MeshRenderer;
 pub use pipeline::create_mesh_pipeline;
 pub use scene::{build_scene, Draw, DrawableObject, FrameFit, RenderMode, Scene};
+pub use triangle_renderer::TriangleRenderer;
 
 // Crate-internal items shared across render submodules and sibling modules.
 pub(crate) use color::upload_texture;

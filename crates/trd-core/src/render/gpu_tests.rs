@@ -1130,3 +1130,43 @@ fn frame_plane_composites_background_under_scene() {
         );
     }
 }
+
+#[test]
+#[ignore = "requires a GPU adapter"]
+#[cfg(not(target_arch = "wasm32"))]
+fn triangle_renderer_draws_gradient_triangle() {
+    let (device, queue) = pollster::block_on(test_device());
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+    let (width, height) = (64, 64);
+    let renderer = TriangleRenderer::new(&device, format);
+
+    let px = render_with_readback(&device, &queue, format, width, height, |_q, e, v| {
+        renderer.encode(e, v);
+    });
+    let at = |x: u32, y: u32| -> [u8; 3] {
+        let i = ((y * width + x) * 4) as usize;
+        [px[i], px[i + 1], px[i + 2]]
+    };
+
+    // The triangle covers screen center; a top corner is outside it (background).
+    assert_ne!(
+        at(width / 2, height / 2),
+        [0, 0, 0],
+        "center must be inside the triangle"
+    );
+    assert_eq!(
+        at(0, 0),
+        [0, 0, 0],
+        "top-left corner must be background (black)"
+    );
+
+    // Per-vertex colors interpolate across the face: a point near the red apex is
+    // redder than a point near the blue bottom-right corner, and vice versa —
+    // proving a gradient rather than a flat fill.
+    let near_apex = at(width / 2, 22);
+    let near_blue = at(42, 46);
+    assert!(
+        near_apex[0] > near_blue[0] && near_blue[2] > near_apex[2],
+        "gradient expected: near-apex {near_apex:?} redder, near-blue {near_blue:?} bluer",
+    );
+}

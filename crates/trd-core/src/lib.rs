@@ -25,7 +25,7 @@ pub use protocol::{
 };
 pub use render::{
     build_scene, create_mesh_pipeline, CameraFormError, Draw, DrawableObject, FrameFit,
-    FrameParams, Mesh, MeshRenderer, RenderMode, Scene, Vertex, Viewport,
+    FrameParams, Mesh, MeshRenderer, RenderMode, Scene, TriangleRenderer, Vertex, Viewport,
 };
 pub use texture::{
     ConstantTexture, ImageData, ImageTexture, Texture, TextureError, TEXTURE_COLUMN,
