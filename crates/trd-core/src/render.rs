@@ -1,8 +1,7 @@
-//! Shared, platform-agnostic parametric triangle rendering.
+//! Shared, platform-agnostic mesh rendering.
 //!
-//! [`render_triangle`] draws the hello-triangle transformed by [`FrameParams`]
-//! into the given texture view. [`MeshRenderer`] draws the same triangle through
-//! the vertex/index-buffer path used by the native batch renderer.
+//! [`MeshRenderer`] rasterizes a [`Scene`] of [`DrawableObject`]s through the
+//! vertex/index-buffer path used by the native batch renderer and the browser.
 
 use crate::math::{Matrix4, Point3, Transform, Vector3};
 use crate::texture::{ImageData, Texture};
@@ -86,12 +85,11 @@ pub(crate) const fn axes_vertices() -> [Vertex; 6] {
 
 /// Per-frame transform parameters for the triangle.
 ///
-/// The base triangle vertices `p_i` are transformed by the full MVP chain
-/// `clip = P · V · M · (p_i, 0, 1)` in the vertex shader, where:
-/// - **M** (model) is [`FrameParams::model`] if present, else synthesized from
-///   the 2D affine `center`/`size`/`theta` as
-///   `translate(center) · rotate_z(theta) · scale(size)` (reproducing the
-///   original `p' = center + R(theta) · (size ⊙ p_i)`).
+/// The mesh vertices `p_i` are transformed by the full MVP chain
+/// `clip = P · V · M · (p_i, 1)` in the vertex shader, where:
+/// - **M** (model) is [`FrameParams::model`] if present, else the identity —
+///   the default single-object placement when a frame carries no explicit
+///   instanced draw list.
 /// - **V** (view) is the camera-from-world transform, resolved (in precedence
 ///   order) from the **CV** pose [`FrameParams::pose`] (view = `inverse(pose)`),
 ///   else the **CG** look-at ([`FrameParams::eye`] + [`FrameParams::target`] or
@@ -104,18 +102,12 @@ pub(crate) const fn axes_vertices() -> [Vertex; 6] {
 /// **CV wins over CG** (a well-formed stream carries only one form; mixing is
 /// rejected at decode as a conflicting camera form). Any matrix/param that would
 /// be identity is simply omitted (its column is absent), so a stream with no
-/// camera columns has `P = V = I` and `M` is the 2D affine — byte-for-byte the
-/// protocol `0.0.1` result.
+/// camera columns has `P = V = I`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FrameParams {
-    /// Triangle centroid in NDC; `(0,0)` is screen center.
-    pub center: [f32; 2],
-    /// Per-axis scale; `(1,1)` is the base triangle.
-    pub size: [f32; 2],
-    /// Rotation in radians, counter-clockwise.
-    pub theta: f32,
-    /// Optional explicit 4×4 **model** matrix, column-major (16 floats). When
-    /// `Some`, it supersedes `center`/`size`/`theta`.
+    /// Optional explicit 4×4 **model** matrix, column-major (16 floats). Placed
+    /// as the default single instance of mesh `0` when a frame carries no
+    /// explicit instanced draw list; defaults to the identity when absent.
     pub model: Option<[f32; 16]>,
     /// Optional camera **intrinsics** `K` (**CV** form): a 3×3 pinhole matrix,
     /// column-major (9 floats). `Some` derives the projection; `None` falls back
@@ -180,11 +172,8 @@ impl Viewport {
 }
 
 impl FrameParams {
-    /// The identity transform: centered, unit scale, no rotation, no camera.
+    /// The identity transform: no model, no camera.
     pub const IDENTITY: FrameParams = FrameParams {
-        center: [0.0, 0.0],
-        size: [1.0, 1.0],
-        theta: 0.0,
         model: None,
         k: None,
         pose: None,
@@ -199,13 +188,12 @@ impl FrameParams {
     };
 
     /// The effective 4×4 model matrix: the explicit [`FrameParams::model`] if
-    /// present, else the 2D affine synthesized from `center`/`size`/`theta`.
-    /// Used by front-ends to place the default single instance of mesh 0 when a
-    /// frame carries no explicit instanced draw list.
+    /// present, else the identity. Used by front-ends to place the default single
+    /// instance of mesh 0 when a frame carries no explicit instanced draw list.
     pub fn model_matrix(&self) -> Matrix4 {
         match self.model {
             Some(cols) => Matrix4::from_cols_array(&cols),
-            None => model_from_2d_affine(self.center, self.size, self.theta),
+            None => Matrix4::IDENTITY,
         }
     }
 
@@ -271,34 +259,12 @@ impl FrameParams {
         Ok(())
     }
 
-    /// The full clip transform `P · V · M` for a given viewport.
-    pub(crate) fn clip_transform(&self, viewport: Viewport) -> Matrix4 {
-        self.clip_transform_with_base(viewport, Matrix4::IDENTITY)
-    }
-
-    /// The clip transform `P · V · M · base`, where `base` is a model-space
-    /// pre-transform applied before the per-frame model. Used by the mesh path to
-    /// apply a mesh's [`crate::Mesh::preview_transform`] (center + scale-to-fit)
-    /// beneath the per-frame `model` (e.g. a turntable rotation), so an
-    /// arbitrary-unit asset renders centered and at a reasonable size.
-    pub(crate) fn clip_transform_with_base(&self, viewport: Viewport, base: Matrix4) -> Matrix4 {
-        self.projection_matrix(viewport) * self.view_matrix() * self.model_matrix() * base
-    }
-
     /// The camera-only transform `P · V` for a given viewport, used by the
     /// instanced mesh path where each drawn instance supplies its own model
     /// matrix (`clip = P · V · M · p`).
     pub(crate) fn view_proj_matrix(&self, viewport: Viewport) -> Matrix4 {
         self.projection_matrix(viewport) * self.view_matrix()
     }
-}
-
-/// Builds the 2D-affine model matrix `translate(center) · rotate_z(theta) ·
-/// scale(size)` (z untouched), the `0.0.1` transform expressed as a [`Matrix4`].
-pub(crate) fn model_from_2d_affine(center: [f32; 2], size: [f32; 2], theta: f32) -> Matrix4 {
-    Matrix4::from_translation(Vector3::new(center[0], center[1], 0.0))
-        * Matrix4::from_rotation_z(theta)
-        * Matrix4::from_scale(Vector3::new(size[0], size[1], 1.0))
 }
 
 /// Builds a right-handed, wgpu-clip-space (`z ∈ [0, 1]`) perspective projection
@@ -344,9 +310,8 @@ pub(crate) fn projection_from_intrinsics(k: [f32; 9], viewport: Viewport) -> Mat
 }
 
 /// GPU uniform matching the WGSL `Params` layout: a single column-major 4×4
-/// matrix (64 bytes). The triangle path stores the full clip transform
-/// `P · V · M`; the instanced mesh path stores the camera-only `P · V` (each
-/// instance supplies its own model matrix).
+/// matrix (64 bytes) storing the camera-only `P · V` (each instance supplies
+/// its own model matrix).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Uniform {
@@ -354,12 +319,6 @@ struct Uniform {
 }
 
 impl Uniform {
-    fn from_params(params: FrameParams, viewport: Viewport) -> Self {
-        Uniform {
-            transform: params.clip_transform(viewport).to_cols_array(),
-        }
-    }
-
     fn view_proj(params: FrameParams, viewport: Viewport) -> Self {
         Uniform {
             transform: params.view_proj_matrix(viewport).to_cols_array(),
@@ -480,36 +439,6 @@ impl Mesh {
             indices: vec![0, 1, 2],
         }
     }
-}
-
-/// Builds the triangle render pipeline for `format` using an auto bind-group
-/// layout (group 0, binding 0 = the params uniform).
-pub fn create_triangle_pipeline(
-    device: &wgpu::Device,
-    format: wgpu::TextureFormat,
-) -> wgpu::RenderPipeline {
-    let shader = device.create_shader_module(wgpu::include_wgsl!("triangle.wgsl"));
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("trd triangle pipeline"),
-        layout: None,
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: Some("vs_main"),
-            compilation_options: Default::default(),
-            buffers: &[],
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: Some("fs_main"),
-            compilation_options: Default::default(),
-            targets: &[Some(format.into())],
-        }),
-        primitive: wgpu::PrimitiveState::default(),
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState::default(),
-        multiview_mask: None,
-        cache: None,
-    })
 }
 
 /// Builds the indexed mesh render pipeline for `format` using an auto bind-group
@@ -938,31 +867,6 @@ fn downsample_srgb(w: u32, h: u32, src: &[u8]) -> (u32, u32, Vec<u8>) {
     (w2, h2, dst)
 }
 
-/// Creates the params uniform buffer + bind group for `pipeline`, initialised
-/// to `params` for the given `viewport` (needed to project camera intrinsics).
-pub(crate) fn create_params_binding(
-    device: &wgpu::Device,
-    pipeline: &wgpu::RenderPipeline,
-    params: FrameParams,
-    viewport: Viewport,
-) -> (wgpu::Buffer, wgpu::BindGroup) {
-    use wgpu::util::DeviceExt;
-    let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("trd params uniform"),
-        contents: bytemuck::bytes_of(&Uniform::from_params(params, viewport)),
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-    });
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("trd params bind group"),
-        layout: &pipeline.get_bind_group_layout(0),
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: buffer.as_entire_binding(),
-        }],
-    });
-    (buffer, bind_group)
-}
-
 /// Creates the camera `P·V` uniform buffer + bind group over an **explicit**
 /// bind-group layout (shared by the filled and wireframe mesh pipelines),
 /// initialised to `params`'s view-projection for `viewport`. Used by
@@ -989,23 +893,11 @@ pub(crate) fn create_view_proj_binding(
     });
     (buffer, bind_group)
 }
-/// [`MeshRenderer`], which reuse one uniform buffer across frames instead of
-/// rebuilding it.
-pub(crate) fn write_params(
-    queue: &wgpu::Queue,
-    buffer: &wgpu::Buffer,
-    params: FrameParams,
-    viewport: Viewport,
-) {
-    queue.write_buffer(
-        buffer,
-        0,
-        bytemuck::bytes_of(&Uniform::from_params(params, viewport)),
-    );
-}
 
-/// Like [`write_params`] but writes the camera-only `P · V` transform (the
-/// instanced mesh path supplies each model matrix per instance).
+/// Writes the camera-only `P · V` transform into an existing uniform buffer (the
+/// instanced mesh path supplies each model matrix per instance). Lets
+/// [`MeshRenderer`] reuse one uniform buffer across frames instead of rebuilding
+/// it.
 pub(crate) fn write_view_proj(
     queue: &wgpu::Queue,
     buffer: &wgpu::Buffer,
@@ -1017,120 +909,6 @@ pub(crate) fn write_view_proj(
         0,
         bytemuck::bytes_of(&Uniform::view_proj(params, viewport)),
     );
-}
-
-/// Draws the transformed triangle into `view`, clearing to black first.
-///
-/// `width`/`height` are the target's pixel dimensions, used to project camera
-/// intrinsics (`FrameParams::k`); they have no effect on the identity/2D-affine
-/// path. Builds a fresh pipeline and uniform each call; intended for one-shot
-/// callers. The batch renderer reuses a persistent pipeline.
-pub fn render_triangle(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    view: &wgpu::TextureView,
-    format: wgpu::TextureFormat,
-    params: FrameParams,
-    width: u32,
-    height: u32,
-) {
-    let pipeline = create_triangle_pipeline(device, format);
-    let (_buffer, bind_group) =
-        create_params_binding(device, &pipeline, params, Viewport { width, height });
-
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("trd triangle encoder"),
-    });
-    {
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("trd triangle pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-        pass.set_pipeline(&pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
-        pass.draw(0..3, 0..1);
-    }
-    queue.submit(Some(encoder.finish()));
-}
-
-/// Persistent triangle renderer: owns one pipeline, uniform buffer, and bind
-/// group, and encodes a single frame into a caller-provided encoder and view.
-///
-/// `encode` never creates a command encoder, submits, acquires a surface, or
-/// presents; those belong to the target adapter (CLI readback or canvas).
-pub struct TriangleRenderer {
-    pipeline: wgpu::RenderPipeline,
-    uniform: wgpu::Buffer,
-    bind_group: wgpu::BindGroup,
-}
-
-impl TriangleRenderer {
-    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
-        let pipeline = create_triangle_pipeline(device, format);
-        // The identity params ignore the viewport (no intrinsics); each `encode`
-        // supplies the real target dimensions.
-        let (uniform, bind_group) = create_params_binding(
-            device,
-            &pipeline,
-            FrameParams::IDENTITY,
-            Viewport {
-                width: 1,
-                height: 1,
-            },
-        );
-        Self {
-            pipeline,
-            uniform,
-            bind_group,
-        }
-    }
-
-    /// Encodes one frame. `width`/`height` are the target's pixel dimensions,
-    /// used to project camera intrinsics (`FrameParams::k`); they have no effect
-    /// on the identity/2D-affine path.
-    pub fn encode(
-        &self,
-        queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
-        view: &wgpu::TextureView,
-        params: FrameParams,
-        width: u32,
-        height: u32,
-    ) {
-        write_params(queue, &self.uniform, params, Viewport { width, height });
-
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("trd triangle pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &self.bind_group, &[]);
-        pass.draw(0..3, 0..1);
-    }
 }
 
 /// How a [`MeshRenderer`] rasterizes its meshes: solid filled triangles, or an
@@ -2090,7 +1868,7 @@ impl MeshRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::math::{Point3, Rotation, Transform};
+    use crate::math::{Point3, Transform};
     use approx::assert_abs_diff_eq;
     use glam::{Mat4, Vec3, Vec4};
 
@@ -2103,7 +1881,7 @@ mod tests {
             height: 4,
         };
         assert_eq!(
-            Uniform::from_params(FrameParams::IDENTITY, viewport).transform,
+            Uniform::view_proj(FrameParams::IDENTITY, viewport).transform,
             Matrix4::IDENTITY.to_cols_array()
         );
     }
@@ -2160,13 +1938,10 @@ mod tests {
     }
 
     #[test]
-    fn explicit_model_supersedes_2d_affine() {
-        // A `model` column value is used verbatim, regardless of center/size/theta.
+    fn explicit_model_used_verbatim() {
+        // A `model` column value is used verbatim.
         let cols: [f32; 16] = std::array::from_fn(|i| i as f32 + 1.0);
         let params = FrameParams {
-            center: [9.0, 9.0],
-            size: [9.0, 9.0],
-            theta: 9.0,
             model: Some(cols),
             ..FrameParams::IDENTITY
         };
@@ -2174,32 +1949,13 @@ mod tests {
     }
 
     #[test]
-    fn synthesized_model_reproduces_2d_affine_transform() {
-        // The synthesized model must map base vertices exactly like the legacy
-        // `p' = center + R(theta) * (size ⊙ p)` formula.
-        let center = [0.1_f32, -0.2];
-        let size = [0.5_f32, 0.75];
-        let theta = 1.25_f32;
-        let model = Transform::from_matrix(model_from_2d_affine(center, size, theta));
-
-        for base in [[0.0_f32, 0.5], [-0.5, -0.5], [0.5, -0.5]] {
-            let scaled = [base[0] * size[0], base[1] * size[1]];
-            let (s, c) = theta.sin_cos();
-            let expected = [
-                center[0] + c * scaled[0] - s * scaled[1],
-                center[1] + s * scaled[0] + c * scaled[1],
-            ];
-            let got = model.transform_point(Point3::new(base[0], base[1], 0.0));
-            assert!(
-                (got.x() - expected[0]).abs() < 1e-6,
-                "x: {got:?} {expected:?}"
-            );
-            assert!(
-                (got.y() - expected[1]).abs() < 1e-6,
-                "y: {got:?} {expected:?}"
-            );
-            assert!(got.z().abs() < 1e-6, "z should stay 0: {got:?}");
-        }
+    fn absent_model_falls_back_to_identity() {
+        // A frame with no `model` column places mesh 0 at the identity.
+        let params = FrameParams {
+            model: None,
+            ..FrameParams::IDENTITY
+        };
+        assert_eq!(params.model_matrix(), Matrix4::IDENTITY);
     }
 
     #[test]
@@ -2430,51 +2186,6 @@ mod tests {
         assert!(ndc.x.abs() < 1e-5 && ndc.y.abs() < 1e-5, "ndc = {ndc:?}");
     }
 
-    #[test]
-    fn no_camera_clip_transform_equals_model() {
-        // Without pose/intrinsics, P = V = I so the clip transform is the model.
-        let params = FrameParams {
-            center: [0.2, -0.3],
-            size: [0.5, 0.5],
-            theta: 0.4,
-            ..FrameParams::IDENTITY
-        };
-        let viewport = Viewport {
-            width: 256,
-            height: 256,
-        };
-        assert_abs_diff_eq!(
-            params.clip_transform(viewport).into_inner(),
-            params.model_matrix().into_inner(),
-            epsilon = 1e-6
-        );
-    }
-
-    #[test]
-    fn math_transform_reproduces_2d_affine_model() {
-        // The typed `math::Transform` API rebuilds the legacy
-        // `translate · rotate_z · scale` model matrix that drives the GPU
-        // uniform — the quaternion `Transform` path matches the direct-trig
-        // `Matrix4` path within tolerance.
-        let center = [0.2_f32, -0.3];
-        let size = [0.5_f32, 0.75];
-        let theta = 0.4_f32;
-
-        // `a.then(b) == b * a`, so this is translate · rotate_z · scale.
-        let t = Transform::from_scale(Vector3::new(size[0], size[1], 1.0))
-            .then(Transform::from_rotation(Rotation::from_rotation_z(theta)))
-            .then(Transform::from_translation(Vector3::new(
-                center[0], center[1], 0.0,
-            )));
-
-        let expected = model_from_2d_affine(center, size, theta);
-        assert_abs_diff_eq!(
-            t.matrix().into_inner(),
-            expected.into_inner(),
-            epsilon = 1e-6
-        );
-    }
-
     #[cfg(not(target_arch = "wasm32"))]
     fn render_with_readback(
         device: &wgpu::Device,
@@ -2576,52 +2287,6 @@ mod tests {
             })
             .await
             .expect("request_device failed")
-    }
-
-    #[test]
-    #[ignore = "requires a GPU adapter"]
-    #[cfg(not(target_arch = "wasm32"))]
-    fn mesh_renderer_matches_triangle_renderer_pixels() {
-        let (device, queue) = pollster::block_on(test_device());
-        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-        let (width, height) = (64, 64);
-        let triangle = TriangleRenderer::new(&device, format);
-        let mut mesh = MeshRenderer::new(&device, format, &Mesh::hello_triangle());
-
-        let triangle_pixels = render_with_readback(
-            &device,
-            &queue,
-            format,
-            width,
-            height,
-            |queue, encoder, view| {
-                triangle.encode(queue, encoder, view, FrameParams::IDENTITY, width, height);
-            },
-        );
-        let scene = [DrawableObject::Mesh {
-            mesh_id: 0,
-            model: Matrix4::IDENTITY.to_cols_array(),
-            mode: RenderMode::Filled,
-        }];
-        let mesh_pixels = render_with_readback(
-            &device,
-            &queue,
-            format,
-            width,
-            height,
-            |queue, encoder, view| {
-                mesh.encode(
-                    queue,
-                    encoder,
-                    view,
-                    FrameParams::IDENTITY,
-                    &scene,
-                    Viewport { width, height },
-                );
-            },
-        );
-
-        assert_eq!(mesh_pixels, triangle_pixels);
     }
 
     #[test]

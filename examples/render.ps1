@@ -3,15 +3,15 @@
 # the native window, or replay it in a WebGPU browser (PowerShell 7).
 #
 # Windows-native port of examples/render.sh with the SAME behaviour and flags:
-#   JSONL --(duckdb/pyarrow: Arrow IPC)--> trd --(tensors)--> ffmpeg   (-CLI)
+#   JSONL --(pyarrow: Arrow IPC)--------> trd --(tensors)--> ffmpeg   (-CLI)
 #   JSONL --(pyarrow: Arrow IPC)--------> trd-app window              (-Native)
 #   JSONL --(pyarrow: Arrow IPC)--------> stream.arrow + config.json  (-Web)
 #                                         served to the generic web renderer
 #
 # Unlike render.sh (which pipes everything with no intermediate files), Windows
-# DuckDB cannot write to '/dev/stdout' and PowerShell pipelines are not
-# binary-safe, so the Arrow IPC stages are handed off through temporary files
-# (created in a temp dir and auto-removed). The produced GIF/WebP is identical.
+# PowerShell pipelines are not binary-safe, so the Arrow IPC stages are handed off
+# through temporary files (created in a temp dir and auto-removed). The produced
+# GIF/WebP is identical.
 #
 # Everything runs Windows-native: no WSL, no Nix. -Web builds the wasm bundle with
 # wasm-pack + bun (the counterpart of `nix build .#web`) and serves it with a small
@@ -25,9 +25,9 @@
 #                       [-FramesBase DIR] [-InputPath INPUT.jsonl] `
 #                       [-Output OUTPUT.gif|.webp] [-Width 256] [-Height 256] [-Fps 30]
 #   examples/render.ps1 INPUT.jsonl OUTPUT.gif 256 256 30   # positional
-# Defaults: examples/frames.0.0.2.jsonl  output/out.gif  256 256 30
+# Defaults: examples/frames.bunny_dolly.cg.jsonl (renders assets/meshes/bunny.obj)  output/out.gif  256 256 30
 # Run with no arguments (or -Help) to print the flag guidance and exit; pass -CLI
-# to render the default demo.
+# to render the default demo (the bunny dolly camera capstone).
 #
 # By default (or with -CLI, alias -Headless) the frame stream is rendered to a
 # GIF/WebP via the headless trd-cli.
@@ -43,17 +43,19 @@
 # modes (trd-cli, trd-app and the web renderer share trd-core). Only the playback
 # rate is a live URL param for -Web: append ?fps=N.
 #
-# With -Mesh OBJ the input is a protocol 0.0.3 stream: a leading mesh table
-# (scripts\obj_to_arrow.py encodes the OBJ) concatenated with the params stream,
-# so trd renders the loaded mesh (centered + uniformly scaled to fit) driven by
-# InputPath. Try: examples\render.ps1 -CLI -Mesh assets\meshes\bunny.obj `
+# The stream protocol is 0.0.5-only and mesh-first: every stream begins with a
+# mesh table (scripts\obj_to_arrow.py encodes the OBJ) concatenated with the
+# params stream, so trd renders the loaded mesh (centered + uniformly scaled to
+# fit) driven by InputPath. When no -Mesh (and no -PlacementQuad) is given, the
+# bunny (assets\meshes\bunny.obj) is loaded as the default demo object. Try:
+# examples\render.ps1 -CLI -Mesh assets\meshes\bunny.obj `
 # examples\frames.turntable.jsonl output\bunny.gif. -Mesh is repeatable: pass it
 # several times to load several meshes (one table row each, in order); a frame's
 # `draws` list then references them by 0-based index. Two-mesh demo:
 # examples\render.ps1 -CLI -Wireframe -Mesh assets\meshes\bunny.obj `
 # -Mesh examples\cube.obj examples\frames.multimesh.jsonl output\scene.gif.
 # (-Mesh needs pyarrow via uv/python.)
-# With -Texture IMG trd binds IMG as a 0.0.4 texture table (sampled albedo) and
+# With -Texture IMG trd binds IMG as a texture table (sampled albedo) and
 # renders textured, sampling it at each vertex UV (#20). Requires -Mesh (with
 # UVs); mutually exclusive with -Wireframe. Needs pyarrow + pillow + numpy;
 # downscaled to 2048 (portable limit).
@@ -102,7 +104,7 @@
 #
 # On Windows this auto-sources scripts\dev-env.ps1 (the flake.nix devShell
 # counterpart; see README "Windows setup (without Nix)" for the one-time
-# prerequisites) to put cargo, the MSVC linker, ffmpeg, duckdb and uv on PATH;
+# prerequisites) to put cargo, the MSVC linker, ffmpeg and uv on PATH;
 # set $env:TRD_SKIP_DEV_ENV = '1' to manage the environment yourself. On
 # Linux/macOS run inside `nix develop`. If uv is unavailable the encode step
 # falls back to a system `python` that already has pyarrow + numpy.
@@ -148,7 +150,7 @@ Usage:
                       [-Width 256] [-Height 256] [-Fps 30]
   examples\render.ps1 INPUT.jsonl OUTPUT.gif 256 256 30   # positional form
 
-Defaults: InputPath=examples\frames.0.0.2.jsonl  Output=output\out.gif  Width=256  Height=256  Fps=30
+Defaults: InputPath=examples\frames.bunny_dolly.cg.jsonl (renders assets\meshes\bunny.obj)  Output=output\out.gif  Width=256  Height=256  Fps=30
 
 MODE (pick one; default -CLI):
   -CLI, -Headless   Render to a GIF/WebP via the headless trd-cli (default).
@@ -164,10 +166,11 @@ BROWSER QUERY PARAM (-Web; append to the URL, no rebuild):
                     stream, so it is a positional Width/Height argument).
 
 CONTENT FLAGS (apply to -CLI, -Native and -Web):
-  -Mesh OBJ         Load OBJ as a protocol 0.0.3 mesh (centered + scaled to fit).
+  -Mesh OBJ         Load OBJ as a mesh table entry (centered + scaled to fit).
                     Repeatable: pass several times to load several meshes (row 0,
                     1, ...); a frame's `draws` list references them by index.
-  -Texture IMG      Bind IMG as a 0.0.4 texture and render textured - sampling it
+                    Defaults to assets\meshes\bunny.obj when no mesh is given.
+  -Texture IMG      Bind IMG as a texture table and render textured - sampling it
                     at each vertex UV (#20). Requires -Mesh (with UVs); mutually
                     exclusive with -Wireframe.
   -Wireframe        Draw mesh edges as a line list instead of filled triangles (#38).
@@ -233,7 +236,7 @@ if ($rendererCount -ge 1 -and -not $Web) { Write-Error 'error: -CanvasRenderer /
 # PowerShell can't bind a named parameter more than once, so the repeatable
 # -Mesh flag (parity with render.sh's `--mesh`) is captured by
 # ValueFromRemainingArguments into $Rest and unpacked here, preserving order
-# (mesh 0 = first -Mesh). Each mesh becomes one row of the leading 0.0.3 mesh
+# (mesh 0 = first -Mesh). Each mesh becomes one row of the leading mesh
 # table (scripts\obj_to_arrow.py); a frame's `draws` list references them by
 # 0-based index. Also accepts the -Mesh=OBJ / -Mesh:OBJ forms. Anything else in
 # $Rest is an unrecognised argument.
@@ -256,13 +259,13 @@ if ($Rest) {
 }
 
 $root = Split-Path -Parent $PSScriptRoot
-if (-not $InputPath) { $InputPath = Join-Path $PSScriptRoot 'frames.0.0.2.jsonl' }
+if (-not $InputPath) { $InputPath = Join-Path $PSScriptRoot 'frames.bunny_dolly.cg.jsonl' }
 
 # -PlacementQuadColor implies -PlacementQuad (matches render.sh's
 # --placement-quad-color).
 $quad = [bool]$PlacementQuad -or [bool]$PlacementQuadColor
 
-# -Texture binds a 0.0.4 texture table (sampled albedo) and renders textured. It
+# -Texture binds a texture table (sampled albedo) and renders textured. It
 # needs a real -Mesh (UVs to sample; the placement quad is added later and does
 # not count) and is mutually exclusive with -Wireframe.
 if ($Texture) {
@@ -294,10 +297,6 @@ function Join-Files([string[]]$Parts, [string]$Dest) {
     }
     finally { $out.Dispose() }
 }
-
-# DuckDB SQL string literals escape a single quote by doubling it; forward
-# slashes work on every platform, so normalise Windows backslashes.
-function ConvertTo-SqlPath([string]$p) { ($p -replace "'", "''") -replace '\\', '/' }
 
 $serve = $null
 $work = (New-Item -ItemType Directory -Path (Join-Path ([System.IO.Path]::GetTempPath()) "trd-render-$([guid]::NewGuid())")).FullName
@@ -332,10 +331,18 @@ f 1 3 4
         $meshes += $quadObj
     }
 
+    # The stream protocol is mesh-first (0.0.5 requires a leading [mesh] table;
+    # there is no params-only fallback). When neither -Mesh nor -PlacementQuad
+    # supplied a mesh, load the bunny as the default demo object so the stream is a
+    # valid [mesh][params].
+    if ($meshes.Count -eq 0) {
+        $meshes += (Join-Path $root 'assets/meshes/bunny.obj')
+    }
+
     # --- Fail early if a base tool is missing ---------------------------------
     # cargo is always required. -Web additionally needs wasm-pack + bun to build
-    # the bundle; -CLI needs ffmpeg to encode the GIF/WebP. duckdb is optional --
-    # if its 'arrow' community extension can't load, pyarrow builds the stream.
+    # the bundle; -CLI needs ffmpeg to encode the GIF/WebP. pyarrow (via uv/python)
+    # builds the Arrow stream.
     if ($Web) { $required = @('cargo', 'wasm-pack', 'bun') }
     elseif ($Native) { $required = @('cargo') }
     else { $required = @('cargo', 'ffmpeg') }
@@ -383,43 +390,21 @@ f 1 3 4
         if ($dollyGen.ExitCode -ne 0) { throw "bunny_dolly.py failed (exit $($dollyGen.ExitCode))" }
     }
 
-    # Choose a frame producer: DuckDB (via its 'arrow' community extension) if that
-    # extension actually loads, otherwise scripts\jsonl_to_arrow.py via uv/python.
+    # Choose a frame producer for the params stream: scripts\jsonl_to_arrow.py via
+    # uv/python. The stream protocol is 0.0.5-only and mesh-first, so the params
+    # batch carries the model/camera/draws/frame_path columns the pyarrow producer
+    # emits (the old DuckDB 'arrow' path only understood the retired 0.0.1/0.0.2
+    # center/size/theta/model columns and is gone).
     $jsonlToArrow = Join-Path $root 'scripts/jsonl_to_arrow.py'
     $producer = $null
-    if (Get-Command duckdb -ErrorAction SilentlyContinue) {
-        try { & duckdb -c 'INSTALL arrow FROM community; LOAD arrow;' 2>$null | Out-Null } catch { }
-        if ($LASTEXITCODE -eq 0) { $producer = 'duckdb' }
-        else { Write-Warning "duckdb 'arrow' extension unavailable; building the frame stream with pyarrow instead." }
-    }
-    if (-not $producer) {
-        if ($uvOk) { $producer = 'uv' }
-        elseif ($pyarrowOk) { $producer = 'python' }
-        else {
-            Write-Error "error: need duckdb (with the 'arrow' community extension) or uv/python with pyarrow to build the Arrow frame stream.`nrun '. scripts\dev-env.ps1', or 'pip install pyarrow'."
-        }
+    if ($uvOk) { $producer = 'uv' }
+    elseif ($pyarrowOk) { $producer = 'python' }
+    else {
+        Write-Error "error: need uv or python with pyarrow to build the Arrow frame stream.`nrun '. scripts\dev-env.ps1', or 'pip install pyarrow'."
     }
 
-    # DuckDB's producer only understands the 0.0.1/0.0.2 columns (center/size/theta/
-    # model); its SQL silently DROPS the additive 0.0.3 camera (eye/target/direction/
-    # up/k/pose/fovy/aspect/znear/zfar) and instanced draw-list (draws) columns, as
-    # well as the 0.0.5 background frame reference (frame_path/frame_url). If the
-    # input carries any of those, fall back to the pyarrow producer (which emits
-    # them) so the camera/draw/frame data actually reaches trd - otherwise an
-    # authored camera is lost (identity-camera z-clipping) or the background frame
-    # plane never appears.
-    if ($producer -eq 'duckdb' -and
-        (Select-String -Path $InputPath -Pattern '"(eye|target|direction|up|k|pose|fovy|aspect|znear|zfar|draws|frame_path|frame_url)"\s*:' -Quiet)) {
-        if ($uvOk) { $producer = 'uv' }
-        elseif ($pyarrowOk) { $producer = 'python' }
-        else {
-            Write-Error "error: '$InputPath' carries 0.0.3+ camera/draw/frame columns that DuckDB cannot emit;`ninstall uv or a python with pyarrow to render it (run '. scripts\dev-env.ps1')."
-        }
-    }
-
-    # -Mesh (repeatable) encodes the leading 0.0.3 mesh table via
-    # scripts\obj_to_arrow.py (one row per OBJ, in order). DuckDB cannot author the
-    # nested-list mesh table, so this always needs a pyarrow-capable Python.
+    # -Mesh (repeatable) encodes the leading mesh table via scripts\obj_to_arrow.py
+    # (one row per OBJ, in order). This always needs a pyarrow-capable Python.
     $objToArrow = Join-Path $root 'scripts/obj_to_arrow.py'
     $meshProducer = $null
     if ($meshes.Count -gt 0) {
@@ -430,7 +415,7 @@ f 1 3 4
         }
     }
 
-    # -Texture encodes the image into a 0.0.4 texture table via
+    # -Texture encodes the image into a texture table via
     # scripts\texture_to_arrow.py, concatenated between the mesh table and the
     # params ([mesh][texture][params]). Needs pyarrow + pillow + numpy; downscaled
     # to --max-size 2048 to stay within the portable (downlevel/WebGL2) limit.
@@ -472,55 +457,20 @@ f 1 3 4
     $streamArrow = Join-Path $work 'stream.arrows'
     $imagesArrow = Join-Path $work 'images.arrows'
 
-    # 1. Build a streaming Arrow IPC file of frame params from the JSONL: the
-    #    required 0.0.1 columns (center/size as FixedSizeList<f32>[2], theta as
-    #    f32, defaulting to the identity when absent) plus the additive 0.0.2
-    #    `model` column (FixedSizeList<f32>[16], column-major) - used verbatim if
-    #    present, else synthesized to match scripts/jsonl_to_arrow.py. DuckDB does
-    #    the cast when its 'arrow' extension is available; otherwise pyarrow does.
-    if ($producer -eq 'duckdb') {
-        $sql = @"
-INSTALL arrow FROM community; LOAD arrow;
-COPY (
-  WITH raw AS (
-    SELECT
-      COALESCE(center, [0.0, 0.0]) AS c,
-      COALESCE(size, [1.0, 1.0]) AS s,
-      COALESCE(theta, 0.0) AS th,
-      model AS m
-    FROM read_json('$(ConvertTo-SqlPath $InputPath)',
-      format = 'newline_delimited',
-      columns = {center: 'DOUBLE[]', size: 'DOUBLE[]', theta: 'DOUBLE', model: 'DOUBLE[]'})
-  )
-  SELECT
-    c::FLOAT[2] AS center,
-    s::FLOAT[2] AS size,
-    th::FLOAT AS theta,
-    COALESCE(m, [
-      s[1] * cos(th), s[1] * sin(th), 0.0, 0.0,
-      -s[2] * sin(th), s[2] * cos(th), 0.0, 0.0,
-      0.0, 0.0, 1.0, 0.0,
-      c[1], c[2], 0.0, 1.0
-    ])::FLOAT[16] AS model
-  FROM raw
-) TO '$(ConvertTo-SqlPath $framesArrow)' (FORMAT arrows);
-"@
-        & duckdb -c $sql
-        if ($LASTEXITCODE -ne 0) { throw "duckdb failed (exit $LASTEXITCODE)" }
+    # 1. Build a streaming Arrow IPC file of frame params from the JSONL via
+    #    scripts\jsonl_to_arrow.py (pyarrow): the always-present `model` column
+    #    (FixedSizeList<f32>[16], column-major - a row's explicit matrix, else
+    #    identity) plus optional camera / draws / frame_path columns.
+    if ($producer -eq 'uv') {
+        $genArgs = @('run', '--with', 'pyarrow', $jsonlToArrow, $InputPath, '-o', $framesArrow)
     }
     else {
-        # $producer is 'uv' or 'python': run jsonl_to_arrow.py to the temp file.
-        if ($producer -eq 'uv') {
-            $genArgs = @('run', '--with', 'pyarrow', $jsonlToArrow, $InputPath, '-o', $framesArrow)
-        }
-        else {
-            $genArgs = @($jsonlToArrow, $InputPath, '-o', $framesArrow)
-        }
-        $gen = Start-Process -FilePath $producer -NoNewWindow -Wait -PassThru -ArgumentList $genArgs
-        if ($gen.ExitCode -ne 0) { throw "jsonl_to_arrow ($producer) failed (exit $($gen.ExitCode))" }
+        $genArgs = @($jsonlToArrow, $InputPath, '-o', $framesArrow)
     }
+    $gen = Start-Process -FilePath $producer -NoNewWindow -Wait -PassThru -ArgumentList $genArgs
+    if ($gen.ExitCode -ne 0) { throw "jsonl_to_arrow ($producer) failed (exit $($gen.ExitCode))" }
 
-    # 1b. -Mesh: encode the OBJ(s) into a leading 0.0.3 mesh table (one row per
+    # 1b. -Mesh: encode the OBJ(s) into a leading mesh table (one row per
     #     -Mesh, in order) and concatenate it *before* the params so trd reads
     #     [mesh][params] (or [mesh][texture][params] with -Texture). A frame's
     #     `draws` list references these meshes by 0-based index. Without -Mesh,
@@ -535,7 +485,7 @@ COPY (
         $meshGen = Start-Process -FilePath $meshProducer -NoNewWindow -Wait -PassThru -ArgumentList $meshArgs
         if ($meshGen.ExitCode -ne 0) { throw "obj_to_arrow ($meshProducer) failed (exit $($meshGen.ExitCode))" }
 
-        # 1c. -Texture: encode the image into a 0.0.4 texture table and splice it
+        # 1c. -Texture: encode the image into a texture table and splice it
         #     between the mesh table and the params ([mesh][texture][params]).
         if ($Texture) {
             if ($textureProducer -eq 'uv') {

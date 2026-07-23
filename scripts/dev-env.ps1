@@ -17,7 +17,7 @@
                              (wgpu's raw-dylib deps crash on the -gnu host).
       * the MSVC toolchain - cl.exe / link.exe, imported from vcvars64.bat, so
                              cargo can link native binaries.
-      * ffmpeg, duckdb, uv - the extra tools examples\render.ps1 needs.
+      * ffmpeg, uv         - the extra tools examples\render.ps1 needs.
 
     Running it directly (`.\scripts\dev-env.ps1`) only validates/reports and
     will try to install missing tools; PATH changes will NOT persist unless the
@@ -138,12 +138,6 @@ Resolve-Tool 'ffmpeg' @(
     (Join-Path $scoopShims 'ffmpeg.exe')
 ) | Out-Null
 
-Resolve-Tool 'duckdb' @(
-    'C:\Tools\duckdb\duckdb.exe',
-    (Join-Path $wingetLinks 'duckdb.exe'),
-    (Join-Path $scoopShims 'duckdb.exe')
-) | Out-Null
-
 # Honor uv's own UV_INSTALL_DIR (its official custom install-dir env var) first,
 # so a uv installed off the default paths (e.g. on another drive) is still found.
 $uvInstallDir = $env:UV_INSTALL_DIR
@@ -168,9 +162,8 @@ if (-not $uvOk -and -not $NoInstall -and (Test-Tool 'winget')) {
 $hints = @{
     cargo  = 'install rustup from https://rustup.rs'
     ffmpeg = 'winget install --id Gyan.FFmpeg -e'
-    duckdb = 'winget install --id DuckDB.cli -e'
 }
-foreach ($t in 'cargo', 'ffmpeg', 'duckdb') {
+foreach ($t in 'cargo', 'ffmpeg') {
     if (-not (Test-Tool $t)) { Write-DevWarn "$t not found. Install: $($hints[$t])" }
 }
 if (-not (Test-Tool 'uv')) {
@@ -180,7 +173,7 @@ if (-not (Test-Tool 'uv')) {
 if (-not $Quiet) {
     $rustVer = if (Test-Tool 'rustc') { (& rustc --version) } else { '(missing)' }
     Write-Host "trd dev-env ready: $rustVer"
-    foreach ($t in 'cargo', 'cl', 'ffmpeg', 'duckdb', 'uv') {
+    foreach ($t in 'cargo', 'cl', 'ffmpeg', 'uv') {
         $cmd = Get-Command $t -ErrorAction SilentlyContinue
         $src = if ($cmd) { $cmd.Source } else { '(missing)' }
         Write-Host ('  {0,-8} {1}' -f $t, $src)

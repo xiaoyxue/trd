@@ -2,23 +2,25 @@
 # Render a trd JSONL frame-parameter file to an animated GIF/WebP.
 #
 # Pipeline (fully piped, no intermediate files):
-#   JSONL --(Arrow IPC: duckdb or pyarrow)--> trd --(tensors)--> ffmpeg
+#   JSONL --(Arrow IPC: pyarrow)--> trd --(tensors)--> ffmpeg
 #
 # Usage:
 #   examples/render.sh [--cli | --native | --web [--canvas-renderer|--offscreen-renderer]] \
 #                      [--mesh OBJ]... [--texture IMG] [--wireframe] [--aabb] [--axes] [--frames-base DIR] [INPUT.jsonl] [OUTPUT.gif|.webp] [WIDTH] [HEIGHT] [FPS]
-# Defaults: examples/frames.0.0.2.jsonl  output/out.gif  256 256 30
+# Defaults: examples/frames.bunny_dolly.cg.jsonl (rendering assets/meshes/bunny.obj)  output/out.gif  256 256 30
 # Run with no arguments (or -h/--help) to print the flag guidance and exit; pass
-# --cli to render the default demo.
+# --cli to render the default demo (the bunny dolly camera capstone).
 #
 # By default (or with --cli, alias --headless) the frame stream is rendered to a
 # GIF/WebP via the headless trd-cli.
 # With --native (alias --app) it is played live in the interactive trd-app window
 # (trd-native); OUTPUT is then ignored and neither uv nor ffmpeg are needed.
-# With --mesh OBJ the input is a protocol 0.0.3 stream: a leading mesh table
-# (scripts/obj_to_arrow.py encodes the OBJ) concatenated with the params stream,
-# so trd renders the loaded mesh (centered + uniformly scaled to fit) driven by
-# INPUT.jsonl. Try: examples/render.sh --mesh assets/meshes/bunny.obj \
+# The stream protocol is 0.0.5-only and mesh-first: every stream begins with a
+# mesh table (scripts/obj_to_arrow.py encodes the OBJ) concatenated with the
+# params stream, so trd renders the loaded mesh (centered + uniformly scaled to
+# fit) driven by INPUT.jsonl. When no --mesh (and no --placement-quad) is given,
+# the bunny (assets/meshes/bunny.obj) is loaded as the default demo object. Try:
+# examples/render.sh --mesh assets/meshes/bunny.obj \
 # examples/frames.turntable.jsonl output/bunny.gif. --mesh is repeatable: pass it
 # several times to load several meshes (one table row each, in order); a frame's
 # `draws` list then references them by 0-based index. Try the two-mesh demo:
@@ -82,8 +84,8 @@
 # makes a remote machine's origin "localhost" too); a bare http://<ip> is NOT a
 # secure context.
 #
-# Run from `nix develop`. The Arrow frame stream is built with duckdb's 'arrow'
-# community extension when it loads, otherwise with pyarrow (via uv/python3).
+# Run from `nix develop`. The Arrow frame stream is built with pyarrow (via
+# uv/python3).
 # On WSL, prefix with WGPU_BACKEND=gl for GPU rendering (else it uses software).
 set -euo pipefail
 
@@ -95,7 +97,7 @@ render.sh — render a trd JSONL frame-parameter file to a GIF/WebP (or play/ser
 Usage:
   examples/render.sh [MODE] [CONTENT FLAGS] [INPUT.jsonl] [OUTPUT.gif|.webp] [WIDTH] [HEIGHT] [FPS]
 
-Defaults: INPUT=examples/frames.0.0.2.jsonl  OUTPUT=output/out.gif  WIDTH=256  HEIGHT=256  FPS=30
+Defaults: INPUT=examples/frames.bunny_dolly.cg.jsonl (renders assets/meshes/bunny.obj)  OUTPUT=output/out.gif  WIDTH=256  HEIGHT=256  FPS=30
 
 MODE (pick one; default --cli):
   --cli, --headless   Render to a GIF/WebP via the headless trd-cli (default).
@@ -115,10 +117,11 @@ BROWSER QUERY PARAM (--web; append to the URL, no rebuild):
   one — use the printed SSH tunnel for a remote browser).
 
 CONTENT FLAGS (--cli and --native):
-  --mesh OBJ          Load OBJ as a protocol 0.0.3 mesh (centered + scaled to fit).
+  --mesh OBJ          Load OBJ as a mesh table entry (centered + scaled to fit).
                       Repeatable: pass several times to load several meshes (row 0,
                       1, …); a frame's `draws` list references them by index.
-  --texture IMG       Bind IMG as a 0.0.4 texture and render textured — sampling it
+                      Defaults to assets/meshes/bunny.obj when no mesh is given.
+  --texture IMG       Bind IMG as a texture table and render textured — sampling it
                       at each vertex UV (#20). Requires --mesh (with UVs); mutually
                       exclusive with --wireframe.
   --wireframe         Draw mesh edges as a line list instead of filled triangles (#38).
@@ -196,7 +199,7 @@ fi
 
 # Extract the optional mode flags (--cli/--native/--web), the --web renderer
 # sub-flags (--canvas-renderer/--offscreen-renderer), and repeatable --mesh <obj>
-# flags that prepend a mesh Arrow stream (0.0.3 [mesh][params]); the rest are
+# flags that prepend a mesh Arrow stream (0.0.5 [mesh][params]); the rest are
 # positional.
 cli=0
 native=0
@@ -270,13 +273,11 @@ if [ -n "$texture" ]; then
 fi
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-input="${1:-$root/examples/frames.0.0.2.jsonl}"
+input="${1:-$root/examples/frames.bunny_dolly.cg.jsonl}"
 output="${2:-output/out.gif}"
 width="${3:-256}"
 height="${4:-256}"
 fps="${5:-30}"
-# DuckDB SQL string literals escape a single quote by doubling it.
-sql_input=${input//\'/\'\'}
 
 # --placement-quad appends a canonical colored quad mesh (an origin-centred,
 # extent-2 unit square, corners ±1) as the LAST --mesh, so a stream can draw the
@@ -305,6 +306,15 @@ f 1 2 3
 f 1 3 4
 QUAD
   meshes+=("$quad_obj")
+fi
+
+# The stream protocol is mesh-first (0.0.5 requires a leading [mesh] table; there
+# is no params-only fallback). When neither --mesh nor --placement-quad supplied a
+# mesh, load the bunny as the default demo object so the stream is a valid
+# [mesh][params] and the default INPUT (frames.bunny_dolly.cg.jsonl) has something
+# to place.
+if [ ${#meshes[@]} -eq 0 ]; then
+  meshes+=("$root/assets/meshes/bunny.obj")
 fi
 
 # examples/bunny_dolly.py authors the 45° bird's-eye *dolly* camera capstone (#49)
@@ -346,89 +356,34 @@ for tool in $tools; do
   fi
 done
 
-# Choose a frame producer: DuckDB's 'arrow' community extension if it loads,
-# otherwise scripts/jsonl_to_arrow.py via uv (or python3 with pyarrow).
-if command -v duckdb >/dev/null 2>&1 && duckdb -c "INSTALL arrow FROM community; LOAD arrow;" >/dev/null 2>&1; then
-  producer=duckdb
-elif command -v uv >/dev/null 2>&1; then
+# Choose a frame producer for the params stream: scripts/jsonl_to_arrow.py via
+# uv (or python3 with pyarrow). The stream protocol is 0.0.5-only and mesh-first,
+# so the params batch carries the `model`/camera/`draws`/`frame_path` columns the
+# pyarrow producer emits (the old DuckDB `arrow` path only understood the retired
+# 0.0.1/0.0.2 center/size/theta/model columns and is gone).
+if command -v uv >/dev/null 2>&1; then
   producer=uv
 elif command -v python3 >/dev/null 2>&1 && python3 -c 'import pyarrow' >/dev/null 2>&1; then
   producer=python3
 else
-  echo "error: need duckdb (with the 'arrow' community extension) or uv/python3 with pyarrow" >&2
-  echo "to build the Arrow frame stream" >&2
+  echo "error: need uv or python3 with pyarrow to build the Arrow frame stream" >&2
   exit 1
 fi
-
-# DuckDB's producer only understands the 0.0.1/0.0.2 columns (center/size/theta/
-# model); its SQL silently DROPS the additive 0.0.3 camera (eye/target/direction/
-# up/k/pose/fovy/aspect/znear/zfar) and instanced draw-list (draws) columns, as
-# well as the 0.0.5 background frame reference (frame_path/frame_url). If the
-# input carries any of those, fall back to the pyarrow producer (which emits
-# them) so the camera/draw/frame data actually reaches trd — otherwise an authored
-# camera is lost (identity-camera z-clipping) or the background frame plane never
-# appears.
-if [ "$producer" = duckdb ] \
-  && grep -Eq '"(eye|target|direction|up|k|pose|fovy|aspect|znear|zfar|draws|frame_path|frame_url)"[[:space:]]*:' "$input"; then
-  if command -v uv >/dev/null 2>&1; then
-    producer=uv
-  elif command -v python3 >/dev/null 2>&1 && python3 -c 'import pyarrow' >/dev/null 2>&1; then
-    producer=python3
-  else
-    echo "error: '$input' carries 0.0.3 camera/draw columns that DuckDB cannot emit;" >&2
-    echo "install uv or python3 with pyarrow to render it" >&2
-    exit 1
-  fi
-fi
-
-# DuckDB reads the JSONL and streams Arrow IPC (FORMAT arrows) to stdout. It emits
-# the required 0.0.1 columns (center/size as FixedSizeList<f32>[2], theta as f32,
-# defaulting to the identity when a row omits them) plus the additive 0.0.2 `model`
-# column (FixedSizeList<f32>[16], column-major): a row's explicit `model` is used
-# verbatim, else synthesized as translate(center).rotate_z(theta).scale(size) to
-# match scripts/jsonl_to_arrow.py. The explicit `columns=` schema makes every
-# column exist (NULL when a row omits it), so one query renders both the 0.0.1
-# (center/size/theta) and 0.0.2 (model) example data.
-sql="INSTALL arrow FROM community; LOAD arrow;
-  COPY (
-    WITH raw AS (
-      SELECT
-        COALESCE(center, [0.0, 0.0]) AS c,
-        COALESCE(size, [1.0, 1.0]) AS s,
-        COALESCE(theta, 0.0) AS th,
-        model AS m
-      FROM read_json('$sql_input',
-        format = 'newline_delimited',
-        columns = {center: 'DOUBLE[]', size: 'DOUBLE[]', theta: 'DOUBLE', model: 'DOUBLE[]'})
-    )
-    SELECT
-      c::FLOAT[2] AS center,
-      s::FLOAT[2] AS size,
-      th::FLOAT AS theta,
-      COALESCE(m, [
-        s[1] * cos(th), s[1] * sin(th), 0.0, 0.0,
-        -s[2] * sin(th), s[2] * cos(th), 0.0, 0.0,
-        0.0, 0.0, 1.0, 0.0,
-        c[1], c[2], 0.0, 1.0
-      ])::FLOAT[16] AS model
-    FROM raw
-  ) TO '/dev/stdout' (FORMAT arrows);"
 
 # Emit the Arrow IPC frame stream on stdout via the chosen producer.
 frames() {
   case "$producer" in
-    duckdb) duckdb -c "$sql" ;;
     uv) uv run --with pyarrow "$root/scripts/jsonl_to_arrow.py" "$input" ;;
     python3) python3 "$root/scripts/jsonl_to_arrow.py" "$input" ;;
   esac
 }
 
 # When rendering loaded meshes (--mesh, repeatable), pick a pyarrow-capable
-# Python to encode the OBJ(s) into the leading mesh Arrow stream (duckdb can't
-# author the nested-list mesh table). scripts/obj_to_arrow.py emits a 0.0.3 mesh
-# table with **one row per --mesh** (in the order given); it is concatenated
-# *before* the params stream so trd reads [mesh][params]. A frame's `draws` list
-# references these meshes by 0-based index (mesh 0 = first --mesh).
+# Python to encode the OBJ(s) into the leading mesh Arrow stream.
+# scripts/obj_to_arrow.py emits a mesh table with **one row per --mesh** (in the
+# order given); it is concatenated *before* the params stream so trd reads
+# [mesh][params]. A frame's `draws` list references these meshes by 0-based index
+# (mesh 0 = first --mesh).
 mesh_producer=""
 if [ ${#meshes[@]} -gt 0 ]; then
   if command -v uv >/dev/null 2>&1; then

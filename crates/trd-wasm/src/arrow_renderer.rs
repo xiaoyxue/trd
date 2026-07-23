@@ -3,7 +3,7 @@ use wasm_bindgen::prelude::*;
 
 use trd_core::{
     build_scene, tightly_pack_rgba, DecodedFrame, Draw, DrawableObject, FrameBatch, FrameFit,
-    FrameParams, InputSession, Matrix4, Mesh, MeshRenderer, OutputSession, RenderMode, Viewport,
+    FrameParams, InputSession, Matrix4, MeshRenderer, OutputSession, RenderMode, Viewport,
     DEFAULT_PREVIEW_TARGET,
 };
 
@@ -261,6 +261,13 @@ impl ArrowRenderer {
                 rgba.len()
             )));
         }
+        // Building the renderer needs the leading mesh table already decoded
+        // (the protocol is mesh-first; the mesh renderer requires ≥1 mesh).
+        if !self.input.has_meshes() {
+            return Err(crate::js_error(
+                "input is missing the required leading mesh table (protocol is mesh-first)",
+            ));
+        }
         self.ensure_renderer();
         let queue = &self.queue;
         self.renderer
@@ -348,26 +355,18 @@ impl ArrowRenderer {
     }
 
     /// Lazily builds the mesh renderer on first use: a multi-mesh renderer over
-    /// the stream's leading mesh table (each mesh under its `preview_transform`
-    /// base model), or the built-in hello-triangle for a legacy params-only
-    /// stream.
+    /// the stream's (required) leading mesh table (each mesh under its
+    /// `preview_transform` base model). The protocol is mesh-first, so the session
+    /// always carries meshes by the time frames are produced.
     fn ensure_renderer(&mut self) -> &mut MeshRenderer {
         if self.renderer.is_none() {
-            let renderer = if self.input.has_meshes() {
-                let meshes = self.input.meshes();
-                let base_models: Vec<Matrix4> = meshes
-                    .iter()
-                    .map(|mesh| mesh.preview_transform(DEFAULT_PREVIEW_TARGET).matrix())
-                    .collect();
-                MeshRenderer::with_meshes(&self.device, self.format, meshes, &base_models)
-            } else {
-                MeshRenderer::with_base_model(
-                    &self.device,
-                    self.format,
-                    &Mesh::hello_triangle(),
-                    Matrix4::IDENTITY,
-                )
-            };
+            let meshes = self.input.meshes();
+            let base_models: Vec<Matrix4> = meshes
+                .iter()
+                .map(|mesh| mesh.preview_transform(DEFAULT_PREVIEW_TARGET).matrix())
+                .collect();
+            let renderer =
+                MeshRenderer::with_meshes(&self.device, self.format, meshes, &base_models);
             self.renderer = Some(renderer);
 
             // Bind the stream's texture (0.0.4) as the sampled albedo so
@@ -391,6 +390,14 @@ impl ArrowRenderer {
         &mut self,
         frame: &DecodedFrame,
     ) -> Result<(FrameParams, Vec<DrawableObject>), String> {
+        // The protocol is mesh-first: without a leading mesh table there is
+        // nothing to draw (and the mesh renderer requires ≥1 mesh).
+        if !self.input.has_meshes() {
+            return Err(
+                "input is missing the required leading mesh table (protocol is mesh-first)"
+                    .to_owned(),
+            );
+        }
         let params = frame.params;
         // Absent per-frame draw list ⇒ one instance of mesh 0 placed by the
         // frame's own model (legacy single-object behavior).

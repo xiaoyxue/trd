@@ -4,12 +4,12 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-/// Interactive desktop viewer for a trd scene stream (protocol 0.0.3).
+/// Interactive desktop viewer for a trd scene stream (protocol 0.0.5).
 ///
-/// Reads the Arrow IPC `[mesh][params]` stream on stdin — a leading mesh table
-/// then per-frame params + instanced draw lists (or a legacy `0.0.1`/`0.0.2`
-/// params-only stream → the built-in hello-triangle) — and plays it live in a
-/// window, e.g. `trd-render.sh --mesh bunny.obj … | trd-app`.
+/// Reads the Arrow IPC `[mesh][texture?][params]` stream on stdin — a leading
+/// mesh table (then an optional texture table) followed by per-frame params +
+/// instanced draw lists — and plays it live in a window, e.g.
+/// `trd-render.sh --mesh bunny.obj … | trd-app`.
 #[derive(Parser)]
 #[command(name = "trd-app", version, about)]
 pub(crate) struct Cli {
@@ -37,7 +37,7 @@ pub(crate) struct Cli {
     pub(crate) wireframe: bool,
     /// Render meshes textured — sampling the stream's bound texture table at
     /// each vertex UV — instead of the per-vertex color (#20). Requires a
-    /// `0.0.4` stream carrying a texture table (else the bound texture is 1×1
+    /// stream carrying a texture table (else the bound texture is 1×1
     /// white).
     #[arg(long, conflicts_with = "wireframe")]
     pub(crate) textured: bool,

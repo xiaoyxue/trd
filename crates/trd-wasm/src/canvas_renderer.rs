@@ -1,5 +1,5 @@
 use trd_core::{
-    build_scene, DecodedFrame, Draw, FrameFit, Matrix4, Mesh, MeshRenderer, RenderMode, Viewport,
+    build_scene, DecodedFrame, Draw, FrameFit, Matrix4, MeshRenderer, RenderMode, Viewport,
     DEFAULT_PREVIEW_TARGET,
 };
 use wasm_bindgen::prelude::*;
@@ -325,9 +325,13 @@ impl CanvasRenderer {
                 rgba.len()
             )));
         }
-        // Building the renderer needs the leading mesh table already decoded; the
-        // demo pushes it before the first background, so `ensure_renderer` binds
-        // the real meshes here rather than the hello-triangle fallback.
+        // Building the renderer needs the leading mesh table already decoded
+        // (the protocol is mesh-first; the mesh renderer requires ≥1 mesh).
+        if !self.input.has_meshes() {
+            return Err(js_error(
+                "input is missing the required leading mesh table (protocol is mesh-first)",
+            ));
+        }
         self.ensure_renderer();
         let queue = &self.queue;
         self.renderer
@@ -354,6 +358,13 @@ impl CanvasRenderer {
     /// [`push_ipc`](Self::push_ipc) (immediate) and
     /// [`render_index`](Self::render_index) (buffered replay).
     fn render_frame(&mut self, frame: &DecodedFrame) -> Result<(), JsValue> {
+        // The protocol is mesh-first: without a leading mesh table there is
+        // nothing to draw (and the mesh renderer requires ≥1 mesh).
+        if !self.input.has_meshes() {
+            return Err(js_error(
+                "input is missing the required leading mesh table (protocol is mesh-first)",
+            ));
+        }
         let params = frame.params;
         // Absent per-frame draw list ⇒ one instance of mesh 0 placed by the
         // frame's own model (legacy single-object behavior).
@@ -410,28 +421,19 @@ impl CanvasRenderer {
         })
     }
 
-    /// Lazily builds the mesh renderer on first use. If the stream carried a
-    /// leading mesh table (`input.has_meshes()`), builds a multi-mesh renderer
-    /// with each mesh's [`preview_transform`](trd_core::Mesh::preview_transform)
-    /// base model; otherwise falls back to the built-in hello-triangle so legacy
-    /// params-only streams keep rendering.
+    /// Lazily builds the mesh renderer on first use. The protocol is mesh-first,
+    /// so the session always carries a leading mesh table by the time frames are
+    /// produced; builds a multi-mesh renderer with each mesh's
+    /// [`preview_transform`](trd_core::Mesh::preview_transform) base model.
     fn ensure_renderer(&mut self) -> &mut MeshRenderer {
         if self.renderer.is_none() {
-            let renderer = if self.input.has_meshes() {
-                let meshes = self.input.meshes();
-                let base_models: Vec<Matrix4> = meshes
-                    .iter()
-                    .map(|mesh| mesh.preview_transform(DEFAULT_PREVIEW_TARGET).matrix())
-                    .collect();
-                MeshRenderer::with_meshes(&self.device, self.render_format, meshes, &base_models)
-            } else {
-                MeshRenderer::with_base_model(
-                    &self.device,
-                    self.render_format,
-                    &Mesh::hello_triangle(),
-                    Matrix4::IDENTITY,
-                )
-            };
+            let meshes = self.input.meshes();
+            let base_models: Vec<Matrix4> = meshes
+                .iter()
+                .map(|mesh| mesh.preview_transform(DEFAULT_PREVIEW_TARGET).matrix())
+                .collect();
+            let renderer =
+                MeshRenderer::with_meshes(&self.device, self.render_format, meshes, &base_models);
             self.renderer = Some(renderer);
 
             // Bind the stream's texture (0.0.4) as the sampled albedo so

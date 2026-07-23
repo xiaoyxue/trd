@@ -8,18 +8,19 @@ followed by N record-batch messages, on stdin (input) and stdout (output).
   stream; output batch boundaries mirror the input batches, so memory stays
   bounded to a single batch in flight.
 - **Versioning:** the protocol version is carried in schema-level metadata under
-  the key `trd.protocol.version` and follows `MAJOR.MINOR.PATCH`. Minor bumps are
-  **additive and backward-compatible** (new optional columns); a decoder accepts
-  any version in its supported set and validates a column only if it is present.
+  the key `trd.protocol.version` and follows `MAJOR.MINOR.PATCH`. **The renderer
+  supports exactly one version — currently `0.0.5` — and hard-rejects any other
+  declared version.** The protocol is **not backward compatible**: support for
+  `0.0.1`–`0.0.4` was **deliberately dropped** to simplify the code (see the
+  [no-backward-compat policy](../../AGENTS.md)).
 - **Playback rate:** an optional schema-metadata key `trd.stream.frame_rate`
   (float, frames/sec, default **30**) declares the stream's intended playback
   frame rate — like a video file's fps. Front-ends play at this rate (speed =
   fps); `trd-cli`'s rendered image stream copies it through so `scripts/encode.py`
-  encodes the GIF/WebP at the same rate. It is version-independent (applies to
-  0.0.1 and 0.0.2 alike). See the [timing model](#timing-model) below.
+  encodes the GIF/WebP at the same rate.
 - **Global conventions:** matrices are **column-major** and right-handed;
   projections target **wgpu clip space** (`z ∈ [0, 1]`); the vertex transform is
-  the MVP chain `clip = P · V · M · (position, 0, 1)`.
+  the MVP chain `clip = P · V · M · (position, 1)`.
 
 ## Timing model
 
@@ -32,22 +33,22 @@ the classic video-player model:
 - **Presentation is decoupled from the monitor refresh (vsync).** `trd-app`
   presents at the playback fps by default (non-vsync present mode); pass `--vsync`
   to lock to the refresh rate (Fifo).
-- The same content at the same fps plays at the **same speed** regardless of
-  protocol version or whether motion is authored via `theta` (0.0.1) or a `model`
-  matrix (0.0.2).
+- The same content at the same fps plays at the **same speed**.
 
 
-## Versions
+## Specification
 
-| Version | Status | Summary |
-|---|---|---|
-| [0.0.1](./0.0.1.md) | Superseded | 2D affine per frame (`center`, `size`, `theta`) → RGBA tensor images. |
-| [0.0.2](./0.0.2.md) | Superseded | Adds optional `model` (4×4), `k` (3×3 intrinsics), `pose` (4×4) matrix columns (the MVP + camera). Backward-compatible with 0.0.1. |
-| [0.0.3](./0.0.3.md) | Superseded | Adds an optional leading **mesh** Arrow stream (`[mesh][params]` framing) with nested-list geometry and the scale-to-fit preview transform, a full **camera** (CV `k`/`pose` or CG `eye`/`target`/`direction`/`up`/`fovy`/`aspect`/`znear`/`zfar`), and a per-frame instanced **draw list** (`draw_mesh`/`draw_model` list columns) for multi-mesh scenes. Backward-compatible with 0.0.2. |
-| [0.0.4](./0.0.4.md) | Superseded | Adds an optional **texture** Arrow stream (`[mesh][texture][params]` framing) — `rgba` interleaved-RGBA `fixed_shape_tensor<UInt8>[H, W, 4]` — an optional per-vertex **`uv`** mesh column, and a **textured** render mode sampling the bound texture (`Rgba8UnormSrgb`, linear, clamp-to-edge). Backward-compatible with 0.0.3. |
-| [0.0.5](./0.0.5.md) | Current | Adds an optional per-frame **`frame_path`/`frame_url`** (`Utf8`) params column naming a background image, and a `FramePlane` drawable compositing that image beneath the scene (reused `Rgba8UnormSrgb` texture, depth-write off, `Stretch`/`Cover` fit). The core decodes the reference only; the shell (native `--frames-base` / browser URL) does the image I/O. Backward-compatible with 0.0.4. |
+The protocol is **`0.0.5`-only**; there is a single, self-contained spec:
 
-See [`CHANGELOG.md`](./CHANGELOG.md) for the per-version deltas.
+- **[0.0.5](./0.0.5.md)** — **mesh-first** `[mesh][texture?][params]`. Per-mesh
+  geometry (`position`/`color`/`uv`/`index`), an optional **texture** table
+  (`rgba`), and per-frame params: `model`, a **camera** (CV `k`/`pose` or CG
+  `eye`/`target`/`direction`/`up`/`fovy`/`aspect`/`znear`/`zfar`), an instanced
+  **draw list** (`draw_mesh`/`draw_model`), and an optional **`frame_path`/
+  `frame_url`** background image composited beneath the scene by a `FramePlane`.
 
-The accepted input versions and current output version are defined in
+Earlier iterations (`0.0.1`–`0.0.4`) were removed; the renderer hard-rejects any
+version other than `0.0.5`.
+
+The accepted input version and current output version are defined in
 `crates/trd-core/src/protocol.rs` (`SUPPORTED_INPUT_VERSIONS`, `PROTOCOL_VERSION`).
