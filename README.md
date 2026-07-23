@@ -161,8 +161,8 @@ load the PNG/JPEG (relative to `<dir>`). Produce the stills + manifest with
 `scripts/extract_frames.py`. Without `--frames-base`, `frame_path` is ignored and
 the scene renders over the black clear.
 
-**Full, versioned specification: [`docs/protocol/`](docs/protocol/)** (per-version
-schema reference + [changelog](docs/protocol/CHANGELOG.md)).
+**Full specification: [`docs/protocol/0.0.5.md`](docs/protocol/0.0.5.md)** — the
+single, self-contained schema reference (the protocol is `0.0.5`-only).
 
 
 ## Repository layout
@@ -385,7 +385,7 @@ its `model` transform as a 4×4 matrix (defaulting to identity when the frame is
 driven entirely by its `draws` list), plus optional per-frame camera / draw-list /
 `frame_path` columns. Older wire formats (`0.0.1`–`0.0.4`) are **not** accepted —
 a stream declaring any other version is hard-rejected (see
-[`docs/protocol/`](docs/protocol/) for the version history).
+[`docs/protocol/0.0.5.md`](docs/protocol/0.0.5.md) for the full specification).
 
 - **Producer** — emits the input stream via the pyarrow scripts
   [`obj_to_arrow.py`](scripts/obj_to_arrow.py) (mesh),

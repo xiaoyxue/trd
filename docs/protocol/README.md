@@ -9,11 +9,10 @@ followed by N record-batch messages, on stdin (input) and stdout (output).
   bounded to a single batch in flight.
 - **Versioning:** the protocol version is carried in schema-level metadata under
   the key `trd.protocol.version` and follows `MAJOR.MINOR.PATCH`. **The renderer
-  supports exactly one version at a time — currently `0.0.5` — and hard-rejects
-  any other declared version.** Backward compatibility with `0.0.1`–`0.0.4` was
-  **deliberately dropped** to simplify the code (see the
-  [no-backward-compat policy](../../AGENTS.md)); the older version specs below are
-  retained only as historical reference.
+  supports exactly one version — currently `0.0.5` — and hard-rejects any other
+  declared version.** The protocol is **not backward compatible**: support for
+  `0.0.1`–`0.0.4` was **deliberately dropped** to simplify the code (see the
+  [no-backward-compat policy](../../AGENTS.md)).
 - **Playback rate:** an optional schema-metadata key `trd.stream.frame_rate`
   (float, frames/sec, default **30**) declares the stream's intended playback
   frame rate — like a video file's fps. Front-ends play at this rate (speed =
@@ -37,20 +36,19 @@ the classic video-player model:
 - The same content at the same fps plays at the **same speed**.
 
 
-## Versions
+## Specification
 
-Only **0.0.5** is accepted by the renderer. Earlier versions are **removed** —
-their specs remain below as a historical record of how the format evolved.
+The protocol is **`0.0.5`-only**; there is a single, self-contained spec:
 
-| Version | Status | Summary |
-|---|---|---|
-| [0.0.1](./0.0.1.md) | Removed | 2D affine per frame (`center`, `size`, `theta`) → RGBA tensor images. |
-| [0.0.2](./0.0.2.md) | Removed | Adds optional `model` (4×4), `k` (3×3 intrinsics), `pose` (4×4) matrix columns (the MVP + camera). |
-| [0.0.3](./0.0.3.md) | Removed | Adds an optional leading **mesh** Arrow stream (`[mesh][params]` framing) with nested-list geometry and the scale-to-fit preview transform, a full **camera** (CV `k`/`pose` or CG `eye`/`target`/`direction`/`up`/`fovy`/`aspect`/`znear`/`zfar`), and a per-frame instanced **draw list** (`draw_mesh`/`draw_model` list columns) for multi-mesh scenes. |
-| [0.0.4](./0.0.4.md) | Removed | Adds an optional **texture** Arrow stream (`[mesh][texture][params]` framing) — `rgba` interleaved-RGBA `fixed_shape_tensor<UInt8>[H, W, 4]` — an optional per-vertex **`uv`** mesh column, and a **textured** render mode sampling the bound texture (`Rgba8UnormSrgb`, linear, clamp-to-edge). |
-| [0.0.5](./0.0.5.md) | **Current (only supported)** | **Mesh-first** `[mesh][texture?][params]`. Adds an optional per-frame **`frame_path`/`frame_url`** (`Utf8`) params column naming a background image, and a `FramePlane` drawable compositing that image beneath the scene (reused `Rgba8UnormSrgb` texture, depth-write off, `Stretch`/`Cover` fit). **Not** backward-compatible with `0.0.1`–`0.0.4`. |
+- **[0.0.5](./0.0.5.md)** — **mesh-first** `[mesh][texture?][params]`. Per-mesh
+  geometry (`position`/`color`/`uv`/`index`), an optional **texture** table
+  (`rgba`), and per-frame params: `model`, a **camera** (CV `k`/`pose` or CG
+  `eye`/`target`/`direction`/`up`/`fovy`/`aspect`/`znear`/`zfar`), an instanced
+  **draw list** (`draw_mesh`/`draw_model`), and an optional **`frame_path`/
+  `frame_url`** background image composited beneath the scene by a `FramePlane`.
 
-See [`CHANGELOG.md`](./CHANGELOG.md) for the per-version deltas.
+Earlier iterations (`0.0.1`–`0.0.4`) were removed; the renderer hard-rejects any
+version other than `0.0.5`.
 
 The accepted input version and current output version are defined in
 `crates/trd-core/src/protocol.rs` (`SUPPORTED_INPUT_VERSIONS`, `PROTOCOL_VERSION`).
