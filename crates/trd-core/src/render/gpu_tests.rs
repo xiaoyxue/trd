@@ -5,6 +5,15 @@ use super::*;
 use crate::math::{Matrix4, Point3, Vector3};
 use glam::{Mat4, Vec3};
 
+/// Test convenience constructor: a [`MeshRenderer`] over a single mesh with an
+/// identity base model (vertices drawn in their own coordinates). Replaces the
+/// former single-mesh `MeshRenderer::new`/`with_base_model` production helpers,
+/// which only the GPU tests used.
+#[cfg(not(target_arch = "wasm32"))]
+fn single(device: &wgpu::Device, format: wgpu::TextureFormat, mesh: &Mesh) -> MeshRenderer {
+    MeshRenderer::new(device, format, std::slice::from_ref(mesh), &[Matrix4::IDENTITY])
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn render_with_readback(
     device: &wgpu::Device,
@@ -115,7 +124,7 @@ fn mesh_renderer_draws_multiple_instances() {
     let (device, queue) = pollster::block_on(test_device());
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (64, 64);
-    let mut mesh = MeshRenderer::new(&device, format, &Mesh::hello_triangle());
+    let mut mesh = single(&device, format, &Mesh::hello_triangle());
 
     // One centered instance vs. two instances translated to opposite sides.
     let single = [DrawableObject::Mesh {
@@ -220,7 +229,7 @@ fn mesh_renderer_depth_buffer_occludes_far_behind_near() {
         indices: vec![0, 2, 3, 0, 3, 1],
     };
     // mesh 0 = red (drawn first), mesh 1 = green (drawn last).
-    let mut mesh = MeshRenderer::with_meshes(
+    let mut mesh = MeshRenderer::new(
         &device,
         format,
         &[quad([1.0, 0.0, 0.0]), quad([0.0, 1.0, 0.0])],
@@ -264,7 +273,7 @@ fn mesh_renderer_wireframe_lights_edges_only() {
     let (device, queue) = pollster::block_on(test_device());
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (64, 64);
-    let mut mesh = MeshRenderer::new(&device, format, &Mesh::hello_triangle());
+    let mut mesh = single(&device, format, &Mesh::hello_triangle());
     let model = Matrix4::IDENTITY.to_cols_array();
     let filled_scene = [DrawableObject::Mesh {
         mesh_id: 0,
@@ -389,7 +398,7 @@ fn mesh_renderer_textured_samples_bound_texture() {
     )
     .unwrap();
 
-    let mut mesh = MeshRenderer::new(&device, format, &quad);
+    let mut mesh = single(&device, format, &quad);
     mesh.set_texture(&checker);
     let scene = [DrawableObject::Mesh {
         mesh_id: 0,
@@ -445,7 +454,7 @@ fn mesh_renderer_aabb_overlay_draws_green_box() {
     let (device, queue) = pollster::block_on(test_device());
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (64, 64);
-    let mut mesh = MeshRenderer::new(&device, format, &Mesh::hello_triangle());
+    let mut mesh = single(&device, format, &Mesh::hello_triangle());
     let model = Matrix4::IDENTITY.to_cols_array();
     let plain_scene = [DrawableObject::Mesh {
         mesh_id: 0,
@@ -513,7 +522,7 @@ fn mesh_renderer_axes_overlay_draws_rgb_gizmo() {
     let (device, queue) = pollster::block_on(test_device());
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (64, 64);
-    let mut mesh = MeshRenderer::new(&device, format, &Mesh::hello_triangle());
+    let mut mesh = single(&device, format, &Mesh::hello_triangle());
     let model = Matrix4::IDENTITY.to_cols_array();
     let plain_scene = [DrawableObject::Mesh {
         mesh_id: 0,
@@ -591,7 +600,7 @@ fn scene_composes_all_drawable_kinds_together() {
     let (device, queue) = pollster::block_on(test_device());
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (64, 64);
-    let mut mesh = MeshRenderer::new(&device, format, &Mesh::hello_triangle());
+    let mut mesh = single(&device, format, &Mesh::hello_triangle());
     let model = Matrix4::IDENTITY.to_cols_array();
 
     let filled_only = [DrawableObject::Mesh {
@@ -706,7 +715,7 @@ fn mesh_renderer_renders_loaded_quad_filled_with_correct_coverage() {
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (64, 64);
     let quad = Mesh::from_obj(QUAD_OBJ).expect("quad OBJ parses");
-    let mut mesh = MeshRenderer::new(&device, format, &quad);
+    let mut mesh = single(&device, format, &quad);
 
     let scene = [DrawableObject::Mesh {
         mesh_id: 0,
@@ -769,7 +778,7 @@ fn cg_and_cv_cameras_render_matching_output() {
     let (width, height) = (96, 96);
     let viewport = Viewport { width, height };
     let quad = Mesh::from_obj(QUAD_OBJ).expect("quad OBJ parses");
-    let mut mesh = MeshRenderer::new(&device, format, &quad);
+    let mut mesh = single(&device, format, &quad);
 
     let scene = [DrawableObject::Mesh {
         mesh_id: 0,
@@ -861,7 +870,7 @@ fn dolly_turntable_bird_eye_cg_cv_wireframe_stays_framed() {
     let (width, height) = (128, 128);
     let viewport = Viewport { width, height };
     let cube = Mesh::from_obj(CUBE_OBJ).expect("cube OBJ parses");
-    let mut mesh = MeshRenderer::new(&device, format, &cube);
+    let mut mesh = single(&device, format, &cube);
 
     let fovy = crate::DEFAULT_FOV_Y; // 45°
                                      // Fixed bird's-eye view direction: 45° elevation, 35° azimuth (unit).
@@ -1025,7 +1034,7 @@ fn frame_plane_composites_background_under_scene() {
         ],
         indices: vec![0, 2, 3, 0, 3, 1],
     };
-    let mut mesh = MeshRenderer::new(&device, format, &quad);
+    let mut mesh = single(&device, format, &quad);
 
     // 2×2 background, row-major top-left origin: white, red / green, blue.
     assert!(!mesh.has_frame_texture());

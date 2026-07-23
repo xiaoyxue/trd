@@ -211,31 +211,13 @@ pub struct MeshRenderer {
 }
 
 impl MeshRenderer {
-    /// Builds a single-mesh renderer with no base model (vertices are drawn in
-    /// their own coordinates). Use [`MeshRenderer::with_base_model`] to apply a
-    /// preview/normalization transform beneath the per-frame model.
-    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat, mesh: &Mesh) -> Self {
-        Self::with_base_model(device, format, mesh, Matrix4::IDENTITY)
-    }
-
-    /// Like [`MeshRenderer::new`] but pre-multiplies `base_model` beneath every
-    /// frame's model — used to apply a mesh's [`crate::Mesh::preview_transform`]
-    /// (center + scale-to-fit).
-    pub fn with_base_model(
-        device: &wgpu::Device,
-        format: wgpu::TextureFormat,
-        mesh: &Mesh,
-        base_model: Matrix4,
-    ) -> Self {
-        Self::with_meshes(device, format, std::slice::from_ref(mesh), &[base_model])
-    }
-
-    /// Like [`with_meshes`](Self::with_meshes) but derives each mesh's base
-    /// (preview) model automatically via [`Mesh::preview_transform`]
+    /// Constructs a `MeshRenderer` that derives each mesh's base (preview) model
+    /// automatically via [`Mesh::preview_transform`]
     /// ([`crate::DEFAULT_PREVIEW_TARGET`]) — center + uniform scale-to-fit — so an
-    /// arbitrary-unit asset renders centered at a reasonable size. Shared by the
-    /// headless [`crate::run_stream`]/`BatchRenderer` and the windowed `trd-app`.
-    pub fn with_meshes_preview(
+    /// arbitrary-unit asset renders centered at a reasonable size. A convenience
+    /// constructor over [`new`](Self::new); shared by the headless
+    /// [`crate::run_stream`]/`BatchRenderer` and the windowed `trd-app`.
+    pub fn auto_fit(
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
         meshes: &[Mesh],
@@ -247,14 +229,17 @@ impl MeshRenderer {
                     .matrix()
             })
             .collect();
-        Self::with_meshes(device, format, meshes, &base_models)
+        Self::new(device, format, meshes, &base_models)
     }
 
-    /// Builds a renderer over several meshes, each with its own base (preview)
-    /// model. A frame's [`Scene`] references these meshes by id (row index).
+    /// Constructs a `MeshRenderer` over one or more meshes, each paired with an
+    /// explicit base (preview) model that is pre-multiplied beneath every
+    /// per-frame instance model (`effective = model · base`). This is the primary
+    /// constructor; [`auto_fit`](Self::auto_fit) derives the base models for you.
+    /// A frame's [`Scene`] references these meshes by id (row index).
     ///
     /// Panics if `meshes` is empty or `meshes`/`base_models` differ in length.
-    pub fn with_meshes(
+    pub fn new(
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
         meshes: &[Mesh],

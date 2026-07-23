@@ -366,7 +366,7 @@ impl ArrowRenderer {
                 .map(|mesh| mesh.preview_transform(DEFAULT_PREVIEW_TARGET).matrix())
                 .collect();
             let renderer =
-                MeshRenderer::with_meshes(&self.device, self.format, meshes, &base_models);
+                MeshRenderer::new(&self.device, self.format, meshes, &base_models);
             self.renderer = Some(renderer);
 
             // Bind the stream's texture (0.0.4) as the sampled albedo so
