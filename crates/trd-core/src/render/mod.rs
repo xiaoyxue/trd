@@ -1,0 +1,35 @@
+//! Shared, platform-agnostic mesh rendering.
+//!
+//! [`MeshRenderer`] rasterizes a [`Scene`] of [`DrawableObject`]s through the
+//! vertex/index-buffer path used by the native batch renderer and the browser.
+
+mod color;
+mod frame_params;
+mod gizmo;
+mod gpu_types;
+mod mesh_renderer;
+mod pipeline;
+mod scene;
+
+#[cfg(test)]
+mod gpu_tests;
+
+// Public API surface (re-exported unchanged by `crate::lib`).
+pub use frame_params::{CameraFormError, FrameParams, Viewport};
+pub use gpu_types::{Mesh, Vertex};
+pub use mesh_renderer::MeshRenderer;
+pub use pipeline::create_mesh_pipeline;
+pub use scene::{build_scene, Draw, DrawableObject, FrameFit, RenderMode, Scene};
+
+// Crate-internal items shared across render submodules and sibling modules.
+pub(crate) use color::upload_texture;
+pub(crate) use frame_params::{projection_from_intrinsics, DEFAULT_FAR, DEFAULT_NEAR};
+pub(crate) use gizmo::{axes_vertices, AABB_COLOR, AABB_EDGE_INDICES, AXES_VERTEX_COUNT};
+pub(crate) use gpu_types::{InstanceRaw, Uniform};
+pub(crate) use pipeline::{
+    create_depth_target, create_frame_bind_group_layout, create_frame_plane_pipeline,
+    create_mesh_bind_group_layout, create_mesh_pipeline_with, create_texture_bind_group_layout,
+    create_textured_pipeline, create_view_proj_binding, overlay_depth_stencil, solid_depth_stencil,
+    write_view_proj, DepthTarget,
+};
+pub(crate) use scene::frame_fit_uv_scale;
