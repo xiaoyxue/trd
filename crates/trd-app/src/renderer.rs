@@ -109,7 +109,7 @@ impl Gpu {
     /// centered + scaled to fit via its preview base model). Idempotent per
     /// stream: called once when the mesh table first arrives.
     pub(crate) fn set_meshes(&mut self, meshes: &[Mesh]) {
-        self.renderer = Some(MeshRenderer::with_meshes_preview(
+        self.renderer = Some(MeshRenderer::auto_fit(
             &self.device,
             self.config.format,
             meshes,

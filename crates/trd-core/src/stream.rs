@@ -586,7 +586,7 @@ impl BatchRenderer {
         }
 
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-        let renderer = MeshRenderer::with_meshes(&device, format, meshes, base_models);
+        let renderer = MeshRenderer::new(&device, format, meshes, base_models);
 
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("trd render target"),
