@@ -356,7 +356,12 @@ scene authoring, and the image-display texture. All pixels come from trd-core.
    selected with `--backend arrow`, proven pixel-identical to the in-process
    backend *(PR #99)*. The full "event → new arrow with computed model matrix →
    render → gui" loop, and the seam for external producers.
-4. ⏳ **wasm parity** *(own PR)*: egui-on-canvas + trd-core offscreen.
+4. ✅ **wasm parity**: egui-on-canvas (eframe `WebRunner`) + `trd-core` offscreen
+   (async wgpu 30 readback → egui texture, Strategy A). Shared `scene`/
+   `interaction`/`ui` compile on both targets; `wasm_renderer` + `web_app` are the
+   wasm twins of `render_backend` + `app`. Thin `crates/trd-gui/web/` bootstrap
+   (`start(canvas)`). Compiles + clippy-clean on wasm32; browser render is a
+   handoff (WebGPU browser required).
 5. ⏳ **(later)** Strategy B live shared-surface overlay once egui ships wgpu 30.
 
 ## 11. Open decisions

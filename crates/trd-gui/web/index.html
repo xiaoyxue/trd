@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>trd-gui — interactive viewer (wasm)</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #0c0c0c;
+        overflow: hidden;
+      }
+      /* eframe sizes the app to this canvas; fill the viewport. */
+      #trd-gui-canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- The whole UI + interaction + rendering happen in Rust (trd-gui wasm);
+         this page + src/main.ts are the only JS — the thin bootstrap the repo's
+         "JS is a thin bootstrap only" invariant allows (load the wasm-bindgen
+         module and hand it the canvas). Served/bundled by bun, mirroring web/. -->
+    <canvas id="trd-gui-canvas"></canvas>
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>

@@ -7,33 +7,9 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use trd_core::{ImageTexture, Mesh};
+use trd_core::Mesh;
 
 use crate::error::GuiError;
-
-/// Textures are downscaled to fit this square before upload — `trd-core`'s
-/// headless renderer uses wgpu's `downlevel_defaults` limits, whose
-/// `max_texture_dimension_2d` is 2048, and the demo albedo maps are 3072².
-const MAX_TEXTURE_DIM: u32 = 2048;
-
-/// A built-in origin-centered unit cube with per-corner colors, used as the
-/// default object when no `--mesh` is supplied (`v x y z r g b` OBJ extension).
-const DEFAULT_MESH_OBJ: &str = "\
-v -0.5 -0.5 -0.5 0.1 0.1 0.9
-v  0.5 -0.5 -0.5 0.9 0.1 0.1
-v  0.5  0.5 -0.5 0.9 0.9 0.1
-v -0.5  0.5 -0.5 0.1 0.9 0.1
-v -0.5 -0.5  0.5 0.1 0.9 0.9
-v  0.5 -0.5  0.5 0.9 0.1 0.9
-v  0.5  0.5  0.5 0.9 0.9 0.9
-v -0.5  0.5  0.5 0.2 0.2 0.2
-f 1 2 3 4
-f 5 6 7 8
-f 1 5 8 4
-f 2 6 7 3
-f 4 8 7 3
-f 1 5 6 2
-";
 
 /// Which render backend the viewer drives (design §5.2).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default, clap::ValueEnum)]
@@ -87,46 +63,23 @@ impl Cli {
                 })?;
                 Ok(Mesh::from_obj(&text)?)
             }
-            None => Ok(Mesh::from_obj(DEFAULT_MESH_OBJ)?),
+            None => Ok(crate::assets::default_mesh()?),
         }
     }
 
-    /// Loads and decodes the `--texture` image (if any) into an [`ImageTexture`],
-    /// downscaling to [`MAX_TEXTURE_DIM`] so it fits the renderer's texture-size
-    /// limit. Returns `None` when no texture was requested.
-    pub fn load_texture(&self) -> Result<Option<ImageTexture>, GuiError> {
+    /// Loads and decodes the `--texture` image (if any) into an [`ImageTexture`]
+    /// via [`crate::assets::decode_texture`]. Returns `None` when no texture was
+    /// requested.
+    pub fn load_texture(&self) -> Result<Option<trd_core::ImageTexture>, GuiError> {
         let Some(path) = &self.texture else {
             return Ok(None);
         };
-        let image = image::open(path).map_err(|source| GuiError::TextureIo {
+        let bytes = std::fs::read(path).map_err(|source| GuiError::TextureIo {
             path: path.display().to_string(),
             source,
         })?;
-        Ok(Some(texture_from_image(image)?))
+        Ok(Some(crate::assets::decode_texture(&bytes)?))
     }
-}
-
-/// Downscales `image` to fit [`MAX_TEXTURE_DIM`] (preserving aspect) and converts
-/// it to an [`ImageTexture`]. Split out from I/O so it is unit-testable without a
-/// file or a GPU.
-pub(crate) fn texture_from_image(image: image::DynamicImage) -> Result<ImageTexture, GuiError> {
-    let image = if image.width() > MAX_TEXTURE_DIM || image.height() > MAX_TEXTURE_DIM {
-        log::info!(
-            "downscaling texture {}×{} to fit {MAX_TEXTURE_DIM}²",
-            image.width(),
-            image.height()
-        );
-        image.resize(
-            MAX_TEXTURE_DIM,
-            MAX_TEXTURE_DIM,
-            image::imageops::FilterType::Triangle,
-        )
-    } else {
-        image
-    };
-    let rgba = image.to_rgba8();
-    let (width, height) = rgba.dimensions();
-    Ok(ImageTexture::from_rgba(width, height, rgba.into_raw())?)
 }
 
 #[cfg(test)]
@@ -157,26 +110,5 @@ mod tests {
             texture: None,
         };
         assert!(cli.load_texture().expect("no texture is Ok").is_none());
-    }
-
-    #[test]
-    fn small_texture_is_converted_unchanged() {
-        let img = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
-            8,
-            8,
-            image::Rgba([10, 20, 30, 255]),
-        ));
-        let tex = texture_from_image(img).expect("small texture converts");
-        assert_eq!((tex.width(), tex.height()), (8, 8));
-    }
-
-    #[test]
-    fn oversized_texture_is_downscaled_within_the_limit() {
-        // A thin, over-wide image keeps the test cheap while exercising the
-        // downscale branch: the width is clamped to MAX_TEXTURE_DIM.
-        let img = image::DynamicImage::ImageRgba8(image::RgbaImage::new(MAX_TEXTURE_DIM + 8, 2));
-        let tex = texture_from_image(img).expect("oversized texture converts");
-        assert!(tex.width() <= MAX_TEXTURE_DIM && tex.height() <= MAX_TEXTURE_DIM);
-        assert_eq!(tex.width(), MAX_TEXTURE_DIM);
     }
 }

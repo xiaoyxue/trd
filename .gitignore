@@ -9,6 +9,10 @@ web/dist
 
 # wasm-pack output (generated npm package for the wasm core)
 crates/trd-wasm/pkg
+# wasm-bindgen output + bun artifacts for the browser trd-gui viewer (Slice 4)
+crates/trd-gui/web/pkg
+crates/trd-gui/web/dist
+crates/trd-gui/web/node_modules
 
 # Nix
 result

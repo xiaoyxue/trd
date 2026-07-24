@@ -480,9 +480,9 @@ mod tests {
         let decoded = crate::decode_params_stream(&bytes).unwrap();
 
         assert_eq!(decoded.len(), 2);
-        for (i, (params, d)) in decoded.iter().enumerate() {
-            assert_eq!(*params, frames[i]);
-            assert_eq!(*d, draws[i]);
+        for (i, frame) in decoded.iter().enumerate() {
+            assert_eq!(frame.params, frames[i]);
+            assert_eq!(frame.draws, draws[i]);
         }
     }
 

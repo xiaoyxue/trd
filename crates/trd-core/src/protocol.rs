@@ -406,6 +406,24 @@ fn decode_frame_batch(batch: &RecordBatch) -> Result<FrameBatch, ProtocolError> 
         .collect())
 }
 
+/// Decodes a standalone **params** Arrow IPC stream (the bytes authored by
+/// [`crate::encode_params_stream`]) into one [`DecodedFrame`] per frame, reusing
+/// this module's decoders. Unlike [`InputSession`] it does **not** require a
+/// leading mesh table — it is the params-only counterpart for a producer that
+/// already holds the meshes (e.g. the GUI's Arrow round-trip render), so it need
+/// not re-decode the mesh per frame. Every batch's `trd.protocol.version`
+/// metadata is checked. Available on both native and wasm.
+pub fn decode_params_stream(bytes: &[u8]) -> Result<Vec<DecodedFrame>, ProtocolError> {
+    let reader = arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(bytes), None)?;
+    let mut frames = Vec::new();
+    for batch in reader {
+        let batch = batch?;
+        check_version(batch.schema().as_ref())?;
+        frames.extend(decode_frame_batch(&batch)?);
+    }
+    Ok(frames)
+}
+
 /// Decodes the optional per-frame **background frame reference** column (`0.0.5`)
 /// into one `Option<String>` per row, preferring `frame_url` (browser) then
 /// `frame_path`. Returns `None` when neither column is present; per-row nulls or
