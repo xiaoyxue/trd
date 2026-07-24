@@ -377,31 +377,34 @@ camera pans and zooms**. It is the cornellbox demo with only the clip (and its
 calibration) swapped — `trd-core` is untouched.
 
 The broadcast video and its extracted frames are **not** vendored (copyrighted); the
-demo reads them from a local dataset dir (e.g. `~/Asset/nba-short/`). Only the
-derived, image-free artifacts are committed: the adapter, the perception stream
-(`examples/frames.nba.perception.arrow` — just `K` + quad + `frame_path`) and the
-placed scene (`examples/frames.nba.stage2.jsonl`).
+demo reads the video from a local file (e.g. `~/Asset/nba-short/NBA.mp4`). The
+per-frame **calibration** it depends on *is* vendored — image-free numeric camera `K`
++ floor quads at [`assets/videos/nba/per_frame_KVP_cube.parquet`](assets/videos/nba/)
+(see its `DATASET.md`) — so the pipeline runs without the external dataset. Only the
+other derived artifacts are committed too: the adapter, the perception stream
+(`examples/frames.nba.perception.arrow`) and the placed scene
+(`examples/frames.nba.stage2.jsonl`).
 
 ```sh
-NBA=~/Asset/nba-short     # local dataset: NBA.mp4 + per_frame_KVP_cube.parquet
+NBA_MP4=~/Asset/nba-short/NBA.mp4     # only the (copyrighted) video is external
 
-# 1. parquet → perception Arrow (shot 2; use a trustworthy BA_* focal).
+# 1. vendored parquet → perception Arrow (shot 2; use a trustworthy BA_* focal).
 #    Prints the present_index range to extract next.
 uv run --with pyarrow scripts/nba_perception_to_arrow.py \
-  --parquet "$NBA/per_frame_KVP_cube.parquet" --shot 2 --method BA_2511 \
+  --shot 2 --method BA_2511 \
   -o examples/frames.nba.perception.arrow
 
 # 2. extract those broadcast frames (present_index 428..579) as background stills
 mkdir -p output/nba/frames
-ffmpeg -i "$NBA/NBA.mp4" -vf "select='between(n,428,579)',scale=960:540" \
+ffmpeg -i "$NBA_MP4" -vf "select='between(n,428,579)',scale=960:540" \
   -vsync 0 -start_number 428 -q:v 3 output/nba/frames/frame_%06d.jpg
 
 # 3. perception → placed scene (bunny on the court quad, Pose-free #77), then render
 uv run --with pyarrow --with numpy examples/placement_quad_by_local_coord.py \
   --from-perception examples/frames.nba.perception.arrow --place-mesh --placement-quad \
-  --src-width 1920 --src-height 1080 --width 960 --height 540 \
+  --size-factor 0.7 --src-width 1920 --src-height 1080 --width 960 --height 540 \
   -o examples/frames.nba.stage2.jsonl
-examples/render.sh --cli --placement-quad --axes-local \
+examples/render.sh --cli --placement-quad --axes-local --aabb \
   --mesh assets/meshes/bunny_with_texture/bunny.obj \
   --texture assets/meshes/bunny_with_texture/bunny_uv_map1.jpg \
   --frames-base output/nba \

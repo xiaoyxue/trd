@@ -1,0 +1,40 @@
+{
+  "description": "Per-frame K / 3 cube-VPs / ad-unit / cube vertices, multi-method (NBA shots 2 & 7).",
+  "grain": "one row per (shot, method, present_index)",
+  "methods": [
+    "1circle_4224",
+    "2VP_6127",
+    "2VP_9160",
+    "3circle_3643",
+    "BA_2511",
+    "BA_2568",
+    "Zhang_2538",
+    "Zhang_3533"
+  ],
+  "columns": {
+    "shot": "int NBA shot id",
+    "method": "K-estimation algorithm (see methods list); distinguishes K variants",
+    "present_index": "global frame index",
+    "f_ref_px": "method focal at ref frame; the value used in K (per-frame, const per shot+method)",
+    "f_frame_px": "== f_ref_px (K focal). Kept for schema stability.",
+    "f_frame_raw": "EXPERIMENTAL per-frame focal estimate from center(H_i).K_ref; on this low-rotation footage it is mostly unobservable/noisy -- use only where f_frame_reliable is true, else ignore",
+    "f_frame_reliable": "bool: per-frame focal self-consistent + rotation observable (rare here)",
+    "tilt_deg": "floor-normal tilt of this method (const per shot+method)",
+    "cx,cy,W,H": "principal point (frame center) + frame size",
+    "K": "3x3 row-major intrinsics from f_frame_px, pp at (cx,cy)",
+    "vp_len": "cube X-axis VP (court length r1), homogeneous [x,y,w] px in THIS frame",
+    "vp_wid": "cube Y-axis VP (court width r2), homogeneous",
+    "vp_up": "cube Z-axis VP (floor normal r3), homogeneous (w~0 => at infinity)",
+    "has_ad_quad": "bool: ad_quad is tracked (True) or H-propagated from ref (False)",
+    "ad_quad": "4 ad-unit corners (x,y) order UL,UR,LR,LL",
+    "cube_verts": "8 cube vertices (x,y) order [b0,b1,b2,b3,t0,t1,t2,t3]; bottom=ad_quad ring, top[k] above bottom[k] (extruded along floor normal)",
+    "h_ref_to_i": "3x3 row-major homography ref->this frame"
+  },
+  "vertex_order": [
+    "b0=UL",
+    "b1=UR",
+    "b2=LR",
+    "b3=LL",
+    "t0..t3 = extruded up from b0..b3"
+  ]
+}

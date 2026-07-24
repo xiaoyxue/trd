@@ -2,10 +2,10 @@
 """Adapt the NBA court-calibration parquet into the trd **perception** Arrow stream.
 
 The upstream research dataset ``per_frame_KVP_cube.parquet`` (VideoAnalysis#1133;
-see ``~/Asset/nba-short/``) already solves the hard part of issue #95: per broadcast
-frame it carries the camera intrinsics ``K`` and a tracked planar floor quad
-(``ad_quad`` — the "ad-unit" rectangle the reference AR cube stands on). That is
-*exactly* the input trd's single-view placement stage
+vendored under ``assets/videos/nba/`` — see that dir's ``DATASET.md``) already solves
+the hard part of issue #95: per broadcast frame it carries the camera intrinsics ``K``
+and a tracked planar floor quad (``ad_quad`` — the "ad-unit" rectangle the reference AR
+cube stands on). That is *exactly* the input trd's single-view placement stage
 (``examples/placement_quad_by_local_coord.py --from-perception``) consumes, so this
 adapter is a thin repack: it emits the **same** perception schema as
 ``scripts/perception_to_arrow.py`` (``k`` + ``placement_quad`` + ``frame_path``),
@@ -29,13 +29,14 @@ stage scales ``K`` to the render resolution (pass its ``--src-width 1920
 Run (from ``nix develop``)::
 
     uv run --with pyarrow scripts/nba_perception_to_arrow.py \
-        --parquet ~/Asset/nba-short/per_frame_KVP_cube.parquet \
         --shot 2 --method BA_2511 \
         -o examples/frames.nba.perception.arrow
 
-It prints the emitted ``present_index`` range to stderr so the offline frame
-extractor knows which frames of ``NBA.mp4`` to pull (they must land at
-``<frames-base>/<frame-rel>/frame_<present_index>.<ext>``).
+The calibration parquet is vendored at ``assets/videos/nba/per_frame_KVP_cube.parquet``
+(the ``--parquet`` default), so no external dataset is needed. It prints the emitted
+``present_index`` range to stderr so the offline frame extractor knows which frames of
+the (un-vendored, copyrighted) ``NBA.mp4`` to pull — they must land at
+``<frames-base>/<frame-rel>/frame_<present_index>.<ext>``.
 """
 import argparse
 import sys
@@ -53,8 +54,9 @@ PERCEPTION_STAGE_VALUE = b"perception"
 def main():
     ap = argparse.ArgumentParser(
         description="Repack the NBA K/ad_quad parquet into the trd perception Arrow stream (#95).")
-    ap.add_argument("--parquet", required=True,
-                    help="per_frame_KVP_cube.parquet (VideoAnalysis#1133 NBA dataset)")
+    ap.add_argument("--parquet", default="assets/videos/nba/per_frame_KVP_cube.parquet",
+                    help="per_frame_KVP_cube.parquet (VideoAnalysis#1133 NBA dataset; "
+                         "the calibration is vendored under assets/videos/nba/)")
     ap.add_argument("--shot", type=int, default=2, help="NBA shot id (2 or 7)")
     ap.add_argument("--method", default="BA_2511",
                     help="K-estimation method (use a BA_* focal; BA_2511=shot2, BA_2568=shot7)")
