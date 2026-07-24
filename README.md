@@ -51,7 +51,7 @@ Platform-agnostic wgpu logic, shared verbatim by every target:
 - **`output.rs`** — the cross-platform Arrow IPC *output* serialization.
   `OutputSession` writes the `r,g,b,a` `fixed_shape_tensor<u8>` stream
   incrementally (one output batch per input batch); `tightly_pack_rgba` strips GPU
-  row padding. Shared by the native CLI and the browser `ArrowRenderer`.
+  row padding. Shared by the native CLI and the browser `OffscreenRenderer`.
 - **`math/`** — the typed homogeneous linear-algebra layer over glam:
   `Vector2/3/4`, `Point2/3/4`, `Normal3`, `Matrix3/4`, `Rotation` (unit
   quaternion), `Transform`, and `Aabb2/3`. Zero-cost `#[repr(transparent)]`
@@ -85,10 +85,10 @@ Each is a *thin shell* that only supplies a render target and calls the core:
   **one** config-driven front-end: `render.sh --web` runs the *same* Arrow producers
   and scene flags as `--cli` and writes `stream.arrow` + `config.json` into the
   served directory; the tiny [`web/src/main.ts`](web/src/main.ts) loads
-  [`web/src/generic-renderer.ts`](web/src/generic-renderer.ts), which fetches both,
+  [`web/src/viewer.ts`](web/src/viewer.ts), which fetches both,
   decodes the whole stream once with `loadIpc` (buffering every frame), and replays
   it by index with `renderIndex(i)`. Two targets share the bundle — the on-screen
-  `CanvasRenderer` (default) and the offscreen `ArrowRenderer` (renders to a texture,
+  `CanvasRenderer` (default) and the offscreen `OffscreenRenderer` (renders to a texture,
   reads it back to RGBA, and paints it to a 2D canvas). Modes/overlays come from the
   config via `setWireframe`/`setTextured`/`setShowAabb`/`setShowAxes`/`setShowLocalAxes`,
   and `setCompositeFrame` + `updateFrameTextureRgba` composite each frame's 0.0.5
@@ -173,7 +173,7 @@ single, self-contained schema reference (the protocol is `0.0.5`-only).
 | `crates/trd-cli` | headless CLI: Arrow params in → Arrow image out |
 | `crates/trd-app` | native interactive window (winit + live wgpu surface); split into `main`/`cli`/`error`/`renderer`/`stream`/`app` modules |
 | `crates/trd-wasm` | `wasm-bindgen` entry point (crate-root glue + `canvas_renderer`/`arrow_renderer` modules); packaged as the `trd-wasm` npm library |
-| `web/` | bun-managed thin TypeScript wrapper (`main.ts` → config-driven `generic-renderer.ts`) that loads `trd-wasm` |
+| `web/` | bun-managed thin TypeScript wrapper (`main.ts` → config-driven `viewer.ts`) that loads `trd-wasm` |
 | `examples/` | mesh-first demo streams (e.g. `frames.bunny_dolly.cg.jsonl`, `frames.turntable.jsonl`) + `render.sh` / `render.ps1` wrappers |
 | `scripts/jsonl_to_arrow.py` | JSONL → Arrow `0.0.5` params stream (pyarrow producer) |
 | `scripts/extract_frames.py` | video → still `frames/` + [frame-to-row mapping manifest](docs/frame-extraction.md) (ffmpeg; boundary tooling for the #62 compositing pipeline) |
@@ -496,7 +496,7 @@ examples/render.sh --web --canvas-renderer --placement-quad --axes-local \
   --frames-base output/cornellbox \
   examples/frames.cornellbox.stage1.jsonl '' 960 540 25   # then open http://localhost:8080/?fps=30
 
-# Offscreen ArrowRenderer texture read back to a 2D canvas (browser twin of --cli output):
+# Offscreen OffscreenRenderer texture read back to a 2D canvas (browser twin of --cli output):
 examples/render.sh --web --offscreen-renderer --placement-quad --axes-local --aabb \
   --mesh assets/meshes/bunny_with_texture/bunny.obj \
   --texture assets/meshes/bunny_with_texture/bunny_uv_map1.jpg \
@@ -512,9 +512,8 @@ Every `--cli` content flag applies to `--web` unchanged — `--mesh`, `--texture
 into the stream's CV `k`, so it is a positional argument, **not** a URL param; the
 only live URL param is **`?fps=N`** (1..240, default = the `FPS` positional). Two
 render targets share the one bundle: **`--canvas-renderer`** (default) draws to the
-on-screen WebGPU `CanvasRenderer`; **`--offscreen-renderer`** (alias
-`--arrow-renderer`) draws to an offscreen `ArrowRenderer` texture read back to RGBA
-and painted to a 2D canvas.
+on-screen WebGPU `CanvasRenderer`; **`--offscreen-renderer`** draws to an offscreen
+`OffscreenRenderer` texture read back to RGBA and painted to a 2D canvas.
 
 The server binds all interfaces, so browse to `http://<host-ip>:PORT` directly,
 or forward it — `ssh -L 8080:localhost:8080 <user>@<host>`, then open
@@ -528,8 +527,8 @@ or forward it — `ssh -L 8080:localhost:8080 <user>@<host>`, then open
 
 The wasm core is a standard, TypeScript-typed npm package (`nix build .#trd-wasm`,
 built with `wasm-bindgen-cli` + `wasm-opt`); its crate root is glue only, with the
-two renderers in `crates/trd-wasm/src/{canvas_renderer,arrow_renderer}.rs`. The
-generic renderer fetches the prebuilt Arrow stream and replays it by index —
+two renderers in `crates/trd-wasm/src/{canvas_renderer,offscreen_renderer}.rs`. The
+generic viewer fetches the prebuilt Arrow stream and replays it by index —
 decoding it **once** with `loadIpc` (buffering every frame) rather than pushing
 frame-by-frame:
 
@@ -542,7 +541,7 @@ const total = canvas.loadIpc(streamBytes); // decode + buffer all frames
 canvas.renderIndex(0);                     // draw buffered frame 0
 ```
 
-`ArrowRenderer` is the offscreen counterpart: it renders each buffered frame to an
+`OffscreenRenderer` is the offscreen counterpart: it renders each buffered frame to an
 offscreen texture, and its `renderIndex(i)` is **async**, returning that frame's
 tightly-packed RGBA `Uint8Array` to paint onto a 2D canvas. Both renderers also
 keep the streaming `pushIpc` path (append input / emit output, `finish()` → EOS)

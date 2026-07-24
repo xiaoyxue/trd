@@ -161,7 +161,7 @@ impl CanvasRenderer {
     }
 
     /// Decodes frames from an Arrow IPC chunk and **buffers** them without
-    /// rendering (the generic renderer's load phase), returning the running total
+    /// rendering (the generic viewer's load phase), returning the running total
     /// of buffered frames. The stream's leading mesh/texture tables are consumed
     /// as usual; only the params frames are buffered, to be replayed by
     /// [`render_index`](Self::render_index). Push the whole `[mesh?][texture?][params]`
@@ -206,7 +206,7 @@ impl CanvasRenderer {
     }
 
     /// Renders one buffered frame (by index) to the surface using the current
-    /// flags and any uploaded background — the generic renderer's per-tick call.
+    /// flags and any uploaded background — the generic viewer's per-tick call.
     #[wasm_bindgen(js_name = renderIndex)]
     pub fn render_index(&mut self, index: u32) -> Result<(), JsValue> {
         self.require_open()?;

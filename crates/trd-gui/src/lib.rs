@@ -24,7 +24,7 @@
 //! scene + controller are unit-tested without egui or a GPU; `ui` is the shared
 //! egui layout). The render path is target-split: native uses the synchronous
 //! `render_backend` (`BatchRenderer`) driven by `app`; wasm uses the asynchronous
-//! offscreen `wasm_renderer` driven by `web_app`, started via [`start`].
+//! offscreen `web_renderer` driven by `web_app`, started via [`start`].
 
 pub mod assets;
 pub mod error;
@@ -39,9 +39,9 @@ pub mod app;
 pub mod cli;
 
 #[cfg(target_arch = "wasm32")]
-pub mod wasm_renderer;
-#[cfg(target_arch = "wasm32")]
 pub mod web_app;
+#[cfg(target_arch = "wasm32")]
+pub mod web_renderer;
 
 /// The browser entry point (Slice 4): builds the offscreen renderer and runs the
 /// eframe app on `canvas`. `mesh_obj` and `texture_bytes` are the browser
@@ -61,8 +61,8 @@ pub async fn start(
 ) -> Result<(), wasm_bindgen::JsValue> {
     use crate::interaction::InteractionController;
     use crate::scene::SceneState;
-    use crate::wasm_renderer::{WasmBackend, WasmRenderer};
     use crate::web_app::WebApp;
+    use crate::web_renderer::{WebBackend, WebRenderer};
 
     console_error_panic_hook::set_once();
     let _ = eframe::WebLogger::init(log::LevelFilter::Warn);
@@ -83,10 +83,10 @@ pub async fn start(
     // `?backend=arrow` selects the Arrow wire round-trip; anything else (or
     // absent) is the direct in-process render.
     let backend = match backend.as_deref() {
-        Some("arrow") => WasmBackend::Arrow,
-        _ => WasmBackend::Inproc,
+        Some("arrow") => WebBackend::Arrow,
+        _ => WebBackend::Inproc,
     };
-    let renderer = WasmRenderer::new(
+    let renderer = WebRenderer::new(
         &[mesh],
         texture.as_ref().map(|t| t as &dyn trd_core::Texture),
         512,

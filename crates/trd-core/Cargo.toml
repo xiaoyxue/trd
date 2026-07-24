@@ -17,6 +17,9 @@ arrow-schema = { version = "59", default-features = false, features = ["canonica
 # (wasm-compatible). `default-features = false` drops the `ahash` feature for a
 # leaner wasm build (falls back to std hashing).
 tobj = { version = "4", default-features = false }
+# Oneshot channel for the shared offscreen readback (`render/offscreen.rs`): the
+# map callback signals completion on both native and wasm (pure Rust, no I/O).
+futures-channel = "0.3"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 pollster = "0.4"

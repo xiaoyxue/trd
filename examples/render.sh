@@ -62,8 +62,8 @@
 #     examples/frames.bunny_dolly.cv.jsonl output/bunny_dolly_cv.gif 1024 1024 24
 # With --web (alias --wasm) it renders the SAME scene as --cli, but in a WebGPU
 # browser. It builds the config-driven web bundle via nix (.#web), copies it to a
-# writable serve dir, and drops in the runtime inputs the generic renderer
-# (web/src/generic-renderer.ts) fetches at load: `stream.arrow` (the identical
+# writable serve dir, and drops in the runtime inputs the generic viewer
+# (web/src/viewer.ts) fetches at load: `stream.arrow` (the identical
 # mesh++texture++params bytes trd-cli reads on stdin, from the same producers),
 # `config.json` (the chosen renderer target + scene flags + baked resolution +
 # default fps), and — when --frames-base is set — the background stills, so the
@@ -448,8 +448,8 @@ frames_base_flag=()
 
 # --web/--wasm: replay the SAME stream + scene flags as --cli, but in the browser.
 # Build the config-driven web bundle (nix .#web) once, copy it to a writable serve
-# dir, then drop in the runtime inputs the generic renderer (web/src/generic-
-# renderer.ts) fetches at load:
+# dir, then drop in the runtime inputs the generic viewer (web/src/viewer.ts)
+# fetches at load:
 #   stream.arrow  — mesh++texture++params, the identical bytes trd-cli reads on stdin
 #   config.json   — target renderer + scene flags + baked resolution + default fps
 #   frames/…      — the 0.0.5 background stills (copied from --frames-base) so each

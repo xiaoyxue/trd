@@ -1,22 +1,22 @@
-// The single, config-driven browser renderer. It is the in-browser twin of
+// The single, config-driven browser viewer. It is the in-browser twin of
 // `render.sh --cli`: `render.sh --web` runs the SAME Arrow producers (mesh +
 // texture + params) at the SAME scene flags, writes the resulting stream plus a
 // small `config.json` into the served directory, and this module fetches both
 // and replays them — to an on-screen `<canvas>` (`--canvas-renderer`, the
 // `CanvasRenderer`) or to an offscreen texture painted back to the canvas
-// (`--offscreen-renderer`, the `ArrowRenderer`).
+// (`--offscreen-renderer`, the `OffscreenRenderer`).
 //
 // The scene (which meshes/texture, camera, draws, wireframe/textured/aabb/axes/
 // axes-local, background compositing) is fixed by render.sh at generation time,
 // exactly like the CLI. Only playback `?fps=N` is a live URL param (the render
 // resolution is baked into the stream, so it is a render.sh argument).
-import init, { ArrowRenderer, CanvasRenderer } from "trd-wasm";
+import init, { CanvasRenderer, OffscreenRenderer } from "trd-wasm";
 import wasmUrl from "trd-wasm/trd_wasm_bg.wasm" with { type: "file" };
 
 /// The flags render.sh bakes alongside the generated `stream.arrow`. Mirrors the
 /// `--cli` scene flags plus the chosen web target and default playback rate.
 interface RenderConfig {
-  /// `canvas` = on-screen `CanvasRenderer`; `offscreen` = `ArrowRenderer`
+  /// `canvas` = on-screen `CanvasRenderer`; `offscreen` = `OffscreenRenderer`
   /// rendering to a texture then painted to a 2D canvas.
   target: "canvas" | "offscreen";
   /// Base render mode for meshes without a per-draw override.
@@ -134,7 +134,7 @@ async function main(): Promise<void> {
 /// browser twin of trd-app buffering the whole stream up front). Decoded
 /// concurrently in small batches; a status line reports progress.
 async function preloadBackgrounds(
-  renderer: CanvasRenderer | ArrowRenderer,
+  renderer: CanvasRenderer | OffscreenRenderer,
   total: number,
   config: RenderConfig,
 ): Promise<void> {
@@ -208,7 +208,7 @@ async function runOffscreen(
   if (!context) {
     fail("failed to acquire 2D context for the offscreen display");
   }
-  const renderer = await ArrowRenderer.create(config.width, config.height);
+  const renderer = await OffscreenRenderer.create(config.width, config.height);
   applyMode(renderer, config);
   const total = renderer.loadIpc(stream);
   if (total === 0) {
@@ -253,7 +253,7 @@ async function runOffscreen(
 /// The scene-mode + overlay flags are identical across both renderers; applied
 /// once before playback. `setTextured`/`setWireframe` are mutually exclusive; the
 /// default (filled) leaves per-vertex color.
-function applyMode(renderer: CanvasRenderer | ArrowRenderer, config: RenderConfig): void {
+function applyMode(renderer: CanvasRenderer | OffscreenRenderer, config: RenderConfig): void {
   if (config.mode === "wireframe") {
     renderer.setWireframe(true);
   } else if (config.mode === "textured") {
@@ -272,7 +272,7 @@ function applyMode(renderer: CanvasRenderer | ArrowRenderer, config: RenderConfi
 /// callback; `preloadBackgrounds` guarantees the cache hit. A frame with no
 /// reference — or one not yet cached — keeps the previous background.
 function uploadCachedBackground(
-  renderer: CanvasRenderer | ArrowRenderer,
+  renderer: CanvasRenderer | OffscreenRenderer,
   ref: string | undefined,
   config: RenderConfig,
 ): void {

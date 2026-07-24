@@ -1,23 +1,21 @@
-//! [`WasmRenderer`] — the browser render backend (#97, Slice 4).
+//! [`WebRenderer`] — the browser render backend (#97, Slice 4).
 //!
-//! The wasm twin of the native [`InProcRenderer`](crate::render_backend::InProcRenderer):
+//! The web twin of the native [`InProcRenderer`](crate::render_backend::InProcRenderer):
 //! it builds a `trd-core` [`MeshRenderer`] once (its own wgpu 30 device, no
 //! surface), then renders the interactive [`SceneState`] to an **offscreen**
 //! texture and reads it back to RGBA — the pixels the eframe app uploads as an
 //! egui texture (Strategy A: only CPU RGBA crosses, so egui's WebGL backend stays
-//! independent of `trd-core`'s wgpu). Mirrors the async readback path of
-//! `trd-wasm`'s offscreen `ArrowRenderer` (`map_async` + `device.poll` + await).
+//! independent of `trd-core`'s wgpu). Both share `trd-core`'s
+//! [`OffscreenTarget`] readback harness with `trd-wasm`'s `OffscreenRenderer`.
 //!
 //! Rendering is **async** on wasm (GPU readback can't block the browser event
 //! loop), so — unlike the native `SceneRenderer` trait — `render` is an
 //! `async fn`; the app schedules it with `wasm_bindgen_futures::spawn_local`.
 
-use futures_channel::oneshot;
-
 use trd_core::{
-    build_scene, decode_params_stream, encode_params_stream, read_image_stream, tightly_pack_rgba,
-    DrawableObject, FrameParams, Mesh, MeshRenderer, OutputSession, Texture, Viewport,
-    DEFAULT_PREVIEW_TARGET,
+    build_scene, decode_params_stream, encode_params_stream, read_image_stream, DrawableObject,
+    FrameParams, Mesh, MeshRenderer, OffscreenTarget, OutputSession, Texture, DEFAULT_PREVIEW_TARGET,
+    OFFSCREEN_FORMAT,
 };
 
 use crate::error::GuiError;
@@ -26,35 +24,34 @@ use crate::scene::SceneState;
 
 /// How the browser renderer produces each frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum WasmBackend {
+pub enum WebBackend {
     /// Render the scene state directly on the persistent `MeshRenderer` (lowest
-    /// latency; the default) — the wasm twin of the native `InProcRenderer`.
+    /// latency; the default) — the web twin of the native `InProcRenderer`.
     #[default]
     Inproc,
     /// Round-trip the frame through the Arrow wire format: encode the scene to a
     /// `[mesh][texture?][params]` stream, decode it back through the **wasm**
     /// decoder (`InputSession`), render on the persistent device, then encode the
     /// image to an Arrow stream and decode it back (`OutputSession` /
-    /// `read_image_stream`) — the wasm twin of the native `ArrowRoundTripRenderer`
+    /// `read_image_stream`) — the web twin of the native `ArrowRoundTripRenderer`
     /// and the seam an external producer would drive. Reuses the device, so only
     /// the per-frame encode/decode is extra.
     Arrow,
 }
 
 /// A browser offscreen renderer over a `trd-core` [`MeshRenderer`].
-pub struct WasmRenderer {
+pub struct WebRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     renderer: MeshRenderer,
-    target: wgpu::Texture,
-    staging: wgpu::Buffer,
+    /// The shared offscreen render target + readback buffer (#103, Part B).
+    target: OffscreenTarget,
     width: u32,
     height: u32,
-    padded_bytes_per_row: u32,
-    backend: WasmBackend,
+    backend: WebBackend,
 }
 
-impl WasmRenderer {
+impl WebRenderer {
     /// Builds the offscreen renderer (async: wgpu device creation) from the
     /// static meshes and an optional bound `texture` (sampled by
     /// [`RenderMode::Textured`](trd_core::RenderMode::Textured)).
@@ -63,7 +60,7 @@ impl WasmRenderer {
         texture: Option<&dyn Texture>,
         width: u32,
         height: u32,
-        backend: WasmBackend,
+        backend: WebBackend,
     ) -> Result<Self, GuiError> {
         let instance = wgpu::Instance::default();
         let adapter = instance
@@ -93,40 +90,18 @@ impl WasmRenderer {
             )));
         }
 
-        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
         let base_models: Vec<trd_core::Matrix4> = meshes
             .iter()
             .map(|m| m.preview_transform(DEFAULT_PREVIEW_TARGET).matrix())
             .collect();
-        let mut renderer = MeshRenderer::new(&device, format, meshes, &base_models);
+        let mut renderer = MeshRenderer::new(&device, OFFSCREEN_FORMAT, meshes, &base_models);
         if let Some(texture) = texture {
             renderer.set_texture(texture);
         }
 
-        let target = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("trd-gui wasm target"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-
-        let unpadded = width * 4;
-        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let padded_bytes_per_row = unpadded.div_ceil(align) * align;
-        let staging = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("trd-gui wasm staging"),
-            size: u64::from(padded_bytes_per_row) * u64::from(height),
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        // The shared offscreen harness owns the render target + readback buffer.
+        let target = OffscreenTarget::new(&device, width, height)
+            .map_err(|e| GuiError::WasmRender(e.to_string()))?;
 
         // The Arrow backend round-trips only the per-frame params through the
         // wire (the mesh is uploaded once into `renderer`, like native), so no
@@ -136,10 +111,8 @@ impl WasmRenderer {
             queue,
             renderer,
             target,
-            staging,
             width,
             height,
-            padded_bytes_per_row,
             backend,
         })
     }
@@ -153,8 +126,8 @@ impl WasmRenderer {
     /// via the direct path or the Arrow round-trip per the configured backend.
     pub async fn render(&mut self, state: &SceneState) -> Result<ImageRgba, GuiError> {
         let rgba = match self.backend {
-            WasmBackend::Inproc => self.render_direct(state).await?,
-            WasmBackend::Arrow => self.render_arrow(state).await?,
+            WebBackend::Inproc => self.render_direct(state).await?,
+            WebBackend::Arrow => self.render_arrow(state).await?,
         };
         Ok(ImageRgba {
             width: self.width,
@@ -164,7 +137,7 @@ impl WasmRenderer {
     }
 
     /// Direct path: build the scene from `state` and render it on the persistent
-    /// device (the wasm twin of `InProcRenderer`).
+    /// device (the web twin of `InProcRenderer`).
     async fn render_direct(&mut self, state: &SceneState) -> Result<Vec<u8>, GuiError> {
         let aspect = self.width as f32 / self.height.max(1) as f32;
         let params = state.frame_params(aspect);
@@ -234,66 +207,9 @@ impl WasmRenderer {
         params: FrameParams,
         scene: &[DrawableObject],
     ) -> Result<Vec<u8>, GuiError> {
-        let view = self
-            .target
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("trd-gui wasm frame"),
-            });
-        let viewport = Viewport {
-            width: self.width,
-            height: self.height,
-        };
-        self.renderer
-            .encode(&self.queue, &mut encoder, &view, params, scene, viewport);
-
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.target,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &self.staging,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(self.padded_bytes_per_row),
-                    rows_per_image: Some(self.height),
-                },
-            },
-            wgpu::Extent3d {
-                width: self.width,
-                height: self.height,
-                depth_or_array_layers: 1,
-            },
-        );
-        self.queue.submit(Some(encoder.finish()));
-
-        let slice = self.staging.slice(..);
-        let (sender, receiver) = oneshot::channel();
-        slice.map_async(wgpu::MapMode::Read, move |result| {
-            let _ = sender.send(result);
-        });
-        self.device
-            .poll(wgpu::PollType::Poll)
-            .map_err(|e| GuiError::WasmRender(format!("GPU poll failed: {e}")))?;
-        receiver
+        self.target
+            .render(&self.device, &self.queue, &mut self.renderer, params, scene)
             .await
-            .map_err(|_| GuiError::WasmRender("GPU readback cancelled".to_owned()))?
-            .map_err(|e| GuiError::WasmRender(format!("GPU readback failed: {e}")))?;
-
-        let rgba = match slice.get_mapped_range() {
-            Ok(mapped) => {
-                tightly_pack_rgba(&mapped, self.width, self.height, self.padded_bytes_per_row)
-                    .map_err(|e| GuiError::WasmRender(format!("row unpack failed: {e}")))
-            }
-            Err(e) => Err(GuiError::WasmRender(format!("mapped range failed: {e}"))),
-        };
-        self.staging.unmap();
-
-        rgba
+            .map_err(|e| GuiError::WasmRender(e.to_string()))
     }
 }

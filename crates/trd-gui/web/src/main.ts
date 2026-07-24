@@ -7,7 +7,7 @@ import wasmUrl from "../pkg/trd_gui_bg.wasm" with { type: "file" };
 
 async function main(): Promise<void> {
   // wasm-bindgen's default wasm path breaks once bundled, so pass the bundler's
-  // asset URL explicitly (same pattern as web/src/generic-renderer.ts).
+  // asset URL explicitly (same pattern as web/src/viewer.ts).
   await init({ module_or_path: wasmUrl });
 
   const canvas = document.getElementById("trd-gui-canvas");
