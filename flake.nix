@@ -103,6 +103,27 @@
           }
         );
 
+        # --- Native interactive GUI (eframe/egui) ---------------------------
+        # trd-gui is the interactive front-end (issue #97). Like trd-cli it
+        # dlopens the GPU/windowing libs (GL/Vulkan/X11/Wayland) at run time, so
+        # wrap the binary with the same `runtimeLibs` on LD_LIBRARY_PATH.
+        trd-gui = craneLib.buildPackage (
+          commonArgs
+          // {
+            inherit cargoArtifacts;
+            pname = "trd-gui";
+            cargoExtraArgs = "--package trd-gui";
+            doCheck = false;
+            # X11/Wayland/xkbcommon dev libs for the eframe/winit build.
+            buildInputs = runtimeLibs;
+            nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ pkgs.makeWrapper ];
+            postInstall = ''
+              wrapProgram $out/bin/trd-gui \
+                --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath runtimeLibs}
+            '';
+          }
+        );
+
         # --- wasm build ------------------------------------------------------
         wasmArgs = commonArgs // {
           CARGO_BUILD_TARGET = "wasm32-unknown-unknown";
@@ -251,7 +272,12 @@
       in
       {
         packages = {
-          inherit trd-cli trd-wasm web;
+          inherit
+            trd-cli
+            trd-gui
+            trd-wasm
+            web
+            ;
           default = web;
         };
 
@@ -259,6 +285,10 @@
           trd = {
             type = "app";
             program = "${trd-cli}/bin/trd";
+          };
+          trd-gui = {
+            type = "app";
+            program = "${trd-gui}/bin/trd-gui";
           };
           web = {
             type = "app";
@@ -270,6 +300,7 @@
         checks = {
           inherit
             trd-cli
+            trd-gui
             trd-wasm
             web
             ;
