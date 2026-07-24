@@ -2,6 +2,18 @@
 
 Status: **proposal** · Owner: @xiaoyxue · Branch: `feat/trd-gui-design`
 
+## 0. Decisions (locked, 2026-07-24)
+
+1. **Toolkit = egui** (over imgui-rs) — §3.
+2. **Integration = Strategy A** (decoupled CPU-RGBA handoff) — §4. Strategy B
+   (shared-surface overlay) is a *future* migration, once egui supports wgpu 30.
+3. **One cross-platform `trd-gui` crate**, not GUI code spread across
+   `trd-app`/`trd-wasm`. The egui UI + interaction logic is written **once** and
+   shared; only the bootstrap (native winit/eframe vs wasm canvas) and the render
+   backend are `cfg`-gated per target — §7.1. Recommended runner: **eframe**
+   (native + web from one `App`); raw `egui-winit`+`egui-wgpu` only if we need
+   finer control of the two-device setup.
+
 ## 1. Goal
 
 Add an **interactive** desktop/web front-end for trd that
@@ -78,7 +90,7 @@ boundary. So the "egui draws chrome directly on top of trd-core's live surface"
 
 Two integration strategies follow from this:
 
-### Strategy A — decoupled CPU-RGBA handoff  ✅ recommended now
+### Strategy A — decoupled CPU-RGBA handoff  ✅ **chosen**
 
 egui owns **its own** wgpu (29) device purely for UI; trd-core renders the scene
 **headless** to an RGBA buffer (wgpu 30) and the GUI **uploads that buffer as an
@@ -203,21 +215,49 @@ only when an external producer is actually wired in.
 
 ## 7. Proposed crate layout
 
-New crate `crates/trd-gui`, a **peer** of `trd-app`:
+### 7.1 One crate, both targets (not spread across native/wasm)
+
+egui is immediate-mode and **platform-agnostic**: the UI and interaction logic
+are plain Rust, written **once**. Only two things differ per platform, and both
+are small:
+
+* the **bootstrap** — native event loop/window (winit, via eframe) vs the wasm
+  canvas runner; and
+* the **render backend** — native in-proc trd-core render vs wasm offscreen
+  render + async readback.
+
+So `trd-gui` is a **single crate that targets both** native and wasm, rather
+than a shared "gui interface" library that `trd-app`/`trd-wasm` each integrate.
+It mirrors the existing empty-on-other-target pattern (`trd-app` native-only,
+`trd-wasm` wasm-only) — but in **one** crate, because egui lets us share the UI.
+`trd-app`/`trd-wasm` stay as the thin, non-interactive player/renderer;
+`trd-gui` is the interactive **peer**.
+
+| Concern | Shared (write once) | Native only | Wasm only |
+|---------|---------------------|-------------|-----------|
+| egui UI (panels, widgets, image) | ✅ `app.rs` | | |
+| `InteractionController` (events → matrix) | ✅ `interaction.rs` | | |
+| `SceneState` (models + camera) | ✅ `scene.rs` | | |
+| `SceneRenderer` trait | ✅ `render_backend.rs` | impls | impls |
+| Bootstrap / runner | | `main.rs` (eframe native) | `lib.rs` (eframe web / wasm-bindgen) |
+| Render backend impl | | `InProcRenderer` (trd-core, `block_on`) | offscreen trd-core + async readback |
+
+### 7.2 Files
+
+New crate `crates/trd-gui`:
 
 ```
 crates/trd-gui/
   Cargo.toml
   src/
-    main.rs            # native bin `trd-gui` (cfg-gated empty on wasm, like trd-app)
-    app.rs             # egui app: panels, layout, image widget, per-frame update
-    interaction.rs     # InteractionController: InteractionEvent → SceneState (unit-tested, no egui)
-    scene.rs           # SceneState: meshes + per-object model + camera FrameParams
-    render_backend.rs  # SceneRenderer trait + InProcRenderer + ArrowRoundTripRenderer
-    cli.rs             # args: --width/--height, --backend {inproc,arrow}, mesh/stream source, overlays
+    lib.rs             # shared modules; wasm-bindgen entry (cfg wasm), empty-ish on native
+    main.rs            # native bin `trd-gui` (eframe native runner; cfg-gated empty on wasm)
+    app.rs             # egui app: panels, layout, image widget, per-frame update (SHARED)
+    interaction.rs     # InteractionController: InteractionEvent → SceneState (SHARED, unit-tested, no egui)
+    scene.rs           # SceneState: meshes + per-object model + camera FrameParams (SHARED)
+    render_backend.rs  # SceneRenderer trait (SHARED) + InProc (native) / offscreen (wasm) impls (cfg-gated)
+    cli.rs             # native args: --width/--height, --backend {inproc,arrow}, mesh/stream source, overlays
     error.rs
-  # wasm: a lib target (egui on canvas + trd-core arrow_renderer offscreen),
-  # cfg-gated empty on native — mirrors trd-app/trd-wasm.
 ```
 
 Dependencies (native): `egui`, `egui-winit`, `egui-wgpu` (its own wgpu 29),
