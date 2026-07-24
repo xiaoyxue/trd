@@ -202,6 +202,12 @@ impl eframe::App for TrdGuiApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
 
+        // An expensive backend (Arrow round-trip) re-runs the whole pipeline per
+        // frame, so defer its re-render until a pointer interaction *ends* rather
+        // than every drag frame; cheap backends render every changed frame.
+        let interacting = ctx.input(|i| i.pointer.any_down());
+        let defer = self.renderer.defer_expensive() && interacting;
+
         egui::Panel::left("controls")
             .resizable(false)
             .exact_size(200.0)
@@ -209,11 +215,18 @@ impl eframe::App for TrdGuiApp {
 
         egui::CentralPanel::default().show(ui, |ui| {
             // Render before displaying so control-panel edits made this frame
-            // (mode/overlay toggles set `needs_render`) show immediately.
-            if self.needs_render || self.texture.is_none() {
+            // (mode/overlay toggles set `needs_render`) show immediately. The
+            // first frame (no texture yet) always renders.
+            if self.texture.is_none() || (self.needs_render && !defer) {
                 self.render_scene(&ctx);
             }
             self.image_panel(ui);
+
+            // While deferring, keep requesting repaints so the pending render
+            // fires as soon as the interaction ends.
+            if self.needs_render && defer {
+                ctx.request_repaint();
+            }
         });
     }
 }

@@ -36,4 +36,4 @@ pub(crate) use pipeline::{
     create_textured_pipeline, create_view_proj_binding, overlay_depth_stencil, solid_depth_stencil,
     write_view_proj, DepthTarget,
 };
-pub(crate) use scene::frame_fit_uv_scale;
+pub(crate) use scene::{frame_fit_uv_scale, DRAW_MODE_INHERIT};

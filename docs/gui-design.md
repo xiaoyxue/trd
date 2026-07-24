@@ -351,10 +351,11 @@ scene authoring, and the image-display texture. All pixels come from trd-core.
    *(PR #98)*
 3. **Object interaction + Arrow round-trip**: ✅ translate/rotate the mesh
    (`Draw.model`) in process, plus Filled/Wireframe/**Textured** render modes
-   (`--texture`) *(PR #98)*; ⏳ **next PR** adds the `ArrowRoundTripRenderer`
-   (Rust scene encoder + `run_stream`/`trd-cli`) behind the same `SceneRenderer`
-   trait — the full "event → new arrow with computed model matrix → render → gui"
-   loop for external producers.
+   (`--texture`) *(PR #98)*; ✅ the `ArrowRoundTripRenderer` (`trd_core::scene_encode`
+   authors the `[mesh][params]` Arrow → `run_stream` → `read_image_stream`),
+   selected with `--backend arrow`, proven pixel-identical to the in-process
+   backend *(PR #99)*. The full "event → new arrow with computed model matrix →
+   render → gui" loop, and the seam for external producers.
 4. ⏳ **wasm parity** *(own PR)*: egui-on-canvas + trd-core offscreen.
 5. ⏳ **(later)** Strategy B live shared-surface overlay once egui ships wgpu 30.
 

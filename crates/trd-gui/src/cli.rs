@@ -35,6 +35,18 @@ f 4 8 7 3
 f 1 5 6 2
 ";
 
+/// Which render backend the viewer drives (design §5.2).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum Backend {
+    /// Call `trd-core`'s `BatchRenderer` directly (lowest latency; the default).
+    #[default]
+    Inproc,
+    /// Author a `[mesh][params]` Arrow stream → `run_stream` → decode the image
+    /// stream back. Identical output to the batch CLI; the seam for external
+    /// producers. Higher latency, so it re-renders on interaction end.
+    Arrow,
+}
+
 /// `trd-gui` — an interactive egui viewer that renders a mesh with `trd-core`
 /// and turns orbit/zoom/move gestures into an updated camera/model matrix.
 #[derive(Parser, Debug)]
@@ -47,6 +59,10 @@ pub struct Cli {
     /// Render height in pixels (the display scales this to the window).
     #[arg(long, default_value_t = 512)]
     pub height: u32,
+
+    /// Which render backend to drive.
+    #[arg(long, value_enum, default_value_t = Backend::Inproc)]
+    pub backend: Backend,
 
     /// Path to a Wavefront OBJ mesh to view. Defaults to a built-in cube.
     #[arg(long)]
@@ -122,6 +138,7 @@ mod tests {
         let cli = Cli {
             width: 512,
             height: 512,
+            backend: Backend::Inproc,
             mesh: None,
             texture: None,
         };
@@ -135,6 +152,7 @@ mod tests {
         let cli = Cli {
             width: 256,
             height: 256,
+            backend: Backend::Inproc,
             mesh: None,
             texture: None,
         };

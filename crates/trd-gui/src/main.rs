@@ -10,9 +10,11 @@
 fn main() -> eframe::Result<()> {
     use clap::Parser;
     use trd_gui::app::TrdGuiApp;
-    use trd_gui::cli::Cli;
+    use trd_gui::cli::{Backend, Cli};
     use trd_gui::interaction::InteractionController;
-    use trd_gui::render_backend::{mesh_has_uvs, InProcRenderer};
+    use trd_gui::render_backend::{
+        mesh_has_uvs, ArrowRoundTripRenderer, InProcRenderer, SceneRenderer,
+    };
     use trd_gui::scene::SceneState;
 
     env_logger::Builder::from_env(
@@ -22,8 +24,8 @@ fn main() -> eframe::Result<()> {
 
     let cli = Cli::parse();
 
-    // Load the mesh and build the in-process backend up front so a bad mesh /
-    // adapter fails fast on the console rather than inside the window.
+    // Load the mesh and build the backend up front so a bad mesh / adapter fails
+    // fast on the console rather than inside the window.
     let mesh = match cli.load_mesh() {
         Ok(mesh) => mesh,
         Err(err) => {
@@ -47,12 +49,24 @@ fn main() -> eframe::Result<()> {
              assets/meshes/bunny_with_texture/bunny.obj"
         );
     }
-    let renderer = match InProcRenderer::new(
-        &[mesh],
-        texture.as_ref().map(|t| t as &dyn trd_core::Texture),
-        cli.width,
-        cli.height,
-    ) {
+
+    let renderer: Result<Box<dyn SceneRenderer>, _> = match cli.backend {
+        Backend::Inproc => InProcRenderer::new(
+            &[mesh],
+            texture.as_ref().map(|t| t as &dyn trd_core::Texture),
+            cli.width,
+            cli.height,
+        )
+        .map(|r| Box::new(r) as Box<dyn SceneRenderer>),
+        Backend::Arrow => ArrowRoundTripRenderer::new(
+            &[mesh],
+            texture.as_ref().map(|t| t as &dyn trd_core::Texture),
+            cli.width,
+            cli.height,
+        )
+        .map(|r| Box::new(r) as Box<dyn SceneRenderer>),
+    };
+    let renderer = match renderer {
         Ok(renderer) => renderer,
         Err(err) => {
             log::error!("failed to create renderer: {err}");
@@ -61,7 +75,7 @@ fn main() -> eframe::Result<()> {
     };
 
     let controller = InteractionController::new(SceneState::default());
-    let app = TrdGuiApp::new(controller, Box::new(renderer));
+    let app = TrdGuiApp::new(controller, renderer);
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([900.0, 700.0]),

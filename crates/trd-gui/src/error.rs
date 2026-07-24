@@ -41,4 +41,19 @@ pub enum GuiError {
     #[cfg(not(target_arch = "wasm32"))]
     #[error("invalid texture: {0}")]
     TextureData(#[from] trd_core::TextureError),
+
+    /// Authoring the Arrow scene stream failed (Arrow round-trip backend).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error("scene encode failed: {0}")]
+    Encode(#[from] trd_core::SceneEncodeError),
+
+    /// Decoding the rendered image stream failed (Arrow round-trip backend).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error("image decode failed: {0}")]
+    Output(#[from] trd_core::OutputError),
+
+    /// The Arrow round-trip produced no image frame for the scene.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error("the render pipeline produced no frame")]
+    NoFrame,
 }
