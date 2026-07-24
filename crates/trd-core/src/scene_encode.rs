@@ -440,6 +440,53 @@ mod tests {
     }
 
     #[test]
+    fn params_roundtrip_through_decode_params_stream() {
+        let frames = vec![
+            FrameParams {
+                eye: Some([0.0, 0.0, 4.0]),
+                target: Some([0.0, 0.0, 0.0]),
+                up: Some([0.0, 1.0, 0.0]),
+                fovy: Some(0.8),
+                aspect: Some(1.5),
+                ..FrameParams::IDENTITY
+            },
+            FrameParams {
+                eye: Some([1.0, 0.0, 3.0]),
+                target: Some([0.0, 0.0, 0.0]),
+                up: Some([0.0, 1.0, 0.0]),
+                fovy: Some(0.8),
+                aspect: Some(1.5),
+                ..FrameParams::IDENTITY
+            },
+        ];
+        let draws = vec![
+            vec![Draw {
+                mesh_id: 0,
+                model: [
+                    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.2, -0.1, 0.0, 1.0,
+                ],
+                mode: None,
+            }],
+            vec![Draw {
+                mesh_id: 0,
+                model: [
+                    0.5, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 1.0,
+                ],
+                mode: Some(RenderMode::Wireframe),
+            }],
+        ];
+
+        let bytes = encode_params_stream(&frames, Some(&draws)).unwrap();
+        let decoded = crate::decode_params_stream(&bytes).unwrap();
+
+        assert_eq!(decoded.len(), 2);
+        for (i, (params, d)) in decoded.iter().enumerate() {
+            assert_eq!(*params, frames[i]);
+            assert_eq!(*d, draws[i]);
+        }
+    }
+
+    #[test]
     fn draws_length_must_match_frames() {
         let frame = FrameParams {
             fovy: Some(0.8),

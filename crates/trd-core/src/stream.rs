@@ -402,6 +402,36 @@ fn decode_draws(batch: &RecordBatch) -> Result<Option<Vec<Vec<Draw>>>, StreamErr
     Ok(Some(rows))
 }
 
+/// Decodes a **params** Arrow IPC stream (the bytes authored by
+/// [`crate::encode_params_stream`]) into one `(FrameParams, draws)` pair per
+/// frame, reusing the exact wire decoders [`decode_frames`] and the draw decoder
+/// that [`run_stream`] uses. When a frame carries no instanced draw list, its
+/// `draws` is empty (the renderer then places one default instance of mesh `0`
+/// by the frame's own `model`).
+///
+/// This is the decode half of the round-trip an in-process producer needs: it
+/// lets a caller (e.g. the GUI's Arrow backend) serialize the per-frame
+/// camera/model matrix to the wire and decode it back **without** rebuilding the
+/// GPU renderer per frame — it can then feed a persistent [`BatchRenderer`].
+pub fn decode_params_stream(bytes: &[u8]) -> Result<Vec<(FrameParams, Vec<Draw>)>, StreamError> {
+    let reader = StreamReader::try_new(std::io::Cursor::new(bytes), None)?;
+    let mut out = Vec::new();
+    for batch in reader {
+        let batch = batch?;
+        check_version(batch.schema().as_ref())?;
+        let frames = decode_frames(&batch)?;
+        let draw_lists = decode_draws(&batch)?;
+        for (i, params) in frames.into_iter().enumerate() {
+            let draws = draw_lists
+                .as_ref()
+                .map(|lists| lists[i].clone())
+                .unwrap_or_default();
+            out.push((params, draws));
+        }
+    }
+    Ok(out)
+}
+
 /// Decodes the optional per-frame **background frame reference** column (`0.0.5`)
 /// into one `Option<String>` per row. The column names a per-frame image the
 /// shell loads at the boundary and composites beneath the scene via a
