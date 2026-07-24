@@ -4,8 +4,8 @@
 use std::sync::Arc;
 
 use trd_core::{
-    build_scene, EnvMapData, FrameFit, GridPlane, ImageTexture, Mesh, MeshRenderer, PbrMaterial,
-    RenderMode, Viewport,
+    build_scene, EnvMapData, FrameFit, GridPlane, ImageTexture, Mesh, MeshRenderer, OnscreenTarget,
+    PbrMaterial, RenderMode,
 };
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
@@ -16,10 +16,10 @@ use crate::stream::FrameData;
 /// GPU resources tied to a live window surface.
 pub(crate) struct WindowRenderer {
     pub(crate) window: Arc<Window>,
-    surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    config: wgpu::SurfaceConfiguration,
+    /// The shared on-screen render harness (surface + config + sRGB view, #103).
+    target: OnscreenTarget,
     /// The scene renderer, built lazily once the stream's mesh table (or the
     /// legacy built-in fallback) has arrived from the reader thread.
     pub(crate) renderer: Option<MeshRenderer>,
@@ -88,24 +88,19 @@ impl WindowRenderer {
             wgpu::PresentMode::Fifo
         };
         log::info!("present mode: {:?} (vsync={vsync})", config.present_mode);
-        surface.configure(&device, &config);
+        let target = OnscreenTarget::new(&device, surface, config);
 
         Ok(Self {
             window,
-            surface,
             device,
             queue,
-            config,
+            target,
             renderer: None,
         })
     }
 
     pub(crate) fn resize(&mut self, size: PhysicalSize<u32>) {
-        if size.width > 0 && size.height > 0 {
-            self.config.width = size.width;
-            self.config.height = size.height;
-            self.surface.configure(&self.device, &self.config);
-        }
+        self.target.resize(&self.device, size.width, size.height);
     }
 
     /// Uploads the stream's meshes and builds the scene renderer (each mesh
@@ -114,7 +109,7 @@ impl WindowRenderer {
     pub(crate) fn set_meshes(&mut self, meshes: &[Mesh]) {
         self.renderer = Some(MeshRenderer::auto_fit(
             &self.device,
-            self.config.format,
+            self.target.view_format(),
             meshes,
         ));
     }
@@ -161,23 +156,19 @@ impl WindowRenderer {
             return;
         };
 
-        let surface = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(surface)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(surface) => surface,
+        let texture = match self.target.acquire() {
+            wgpu::CurrentSurfaceTexture::Success(texture)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
             // The surface config is stale (e.g. after a resize/minimise or a lost
             // surface); reconfigure and try again on the next redraw.
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                self.surface.configure(&self.device, &self.config);
+                self.target.reconfigure(&self.device);
                 self.window.request_redraw();
                 return;
             }
             // Transient (timeout/occluded/other): skip this frame.
             _ => return,
         };
-
-        let view = surface
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
 
         // Author the frame's Scene from its draw list + the render mode/overlay
         // flags, then hand it to the shared MeshRenderer — the same Scene the
@@ -197,23 +188,13 @@ impl WindowRenderer {
             show_local_grid_mesh,
             frame_fit,
         );
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("trd app frame"),
-            });
-        renderer.encode(
+        self.target.present(
+            &self.device,
             &self.queue,
-            &mut encoder,
-            &view,
+            renderer,
+            texture,
             frame.params,
             &scene,
-            Viewport {
-                width: self.config.width,
-                height: self.config.height,
-            },
         );
-        self.queue.submit(Some(encoder.finish()));
-        self.queue.present(surface);
     }
 }
