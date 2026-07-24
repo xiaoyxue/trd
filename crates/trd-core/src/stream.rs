@@ -678,8 +678,7 @@ pub fn run_stream<R: Read, W: Write>(
             output_session = Some(session_out);
         }
 
-        if let (Some(renderer), Some(output_session)) =
-            (renderer.as_mut(), output_session.as_mut())
+        if let (Some(renderer), Some(output_session)) = (renderer.as_mut(), output_session.as_mut())
         {
             for batch in &batches {
                 render_and_write_batch(
