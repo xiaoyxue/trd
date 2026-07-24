@@ -14,6 +14,16 @@ Status: **proposal** · Owner: @xiaoyxue · Branch: `feat/trd-gui-design`
    (native + web from one `App`); raw `egui-winit`+`egui-wgpu` only if we need
    finer control of the two-device setup.
 
+## Status
+
+- **Scaffold landed** (`crates/trd-gui`): a native eframe/egui window (empty
+  placeholder), added to the workspace + a wrapped `nix build .#trd-gui` output +
+  `nix flake check`. Deps: `eframe`/`egui` 0.35 (glow), `trd-core`. Native-only
+  for now (empty `main` on wasm, like trd-app). `trd_core::BatchRenderer` is now
+  exported for the in-process backend.
+- **Next (handed off, primarily on Windows):** the vertical slices in §10 —
+  Slice 1 in-process backend first. See issue #97 for the per-slice checklists.
+
 ## 1. Goal
 
 Add an **interactive** desktop/web front-end for trd that
@@ -92,17 +102,25 @@ Two integration strategies follow from this:
 
 ### Strategy A — decoupled CPU-RGBA handoff  ✅ **chosen**
 
-egui owns **its own** wgpu (29) device purely for UI; trd-core renders the scene
-**headless** to an RGBA buffer (wgpu 30) and the GUI **uploads that buffer as an
+egui/eframe owns **its own** UI renderer, and trd-core renders the scene
+**headless** to an RGBA buffer (wgpu 30); the GUI **uploads that buffer as an
 egui texture** shown in the central panel. Only **CPU pixels** cross between the
-two wgpu instances, so the version gap is irrelevant.
+two, so the version gap is irrelevant.
+
+**Realized with eframe's default `glow` (OpenGL) backend** for the UI — since
+only CPU RGBA is handed over, egui's renderer is fully independent of trd-core's
+`wgpu 30`, and we avoid pulling a *second* wgpu (29) into the build entirely.
+(eframe's optional `wgpu` backend is still resolved in `Cargo.lock` but stays
+inactive.) On wasm the same holds with eframe's WebGL renderer while trd-core
+uses WebGPU.
 
 This is *exactly the loop the request describes* — "generate new arrow with
 computed model matrix → render again → send the output to trd-gui" — and it
 works today.
 
-Cost: both wgpu 29 and wgpu 30 compile into the binary; one GPU→CPU→GPU readback
-per updated frame. Both are acceptable (we only re-render on change).
+Cost: on native, egui runs on OpenGL while trd-core runs on Vulkan/wgpu (two
+independent graphics contexts in one process); one GPU→CPU→GPU readback per
+updated frame. Both are acceptable (we only re-render on change).
 
 ### Strategy B — shared-surface egui overlay  ⏳ future
 

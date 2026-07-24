@@ -1,0 +1,32 @@
+[package]
+name = "trd-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "trd-gui"
+path = "src/main.rs"
+
+# trd-gui is the interactive egui front-end (issue #97). It displays trd-core's
+# rendered image stream and turns user interaction (orbit / zoom / translate)
+# into an updated model/camera matrix that trd-core re-renders (Strategy A:
+# decoupled CPU-RGBA handoff — egui owns its own UI renderer, trd-core renders
+# headless RGBA that the GUI shows as an egui texture, so the toolkits stay
+# independent of trd-core's `wgpu 30`).
+#
+# The interactive windowing stack (eframe/egui) is native-only for now; on wasm
+# the crate compiles to an empty `main` (see the cfg gate in src/main.rs) so
+# workspace-wide wasm builds skip it, mirroring trd-app. Browser support (the
+# wasm render backend, Slice 3 in #97) is added later.
+[dependencies]
+trd-core.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# eframe (default `glow`/OpenGL renderer) drives the window + egui; only CPU
+# RGBA crosses to trd-core, so egui's backend is independent of trd-core's wgpu.
+eframe = "0.35"
+egui = "0.35"
+env_logger = "0.11"
+log = "0.4"
