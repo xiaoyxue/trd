@@ -15,12 +15,31 @@
 use futures_channel::oneshot;
 
 use trd_core::{
-    build_scene, tightly_pack_rgba, MeshRenderer, Texture, Viewport, DEFAULT_PREVIEW_TARGET,
+    build_scene, decode_params_stream, encode_params_stream, read_image_stream, tightly_pack_rgba,
+    DrawableObject, FrameParams, Mesh, MeshRenderer, OutputSession, Texture, Viewport,
+    DEFAULT_PREVIEW_TARGET,
 };
 
 use crate::error::GuiError;
 use crate::render_backend::ImageRgba;
 use crate::scene::SceneState;
+
+/// How the browser renderer produces each frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WasmBackend {
+    /// Render the scene state directly on the persistent `MeshRenderer` (lowest
+    /// latency; the default) — the wasm twin of the native `InProcRenderer`.
+    #[default]
+    Inproc,
+    /// Round-trip the frame through the Arrow wire format: encode the scene to a
+    /// `[mesh][texture?][params]` stream, decode it back through the **wasm**
+    /// decoder (`InputSession`), render on the persistent device, then encode the
+    /// image to an Arrow stream and decode it back (`OutputSession` /
+    /// `read_image_stream`) — the wasm twin of the native `ArrowRoundTripRenderer`
+    /// and the seam an external producer would drive. Reuses the device, so only
+    /// the per-frame encode/decode is extra.
+    Arrow,
+}
 
 /// A browser offscreen renderer over a `trd-core` [`MeshRenderer`].
 pub struct WasmRenderer {
@@ -32,6 +51,7 @@ pub struct WasmRenderer {
     width: u32,
     height: u32,
     padded_bytes_per_row: u32,
+    backend: WasmBackend,
 }
 
 impl WasmRenderer {
@@ -39,10 +59,11 @@ impl WasmRenderer {
     /// static meshes and an optional bound `texture` (sampled by
     /// [`RenderMode::Textured`](trd_core::RenderMode::Textured)).
     pub async fn new(
-        meshes: &[trd_core::Mesh],
+        meshes: &[Mesh],
         texture: Option<&dyn Texture>,
         width: u32,
         height: u32,
+        backend: WasmBackend,
     ) -> Result<Self, GuiError> {
         let instance = wgpu::Instance::default();
         let adapter = instance
@@ -107,6 +128,9 @@ impl WasmRenderer {
             mapped_at_creation: false,
         });
 
+        // The Arrow backend round-trips only the per-frame params through the
+        // wire (the mesh is uploaded once into `renderer`, like native), so no
+        // mesh/texture stream needs caching here.
         Ok(Self {
             device,
             queue,
@@ -116,6 +140,7 @@ impl WasmRenderer {
             width,
             height,
             padded_bytes_per_row,
+            backend,
         })
     }
 
@@ -124,8 +149,23 @@ impl WasmRenderer {
         (self.width, self.height)
     }
 
-    /// Renders the current scene state to an RGBA image (async GPU readback).
+    /// Renders the current scene state to an RGBA image (async GPU readback),
+    /// via the direct path or the Arrow round-trip per the configured backend.
     pub async fn render(&mut self, state: &SceneState) -> Result<ImageRgba, GuiError> {
+        let rgba = match self.backend {
+            WasmBackend::Inproc => self.render_direct(state).await?,
+            WasmBackend::Arrow => self.render_arrow(state).await?,
+        };
+        Ok(ImageRgba {
+            width: self.width,
+            height: self.height,
+            rgba,
+        })
+    }
+
+    /// Direct path: build the scene from `state` and render it on the persistent
+    /// device (the wasm twin of `InProcRenderer`).
+    async fn render_direct(&mut self, state: &SceneState) -> Result<Vec<u8>, GuiError> {
         let aspect = self.width as f32 / self.height.max(1) as f32;
         let params = state.frame_params(aspect);
         let scene = build_scene(
@@ -136,7 +176,64 @@ impl WasmRenderer {
             state.show_local_axes,
             None,
         );
+        self.render_scene(params, &scene).await
+    }
 
+    /// Arrow round-trip path: serialize **only** the per-frame params (the
+    /// computed matrix + draws) to the wire, decode it back through the wasm
+    /// decoder ([`decode_params_stream`]), render on the persistent device (the
+    /// mesh was uploaded once), then serialize the image and decode it back — the
+    /// full params + image wire round-trip, matching the native backend (the mesh
+    /// does **not** cross the wire per frame).
+    async fn render_arrow(&mut self, state: &SceneState) -> Result<Vec<u8>, GuiError> {
+        let aspect = self.width as f32 / self.height.max(1) as f32;
+
+        // 1. Serialize the params and decode them back through the wire decoder.
+        let params_bytes =
+            encode_params_stream(&[state.frame_params(aspect)], Some(&[state.draws()]))?;
+        let frame = decode_params_stream(&params_bytes)?
+            .into_iter()
+            .next()
+            .ok_or(GuiError::WasmRender("decoder produced no frame".to_owned()))?;
+
+        // 2. Build the scene from the decoded frame and render on the device.
+        let draws = if frame.draws.is_empty() {
+            state.draws()
+        } else {
+            frame.draws.clone()
+        };
+        let scene = build_scene(
+            &draws,
+            state.mode,
+            state.show_aabb,
+            state.show_axes,
+            state.show_local_axes,
+            None,
+        );
+        let rgba = self.render_scene(frame.params, &scene).await?;
+
+        // 3. Serialize the image to an Arrow stream and decode it back — the
+        //    output half of the round-trip an external consumer would read.
+        let mut out = OutputSession::new(self.width, self.height)?;
+        let mut bytes = out.drain_new()?;
+        out.write_rgba_batch(&[rgba])?;
+        bytes.extend(out.drain_new()?);
+        out.finish()?;
+        bytes.extend(out.drain_new()?);
+        read_image_stream(std::io::Cursor::new(bytes), self.width, self.height)?
+            .pop()
+            .ok_or(GuiError::WasmRender(
+                "image decoder produced no frame".to_owned(),
+            ))
+    }
+
+    /// Encodes `scene` under `params` to the offscreen target and reads it back
+    /// to tightly-packed RGBA (the async GPU-readback step shared by both paths).
+    async fn render_scene(
+        &mut self,
+        params: FrameParams,
+        scene: &[DrawableObject],
+    ) -> Result<Vec<u8>, GuiError> {
         let view = self
             .target
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -150,7 +247,7 @@ impl WasmRenderer {
             height: self.height,
         };
         self.renderer
-            .encode(&self.queue, &mut encoder, &view, params, &scene, viewport);
+            .encode(&self.queue, &mut encoder, &view, params, scene, viewport);
 
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
@@ -197,10 +294,6 @@ impl WasmRenderer {
         };
         self.staging.unmap();
 
-        Ok(ImageRgba {
-            width: self.width,
-            height: self.height,
-            rgba: rgba?,
-        })
+        rgba
     }
 }

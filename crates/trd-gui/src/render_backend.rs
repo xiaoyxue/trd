@@ -181,8 +181,8 @@ mod native {
             // 1. Serialize the per-frame params (the computed matrix) to the wire...
             let params_bytes =
                 encode_params_stream(&[state.frame_params(aspect)], Some(&[state.draws()]))?;
-            // 2. ...and decode it back through the real wire decoders.
-            let (params, draws) = decode_params_stream(&params_bytes)?
+            // 2. ...and decode it back through the real wire decoder.
+            let frame = decode_params_stream(&params_bytes)?
                 .into_iter()
                 .next()
                 .ok_or(GuiError::NoFrame)?;
@@ -193,7 +193,9 @@ mod native {
             self.renderer.set_show_aabb(opts.show_aabb);
             self.renderer.set_show_axes(opts.show_axes);
             self.renderer.set_show_local_axes(opts.show_local_axes);
-            let rgba = self.renderer.render_frame(params, &draws, None)?;
+            let rgba = self
+                .renderer
+                .render_frame(frame.params, &frame.draws, None)?;
 
             // 4. Serialize the rendered image to an Arrow stream and decode it back —
             // the output half of the round-trip an external consumer would read.

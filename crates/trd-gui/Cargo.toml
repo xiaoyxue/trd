@@ -36,6 +36,13 @@ thiserror = "2"
 # egui/log are shared by the native window and the wasm (eframe-web) app.
 egui = "0.35"
 log = "0.4"
+# Decode + downscale the optional texture image in Rust (native `--texture` /
+# browser `?texture=`), keeping trd-core I/O-free. Pure-Rust png/jpeg decoders
+# compile on both native and wasm, so this is a shared dep.
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # eframe (default `glow`/OpenGL renderer) drives the window + egui; only CPU
@@ -43,12 +50,6 @@ log = "0.4"
 eframe = "0.35"
 clap = { version = "4", features = ["derive"] }
 env_logger = "0.11"
-# Decode + downscale the optional `--texture` image in the shell (keeping
-# trd-core I/O-free), matching trd-app's decoder features.
-image = { version = "0.25", default-features = false, features = [
-    "png",
-    "jpeg",
-] }
 
 # The browser target (Slice 4, #97): eframe-on-canvas UI + trd-core rendering the
 # scene offscreen (wgpu 30) to RGBA shown as an egui texture (Strategy A). Mirrors

@@ -21,8 +21,8 @@ pub use math::{
 pub use mesh::{MeshError, DEFAULT_PREVIEW_TARGET};
 pub use output::{output_schema, read_image_stream, tightly_pack_rgba, OutputError, OutputSession};
 pub use protocol::{
-    frame_rate_from_metadata, DecodedFrame, FrameBatch, InputSession, ProtocolError,
-    DEFAULT_FRAME_RATE, FRAME_RATE_KEY, PROTOCOL_VERSION, PROTOCOL_VERSION_KEY,
+    decode_params_stream, frame_rate_from_metadata, DecodedFrame, FrameBatch, InputSession,
+    ProtocolError, DEFAULT_FRAME_RATE, FRAME_RATE_KEY, PROTOCOL_VERSION, PROTOCOL_VERSION_KEY,
 };
 pub use render::{
     build_scene, create_mesh_pipeline, CameraFormError, Draw, DrawableObject, FrameFit,
@@ -39,9 +39,8 @@ pub use texture::{
 mod stream;
 #[cfg(not(target_arch = "wasm32"))]
 pub use stream::{
-    decode_frames, decode_params_stream, read_frame_stream, read_frame_stream_with_meta,
-    read_scene_stream_with_meta, run_stream, BatchRenderer, FrameResolver, RenderOptions,
-    StreamError,
+    decode_frames, read_frame_stream, read_frame_stream_with_meta, read_scene_stream_with_meta,
+    run_stream, BatchRenderer, FrameResolver, RenderOptions, StreamError,
 };
 
 /// Returns the project greeting used by the CLI and web entry points.

@@ -43,26 +43,58 @@ pub mod wasm_renderer;
 #[cfg(target_arch = "wasm32")]
 pub mod web_app;
 
-/// The browser entry point (Slice 4): builds the default-scene offscreen renderer
-/// and runs the eframe app on `canvas`. Called from a thin JS bootstrap after the
-/// wasm module loads (`await start(canvas)`); all UI + interaction + rendering
-/// happen in Rust, per the repo's "JS is a thin bootstrap only" invariant.
+/// The browser entry point (Slice 4): builds the offscreen renderer and runs the
+/// eframe app on `canvas`. `mesh_obj` and `texture_bytes` are the browser
+/// equivalents of the native `--mesh` / `--texture` flags — an optional Wavefront
+/// OBJ **as text** and optional texture image **bytes** (PNG/JPEG); the thin JS
+/// bootstrap fetches them from `?mesh=` / `?texture=` URLs and passes them in.
+/// `None`/absent falls back to the built-in cube / no texture. All UI +
+/// interaction + rendering happen in Rust, per the repo's "JS is a thin bootstrap
+/// only" invariant.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen]
-pub async fn start(canvas: web_sys::HtmlCanvasElement) -> Result<(), wasm_bindgen::JsValue> {
+pub async fn start(
+    canvas: web_sys::HtmlCanvasElement,
+    mesh_obj: Option<String>,
+    texture_bytes: Option<Vec<u8>>,
+    backend: Option<String>,
+) -> Result<(), wasm_bindgen::JsValue> {
     use crate::interaction::InteractionController;
     use crate::scene::SceneState;
-    use crate::wasm_renderer::WasmRenderer;
+    use crate::wasm_renderer::{WasmBackend, WasmRenderer};
     use crate::web_app::WebApp;
 
     console_error_panic_hook::set_once();
     let _ = eframe::WebLogger::init(log::LevelFilter::Warn);
 
-    let mesh =
-        assets::default_mesh().map_err(|e| wasm_bindgen::JsValue::from_str(&e.to_string()))?;
-    let renderer = WasmRenderer::new(&[mesh], None, 512, 512)
-        .await
-        .map_err(|e| wasm_bindgen::JsValue::from_str(&e.to_string()))?;
+    let to_js = |e: crate::error::GuiError| wasm_bindgen::JsValue::from_str(&e.to_string());
+    let mesh = match mesh_obj {
+        Some(text) => trd_core::Mesh::from_obj(&text)
+            .map_err(crate::error::GuiError::from)
+            .map_err(to_js)?,
+        None => assets::default_mesh()
+            .map_err(crate::error::GuiError::from)
+            .map_err(to_js)?,
+    };
+    let texture = match texture_bytes {
+        Some(bytes) => Some(assets::decode_texture(&bytes).map_err(to_js)?),
+        None => None,
+    };
+    // `?backend=arrow` selects the Arrow wire round-trip; anything else (or
+    // absent) is the direct in-process render.
+    let backend = match backend.as_deref() {
+        Some("arrow") => WasmBackend::Arrow,
+        _ => WasmBackend::Inproc,
+    };
+    let renderer = WasmRenderer::new(
+        &[mesh],
+        texture.as_ref().map(|t| t as &dyn trd_core::Texture),
+        512,
+        512,
+        backend,
+    )
+    .await
+    .map_err(to_js)?;
     let app = WebApp::new(InteractionController::new(SceneState::default()), renderer);
 
     eframe::WebRunner::new()

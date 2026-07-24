@@ -23,34 +23,43 @@ pub enum GuiError {
     #[error("failed to parse mesh: {0}")]
     Mesh(#[from] trd_core::MeshError),
 
+    /// A texture image could not be decoded (PNG/JPEG). Shared: native
+    /// `--texture` bytes and browser `?texture=` bytes both decode in Rust.
+    #[error("failed to decode texture: {0}")]
+    TextureDecode(#[from] image::error::ImageError),
+
+    /// The decoded texture pixels were rejected by `trd-core`.
+    #[error("invalid texture: {0}")]
+    TextureData(#[from] trd_core::TextureError),
+
     /// A render delegated to `trd-core` failed (native in-process backend).
     #[cfg(not(target_arch = "wasm32"))]
     #[error("render failed: {0}")]
     Render(#[from] trd_core::StreamError),
 
-    /// The texture image file could not be read or decoded.
+    /// The texture image file could not be read from disk (native `--texture`).
     #[cfg(not(target_arch = "wasm32"))]
-    #[error("failed to load texture '{path}': {source}")]
+    #[error("failed to read texture file '{path}': {source}")]
     TextureIo {
         path: String,
         #[source]
-        source: image::error::ImageError,
+        source: std::io::Error,
     },
 
-    /// The decoded texture pixels were rejected by `trd-core`.
-    #[cfg(not(target_arch = "wasm32"))]
-    #[error("invalid texture: {0}")]
-    TextureData(#[from] trd_core::TextureError),
-
-    /// Authoring the Arrow scene stream failed (Arrow round-trip backend).
-    #[cfg(not(target_arch = "wasm32"))]
+    /// Authoring an Arrow scene stream failed (Arrow round-trip path, native +
+    /// wasm).
     #[error("scene encode failed: {0}")]
     Encode(#[from] trd_core::SceneEncodeError),
 
-    /// Decoding the rendered image stream failed (Arrow round-trip backend).
-    #[cfg(not(target_arch = "wasm32"))]
-    #[error("image decode failed: {0}")]
+    /// Encoding/decoding the rendered image Arrow stream failed (Arrow round-trip
+    /// path, native + wasm).
+    #[error("image stream failed: {0}")]
     Output(#[from] trd_core::OutputError),
+
+    /// Decoding the input Arrow stream failed (wasm Arrow round-trip via
+    /// `InputSession`).
+    #[error("input stream decode failed: {0}")]
+    Protocol(#[from] trd_core::ProtocolError),
 
     /// The Arrow round-trip produced no image frame for the scene.
     #[cfg(not(target_arch = "wasm32"))]
