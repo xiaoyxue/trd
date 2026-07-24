@@ -40,14 +40,17 @@ Platform-agnostic wgpu logic, shared verbatim by every target:
   degenerate one-element scene, so there is no special case. Wireframe is a *mode*
   of the mesh drawable, not a separate primitive; the AABB box and axes gizmo are
   core-side additions to the scene (not wire columns).
-- **`stream.rs`** — the native Arrow IPC filter: `read_frame_stream` decodes the
-  input frames; `run_stream` is the CLI filter. Only one record batch is ever in
-  flight, so an animation of any length streams in constant memory.
+- **`stream.rs`** — the native Arrow IPC filter: `run_stream` is the CLI filter,
+  and `read_scene_stream_with_meta` drives the windowed viewer. Both frame the
+  input by driving the shared `protocol.rs` `InputSession` from a blocking
+  `Read`, so all mesh-first sub-stream sniffing lives in one place. Only one
+  record batch is ever in flight, so an animation of any length streams in
+  constant memory.
 - **`protocol.rs`** — the cross-platform (native + wasm) incremental Arrow IPC
   decoder. `InputSession` feeds arbitrary byte chunks through `arrow`'s
   `StreamDecoder`, validates the protocol schema once (accepts `0.0.5` only), and
-  yields one `FrameBatch` (`Vec<FrameParams>`) per record batch — the
-  browser's input path.
+  yields one `FrameBatch` (`Vec<DecodedFrame>`) per record batch — the **single
+  framing driver** for both the native CLI/window and the browser.
 - **`output.rs`** — the cross-platform Arrow IPC *output* serialization.
   `OutputSession` writes the `r,g,b,a` `fixed_shape_tensor<u8>` stream
   incrementally (one output batch per input batch); `tightly_pack_rgba` strips GPU
