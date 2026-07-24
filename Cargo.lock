@@ -3987,10 +3987,12 @@ dependencies = [
 name = "trd-gui"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "eframe",
  "egui",
  "env_logger",
  "log",
+ "thiserror 2.0.18",
  "trd-core",
 ]
 
