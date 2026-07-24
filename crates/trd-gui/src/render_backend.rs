@@ -13,7 +13,10 @@
 //! image stream) and the wasm offscreen backend are the design's later slices;
 //! both slot behind this same trait.
 
-use trd_core::{BatchRenderer, Mesh, Texture};
+use trd_core::{
+    encode_mesh_stream, encode_params_stream, read_image_stream, run_stream, BatchRenderer, Mesh,
+    RenderOptions, Texture,
+};
 
 use crate::error::GuiError;
 use crate::scene::SceneState;
@@ -34,6 +37,26 @@ pub trait SceneRenderer {
 
     /// The fixed pixel dimensions this backend renders at (`width`, `height`).
     fn size(&self) -> (u32, u32);
+
+    /// Whether a render is costly enough that the UI should re-render only when
+    /// an interaction *ends* (on pointer release) rather than every drag frame.
+    /// The [`ArrowRoundTripRenderer`] serializes + re-runs the whole pipeline per
+    /// frame, so it returns `true`; the in-process backend renders every frame.
+    fn defer_expensive(&self) -> bool {
+        false
+    }
+}
+
+/// The render options `trd-core`'s `run_stream` applies globally, derived from
+/// the interactive scene state (mode + overlay toggles). Shared by both backends
+/// so they stay in agreement.
+fn render_options(state: &SceneState) -> RenderOptions {
+    RenderOptions {
+        mode: state.mode,
+        show_aabb: state.show_aabb,
+        show_axes: state.show_axes,
+        show_local_axes: state.show_local_axes,
+    }
 }
 
 /// The native in-process backend: builds a `trd-core` [`BatchRenderer`] once at a
@@ -92,6 +115,76 @@ impl SceneRenderer for InProcRenderer {
 
     fn size(&self) -> (u32, u32) {
         (self.width, self.height)
+    }
+}
+
+/// The **Arrow round-trip** backend (design §5.2): authors the scene as a
+/// `[mesh][params]` Arrow stream (via [`encode_mesh_stream`]/
+/// [`encode_params_stream`]), pipes it through `trd-core`'s [`run_stream`]
+/// exactly as the headless CLI does, and decodes the resulting image stream back
+/// to RGBA ([`read_image_stream`]). This produces output identical to the batch
+/// pipeline and is the seam where an **external** producer (Python/ML/CV that
+/// consumes the interaction and computes the next matrix) could sit.
+///
+/// It re-runs the whole pipeline (including GPU device setup) per render, so it
+/// reports [`SceneRenderer::defer_expensive`] `= true` and the UI re-renders only
+/// when an interaction ends. The leading mesh table is encoded once and cached;
+/// only the tiny params stream is re-authored per frame.
+pub struct ArrowRoundTripRenderer {
+    /// The cached mesh-table IPC bytes (static across frames).
+    mesh_stream: Vec<u8>,
+    width: u32,
+    height: u32,
+}
+
+impl ArrowRoundTripRenderer {
+    /// Builds the backend, encoding the (static) mesh table once. Textures are
+    /// not authored into the round-trip stream yet, so Textured mode renders with
+    /// `trd-core`'s default albedo here.
+    pub fn new(meshes: &[Mesh], width: u32, height: u32) -> Result<Self, GuiError> {
+        let mesh_stream = encode_mesh_stream(meshes)?;
+        Ok(Self {
+            mesh_stream,
+            width,
+            height,
+        })
+    }
+}
+
+impl SceneRenderer for ArrowRoundTripRenderer {
+    fn render(&mut self, state: &SceneState) -> Result<ImageRgba, GuiError> {
+        let aspect = self.width as f32 / self.height.max(1) as f32;
+        let params = encode_params_stream(&[state.frame_params(aspect)], Some(&[state.draws()]))?;
+
+        let mut input = self.mesh_stream.clone();
+        input.extend(params);
+
+        let mut output = Vec::new();
+        run_stream(
+            std::io::Cursor::new(input),
+            &mut output,
+            self.width,
+            self.height,
+            render_options(state),
+            None,
+        )?;
+
+        let rgba = read_image_stream(std::io::Cursor::new(output), self.width, self.height)?
+            .pop()
+            .ok_or(GuiError::NoFrame)?;
+        Ok(ImageRgba {
+            width: self.width,
+            height: self.height,
+            rgba,
+        })
+    }
+
+    fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    fn defer_expensive(&self) -> bool {
+        true
     }
 }
 
