@@ -27,7 +27,10 @@ use crate::math::Matrix4;
 use crate::protocol::{
     frame_rate_from_metadata, is_mesh_schema, is_texture_schema, ProtocolError, PROTOCOL_VERSION,
 };
-use crate::render::{Draw, DrawableObject, FrameFit, FrameParams, Mesh, MeshRenderer, RenderMode};
+use crate::render::{
+    Draw, DrawableObject, FrameFit, FrameParams, Mesh, MeshRenderer, OffscreenError,
+    OffscreenTarget, RenderMode, OFFSCREEN_FORMAT,
+};
 use crate::texture::ImageTexture;
 use crate::OutputSession;
 
@@ -176,6 +179,32 @@ impl From<ProtocolError> for StreamError {
     }
 }
 
+/// Maps the shared offscreen render harness's [`OffscreenError`] onto this
+/// module's [`StreamError`], so [`BatchRenderer`] keeps its flat error surface
+/// while the target/readback plumbing lives in [`crate::render::OffscreenTarget`].
+impl From<OffscreenError> for StreamError {
+    fn from(error: OffscreenError) -> Self {
+        match error {
+            OffscreenError::InvalidDimensions { width, height } => StreamError::InvalidDimensions {
+                width,
+                height,
+                reason: "dimensions must be non-zero",
+            },
+            OffscreenError::ExceedsMaxDimension { width, height, .. } => {
+                StreamError::InvalidDimensions {
+                    width,
+                    height,
+                    reason: "exceeds adapter max_texture_dimension_2d",
+                }
+            }
+            OffscreenError::RowOverflow { .. } | OffscreenError::Gpu(_) => {
+                StreamError::Render(error.to_string())
+            }
+            OffscreenError::Output(e) => StreamError::Output(e),
+        }
+    }
+}
+
 /// If the schema declares a protocol version, require it to be supported.
 /// Delegates to the shared [`crate::protocol::check_version`].
 pub fn check_version(schema: &Schema) -> Result<(), StreamError> {
@@ -277,11 +306,8 @@ pub struct BatchRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     renderer: MeshRenderer,
-    texture: wgpu::Texture,
-    staging: wgpu::Buffer,
-    width: u32,
-    height: u32,
-    padded_bytes_per_row: u32,
+    /// The shared offscreen render target + readback buffer (#103, Part B).
+    target: OffscreenTarget,
     /// Render mode (filled/wireframe) applied to every mesh drawable this
     /// renderer builds into its per-frame [`Scene`](crate::Scene).
     mode: RenderMode,
@@ -346,52 +372,18 @@ impl BatchRenderer {
             .await
             .map_err(|e| StreamError::Render(e.to_string()))?;
 
-        let max_dim = device.limits().max_texture_dimension_2d;
-        if width > max_dim || height > max_dim {
-            return Err(StreamError::InvalidDimensions {
-                width,
-                height,
-                reason: "exceeds adapter max_texture_dimension_2d",
-            });
-        }
-
-        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let format = OFFSCREEN_FORMAT;
         let renderer = MeshRenderer::new(&device, format, meshes, base_models);
 
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("trd render target"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-
-        let unpadded = width * BYTES_PER_PIXEL;
-        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let padded_bytes_per_row = unpadded.div_ceil(align) * align;
-        let staging = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("trd readback buffer"),
-            size: u64::from(padded_bytes_per_row) * u64::from(height),
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
+        // The shared offscreen harness owns the render target + readback buffer
+        // and re-validates the size against the adapter's max dimension.
+        let target = OffscreenTarget::new(&device, width, height)?;
 
         Ok(Self {
             device,
             queue,
             renderer,
-            texture,
-            staging,
-            width,
-            height,
-            padded_bytes_per_row,
+            target,
             mode: RenderMode::Filled,
             show_aabb: false,
             show_axes: false,
@@ -476,77 +468,14 @@ impl BatchRenderer {
         draws: &[Draw],
         frame: Option<FrameFit>,
     ) -> Result<Vec<u8>, StreamError> {
-        pollster::block_on(self.render_async(params, draws, frame))
-    }
-
-    async fn render_async(
-        &mut self,
-        params: FrameParams,
-        draws: &[Draw],
-        frame: Option<FrameFit>,
-    ) -> Result<Vec<u8>, StreamError> {
         let scene = self.build_scene(draws, frame);
-        let view = self
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("trd frame"),
-            });
-        self.renderer.encode(
+        Ok(pollster::block_on(self.target.render(
+            &self.device,
             &self.queue,
-            &mut encoder,
-            &view,
+            &mut self.renderer,
             params,
             &scene,
-            crate::render::Viewport {
-                width: self.width,
-                height: self.height,
-            },
-        );
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &self.staging,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(self.padded_bytes_per_row),
-                    rows_per_image: Some(self.height),
-                },
-            },
-            wgpu::Extent3d {
-                width: self.width,
-                height: self.height,
-                depth_or_array_layers: 1,
-            },
-        );
-        self.queue.submit(Some(encoder.finish()));
-
-        let slice = self.staging.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| {
-            let _ = tx.send(r);
-        });
-        self.device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .map_err(|e| StreamError::Render(e.to_string()))?;
-        rx.recv()
-            .expect("map_async callback dropped")
-            .map_err(|e| StreamError::Render(e.to_string()))?;
-
-        let pixels = {
-            let mapped = slice.get_mapped_range().expect("buffer mapped after poll");
-            crate::tightly_pack_rgba(&mapped, self.width, self.height, self.padded_bytes_per_row)?
-        };
-        self.staging.unmap();
-        Ok(pixels)
+        ))?)
     }
 }
 

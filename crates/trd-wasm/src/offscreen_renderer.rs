@@ -1,10 +1,9 @@
-use futures_channel::oneshot;
 use wasm_bindgen::prelude::*;
 
 use trd_core::{
-    build_scene, tightly_pack_rgba, DecodedFrame, Draw, DrawableObject, FrameBatch, FrameFit,
-    FrameParams, InputSession, Matrix4, MeshRenderer, OutputSession, RenderMode, Viewport,
-    DEFAULT_PREVIEW_TARGET,
+    build_scene, DecodedFrame, Draw, DrawableObject, FrameBatch, FrameFit, FrameParams,
+    InputSession, Matrix4, MeshRenderer, OffscreenTarget, OutputSession, RenderMode,
+    DEFAULT_PREVIEW_TARGET, OFFSCREEN_FORMAT,
 };
 
 fn error_message(context: &str, error: impl std::fmt::Display) -> String {
@@ -22,17 +21,16 @@ impl RendererState {
     fn ensure_open(&self) -> Result<(), String> {
         match self {
             Self::Open => Ok(()),
-            Self::Finished => Err("ArrowRenderer is already finished".to_string()),
-            Self::Failed(message) => Err(format!("ArrowRenderer is failed: {message}")),
+            Self::Finished => Err("OffscreenRenderer is already finished".to_string()),
+            Self::Failed(message) => Err(format!("OffscreenRenderer is failed: {message}")),
         }
     }
 }
 
 #[wasm_bindgen]
-pub struct ArrowRenderer {
+pub struct OffscreenRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    format: wgpu::TextureFormat,
     /// Built lazily on the first rendered frame from the stream's leading mesh
     /// table, or the built-in hello-triangle for a legacy params-only stream.
     renderer: Option<MeshRenderer>,
@@ -46,28 +44,25 @@ pub struct ArrowRenderer {
     /// [`DrawableObject::FramePlane`] (#63); a no-op until a background is
     /// uploaded via [`update_frame_texture_rgba`](Self::update_frame_texture_rgba).
     composite_frame: bool,
-    target: wgpu::Texture,
-    staging: wgpu::Buffer,
+    /// The shared offscreen render target + readback buffer (#103, Part B).
+    target: OffscreenTarget,
     input: InputSession,
     /// Frames decoded by [`load_ipc`](Self::load_ipc) but not yet rendered,
     /// replayed on demand by [`render_index`](Self::render_index) (the generic
-    /// offscreen renderer's paced playback).
+    /// viewer's paced playback).
     frames: Vec<DecodedFrame>,
     output: OutputSession,
-    width: u32,
-    height: u32,
-    padded_bytes_per_row: u32,
     state: RendererState,
 }
 
 #[wasm_bindgen]
-impl ArrowRenderer {
+impl OffscreenRenderer {
     #[wasm_bindgen(js_name = create)]
     pub async fn create(width: u32, height: u32) -> Result<Self, JsValue> {
         console_error_panic_hook::set_once();
 
         let output = OutputSession::new(width, height).map_err(|error| {
-            crate::js_error(error_message("invalid ArrowRenderer dimensions", error))
+            crate::js_error(error_message("invalid OffscreenRenderer dimensions", error))
         })?;
 
         let instance = wgpu::Instance::default();
@@ -82,7 +77,7 @@ impl ArrowRenderer {
 
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
-                label: Some("trd ArrowRenderer device"),
+                label: Some("trd OffscreenRenderer device"),
                 required_features: wgpu::Features::empty(),
                 required_limits: wgpu::Limits::default().using_resolution(adapter.limits()),
                 experimental_features: wgpu::ExperimentalFeatures::disabled(),
@@ -92,49 +87,14 @@ impl ArrowRenderer {
             .await
             .map_err(|error| crate::js_error(error_message("request_device failed", error)))?;
 
-        let max_dimension = device.limits().max_texture_dimension_2d;
-        if width > max_dimension || height > max_dimension {
-            return Err(crate::js_error(format!(
-                "ArrowRenderer dimensions {width}x{height} exceed max_texture_dimension_2d {max_dimension}"
-            )));
-        }
-
-        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-
-        let target = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("trd ArrowRenderer target"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-
-        let unpadded = width.checked_mul(4).ok_or_else(|| {
-            crate::js_error(format!(
-                "ArrowRenderer row byte count overflows for width {width}"
-            ))
-        })?;
-        let padded_bytes_per_row = unpadded.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
-            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-
-        let staging = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("trd ArrowRenderer staging"),
-            size: u64::from(padded_bytes_per_row) * u64::from(height),
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        // The shared offscreen harness owns the render target + readback buffer
+        // and re-validates the size against the adapter's max dimension.
+        let target = OffscreenTarget::new(&device, width, height)
+            .map_err(|error| crate::js_error(error_message("OffscreenRenderer target", error)))?;
 
         Ok(Self {
             device,
             queue,
-            format,
             renderer: None,
             mode: RenderMode::Filled,
             show_aabb: false,
@@ -142,13 +102,9 @@ impl ArrowRenderer {
             show_local_axes: false,
             composite_frame: false,
             target,
-            staging,
             input: InputSession::new(),
             frames: Vec::new(),
             output,
-            width,
-            height,
-            padded_bytes_per_row,
             state: RendererState::Open,
         })
     }
@@ -322,7 +278,7 @@ impl ArrowRenderer {
 
     /// Renders one buffered frame (by index) to the offscreen texture and returns
     /// its tightly-packed RGBA (`width * height * 4` bytes) for the JS shell to
-    /// display — the generic offscreen renderer's per-tick call.
+    /// display — the generic viewer's per-tick call.
     #[wasm_bindgen(js_name = renderIndex)]
     pub async fn render_index(&mut self, index: u32) -> Result<Vec<u8>, JsValue> {
         if let Err(message) = self.state.ensure_open() {
@@ -348,7 +304,7 @@ impl ArrowRenderer {
     }
 }
 
-impl ArrowRenderer {
+impl OffscreenRenderer {
     fn fail<T>(&mut self, message: String) -> Result<T, JsValue> {
         self.state = RendererState::Failed(message.clone());
         Err(crate::js_error(message))
@@ -365,7 +321,7 @@ impl ArrowRenderer {
                 .iter()
                 .map(|mesh| mesh.preview_transform(DEFAULT_PREVIEW_TARGET).matrix())
                 .collect();
-            let renderer = MeshRenderer::new(&self.device, self.format, meshes, &base_models);
+            let renderer = MeshRenderer::new(&self.device, OFFSCREEN_FORMAT, meshes, &base_models);
             self.renderer = Some(renderer);
 
             // Bind the stream's texture (0.0.4) as the sampled albedo so
@@ -459,75 +415,13 @@ impl ArrowRenderer {
         params: FrameParams,
         scene: &[DrawableObject],
     ) -> Result<Vec<u8>, String> {
-        let view = self
-            .target
-            .create_view(&wgpu::TextureViewDescriptor::default());
-
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("trd ArrowRenderer frame"),
-            });
-
-        let viewport = Viewport {
-            width: self.width,
-            height: self.height,
-        };
-        self.renderer
+        let renderer = self
+            .renderer
             .as_mut()
-            .expect("renderer built before render_frame")
-            .encode(&self.queue, &mut encoder, &view, params, scene, viewport);
-
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.target,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &self.staging,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(self.padded_bytes_per_row),
-                    rows_per_image: Some(self.height),
-                },
-            },
-            wgpu::Extent3d {
-                width: self.width,
-                height: self.height,
-                depth_or_array_layers: 1,
-            },
-        );
-
-        self.queue.submit(Some(encoder.finish()));
-
-        let slice = self.staging.slice(..);
-        let (sender, receiver) = oneshot::channel();
-
-        slice.map_async(wgpu::MapMode::Read, move |result| {
-            let _ = sender.send(result);
-        });
-
-        self.device
-            .poll(wgpu::PollType::Poll)
-            .map_err(|error| error_message("GPU poll failed", error))?;
-
-        let map_result = receiver
+            .expect("renderer built before render_frame");
+        self.target
+            .render(&self.device, &self.queue, renderer, params, scene)
             .await
-            .map_err(|_| "GPU readback callback was cancelled".to_string())?;
-
-        map_result.map_err(|error| error_message("GPU readback failed", error))?;
-
-        let packed = match slice.get_mapped_range() {
-            Ok(mapped) => {
-                tightly_pack_rgba(&mapped, self.width, self.height, self.padded_bytes_per_row)
-                    .map_err(|error| error_message("GPU row unpack failed", error))
-            }
-            Err(error) => Err(error_message("GPU mapped range failed", error)),
-        };
-
-        self.staging.unmap();
-        packed
+            .map_err(|error| error_message("offscreen render", error))
     }
 }

@@ -25,12 +25,12 @@ use winit::window::{Window, WindowId};
 
 use crate::cli::Cli;
 use crate::error::AppError;
-use crate::renderer::Gpu;
+use crate::renderer::WindowRenderer;
 use crate::stream::{spawn_stdin_reader, FrameData, StreamMsg};
 
 /// The winit application: owns the GPU state and drives stream playback.
 struct App {
-    gpu: Option<Gpu>,
+    gpu: Option<WindowRenderer>,
     /// Meshes + rate + frames arriving from the stdin reader thread.
     rx: Receiver<StreamMsg>,
     /// The stream's mesh table (or the legacy built-in fallback), held until the
@@ -220,7 +220,7 @@ impl ApplicationHandler for App {
             }
         };
 
-        match pollster::block_on(Gpu::new(window.clone(), self.vsync)) {
+        match pollster::block_on(WindowRenderer::new(window.clone(), self.vsync)) {
             Ok(gpu) => {
                 gpu.window.request_redraw();
                 self.gpu = Some(gpu);

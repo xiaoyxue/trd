@@ -11,7 +11,7 @@ use crate::error::AppError;
 use crate::stream::FrameData;
 
 /// GPU resources tied to a live window surface.
-pub(crate) struct Gpu {
+pub(crate) struct WindowRenderer {
     pub(crate) window: Arc<Window>,
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -22,7 +22,7 @@ pub(crate) struct Gpu {
     pub(crate) renderer: Option<MeshRenderer>,
 }
 
-impl Gpu {
+impl WindowRenderer {
     pub(crate) async fn new(window: Arc<Window>, vsync: bool) -> Result<Self, AppError> {
         let size = window.inner_size();
         let width = size.width.max(1);

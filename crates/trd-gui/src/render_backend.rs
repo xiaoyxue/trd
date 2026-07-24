@@ -24,7 +24,7 @@ pub struct ImageRgba {
 
 // The native `BatchRenderer`-based backends (in-process + Arrow round-trip) and
 // the `SceneRenderer` trait are native-only; on wasm the offscreen renderer is
-// `crate::wasm_renderer` (async) instead, so only `ImageRgba` above is shared.
+// `crate::web_renderer` (async) instead, so only `ImageRgba` above is shared.
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::*;
 

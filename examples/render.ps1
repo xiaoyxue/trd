@@ -520,8 +520,8 @@ f 1 3 4
         # --- -Web: build the wasm bundle and serve the SAME scene as -CLI ------
         # Windows-native counterpart of render.sh --web (which builds `nix .#web`
         # and serves it with static-web-server). Build the config-driven bundle
-        # with wasm-pack + bun, then drop the runtime inputs the generic renderer
-        # (web/src/generic-renderer.ts) fetches at load into web/dist:
+        # with wasm-pack + bun, then drop the runtime inputs the generic viewer
+        # (web/src/viewer.ts) fetches at load into web/dist:
         #   stream.arrow  — the identical bytes trd-cli reads on stdin
         #   config.json   — target renderer + scene flags + baked resolution + fps
         #   frames/…      — the 0.0.5 background stills (copied from -FramesBase)
