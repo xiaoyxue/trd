@@ -375,7 +375,9 @@ pub(crate) fn is_texture_schema(schema: &Schema) -> bool {
 
 /// Validates a schema's declared protocol version against
 /// [`SUPPORTED_INPUT_VERSIONS`] (absent metadata is allowed for legacy streams).
-fn check_version(schema: &Schema) -> Result<(), ProtocolError> {
+/// The single version check shared by the wasm decoder and the native
+/// [`crate::run_stream`] (which maps [`ProtocolError`] to its `StreamError`).
+pub(crate) fn check_version(schema: &Schema) -> Result<(), ProtocolError> {
     if let Some(version) = schema.metadata().get(PROTOCOL_VERSION_KEY) {
         if !SUPPORTED_INPUT_VERSIONS.contains(&version.as_str()) {
             return Err(ProtocolError::UnsupportedVersion(version.clone()));
@@ -425,20 +427,18 @@ pub fn decode_params_stream(bytes: &[u8]) -> Result<Vec<DecodedFrame>, ProtocolE
 }
 
 /// Decodes the optional per-frame **background frame reference** column (`0.0.5`)
-/// into one `Option<String>` per row, preferring `frame_url` (browser) then
-/// `frame_path`. Returns `None` when neither column is present; per-row nulls or
-/// empty strings decode to `None`. Mirrors the native `stream::decode_frame_refs`
-/// (which prefers `frame_path`). The core performs no I/O — it only surfaces the
-/// reference for the shell to resolve.
-fn decode_frame_refs(batch: &RecordBatch) -> Result<Option<Vec<Option<String>>>, ProtocolError> {
+/// into one `Option<String>` per row, preferring `frame_path` (native filesystem
+/// path) then `frame_url` (browser URL). Returns `None` when neither column is
+/// present; per-row nulls or empty strings decode to `None`. The core performs
+/// no I/O — it only surfaces the reference for the shell to resolve.
+pub(crate) fn decode_frame_refs(
+    batch: &RecordBatch,
+) -> Result<Option<Vec<Option<String>>>, ProtocolError> {
     let (name, col) = match batch
-        .column_by_name("frame_url")
-        .map(|c| ("frame_url", c))
-        .or_else(|| {
-            batch
-                .column_by_name("frame_path")
-                .map(|c| ("frame_path", c))
-        }) {
+        .column_by_name("frame_path")
+        .map(|c| ("frame_path", c))
+        .or_else(|| batch.column_by_name("frame_url").map(|c| ("frame_url", c)))
+    {
         Some(pair) => pair,
         None => return Ok(None),
     };
@@ -471,7 +471,7 @@ fn decode_frame_refs(batch: &RecordBatch) -> Result<Option<Vec<Option<String>>>,
 /// mismatch, is an error. `draw_mode` bytes decode via
 /// [`RenderMode::from_wire`] (`255` = inherit); an absent column leaves every
 /// [`Draw::mode`] `None`. Mirrors the native `stream::decode_draws`.
-fn decode_draws(batch: &RecordBatch) -> Result<Option<Vec<Vec<Draw>>>, ProtocolError> {
+pub(crate) fn decode_draws(batch: &RecordBatch) -> Result<Option<Vec<Vec<Draw>>>, ProtocolError> {
     let (mesh_col, model_col) = match (
         batch.column_by_name("draw_mesh"),
         batch.column_by_name("draw_model"),
@@ -712,7 +712,7 @@ fn validate_f32_field(field: &Field, name: &'static str) -> Result<(), ProtocolE
     }
 }
 
-fn decode_batch(batch: &RecordBatch) -> Result<Vec<FrameParams>, ProtocolError> {
+pub(crate) fn decode_batch(batch: &RecordBatch) -> Result<Vec<FrameParams>, ProtocolError> {
     // Optional matrix columns (validated + null-checked only if present).
     let model = optional_fixed_list(batch, "model", 16)?;
     let k = optional_fixed_list(batch, "k", 9)?;
@@ -1240,7 +1240,7 @@ mod tests {
     }
 
     #[test]
-    fn decodes_frame_reference_column_prefers_url_and_maps_null_or_empty_to_none() {
+    fn decodes_frame_reference_column_prefers_path_and_maps_null_or_empty_to_none() {
         // 0.0.5 background frame reference: `decode_frame_refs` surfaces one
         // Option<String> per row — the value the browser shell (and CLI/app)
         // resolves + composites beneath the scene, and the wasm renderers expose
@@ -1272,7 +1272,10 @@ mod tests {
             ])
         );
 
-        // (b) both columns present ⇒ `frame_url` (browser) wins over `frame_path`.
+        // (b) both columns present ⇒ `frame_path` (native) wins over `frame_url`
+        // (the documented canonical order; a browser shell serving `frame_path`
+        // relative to the page still resolves it, and by default the two strings
+        // are identical).
         let batch = RecordBatch::try_new(
             Arc::new(Schema::new(vec![
                 Field::new("frame_path", DataType::Utf8, true),
@@ -1286,8 +1289,8 @@ mod tests {
         .unwrap();
         assert_eq!(
             decode_frame_refs(&batch).unwrap(),
-            Some(vec![Some("https://cdn/x.jpg".to_owned())]),
-            "frame_url is preferred over frame_path"
+            Some(vec![Some("local/a.jpg".to_owned())]),
+            "frame_path is preferred over frame_url"
         );
 
         // (c) neither column present ⇒ None for the whole batch (params-only stream).

@@ -17,10 +17,7 @@
 //! ([`StreamError::MissingMeshStream`]). Output: one row per frame, four
 //! `fixed_shape_tensor<u8>` channels `r,g,b,a` of shape `[H, W]`.
 
-use arrow::array::{
-    Array, FixedSizeListArray, Float32Array, ListArray, RecordBatch, StringArray, UInt32Array,
-    UInt8Array,
-};
+use arrow::array::RecordBatch;
 use arrow::datatypes::{DataType, Schema};
 use arrow::error::ArrowError;
 use arrow::ipc::reader::StreamReader;
@@ -28,12 +25,9 @@ use std::io::{Read, Write};
 
 use crate::math::Matrix4;
 use crate::protocol::{
-    frame_rate_from_metadata, is_mesh_schema, is_texture_schema, PROTOCOL_VERSION,
-    PROTOCOL_VERSION_KEY, SUPPORTED_INPUT_VERSIONS,
+    frame_rate_from_metadata, is_mesh_schema, is_texture_schema, ProtocolError, PROTOCOL_VERSION,
 };
-use crate::render::{
-    CameraFormError, Draw, DrawableObject, FrameFit, FrameParams, Mesh, MeshRenderer, RenderMode,
-};
+use crate::render::{Draw, DrawableObject, FrameFit, FrameParams, Mesh, MeshRenderer, RenderMode};
 use crate::texture::ImageTexture;
 use crate::OutputSession;
 
@@ -128,128 +122,71 @@ pub enum StreamError {
     Output(#[from] crate::OutputError),
 }
 
-/// If the schema declares a protocol version, require it to be supported.
-pub fn check_version(schema: &Schema) -> Result<(), StreamError> {
-    if let Some(v) = schema.metadata().get(PROTOCOL_VERSION_KEY) {
-        if !SUPPORTED_INPUT_VERSIONS.contains(&v.as_str()) {
-            return Err(StreamError::UnsupportedVersion(v.clone()));
+/// Maps the shared [`ProtocolError`] (from the single decoder in
+/// [`crate::protocol`]) onto this module's [`StreamError`], so the native
+/// `run_stream` path keeps its flat error surface while the per-batch decode
+/// logic lives in exactly one place.
+impl From<ProtocolError> for StreamError {
+    fn from(error: ProtocolError) -> Self {
+        match error {
+            ProtocolError::Arrow(e) => StreamError::Arrow(e),
+            ProtocolError::MissingColumn(c) => StreamError::MissingColumn(c),
+            ProtocolError::ColumnType {
+                column,
+                expected,
+                actual,
+            } => StreamError::ColumnType {
+                column,
+                expected,
+                actual,
+            },
+            ProtocolError::NullValues(c) => StreamError::NullValues(c),
+            ProtocolError::ConflictingCameraForms => StreamError::ConflictingCameraForms,
+            ProtocolError::IncompleteCameraForm => StreamError::IncompleteCameraForm,
+            ProtocolError::UnsupportedVersion(v) => StreamError::UnsupportedVersion(v),
+            ProtocolError::Mesh(e) => StreamError::Mesh(e),
+            ProtocolError::Texture(e) => StreamError::Texture(e),
+            ProtocolError::MismatchedDrawLists {
+                row,
+                mesh_len,
+                model_len,
+            } => StreamError::MismatchedDrawLists {
+                row,
+                mesh_len,
+                model_len,
+            },
+            ProtocolError::MismatchedDrawModes {
+                row,
+                mode_len,
+                draw_len,
+            } => StreamError::MismatchedDrawModes {
+                row,
+                mode_len,
+                draw_len,
+            },
+            ProtocolError::InvalidDrawMode { value } => StreamError::InvalidDrawMode { value },
+            // The session-framing errors can't arise from the per-batch decoders
+            // used by `run_stream`; surface them as a generic render error if they
+            // ever do.
+            other @ (ProtocolError::SessionFinished
+            | ProtocolError::SessionFailed
+            | ProtocolError::MissingSchema
+            | ProtocolError::NoProgress) => StreamError::Render(other.to_string()),
         }
     }
-    Ok(())
 }
 
-/// Looks up an optional `FixedSizeList<Float32>[len]` column, validating type,
-/// length, and non-nullness. Returns `None` if the column is absent (additive
-/// `0.0.2` columns are optional).
-fn optional_fixed_list<'a>(
-    batch: &'a RecordBatch,
-    name: &'static str,
-    len: i32,
-) -> Result<Option<(&'a FixedSizeListArray, &'a Float32Array)>, StreamError> {
-    let Some(column) = batch.column_by_name(name) else {
-        return Ok(None);
-    };
-    let list = column
-        .as_any()
-        .downcast_ref::<FixedSizeListArray>()
-        .filter(|list| list.value_length() == len)
-        .ok_or_else(|| StreamError::ColumnType {
-            column: name,
-            expected: "FixedSizeList<Float32>[N]",
-            actual: column.data_type().clone(),
-        })?;
-    if list.null_count() > 0 || list.values().null_count() > 0 {
-        return Err(StreamError::NullValues(name));
-    }
-    let values = list
-        .values()
-        .as_any()
-        .downcast_ref::<Float32Array>()
-        .ok_or_else(|| StreamError::ColumnType {
-            column: name,
-            expected: "FixedSizeList<Float32>[N]",
-            actual: list.values().data_type().clone(),
-        })?;
-    Ok(Some((list, values)))
+/// If the schema declares a protocol version, require it to be supported.
+/// Delegates to the shared [`crate::protocol::check_version`].
+pub fn check_version(schema: &Schema) -> Result<(), StreamError> {
+    Ok(crate::protocol::check_version(schema)?)
 }
 
-/// Reads the `N` `f32` values of a fixed-size-list `row`.
-fn read_fixed<const N: usize>(
-    list: &FixedSizeListArray,
-    values: &Float32Array,
-    row: usize,
-) -> [f32; N] {
-    let offset = list.value_offset(row) as usize;
-    std::array::from_fn(|i| values.value(offset + i))
-}
-
-/// Looks up an optional non-null `Float32` scalar column, validating its type.
-/// Returns `None` if the column is absent (additive `0.0.3` camera columns).
-fn optional_f32<'a>(
-    batch: &'a RecordBatch,
-    name: &'static str,
-) -> Result<Option<&'a Float32Array>, StreamError> {
-    let Some(column) = batch.column_by_name(name) else {
-        return Ok(None);
-    };
-    let array = column
-        .as_any()
-        .downcast_ref::<Float32Array>()
-        .ok_or_else(|| StreamError::ColumnType {
-            column: name,
-            expected: "Float32",
-            actual: column.data_type().clone(),
-        })?;
-    if array.null_count() > 0 {
-        return Err(StreamError::NullValues(name));
-    }
-    Ok(Some(array))
-}
-
-/// Maps a [`CameraFormError`] onto the stream error type.
-fn camera_form_error(error: CameraFormError) -> StreamError {
-    match error {
-        CameraFormError::Conflicting => StreamError::ConflictingCameraForms,
-        CameraFormError::Incomplete => StreamError::IncompleteCameraForm,
-    }
-}
-
-/// Decodes every row of `batch` into [`FrameParams`], validating column types
-/// and non-nullness (including the fixed-size-list children). Every params column
-/// is optional (`model`/`k`/`pose` matrices and the CG camera columns
-/// `eye`/`target`/`direction`/`up`/`fovy`/`aspect`/`znear`/`zfar`); a params
-/// batch drives its row count via [`RecordBatch::num_rows`].
+/// Decodes every row of `batch` into [`FrameParams`]. Delegates to the single
+/// shared per-batch decoder [`crate::protocol::decode_batch`] (the source of
+/// truth for both the native and wasm paths).
 pub fn decode_frames(batch: &RecordBatch) -> Result<Vec<FrameParams>, StreamError> {
-    let model = optional_fixed_list(batch, "model", 16)?;
-    let k = optional_fixed_list(batch, "k", 9)?;
-    let pose = optional_fixed_list(batch, "pose", 16)?;
-    let eye = optional_fixed_list(batch, "eye", 3)?;
-    let target = optional_fixed_list(batch, "target", 3)?;
-    let direction = optional_fixed_list(batch, "direction", 3)?;
-    let up = optional_fixed_list(batch, "up", 3)?;
-    let fovy = optional_f32(batch, "fovy")?;
-    let aspect = optional_f32(batch, "aspect")?;
-    let znear = optional_f32(batch, "znear")?;
-    let zfar = optional_f32(batch, "zfar")?;
-    (0..batch.num_rows())
-        .map(|i| {
-            let frame = FrameParams {
-                model: model.map(|(list, values)| read_fixed::<16>(list, values, i)),
-                k: k.map(|(list, values)| read_fixed::<9>(list, values, i)),
-                pose: pose.map(|(list, values)| read_fixed::<16>(list, values, i)),
-                eye: eye.map(|(list, values)| read_fixed::<3>(list, values, i)),
-                target: target.map(|(list, values)| read_fixed::<3>(list, values, i)),
-                direction: direction.map(|(list, values)| read_fixed::<3>(list, values, i)),
-                up: up.map(|(list, values)| read_fixed::<3>(list, values, i)),
-                fovy: fovy.map(|a| a.value(i)),
-                aspect: aspect.map(|a| a.value(i)),
-                znear: znear.map(|a| a.value(i)),
-                zfar: zfar.map(|a| a.value(i)),
-            };
-            frame.check_camera_form().map_err(camera_form_error)?;
-            Ok(frame)
-        })
-        .collect()
+    Ok(crate::protocol::decode_batch(batch)?)
 }
 
 /// Decodes the optional per-frame **instanced draw list** columns `draw_mesh`
@@ -262,144 +199,7 @@ pub fn decode_frames(batch: &RecordBatch) -> Result<Vec<FrameParams>, StreamErro
 /// decoded via [`RenderMode::from_wire`] (`255` = inherit the global mode); an
 /// absent `draw_mode` column leaves every [`Draw::mode`] as `None` (inherit).
 fn decode_draws(batch: &RecordBatch) -> Result<Option<Vec<Vec<Draw>>>, StreamError> {
-    let mesh_col = batch.column_by_name("draw_mesh");
-    let model_col = batch.column_by_name("draw_model");
-    let (mesh_col, model_col) = match (mesh_col, model_col) {
-        (None, None) => return Ok(None),
-        (Some(m), Some(n)) => (m, n),
-        (Some(_), None) => return Err(StreamError::MissingColumn("draw_model")),
-        (None, Some(_)) => return Err(StreamError::MissingColumn("draw_mesh")),
-    };
-
-    let mesh_list = mesh_col
-        .as_any()
-        .downcast_ref::<ListArray>()
-        .ok_or_else(|| StreamError::ColumnType {
-            column: "draw_mesh",
-            expected: "List<UInt32>",
-            actual: mesh_col.data_type().clone(),
-        })?;
-    let model_list = model_col
-        .as_any()
-        .downcast_ref::<ListArray>()
-        .ok_or_else(|| StreamError::ColumnType {
-            column: "draw_model",
-            expected: "List<FixedSizeList<Float32>[16]>",
-            actual: model_col.data_type().clone(),
-        })?;
-    if mesh_list.null_count() > 0 {
-        return Err(StreamError::NullValues("draw_mesh"));
-    }
-    if model_list.null_count() > 0 {
-        return Err(StreamError::NullValues("draw_model"));
-    }
-
-    // Optional per-draw render-mode override (`draw_mode`, `List<UInt8>`).
-    let mode_list = match batch.column_by_name("draw_mode") {
-        None => None,
-        Some(col) => {
-            let list = col.as_any().downcast_ref::<ListArray>().ok_or_else(|| {
-                StreamError::ColumnType {
-                    column: "draw_mode",
-                    expected: "List<UInt8>",
-                    actual: col.data_type().clone(),
-                }
-            })?;
-            if list.null_count() > 0 {
-                return Err(StreamError::NullValues("draw_mode"));
-            }
-            Some(list.clone())
-        }
-    };
-
-    let mut rows = Vec::with_capacity(batch.num_rows());
-    for row in 0..batch.num_rows() {
-        let ids_ref = mesh_list.value(row);
-        let ids = ids_ref
-            .as_any()
-            .downcast_ref::<UInt32Array>()
-            .ok_or_else(|| StreamError::ColumnType {
-                column: "draw_mesh",
-                expected: "List<UInt32>",
-                actual: ids_ref.data_type().clone(),
-            })?;
-        if ids.null_count() > 0 {
-            return Err(StreamError::NullValues("draw_mesh"));
-        }
-
-        let models_ref = model_list.value(row);
-        let models = models_ref
-            .as_any()
-            .downcast_ref::<FixedSizeListArray>()
-            .filter(|list| list.value_length() == 16)
-            .ok_or_else(|| StreamError::ColumnType {
-                column: "draw_model",
-                expected: "FixedSizeList<Float32>[16]",
-                actual: models_ref.data_type().clone(),
-            })?;
-        if models.null_count() > 0 || models.values().null_count() > 0 {
-            return Err(StreamError::NullValues("draw_model"));
-        }
-        if ids.len() != models.len() {
-            return Err(StreamError::MismatchedDrawLists {
-                row,
-                mesh_len: ids.len(),
-                model_len: models.len(),
-            });
-        }
-        let model_values = models
-            .values()
-            .as_any()
-            .downcast_ref::<Float32Array>()
-            .ok_or_else(|| StreamError::ColumnType {
-                column: "draw_model",
-                expected: "FixedSizeList<Float32>[16]",
-                actual: models.values().data_type().clone(),
-            })?;
-
-        // Per-draw modes for this row (empty ⇒ every draw inherits the global).
-        let modes: Vec<Option<RenderMode>> = match &mode_list {
-            None => Vec::new(),
-            Some(mode_list) => {
-                let modes_ref = mode_list.value(row);
-                let bytes = modes_ref
-                    .as_any()
-                    .downcast_ref::<UInt8Array>()
-                    .ok_or_else(|| StreamError::ColumnType {
-                        column: "draw_mode",
-                        expected: "List<UInt8>",
-                        actual: modes_ref.data_type().clone(),
-                    })?;
-                if bytes.null_count() > 0 {
-                    return Err(StreamError::NullValues("draw_mode"));
-                }
-                if bytes.len() != ids.len() {
-                    return Err(StreamError::MismatchedDrawModes {
-                        row,
-                        mode_len: bytes.len(),
-                        draw_len: ids.len(),
-                    });
-                }
-                (0..bytes.len())
-                    .map(|j| {
-                        RenderMode::from_wire(bytes.value(j)).ok_or(StreamError::InvalidDrawMode {
-                            value: bytes.value(j),
-                        })
-                    })
-                    .collect::<Result<_, _>>()?
-            }
-        };
-
-        let draws = (0..ids.len())
-            .map(|j| Draw {
-                mesh_id: ids.value(j),
-                model: read_fixed::<16>(models, model_values, j),
-                mode: modes.get(j).copied().flatten(),
-            })
-            .collect();
-        rows.push(draws);
-    }
-    Ok(Some(rows))
+    Ok(crate::protocol::decode_draws(batch)?)
 }
 
 /// Decodes the optional per-frame **background frame reference** column (`0.0.5`)
@@ -411,37 +211,7 @@ fn decode_draws(batch: &RecordBatch) -> Result<Option<Vec<Vec<Draw>>>, StreamErr
 /// to `None` (that frame has no background). The core never performs the I/O —
 /// it only surfaces the reference string for the shell to resolve.
 fn decode_frame_refs(batch: &RecordBatch) -> Result<Option<Vec<Option<String>>>, StreamError> {
-    let (name, col) = match batch
-        .column_by_name("frame_path")
-        .map(|c| ("frame_path", c))
-        .or_else(|| batch.column_by_name("frame_url").map(|c| ("frame_url", c)))
-    {
-        Some(pair) => pair,
-        None => return Ok(None),
-    };
-    let strings =
-        col.as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or_else(|| StreamError::ColumnType {
-                column: name,
-                expected: "Utf8",
-                actual: col.data_type().clone(),
-            })?;
-    let refs = (0..batch.num_rows())
-        .map(|row| {
-            if strings.is_null(row) {
-                None
-            } else {
-                let s = strings.value(row);
-                if s.is_empty() {
-                    None
-                } else {
-                    Some(s.to_owned())
-                }
-            }
-        })
-        .collect();
-    Ok(Some(refs))
+    Ok(crate::protocol::decode_frame_refs(batch)?)
 }
 
 /// each decoded [`FrameParams`] in stream order.
@@ -1084,8 +854,12 @@ pub fn run_stream<R: Read, W: Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::PROTOCOL_VERSION_KEY;
     use crate::render::build_scene;
-    use arrow::array::{ArrayRef, FixedSizeListArray as U8List, UInt8Array};
+    use arrow::array::{
+        Array, ArrayRef, FixedSizeListArray, FixedSizeListArray as U8List, Float32Array, ListArray,
+        StringArray, UInt32Array, UInt8Array,
+    };
     use arrow::datatypes::Field;
     use arrow::ipc::writer::StreamWriter;
     use std::sync::Arc;
