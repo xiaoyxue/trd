@@ -12,9 +12,10 @@ bootstrap only; the WebGPU API is never called from JS.
 Everything shares **one render function** and **one data format**:
 
 ```
-params-stream ─┬─ trd-cli  → trd-core → offscreen readback → image-stream   (headless)
-               ├─ trd-app  → trd-core → window surface                      (native GUI)
-               └─ trd-wasm → trd-core → canvas surface                      (browser)
+input-stream ─┬─ trd-cli  → trd-core → offscreen readback → image-stream   (headless)
+(mesh-first)  ├─ trd-app  → trd-core → window surface                      (native playback)
+              ├─ trd-wasm → trd-core → canvas surface                      (browser)
+              └─ trd-gui  → trd-core → offscreen → egui image      (interactive, native + browser)
 
                   image-stream → scripts/encode.py → ffmpeg → GIF / WebP
 ```
@@ -23,31 +24,38 @@ params-stream ─┬─ trd-cli  → trd-core → offscreen readback → image-s
 
 Platform-agnostic wgpu logic, shared verbatim by every target:
 
-- **`render.rs` + `mesh.wgsl` / `textured.wgsl`** — `MeshRenderer` rasterizes a
-  `Scene` of `DrawableObject`s into *any* `wgpu::TextureView`. That one renderer
-  is why the same code targets an offscreen texture, a window swapchain, or a
-  browser canvas.
-- **`DrawableObject` + `Scene` (`render.rs`)** — the base interface for every
+- **`render/` (module tree) + `mesh.wgsl` / `textured.wgsl` / `frame_plane.wgsl`** —
+  `MeshRenderer` (`render/mesh_renderer.rs`) rasterizes a `Scene` of
+  `DrawableObject`s into *any* `wgpu::TextureView`. That one renderer is why the
+  same code targets an offscreen texture, a window swapchain, or a browser canvas.
+  The offscreen render target + async pixel read-back is itself factored into a
+  shared `OffscreenTarget` harness (`render/offscreen.rs`) reused by every headless
+  renderer — native `BatchRenderer` and the two browser renderers alike.
+- **`DrawableObject` + `Scene` (`render/scene.rs`)** — the base interface for every
   primitive the renderer can draw (#41). `DrawableObject` is a small `Copy` enum —
   `Mesh { mesh_id, model, mode }` (filled or **wireframe** mode), `AabbBox {
-  mesh_id, model }`, and `CoordinateAxes { model }` — where geometry (GPU buffers)
-  is owned once by the renderer's decode-once mesh store and each variant carries
-  only *which* primitive to draw plus its per-frame model. A `Scene = Vec<
-  DrawableObject>` is rebuilt each frame; `MeshRenderer::encode` walks it once,
-  binds the shared `P·V` camera uniform, buckets the drawables (filled meshes → wireframe
-  meshes → AABB boxes → axes) into one instance buffer, and records the draws — with
-  **no per-type branching** in any front-end. A single-object frame is the
-  degenerate one-element scene, so there is no special case. Wireframe is a *mode*
-  of the mesh drawable, not a separate primitive; the AABB box and axes gizmo are
-  core-side additions to the scene (not wire columns).
-- **`stream.rs`** — the native Arrow IPC filter: `read_frame_stream` decodes the
-  input frames; `run_stream` is the CLI filter. Only one record batch is ever in
-  flight, so an animation of any length streams in constant memory.
+  mesh_id, model }`, `CoordinateAxes { model }`, and `FramePlane { fit }` (the #63
+  background still) — where geometry (GPU buffers) is owned once by the renderer's
+  decode-once mesh store and each variant carries only *which* primitive to draw
+  plus its per-frame model. A `Scene = Vec<DrawableObject>` is rebuilt each frame;
+  `MeshRenderer::encode` walks it once, binds the shared `P·V` camera uniform,
+  buckets the drawables (background frame → filled meshes → wireframe meshes → AABB
+  boxes → axes) into one instance buffer, and records the draws — with **no
+  per-type branching** in any front-end. A single-object frame is the degenerate
+  one-element scene, so there is no special case. Wireframe is a *mode* of the mesh
+  drawable, not a separate primitive; the AABB box and axes gizmo are core-side
+  additions to the scene (not wire columns).
+- **`stream.rs`** — the native Arrow IPC filter: `run_stream` is the CLI filter,
+  and `read_scene_stream_with_meta` drives the windowed viewer. Both frame the
+  input by driving the shared `protocol.rs` `InputSession` from a blocking
+  `Read`, so all mesh-first sub-stream sniffing lives in one place. Only one
+  record batch is ever in flight, so an animation of any length streams in
+  constant memory.
 - **`protocol.rs`** — the cross-platform (native + wasm) incremental Arrow IPC
   decoder. `InputSession` feeds arbitrary byte chunks through `arrow`'s
   `StreamDecoder`, validates the protocol schema once (accepts `0.0.5` only), and
-  yields one `FrameBatch` (`Vec<FrameParams>`) per record batch — the
-  browser's input path.
+  yields one `FrameBatch` (`Vec<DecodedFrame>`) per record batch — the **single
+  framing driver** for both the native CLI/window and the browser.
 - **`output.rs`** — the cross-platform Arrow IPC *output* serialization.
   `OutputSession` writes the `r,g,b,a` `fixed_shape_tensor<u8>` stream
   incrementally (one output batch per input batch); `tightly_pack_rgba` strips GPU
@@ -57,27 +65,29 @@ Platform-agnostic wgpu logic, shared verbatim by every target:
   quaternion), `Transform`, and `Aabb2/3`. Zero-cost `#[repr(transparent)]`
   newtypes with **private** inner fields that enforce affine-space rules
   (`point − point → vector`, no `point + point`) the raw glam types can't.
-  Column-major, right-handed, clip `z ∈ [0, 1]`; `render.rs`'s MVP transforms
+  Column-major, right-handed, clip `z ∈ [0, 1]`; `render/`'s MVP transforms
   are built on it and its `ToWgsl` layout keeps the GPU `Uniform` byte-identical.
 
-### The three consumers
+### The consumers
 
 Each is a *thin shell* that only supplies a render target and calls the core:
 
 | Target | Reads | Renders into | Produces |
 |---|---|---|---|
-| **`trd-cli`** | Arrow params stream (stdin) | offscreen texture → pixel read-back | Arrow image stream (stdout) |
-| **`trd-app`** | Arrow params stream (stdin) | live window swapchain | frames on screen |
+| **`trd-cli`** | Arrow stream (stdin) | offscreen texture → pixel read-back | Arrow image stream (stdout) |
+| **`trd-app`** | Arrow stream (stdin) | live window swapchain | frames on screen |
 | **`trd-wasm`** | Arrow stream (buffered via `loadIpc`) | live canvas surface (or offscreen texture) | frames in the browser |
+| **`trd-gui`** | a mesh (`--mesh` / `?mesh=`) + live gestures | offscreen texture → egui image (native + browser) | an interactive orbit/zoom viewer |
 
 - **`trd-cli` — headless Arrow filter.** For each input frame it renders to an
   offscreen texture, copies the pixels back (`copy_texture_to_buffer`), and writes
   them as an Arrow image stream. It does **not** encode video itself — piping that
   stream to `scripts/encode.py` (ffmpeg) turns it into a GIF/WebP.
-- **`trd-app` — native window.** A background thread reads the params stream from
-  stdin; the window plays it at `--fps`, drawing each frame **straight into the
-  swapchain surface** and presenting it. No read-back, no file — pixels go on
-  screen. With no stdin it renders nothing (a black window) until a scene arrives.
+- **`trd-app` — native window.** A background thread reads the mesh-first input
+  stream from stdin (via `read_scene_stream_with_meta`); the window plays it at
+  `--fps`, drawing each frame **straight into the swapchain surface** and presenting
+  it. No read-back, no file — pixels go on screen. With no stdin it renders nothing
+  (a black window) until a scene arrives.
 - **`trd-wasm` / `web/` — browser.** `CanvasRenderer.create(canvas)` obtains a wgpu
   surface from the `<canvas>` and holds a persistent `MeshRenderer` plus an
   `InputSession`, rendering the **same mesh Scene** as the native CLI through the
@@ -94,8 +104,17 @@ Each is a *thin shell* that only supplies a render target and calls the core:
   and `setCompositeFrame` + `updateFrameTextureRgba` composite each frame's 0.0.5
   background still. JS only moves Arrow bytes and schedules frames; it never touches
   the WebGPU API. The crate root is glue only — the two renderers live in
-  `crates/trd-wasm/src/{canvas_renderer,arrow_renderer}.rs` — and it ships as the
+  `crates/trd-wasm/src/{canvas_renderer,offscreen_renderer}.rs` — and it ships as the
   `trd-wasm` npm library.
+- **`trd-gui` — interactive viewer (native + browser).** An egui viewer that turns
+  orbit / zoom / pan gestures into an updated camera + model matrix and re-renders
+  a single mesh through `trd-core`. It renders **offscreen** to RGBA (via the shared
+  `OffscreenTarget` harness) and shows the pixels as an egui image, so egui's own
+  toolkit stays independent of `trd-core`'s wgpu. Native (an eframe app over
+  `InProcRenderer`) and browser (`web_renderer`, `wasm-bindgen` `start(canvas)`)
+  share the same scene + interaction code; `--backend arrow` (or `?backend=arrow`)
+  round-trips each frame's params through the real Arrow wire
+  (`decode_params_stream`) — the seam an external producer would drive.
 
 ### Stream protocol
 
@@ -169,10 +188,11 @@ single, self-contained schema reference (the protocol is `0.0.5`-only).
 
 | Path | What it is |
 |---|---|
-| `crates/trd-core` | the unified render core (`render.rs`, `mesh.wgsl`, `stream.rs`) |
-| `crates/trd-cli` | headless CLI: Arrow params in → Arrow image out |
+| `crates/trd-core` | the unified render core (`render/` module tree, `*.wgsl` shaders, `stream.rs`, `protocol.rs`) |
+| `crates/trd-cli` | headless CLI: Arrow stream in → Arrow image out |
 | `crates/trd-app` | native interactive window (winit + live wgpu surface); split into `main`/`cli`/`error`/`renderer`/`stream`/`app` modules |
-| `crates/trd-wasm` | `wasm-bindgen` entry point (crate-root glue + `canvas_renderer`/`arrow_renderer` modules); packaged as the `trd-wasm` npm library |
+| `crates/trd-gui` | interactive egui orbit/zoom viewer (native eframe + browser wasm); offscreen-renders one mesh through `trd-core` |
+| `crates/trd-wasm` | `wasm-bindgen` entry point (crate-root glue + `canvas_renderer`/`offscreen_renderer` modules); packaged as the `trd-wasm` npm library |
 | `web/` | bun-managed thin TypeScript wrapper (`main.ts` → config-driven `viewer.ts`) that loads `trd-wasm` |
 | `examples/` | mesh-first demo streams (e.g. `frames.bunny_dolly.cg.jsonl`, `frames.turntable.jsonl`) + `render.sh` / `render.ps1` wrappers |
 | `scripts/jsonl_to_arrow.py` | JSONL → Arrow `0.0.5` params stream (pyarrow producer) |

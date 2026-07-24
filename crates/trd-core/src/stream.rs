@@ -18,15 +18,16 @@
 //! `fixed_shape_tensor<u8>` channels `r,g,b,a` of shape `[H, W]`.
 
 use arrow::array::RecordBatch;
-use arrow::datatypes::{DataType, Schema};
+use arrow::datatypes::DataType;
 use arrow::error::ArrowError;
-use arrow::ipc::reader::StreamReader;
 use std::io::{Read, Write};
 
+// `Schema` is only referenced by the `#[cfg(test)]` decode wrappers + unit tests.
+#[cfg(test)]
+use arrow::datatypes::Schema;
+
 use crate::math::Matrix4;
-use crate::protocol::{
-    frame_rate_from_metadata, is_mesh_schema, is_texture_schema, ProtocolError, PROTOCOL_VERSION,
-};
+use crate::protocol::{ProtocolError, PROTOCOL_VERSION};
 use crate::render::{
     Draw, DrawableObject, FrameFit, FrameParams, Mesh, MeshRenderer, OffscreenError,
     OffscreenTarget, RenderMode, OFFSCREEN_FORMAT,
@@ -206,7 +207,11 @@ impl From<OffscreenError> for StreamError {
 }
 
 /// If the schema declares a protocol version, require it to be supported.
-/// Delegates to the shared [`crate::protocol::check_version`].
+/// Delegates to the shared [`crate::protocol::check_version`]. A test-only
+/// [`StreamError`]-typed wrapper: `run_stream` now validates the version inside
+/// the shared [`InputSession`](crate::InputSession), so this only exists to
+/// exercise the [`ProtocolError`] → [`StreamError`] mapping in unit tests.
+#[cfg(test)]
 pub fn check_version(schema: &Schema) -> Result<(), StreamError> {
     Ok(crate::protocol::check_version(schema)?)
 }
@@ -218,61 +223,23 @@ pub fn decode_frames(batch: &RecordBatch) -> Result<Vec<FrameParams>, StreamErro
     Ok(crate::protocol::decode_batch(batch)?)
 }
 
-/// Decodes the optional per-frame **instanced draw list** columns `draw_mesh`
-/// (`List<UInt32>`) and `draw_model` (`List<FixedSizeList<Float32>[16]>`), plus
-/// the optional per-draw `draw_mode` (`List<UInt8>`) render-mode override, into
-/// one `Vec<Draw>` per row. Returns `Some(rows)` when both required columns are
-/// present, or `None` when neither is (legacy single-object streams). Having
-/// exactly one of the `draw_mesh`/`draw_model` pair is an error, as is a per-row
-/// length mismatch between any of the present lists. `draw_mode` bytes are
-/// decoded via [`RenderMode::from_wire`] (`255` = inherit the global mode); an
-/// absent `draw_mode` column leaves every [`Draw::mode`] as `None` (inherit).
+/// Decodes the optional per-frame **instanced draw list** columns into one
+/// `Vec<Draw>` per row. A test-only [`StreamError`]-typed wrapper over
+/// [`crate::protocol::decode_draws`] — the native/wasm paths use the shared
+/// [`InputSession`](crate::InputSession) decoder directly; this only exercises
+/// the [`ProtocolError`] → [`StreamError`] mapping in unit tests.
+#[cfg(test)]
 fn decode_draws(batch: &RecordBatch) -> Result<Option<Vec<Vec<Draw>>>, StreamError> {
     Ok(crate::protocol::decode_draws(batch)?)
 }
 
 /// Decodes the optional per-frame **background frame reference** column (`0.0.5`)
-/// into one `Option<String>` per row. The column names a per-frame image the
-/// shell loads at the boundary and composites beneath the scene via a
-/// [`DrawableObject::FramePlane`]: `frame_path` (a filesystem path, native) is
-/// preferred, else `frame_url` (a URL, browser). Returns `None` when neither
-/// column is present (a stream without background frames); per-row nulls decode
-/// to `None` (that frame has no background). The core never performs the I/O —
-/// it only surfaces the reference string for the shell to resolve.
+/// into one `Option<String>` per row. A test-only [`StreamError`]-typed wrapper
+/// over [`crate::protocol::decode_frame_refs`], exercising the [`ProtocolError`]
+/// → [`StreamError`] mapping in unit tests.
+#[cfg(test)]
 fn decode_frame_refs(batch: &RecordBatch) -> Result<Option<Vec<Option<String>>>, StreamError> {
     Ok(crate::protocol::decode_frame_refs(batch)?)
-}
-
-/// each decoded [`FrameParams`] in stream order.
-///
-/// Convenience wrapper over [`read_frame_stream_with_meta`] that ignores the
-/// stream's declared playback rate.
-pub fn read_frame_stream<R: Read>(
-    input: R,
-    on_frame: impl FnMut(FrameParams),
-) -> Result<(), StreamError> {
-    read_frame_stream_with_meta(input, |_rate| {}, on_frame)
-}
-
-/// Like [`read_frame_stream`], but first invokes `on_meta` with the stream's
-/// declared playback rate (fps, [`crate::DEFAULT_FRAME_RATE`] when absent) as
-/// soon as the schema is known — before any frames — so a live player can pace
-/// playback by wall-clock time. Rendering logic still lives in [`decode_frames`].
-pub fn read_frame_stream_with_meta<R: Read>(
-    input: R,
-    on_meta: impl FnOnce(f64),
-    mut on_frame: impl FnMut(FrameParams),
-) -> Result<(), StreamError> {
-    let reader = StreamReader::try_new(input, None)?;
-    check_version(reader.schema().as_ref())?;
-    on_meta(frame_rate_from_metadata(reader.schema().metadata()));
-    for batch in reader {
-        let batch = batch?;
-        for frame in decode_frames(&batch)? {
-            on_frame(frame);
-        }
-    }
-    Ok(())
 }
 
 const BYTES_PER_PIXEL: u32 = 4;
@@ -479,61 +446,23 @@ impl BatchRenderer {
     }
 }
 
-/// Reads the leading mesh stream, decoding **every** row of its batches into a
-/// `Vec<Mesh>` (one mesh per row, in order), then **drains the rest of the
-/// stream through its end-of-stream marker** so the underlying reader is
-/// positioned at the start of the following params stream. The reader must be
-/// unbuffered (as [`StreamReader::try_new`] produces) so it does not over-read
-/// past the mesh stream's EOS into the params stream.
-fn read_meshes<R: Read>(reader: &mut StreamReader<R>) -> Result<Vec<Mesh>, StreamError> {
-    let mut meshes = Vec::new();
-    for batch in reader.by_ref() {
-        let batch = batch?;
-        if batch.num_rows() > 0 {
-            meshes.extend(Mesh::from_arrow_all(&batch)?);
-        }
-    }
-    if meshes.is_empty() {
-        return Err(StreamError::Mesh(crate::MeshError::Empty));
-    }
-    Ok(meshes)
-}
-
-/// Reads an optional leading **texture** sub-stream (`0.0.4`), decoding its first
-/// row into an [`ImageTexture`], then **drains the rest of the stream through its
-/// end-of-stream marker** so the underlying reader is positioned at the start of
-/// the following params stream. Like [`read_meshes`], the reader must be
-/// unbuffered so it does not over-read past this stream's EOS. Returns the
-/// decoded image (a texture table is one row = one image).
-fn read_texture<R: Read>(reader: &mut StreamReader<R>) -> Result<ImageTexture, StreamError> {
-    let mut texture: Option<ImageTexture> = None;
-    for batch in reader.by_ref() {
-        let batch = batch?;
-        if texture.is_none() && batch.num_rows() > 0 {
-            texture = Some(ImageTexture::from_arrow(&batch)?);
-        }
-    }
-    texture.ok_or(StreamError::Texture(crate::TextureError::Empty))
-}
-
-/// Resolves the `i`-th frame's instanced draw list: the wire `draw_lists` row
-/// when present, else one instance of mesh 0 placed by the frame's own model
-/// (legacy single-object behavior). Every referenced `mesh_id` is validated
-/// against `mesh_count`. Shared by the headless [`run_stream`] path and the live
+/// Resolves one decoded frame's instanced draw list: its wire `draws` when
+/// present, else one instance of mesh 0 placed by the frame's own model (legacy
+/// single-object behavior). Every referenced `mesh_id` is validated against
+/// `mesh_count`. Shared by the headless [`run_stream`] path and the live
 /// [`read_scene_stream_with_meta`] front-end so both resolve draws identically.
-fn resolve_draws(
-    params: &FrameParams,
-    draw_lists: &Option<Vec<Vec<Draw>>>,
-    i: usize,
+fn resolve_frame_draws(
+    frame: &crate::DecodedFrame,
     mesh_count: usize,
 ) -> Result<Vec<Draw>, StreamError> {
-    let draws = match draw_lists {
-        Some(rows) => rows[i].clone(),
-        None => vec![Draw {
+    let draws = if frame.draws.is_empty() {
+        vec![Draw {
             mesh_id: 0,
-            model: params.model_matrix().to_cols_array(),
+            model: frame.params.model_matrix().to_cols_array(),
             mode: None,
-        }],
+        }]
+    } else {
+        frame.draws.clone()
     };
     for draw in &draws {
         if draw.mesh_id as usize >= mesh_count {
@@ -562,57 +491,60 @@ fn resolve_draws(
 /// params-only stream with no leading mesh table is a
 /// [`StreamError::MissingMeshStream`].
 pub fn read_scene_stream_with_meta<R: Read>(
-    input: R,
+    mut input: R,
     on_meshes: impl FnOnce(Vec<Mesh>),
     on_texture: impl FnOnce(Option<ImageTexture>),
     on_meta: impl FnOnce(f64),
     mut on_frame: impl FnMut(FrameParams, Vec<Draw>, Option<String>),
 ) -> Result<(), StreamError> {
-    let mut first = StreamReader::try_new(input, None)?;
-    check_version(first.schema().as_ref())?;
+    let mut session = crate::InputSession::new();
+    // FnOnce callbacks fired exactly once, when the params schema is first
+    // reached (meshes + texture + fps complete); `Option::take` moves each out on
+    // that single iteration so the borrow checker accepts calling them in a loop.
+    let mut on_meshes = Some(on_meshes);
+    let mut on_texture = Some(on_texture);
+    let mut on_meta = Some(on_meta);
+    let mut mesh_count = 0usize;
+    let mut ready = false;
 
-    // Decodes one params batch into `(FrameParams, draws, frame_ref)` callbacks,
-    // validating draw mesh ids against `mesh_count`.
-    let mut emit = |batch: &RecordBatch, mesh_count: usize| -> Result<(), StreamError> {
-        let frames = decode_frames(batch)?;
-        let draw_lists = decode_draws(batch)?;
-        let frame_refs = decode_frame_refs(batch)?;
-        for (i, params) in frames.iter().enumerate() {
-            let draws = resolve_draws(params, &draw_lists, i, mesh_count)?;
-            let frame_ref = frame_refs.as_ref().and_then(|r| r[i].clone());
-            on_frame(*params, draws, frame_ref);
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = input.read(&mut buf)?;
+        if n == 0 {
+            break;
         }
-        Ok(())
-    };
+        let batches = session.push(&buf[..n])?;
 
-    if !is_mesh_schema(first.schema().as_ref()) {
-        // The protocol is mesh-first; a params-only stream is no longer accepted.
-        return Err(StreamError::MissingMeshStream);
+        if !ready && session.has_schema() {
+            if session.meshes().is_empty() {
+                // The protocol is mesh-first; a params-only stream is rejected.
+                return Err(StreamError::MissingMeshStream);
+            }
+            mesh_count = session.meshes().len();
+            if let Some(cb) = on_meshes.take() {
+                cb(session.meshes().to_vec());
+            }
+            if let Some(cb) = on_texture.take() {
+                cb(session.texture().cloned());
+            }
+            if let Some(cb) = on_meta.take() {
+                cb(session.frame_rate().unwrap_or(crate::DEFAULT_FRAME_RATE));
+            }
+            ready = true;
+        }
+
+        for batch in batches {
+            for frame in batch {
+                let draws = resolve_frame_draws(&frame, mesh_count)?;
+                on_frame(frame.params, draws, frame.frame_ref);
+            }
+        }
     }
-    // Mesh-first: decode the leading mesh table, then the optional texture
-    // table, then the params stream — all in the same byte stream.
-    let meshes = read_meshes(&mut first)?;
-    let mesh_count = meshes.len();
-    on_meshes(meshes);
+    session.finish()?;
 
-    // The stream after the mesh table is either a texture table or the params
-    // stream; sniff its schema to decide.
-    let mut next = StreamReader::try_new(first.get_mut(), None)?;
-    check_version(next.schema().as_ref())?;
-    if is_texture_schema(next.schema().as_ref()) {
-        on_texture(Some(read_texture(&mut next)?));
-        let params = StreamReader::try_new(next.get_mut(), None)?;
-        check_version(params.schema().as_ref())?;
-        on_meta(frame_rate_from_metadata(params.schema().metadata()));
-        for batch in params {
-            emit(&batch?, mesh_count)?;
-        }
-    } else {
-        on_texture(None);
-        on_meta(frame_rate_from_metadata(next.schema().metadata()));
-        for batch in next {
-            emit(&batch?, mesh_count)?;
-        }
+    if !ready {
+        // No params schema was ever reached (empty input) — mesh-first unmet.
+        return Err(StreamError::MissingMeshStream);
     }
     Ok(())
 }
@@ -626,60 +558,40 @@ pub fn read_scene_stream_with_meta<R: Read>(
 /// background plane (the shell decides how to report the miss).
 pub type FrameResolver<'a> = &'a dyn Fn(&str) -> Option<crate::texture::ImageData>;
 
-/// Renders every frame of the `params` batch stream to `output`, one Arrow
-/// output batch per input batch. Shared by both the mesh-first and legacy paths.
-/// When `frame_resolver` is `Some`, a frame carrying a `frame_path`/`frame_url`
+/// Renders one decoded [`FrameBatch`](crate::FrameBatch) and writes its output
+/// batch, mirroring one Arrow output batch per input record batch. When
+/// `frame_resolver` is `Some`, a frame carrying a `frame_path`/`frame_url`
 /// reference (`0.0.5`) has its background image resolved + uploaded and composited
 /// beneath the scene via a [`DrawableObject`](crate::render::DrawableObject)`::FramePlane`.
-fn render_params<I, W>(
-    params: I,
-    mut renderer: BatchRenderer,
-    frame_rate: f64,
-    width: u32,
-    height: u32,
+/// `last_frame_ref` tracks the currently uploaded background so consecutive
+/// frames sharing it skip the decode + re-upload.
+fn render_and_write_batch<W: Write>(
+    renderer: &mut BatchRenderer,
+    output_session: &mut OutputSession,
+    batch: &crate::FrameBatch,
     frame_resolver: Option<FrameResolver>,
-    mut output: W,
-) -> Result<(), StreamError>
-where
-    I: Iterator<Item = Result<RecordBatch, ArrowError>>,
-    W: Write,
-{
-    let mut output_session = OutputSession::with_frame_rate(width, height, Some(frame_rate))?;
-    output.write_all(&output_session.drain_new()?)?;
+    last_frame_ref: &mut Option<String>,
+    output: &mut W,
+) -> Result<(), StreamError> {
     let mesh_count = renderer.mesh_count();
-    // The path of the frame texture currently uploaded, so consecutive frames
-    // sharing a background image skip the decode + re-upload.
-    let mut last_frame_ref: Option<String> = None;
-    for batch in params {
-        let batch = batch?;
-        let frames = decode_frames(&batch)?;
-        // Optional per-frame instanced draw list; absent ⇒ one instance of mesh 0
-        // placed by the frame's own model (legacy single-object behavior).
-        let draw_lists = decode_draws(&batch)?;
-        // Optional per-frame background frame reference (0.0.5).
-        let frame_refs = decode_frame_refs(&batch)?;
-        let mut planes: Vec<Vec<u8>> = Vec::with_capacity(frames.len());
-        for (i, params) in frames.iter().enumerate() {
-            let draws = resolve_draws(params, &draw_lists, i, mesh_count)?;
-            let frame_ref = frame_refs.as_ref().and_then(|r| r[i].as_deref());
-            let mut frame_fit = None;
-            if let (Some(path), Some(resolve)) = (frame_ref, frame_resolver) {
-                if last_frame_ref.as_deref() != Some(path) {
-                    if let Some(image) = resolve(path) {
-                        renderer.update_frame_texture(&image);
-                        last_frame_ref = Some(path.to_owned());
-                        frame_fit = Some(FrameFit::Stretch);
-                    }
-                } else {
+    let mut planes: Vec<Vec<u8>> = Vec::with_capacity(batch.len());
+    for frame in batch {
+        let draws = resolve_frame_draws(frame, mesh_count)?;
+        let mut frame_fit = None;
+        if let (Some(path), Some(resolve)) = (frame.frame_ref.as_deref(), frame_resolver) {
+            if last_frame_ref.as_deref() != Some(path) {
+                if let Some(image) = resolve(path) {
+                    renderer.update_frame_texture(&image);
+                    *last_frame_ref = Some(path.to_owned());
                     frame_fit = Some(FrameFit::Stretch);
                 }
+            } else {
+                frame_fit = Some(FrameFit::Stretch);
             }
-            planes.push(renderer.render_frame(*params, &draws, frame_fit)?);
         }
-        output_session.write_rgba_batch(&planes)?;
-        output.write_all(&output_session.drain_new()?)?;
+        planes.push(renderer.render_frame(frame.params, &draws, frame_fit)?);
     }
-    output_session.finish()?;
+    output_session.write_rgba_batch(&planes)?;
     output.write_all(&output_session.drain_new()?)?;
     Ok(())
 }
@@ -709,75 +621,85 @@ pub struct RenderOptions {
 /// leading mesh table is decoded once (via [`Mesh::from_arrow_all`]) and
 /// uploaded, then an optional texture table is uploaded as the bound albedo,
 /// then the following params stream drives per-frame rendering. A params-only
-/// stream with no leading mesh table is a [`StreamError::MissingMeshStream`]. The
-/// sub-streams are told apart by sniffing each schema ([`is_mesh_schema`] /
-/// [`is_texture_schema`]).
+/// stream with no leading mesh table is a [`StreamError::MissingMeshStream`].
+///
+/// Framing is driven by the single shared [`InputSession`](crate::InputSession)
+/// (also used by the wasm renderers): input bytes are read in chunks and pushed
+/// through it, so all the mesh-first sub-stream sniffing + boundary handling
+/// lives in exactly one place. The only native-specific bit is the blocking
+/// [`Read`] byte source.
 pub fn run_stream<R: Read, W: Write>(
-    input: R,
-    output: W,
+    mut input: R,
+    mut output: W,
     width: u32,
     height: u32,
     options: RenderOptions,
     frame_resolver: Option<FrameResolver>,
 ) -> Result<(), StreamError> {
-    let RenderOptions {
-        mode,
-        show_aabb,
-        show_axes,
-        show_local_axes,
-    } = options;
     // Validate dimensions up front so schema construction (which multiplies
     // width*height) can't overflow before BatchRenderer's guard runs.
     check_dimensions(width, height)?;
 
-    let mut first = StreamReader::try_new(input, None)?;
-    check_version(first.schema().as_ref())?;
+    let mut session = crate::InputSession::new();
+    // Built once the params schema is reached (meshes + texture + fps known).
+    let mut renderer: Option<BatchRenderer> = None;
+    let mut output_session: Option<OutputSession> = None;
+    // The background currently uploaded, so consecutive frames sharing it skip
+    // the decode + re-upload.
+    let mut last_frame_ref: Option<String> = None;
 
-    if !is_mesh_schema(first.schema().as_ref()) {
-        // The protocol is mesh-first; a params-only stream is no longer accepted.
-        return Err(StreamError::MissingMeshStream);
-    }
-    // Mesh-first: decode + upload the mesh table (one mesh per row), then the
-    // optional texture table, then render the params stream that follows them in
-    // the same byte stream.
-    let meshes = read_meshes(&mut first)?;
-    let mut renderer = BatchRenderer::with_meshes(width, height, &meshes)?;
-    renderer.set_mode(mode);
-    renderer.set_show_aabb(show_aabb);
-    renderer.set_show_axes(show_axes);
-    renderer.set_show_local_axes(show_local_axes);
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = input.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        let batches = session.push(&buf[..n])?;
 
-    // The stream after the mesh table is either a texture table or the params
-    // stream; sniff its schema to decide.
-    let mut next = StreamReader::try_new(first.get_mut(), None)?;
-    check_version(next.schema().as_ref())?;
-    if is_texture_schema(next.schema().as_ref()) {
-        let texture = read_texture(&mut next)?;
-        renderer.set_texture(&texture);
-        let params = StreamReader::try_new(next.get_mut(), None)?;
-        check_version(params.schema().as_ref())?;
-        let frame_rate = frame_rate_from_metadata(params.schema().metadata());
-        render_params(
-            params,
-            renderer,
-            frame_rate,
-            width,
-            height,
-            frame_resolver,
-            output,
-        )
-    } else {
-        let frame_rate = frame_rate_from_metadata(next.schema().metadata());
-        render_params(
-            next,
-            renderer,
-            frame_rate,
-            width,
-            height,
-            frame_resolver,
-            output,
-        )
+        // The mesh-first protocol delivers meshes + optional texture before the
+        // params schema, so `has_schema()` flips true only once they're complete.
+        if renderer.is_none() && session.has_schema() {
+            if session.meshes().is_empty() {
+                return Err(StreamError::MissingMeshStream);
+            }
+            let mut built = BatchRenderer::with_meshes(width, height, session.meshes())?;
+            built.set_mode(options.mode);
+            built.set_show_aabb(options.show_aabb);
+            built.set_show_axes(options.show_axes);
+            built.set_show_local_axes(options.show_local_axes);
+            if let Some(texture) = session.texture() {
+                built.set_texture(texture);
+            }
+            renderer = Some(built);
+
+            let frame_rate = session.frame_rate().unwrap_or(crate::DEFAULT_FRAME_RATE);
+            let mut session_out = OutputSession::with_frame_rate(width, height, Some(frame_rate))?;
+            output.write_all(&session_out.drain_new()?)?;
+            output_session = Some(session_out);
+        }
+
+        if let (Some(renderer), Some(output_session)) = (renderer.as_mut(), output_session.as_mut())
+        {
+            for batch in &batches {
+                render_and_write_batch(
+                    renderer,
+                    output_session,
+                    batch,
+                    frame_resolver,
+                    &mut last_frame_ref,
+                    &mut output,
+                )?;
+            }
+        }
     }
+    session.finish()?;
+
+    // A stream that never reached a params schema (empty input) — the mesh-first
+    // contract wasn't satisfied.
+    let mut output_session = output_session.ok_or(StreamError::MissingMeshStream)?;
+    output_session.finish()?;
+    output.write_all(&output_session.drain_new()?)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -790,6 +712,7 @@ mod tests {
         StringArray, UInt32Array, UInt8Array,
     };
     use arrow::datatypes::Field;
+    use arrow::ipc::reader::StreamReader;
     use arrow::ipc::writer::StreamWriter;
     use std::sync::Arc;
 
@@ -1330,38 +1253,6 @@ mod tests {
     }
 
     #[test]
-    fn read_frame_stream_roundtrip() {
-        use arrow::ipc::writer::StreamWriter;
-
-        let frames = vec![
-            FrameParams {
-                model: Some(IDENTITY_MODEL),
-                ..FrameParams::IDENTITY
-            },
-            FrameParams {
-                model: Some([
-                    0.5, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.2, -0.1, 0.0, 1.0,
-                ]),
-                ..FrameParams::IDENTITY
-            },
-        ];
-        let batch = build_input_batch(&frames);
-
-        // Encode the batch as an Arrow IPC stream, then read it back through the
-        // public streaming decoder used by the live viewer.
-        let mut buf: Vec<u8> = Vec::new();
-        {
-            let mut writer = StreamWriter::try_new(&mut buf, batch.schema().as_ref()).unwrap();
-            writer.write(&batch).unwrap();
-            writer.finish().unwrap();
-        }
-
-        let mut got = Vec::new();
-        read_frame_stream(buf.as_slice(), |p| got.push(p)).unwrap();
-        assert_eq!(got, frames);
-    }
-
-    #[test]
     fn child_null_in_camera_list_is_error() {
         // A non-null camera-list row whose child float is null must be rejected.
         let item = Arc::new(Field::new("item", DataType::Float32, true));
@@ -1507,8 +1398,6 @@ mod tests {
 
     #[test]
     fn two_stream_mesh_then_params_split_and_decode() {
-        use std::io::Cursor;
-
         // Build a concatenated [mesh][params] byte stream in memory.
         let mesh = Mesh::hello_triangle();
         let frames = vec![
@@ -1527,19 +1416,18 @@ mod tests {
         write_mesh_stream(&mut bytes, &mesh);
         write_params_stream(&mut bytes, &frames);
 
-        // The framing helpers must recover the mesh, then the params that follow
-        // it in the same byte stream (the mesh reader must not over-read).
-        let mut first = StreamReader::try_new(Cursor::new(bytes), None).unwrap();
-        assert!(is_mesh_schema(first.schema().as_ref()));
-        let decoded_meshes = read_meshes(&mut first).unwrap();
-        assert_eq!(decoded_meshes, vec![mesh]);
-
-        let params = StreamReader::try_new(first.get_mut(), None).unwrap();
-        assert!(!is_mesh_schema(params.schema().as_ref()));
+        // The single shared `InputSession` framing driver must recover the mesh,
+        // then the params that follow it in the same byte stream (the mesh
+        // sub-stream boundary must not swallow the params).
+        let mut session = crate::InputSession::new();
         let mut decoded = Vec::new();
-        for batch in params {
-            decoded.extend(decode_frames(&batch.unwrap()).unwrap());
+        for batch in session.push(&bytes).unwrap() {
+            for frame in batch {
+                decoded.push(frame.params);
+            }
         }
+        session.finish().unwrap();
+        assert_eq!(session.meshes(), &[mesh]);
         assert_eq!(decoded, frames);
     }
 
@@ -1548,7 +1436,7 @@ mod tests {
         let mut bytes = Vec::new();
         write_params_stream(&mut bytes, &[FrameParams::IDENTITY]);
         let reader = StreamReader::try_new(bytes.as_slice(), None).unwrap();
-        assert!(!is_mesh_schema(reader.schema().as_ref()));
+        assert!(!crate::protocol::is_mesh_schema(reader.schema().as_ref()));
     }
 
     #[test]
