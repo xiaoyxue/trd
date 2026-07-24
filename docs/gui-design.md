@@ -17,26 +17,33 @@ round-trip + wasm pending) · Owner: @xiaoyxue · Branch: `feat/trd-gui-design`
 
 ## Status
 
-- **Interaction loop implemented** (`crates/trd-gui`, Slices 1–3 of §10, in
-  process): a native eframe/egui window that renders `trd-core`'s headless RGBA
-  into a central-panel egui texture and turns pointer/scroll gestures into an
-  updated camera/model matrix that is re-rendered — the full
+Work is split **one PR per slice** (§10). **PR #98 = the in-process viewer,
+Slices 0–3**; the Arrow round-trip and wasm land as their own follow-up PRs.
+
+- **In-process interaction loop implemented** (`crates/trd-gui`, Slices 0–3 of
+  §10): a native eframe/egui window that renders `trd-core`'s headless RGBA into
+  a central-panel egui texture and turns pointer/scroll gestures into an updated
+  camera/model matrix that is re-rendered — the full
   "input → matrix → render → display" cycle. Modules mirror §7.2: `scene.rs`
   (orbit camera + object transform → `FrameParams`/`Draw`s), `interaction.rs`
   (`InteractionController`: events → scene, unit-tested, egui-free),
   `render_backend.rs` (`SceneRenderer` trait + `InProcRenderer` over
   `trd_core::BatchRenderer`), `app.rs` (egui panels), `cli.rs` (`--mesh` /
-  `--width` / `--height`, built-in default cube). Deps: `eframe`/`egui` 0.35
-  (glow), `trd-core`, `clap`, `thiserror`. Native-only (empty `main` on wasm,
-  like trd-app); the pure `scene`/`interaction` modules still compile on wasm.
-- **Verification:** 15 unit tests (scene/interaction/cli, no GPU) run in
-  `nix flake check`; a GPU-gated `tests/inproc_render.rs` (`#[ignore]`) renders
-  the real backend and asserts a non-blank, interaction-sensitive frame (run
-  locally: MSVC on Windows, nixGL on Linux).
-- **Next (§10):** Slice 3's `ArrowRoundTripRenderer` (author a `[mesh][params]`
-  stream → `run_stream` → image stream, enabling external producers) behind the
-  same `SceneRenderer` trait, then Slice 4 (wasm: egui-on-canvas + `trd-core`
-  offscreen). See issue #97 for the per-slice checklists.
+  `--texture` / `--width` / `--height`, built-in default cube). Render modes
+  Filled / Wireframe / **Textured** (`--texture` binds an albedo, downscaled to
+  the renderer's 2048² limit). Deps: `eframe`/`egui` 0.35 (glow), `trd-core`,
+  `clap`, `thiserror`, `image`. Native-only (empty `main` on wasm, like
+  trd-app); the pure `scene`/`interaction` modules still compile on wasm.
+- **Verification:** 19 unit tests (scene/interaction/cli/render_backend, no GPU)
+  run in `nix flake check`; a GPU-gated `tests/inproc_render.rs` (`#[ignore]`,
+  3 tests) renders the real backend and asserts a non-blank,
+  interaction-sensitive, texture-sampling frame (run locally: MSVC on Windows,
+  nixGL on Linux).
+- **Next (own PRs, §10):** Slice 3's `ArrowRoundTripRenderer` (author a
+  `[mesh][params]` stream → `run_stream` → image stream, enabling external
+  producers) behind the same `SceneRenderer` trait, then Slice 4 (wasm:
+  egui-on-canvas + `trd-core` offscreen). See issue #97 for the per-slice
+  checklists.
 
 ## 1. Goal
 
@@ -333,18 +340,22 @@ scene authoring, and the image-display texture. All pixels come from trd-core.
 * GPU-dependent behavior stays `#[ignore]`d / run locally via nixGL on Linux and
   the MSVC path on Windows (dual-platform verification per AGENTS.md).
 
-## 10. Phasing (vertical slices — each end-to-end verifiable)
+## 10. Phasing (vertical slices — each end-to-end verifiable, one PR per slice)
 
+0. ✅ **Scaffold**: workspace crate + wrapped `nix build .#trd-gui` + an empty
+   eframe/egui window. Groundwork for the decoupled toolkit setup. *(PR #98)*
 1. ✅ **Display**: `trd-gui` native window shows a `trd-core` render as an egui
-   image. Proves the Strategy-A decoupling + the wgpu-gap workaround.
+   image. Proves the Strategy-A decoupling + the wgpu-gap workaround. *(PR #98)*
 2. ✅ **Camera interaction**: orbit/zoom updates the `FrameParams` camera,
    `InProcRenderer` re-renders. Proves the event → render → display loop.
+   *(PR #98)*
 3. **Object interaction + Arrow round-trip**: ✅ translate/rotate the mesh
-   (`Draw.model`) in process; ⏳ still to add the `ArrowRoundTripRenderer` (Rust
-   scene encoder + `run_stream`/`trd-cli`) behind the same `SceneRenderer` trait
-   — the full "event → new arrow with computed model matrix → render → gui" loop
-   for external producers.
-4. ⏳ **wasm parity**: egui-on-canvas + trd-core offscreen.
+   (`Draw.model`) in process, plus Filled/Wireframe/**Textured** render modes
+   (`--texture`) *(PR #98)*; ⏳ **next PR** adds the `ArrowRoundTripRenderer`
+   (Rust scene encoder + `run_stream`/`trd-cli`) behind the same `SceneRenderer`
+   trait — the full "event → new arrow with computed model matrix → render → gui"
+   loop for external producers.
+4. ⏳ **wasm parity** *(own PR)*: egui-on-canvas + trd-core offscreen.
 5. ⏳ **(later)** Strategy B live shared-surface overlay once egui ships wgpu 30.
 
 ## 11. Open decisions
