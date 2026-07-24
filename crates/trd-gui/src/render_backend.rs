@@ -14,8 +14,8 @@
 //! both slot behind this same trait.
 
 use trd_core::{
-    encode_mesh_stream, encode_params_stream, read_image_stream, run_stream, BatchRenderer, Mesh,
-    RenderOptions, Texture,
+    encode_mesh_stream, encode_params_stream, encode_texture_stream, read_image_stream, run_stream,
+    BatchRenderer, Mesh, RenderOptions, Texture,
 };
 
 use crate::error::GuiError;
@@ -133,18 +133,33 @@ impl SceneRenderer for InProcRenderer {
 pub struct ArrowRoundTripRenderer {
     /// The cached mesh-table IPC bytes (static across frames).
     mesh_stream: Vec<u8>,
+    /// The cached texture-table IPC bytes (empty when no texture is bound).
+    texture_stream: Vec<u8>,
     width: u32,
     height: u32,
 }
 
 impl ArrowRoundTripRenderer {
-    /// Builds the backend, encoding the (static) mesh table once. Textures are
-    /// not authored into the round-trip stream yet, so Textured mode renders with
-    /// `trd-core`'s default albedo here.
-    pub fn new(meshes: &[Mesh], width: u32, height: u32) -> Result<Self, GuiError> {
+    /// Builds the backend, encoding the (static) mesh table — and the optional
+    /// texture table — once. When a `texture` is bound it is authored into the
+    /// `[mesh][texture][params]` stream, so [`RenderMode::Textured`] samples it
+    /// (matching the in-process backend).
+    ///
+    /// [`RenderMode::Textured`]: trd_core::RenderMode::Textured
+    pub fn new(
+        meshes: &[Mesh],
+        texture: Option<&dyn Texture>,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, GuiError> {
         let mesh_stream = encode_mesh_stream(meshes)?;
+        let texture_stream = match texture {
+            Some(texture) => encode_texture_stream(texture)?,
+            None => Vec::new(),
+        };
         Ok(Self {
             mesh_stream,
+            texture_stream,
             width,
             height,
         })
@@ -156,7 +171,9 @@ impl SceneRenderer for ArrowRoundTripRenderer {
         let aspect = self.width as f32 / self.height.max(1) as f32;
         let params = encode_params_stream(&[state.frame_params(aspect)], Some(&[state.draws()]))?;
 
+        // Concatenated mesh-first stream: [mesh][texture?][params].
         let mut input = self.mesh_stream.clone();
+        input.extend_from_slice(&self.texture_stream);
         input.extend(params);
 
         let mut output = Vec::new();

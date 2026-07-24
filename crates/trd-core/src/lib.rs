@@ -28,7 +28,9 @@ pub use render::{
     build_scene, create_mesh_pipeline, CameraFormError, Draw, DrawableObject, FrameFit,
     FrameParams, Mesh, MeshRenderer, RenderMode, Scene, TriangleRenderer, Vertex, Viewport,
 };
-pub use scene_encode::{encode_mesh_stream, encode_params_stream, encode_scene, SceneEncodeError};
+pub use scene_encode::{
+    encode_mesh_stream, encode_params_stream, encode_scene, encode_texture_stream, SceneEncodeError,
+};
 pub use texture::{
     ConstantTexture, ImageData, ImageTexture, Texture, TextureError, TEXTURE_COLUMN,
 };
