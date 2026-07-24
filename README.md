@@ -363,6 +363,56 @@ examples/render.sh --cli --wireframe --axes --aabb \
   output/fp_demo/turntable_fp.jsonl output/fp_demo.gif 512 512 24
 ```
 
+#### NBA court AR demo (#95)
+
+[`scripts/nba_perception_to_arrow.py`](scripts/nba_perception_to_arrow.py) drives
+the **same** single-view placement pipeline on a **real NBA broadcast clip**: it
+repacks a per-frame court-calibration dataset — camera `K` + a tracked planar floor
+quad (the "ad-unit" rectangle a reference AR cube stands on), from
+VideoAnalysis#1133 — into the perception Arrow stream that
+[`examples/placement_quad_by_local_coord.py`](examples/placement_quad_by_local_coord.py)
+already consumes. The bunny is anchored to that court quad via the Pose-free #77
+reconstruction and **stays glued to the same spot on the floor as the broadcast
+camera pans and zooms**. It is the cornellbox demo with only the clip (and its
+calibration) swapped — `trd-core` is untouched.
+
+The broadcast video and its extracted frames are **not** vendored (copyrighted); the
+demo reads them from a local dataset dir (e.g. `~/Asset/nba-short/`). Only the
+derived, image-free artifacts are committed: the adapter, the perception stream
+(`examples/frames.nba.perception.arrow` — just `K` + quad + `frame_path`) and the
+placed scene (`examples/frames.nba.stage2.jsonl`).
+
+```sh
+NBA=~/Asset/nba-short     # local dataset: NBA.mp4 + per_frame_KVP_cube.parquet
+
+# 1. parquet → perception Arrow (shot 2; use a trustworthy BA_* focal).
+#    Prints the present_index range to extract next.
+uv run --with pyarrow scripts/nba_perception_to_arrow.py \
+  --parquet "$NBA/per_frame_KVP_cube.parquet" --shot 2 --method BA_2511 \
+  -o examples/frames.nba.perception.arrow
+
+# 2. extract those broadcast frames (present_index 428..579) as background stills
+mkdir -p output/nba/frames
+ffmpeg -i "$NBA/NBA.mp4" -vf "select='between(n,428,579)',scale=960:540" \
+  -vsync 0 -start_number 428 -q:v 3 output/nba/frames/frame_%06d.jpg
+
+# 3. perception → placed scene (bunny on the court quad, Pose-free #77), then render
+uv run --with pyarrow --with numpy examples/placement_quad_by_local_coord.py \
+  --from-perception examples/frames.nba.perception.arrow --place-mesh --placement-quad \
+  --src-width 1920 --src-height 1080 --width 960 --height 540 \
+  -o examples/frames.nba.stage2.jsonl
+examples/render.sh --cli --placement-quad --axes-local \
+  --mesh assets/meshes/bunny_with_texture/bunny.obj \
+  --texture assets/meshes/bunny_with_texture/bunny_uv_map1.jpg \
+  --frames-base output/nba \
+  examples/frames.nba.stage2.jsonl output/nba_stage2.gif 960 540 25
+```
+
+Shot 7 (`--method BA_2568`, `present_index` 1440..1638) is the other calibrated
+shot. `K` is authored for 1920×1080, so keep `--src-width 1920 --src-height 1080`
+(it is scaled to the render size). On Windows, run the same three steps with
+`examples\render.ps1 -CLI` for the final render.
+
 #### The render pipeline
 
 Under the hood it is a fully-piped `JSONL → Arrow → trd → ffmpeg` flow, no
