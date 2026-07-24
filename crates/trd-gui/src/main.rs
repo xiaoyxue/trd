@@ -12,7 +12,7 @@ fn main() -> eframe::Result<()> {
     use trd_gui::app::TrdGuiApp;
     use trd_gui::cli::Cli;
     use trd_gui::interaction::InteractionController;
-    use trd_gui::render_backend::InProcRenderer;
+    use trd_gui::render_backend::{mesh_has_uvs, InProcRenderer};
     use trd_gui::scene::SceneState;
 
     env_logger::Builder::from_env(
@@ -38,6 +38,15 @@ fn main() -> eframe::Result<()> {
             std::process::exit(1);
         }
     };
+    // A texture only maps meaningfully onto a UV-mapped mesh; warn otherwise so a
+    // flat/"wrong" Textured render is explained rather than mysterious.
+    if texture.is_some() && !mesh_has_uvs(&mesh) {
+        log::warn!(
+            "the loaded mesh has no UV coordinates; the bound texture will sample \
+             a single texel in Textured mode. Use a UV-mapped mesh, e.g. \
+             assets/meshes/bunny_with_texture/bunny.obj"
+        );
+    }
     let renderer = match InProcRenderer::new(
         &[mesh],
         texture.as_ref().map(|t| t as &dyn trd_core::Texture),

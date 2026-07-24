@@ -86,28 +86,31 @@ impl Cli {
             path: path.display().to_string(),
             source,
         })?;
-        let image = if image.width() > MAX_TEXTURE_DIM || image.height() > MAX_TEXTURE_DIM {
-            log::info!(
-                "downscaling texture {}×{} to fit {MAX_TEXTURE_DIM}²",
-                image.width(),
-                image.height()
-            );
-            image.resize(
-                MAX_TEXTURE_DIM,
-                MAX_TEXTURE_DIM,
-                image::imageops::FilterType::Triangle,
-            )
-        } else {
-            image
-        };
-        let rgba = image.to_rgba8();
-        let (width, height) = rgba.dimensions();
-        Ok(Some(ImageTexture::from_rgba(
-            width,
-            height,
-            rgba.into_raw(),
-        )?))
+        Ok(Some(texture_from_image(image)?))
     }
+}
+
+/// Downscales `image` to fit [`MAX_TEXTURE_DIM`] (preserving aspect) and converts
+/// it to an [`ImageTexture`]. Split out from I/O so it is unit-testable without a
+/// file or a GPU.
+pub(crate) fn texture_from_image(image: image::DynamicImage) -> Result<ImageTexture, GuiError> {
+    let image = if image.width() > MAX_TEXTURE_DIM || image.height() > MAX_TEXTURE_DIM {
+        log::info!(
+            "downscaling texture {}×{} to fit {MAX_TEXTURE_DIM}²",
+            image.width(),
+            image.height()
+        );
+        image.resize(
+            MAX_TEXTURE_DIM,
+            MAX_TEXTURE_DIM,
+            image::imageops::FilterType::Triangle,
+        )
+    } else {
+        image
+    };
+    let rgba = image.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    Ok(ImageTexture::from_rgba(width, height, rgba.into_raw())?)
 }
 
 #[cfg(test)]
@@ -125,5 +128,37 @@ mod tests {
         let mesh = cli.load_mesh().expect("built-in cube parses");
         assert!(!mesh.vertices.is_empty());
         assert!(!mesh.indices.is_empty());
+    }
+
+    #[test]
+    fn no_texture_flag_loads_nothing() {
+        let cli = Cli {
+            width: 256,
+            height: 256,
+            mesh: None,
+            texture: None,
+        };
+        assert!(cli.load_texture().expect("no texture is Ok").is_none());
+    }
+
+    #[test]
+    fn small_texture_is_converted_unchanged() {
+        let img = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            8,
+            8,
+            image::Rgba([10, 20, 30, 255]),
+        ));
+        let tex = texture_from_image(img).expect("small texture converts");
+        assert_eq!((tex.width(), tex.height()), (8, 8));
+    }
+
+    #[test]
+    fn oversized_texture_is_downscaled_within_the_limit() {
+        // A thin, over-wide image keeps the test cheap while exercising the
+        // downscale branch: the width is clamped to MAX_TEXTURE_DIM.
+        let img = image::DynamicImage::ImageRgba8(image::RgbaImage::new(MAX_TEXTURE_DIM + 8, 2));
+        let tex = texture_from_image(img).expect("oversized texture converts");
+        assert!(tex.width() <= MAX_TEXTURE_DIM && tex.height() <= MAX_TEXTURE_DIM);
+        assert_eq!(tex.width(), MAX_TEXTURE_DIM);
     }
 }

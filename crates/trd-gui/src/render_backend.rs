@@ -94,3 +94,31 @@ impl SceneRenderer for InProcRenderer {
         (self.width, self.height)
     }
 }
+
+/// Whether any vertex carries a non-zero UV — i.e. the mesh is UV-mapped.
+/// [`RenderMode::Textured`] only maps a bound texture meaningfully on such a
+/// mesh; a mesh with no `vt`/`uv` data samples a single texel everywhere, which
+/// is the usual cause of a "wrong looking" texture. Front-ends warn on this.
+///
+/// [`RenderMode::Textured`]: trd_core::RenderMode::Textured
+pub fn mesh_has_uvs(mesh: &Mesh) -> bool {
+    mesh.vertices.iter().any(|v| v.uv != [0.0, 0.0])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mesh_has_uvs_detects_texcoords() {
+        // A plain triangle (no `vt`) has all-zero UVs.
+        let plain = Mesh::from_obj("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n").expect("parses");
+        assert!(!mesh_has_uvs(&plain));
+
+        // The same triangle with `vt` texture coordinates is UV-mapped.
+        let mapped =
+            Mesh::from_obj("v 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\nf 1/1 2/2 3/3\n")
+                .expect("parses");
+        assert!(mesh_has_uvs(&mapped));
+    }
+}
