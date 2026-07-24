@@ -411,6 +411,12 @@ examples/render.sh --cli --placement-quad --axes-local --aabb \
   examples/frames.nba.stage2.jsonl output/nba_stage2.gif 960 540 25
 ```
 
+Like the cornellbox demo this also has a **stage 1** (the anchor before the mesh —
+just the reconstructed placement quad + its local axes, no bunny): swap
+`--place-mesh` for `--no-place-mesh --placement-quad-mesh-index 0` in step 3 to write
+`examples/frames.nba.stage1.jsonl`, then render it with `--placement-quad --axes-local`
+(no `--mesh`).
+
 Shot 7 (`--method BA_2568`, `present_index` 1440..1638) is the other calibrated
 shot. `K` is authored for 1920×1080, so keep `--src-width 1920 --src-height 1080`
 (it is scaled to the render size). On Windows, run the same three steps with
