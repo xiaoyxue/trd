@@ -1,11 +1,12 @@
 use std::cell::RefCell;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, FixedSizeListArray, RecordBatch, UInt8Array};
+use arrow::array::{Array, ArrayRef, FixedSizeListArray, RecordBatch, UInt8Array};
 use arrow::datatypes::{DataType, Field, Fields, Schema};
 use arrow::error::ArrowError;
+use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::StreamWriter;
 use arrow_schema::extension::FixedShapeTensor;
 use thiserror::Error;
@@ -37,6 +38,9 @@ pub enum OutputError {
 
     #[error("RGBA frame has {actual} bytes; expected {expected}")]
     InvalidRgbaFrameLength { actual: usize, expected: usize },
+
+    #[error("image output column `{0}` is missing or has an unexpected type")]
+    MalformedImage(&'static str),
 
     #[error("row stride {stride} does not fit usize")]
     RowStrideDoesNotFitUsize { stride: u32 },
@@ -340,6 +344,59 @@ pub fn tightly_pack_rgba(
     Ok(rgba)
 }
 
+/// Decodes a rendered **image** Arrow IPC stream (the bytes written by
+/// [`OutputSession`] / [`crate::run_stream`]) back into one tightly-packed
+/// row-major RGBA frame per row (`width * height * 4` bytes each). The inverse of
+/// [`output_batch`]: it reads the four `r`/`g`/`b`/`a`
+/// `FixedSizeList<UInt8>[width*height]` channel columns and interleaves them.
+///
+/// Lets a Rust consumer (e.g. the GUI's `ArrowRoundTripRenderer`) round-trip a
+/// scene through `run_stream` in-process and read the frames back without going
+/// out to an external image encoder.
+pub fn read_image_stream<R: Read>(
+    reader: R,
+    width: u32,
+    height: u32,
+) -> Result<Vec<Vec<u8>>, OutputError> {
+    let layout = output_layout(width, height)?;
+    let stream = StreamReader::try_new(reader, None)?;
+    let mut frames = Vec::new();
+    for batch in stream {
+        let batch = batch?;
+        let channels: Vec<&FixedSizeListArray> = ["r", "g", "b", "a"]
+            .into_iter()
+            .map(|name| {
+                batch
+                    .column_by_name(name)
+                    .and_then(|c| c.as_any().downcast_ref::<FixedSizeListArray>())
+                    .filter(|c| c.value_length() == layout.list_size)
+                    .ok_or(OutputError::MalformedImage(match name {
+                        "r" => "r",
+                        "g" => "g",
+                        "b" => "b",
+                        _ => "a",
+                    }))
+            })
+            .collect::<Result<_, _>>()?;
+
+        for row in 0..batch.num_rows() {
+            let mut rgba = vec![0u8; layout.rgba_bytes];
+            for (channel, list) in channels.iter().enumerate() {
+                let values_ref = list.value(row);
+                let values = values_ref
+                    .as_any()
+                    .downcast_ref::<UInt8Array>()
+                    .ok_or(OutputError::MalformedImage("channel"))?;
+                for pixel in 0..layout.pixels {
+                    rgba[pixel * 4 + channel] = values.value(pixel);
+                }
+            }
+            frames.push(rgba);
+        }
+    }
+    Ok(frames)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -417,6 +474,25 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 1]
         );
+    }
+
+    #[test]
+    fn read_image_stream_roundtrips_written_frames() {
+        let (w, h) = (2u32, 2u32);
+        let frame0: Vec<u8> = (0..(w * h * 4) as u8).collect();
+        let frame1: Vec<u8> = (0..(w * h * 4) as u8).map(|b| 255 - b).collect();
+
+        let mut output = OutputSession::new(w, h).unwrap();
+        let mut bytes = output.drain_new().unwrap();
+        output
+            .write_rgba_batch(&[frame0.clone(), frame1.clone()])
+            .unwrap();
+        bytes.extend(output.drain_new().unwrap());
+        output.finish().unwrap();
+        bytes.extend(output.drain_new().unwrap());
+
+        let frames = read_image_stream(bytes.as_slice(), w, h).unwrap();
+        assert_eq!(frames, vec![frame0, frame1]);
     }
 
     #[test]

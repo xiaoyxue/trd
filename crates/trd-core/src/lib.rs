@@ -10,6 +10,7 @@ mod mesh;
 mod output;
 mod protocol;
 mod render;
+mod scene_encode;
 mod texture;
 
 pub use camera::{Camera, DEFAULT_FIT_MARGIN, DEFAULT_FOV_Y, DEFAULT_VIEW_DIR};
@@ -18,7 +19,7 @@ pub use math::{
     Transform, Vector2, Vector3, Vector4, EPSILON,
 };
 pub use mesh::{MeshError, DEFAULT_PREVIEW_TARGET};
-pub use output::{output_schema, tightly_pack_rgba, OutputError, OutputSession};
+pub use output::{output_schema, read_image_stream, tightly_pack_rgba, OutputError, OutputSession};
 pub use protocol::{
     frame_rate_from_metadata, DecodedFrame, FrameBatch, InputSession, ProtocolError,
     DEFAULT_FRAME_RATE, FRAME_RATE_KEY, PROTOCOL_VERSION, PROTOCOL_VERSION_KEY,
@@ -27,6 +28,7 @@ pub use render::{
     build_scene, create_mesh_pipeline, CameraFormError, Draw, DrawableObject, FrameFit,
     FrameParams, Mesh, MeshRenderer, RenderMode, Scene, TriangleRenderer, Vertex, Viewport,
 };
+pub use scene_encode::{encode_mesh_stream, encode_params_stream, encode_scene, SceneEncodeError};
 pub use texture::{
     ConstantTexture, ImageData, ImageTexture, Texture, TextureError, TEXTURE_COLUMN,
 };
