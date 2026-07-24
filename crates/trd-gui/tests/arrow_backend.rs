@@ -33,11 +33,13 @@ fn cube() -> trd_core::Mesh {
 
 #[test]
 #[ignore = "requires a GPU adapter; run locally"]
-fn arrow_backend_defers_and_renders_a_nonblank_frame() {
+fn arrow_backend_renders_a_nonblank_frame() {
     let (w, h) = (128, 128);
     let mut renderer =
         ArrowRoundTripRenderer::new(&[cube()], None, w, h).expect("arrow backend builds");
-    assert!(renderer.defer_expensive());
+    // The persistent-device backend renders at interactive speed, so it no longer
+    // defers to interaction end.
+    assert!(!renderer.defer_expensive());
 
     let image = renderer
         .render(&SceneState::default())
