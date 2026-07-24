@@ -32,6 +32,7 @@ use thiserror::Error;
 
 use crate::protocol::{PROTOCOL_VERSION, PROTOCOL_VERSION_KEY};
 use crate::render::{Draw, FrameParams, Mesh, RenderMode};
+use crate::texture::{Texture, TEXTURE_COLUMN};
 
 /// A failure authoring an input Arrow stream.
 #[derive(Debug, Error)]
@@ -158,6 +159,44 @@ pub fn encode_mesh_stream(meshes: &[Mesh]) -> Result<Vec<u8>, SceneEncodeError> 
             list_of_u32_column(&indices),
         ],
     )?;
+    write_ipc(&schema, &batch)
+}
+
+/// Authors an optional **texture table** IPC stream: a one-row `rgba`
+/// `FixedSizeList<UInt8>[H*W*4]` column bearing the `arrow.fixed_shape_tensor`
+/// extension with shape `[H, W, 4]` (interleaved RGBA), tagged with the `0.0.5`
+/// protocol version. Placed between the mesh and params sub-streams
+/// (`[mesh][texture][params]`), it binds the albedo `run_stream` samples in
+/// [`RenderMode::Textured`]. Decodes back via `ImageTexture::from_arrow`.
+pub fn encode_texture_stream(texture: &dyn Texture) -> Result<Vec<u8>, SceneEncodeError> {
+    let image = texture.to_image();
+    let (width, height) = (image.width as usize, image.height as usize);
+    let list_size = (width * height * 4) as i32;
+
+    let storage = DataType::FixedSizeList(
+        Arc::new(Field::new("item", DataType::UInt8, false)),
+        list_size,
+    );
+    let extension = arrow_schema::extension::FixedShapeTensor::try_new(
+        DataType::UInt8,
+        vec![height, width, 4],
+        Some(vec![
+            "height".to_string(),
+            "width".to_string(),
+            "channel".to_string(),
+        ]),
+        None,
+    )?;
+    let field = Field::new(TEXTURE_COLUMN, storage, false).with_extension_type(extension);
+    let array = FixedSizeListArray::new(
+        Arc::new(Field::new("item", DataType::UInt8, false)),
+        list_size,
+        Arc::new(UInt8Array::from(image.rgba)),
+        None,
+    );
+
+    let schema = Schema::new(vec![field]).with_metadata(version_metadata());
+    let batch = RecordBatch::try_new(Arc::new(schema.clone()), vec![Arc::new(array) as ArrayRef])?;
     write_ipc(&schema, &batch)
 }
 
@@ -374,6 +413,24 @@ mod tests {
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0].params, frame);
         assert_eq!(decoded[0].draws, draws[0]);
+    }
+
+    #[test]
+    fn texture_stream_roundtrips_through_the_decoder() {
+        use crate::texture::ImageTexture;
+        // 2×2 RGBA checker: white, red / green, blue.
+        let rgba = vec![
+            255, 255, 255, 255, 255, 0, 0, 255, //
+            0, 255, 0, 255, 0, 0, 255, 255,
+        ];
+        let texture = ImageTexture::from_rgba(2, 2, rgba.clone()).unwrap();
+        let bytes = encode_texture_stream(&texture).unwrap();
+        let reader =
+            arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(bytes), None).unwrap();
+        let batch = reader.into_iter().next().unwrap().unwrap();
+        let decoded = ImageTexture::from_arrow(&batch).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (2, 2));
+        assert_eq!(decoded.rgba(), rgba.as_slice());
     }
 
     #[test]

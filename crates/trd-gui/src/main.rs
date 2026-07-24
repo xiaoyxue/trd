@@ -58,16 +58,13 @@ fn main() -> eframe::Result<()> {
             cli.height,
         )
         .map(|r| Box::new(r) as Box<dyn SceneRenderer>),
-        Backend::Arrow => {
-            if texture.is_some() {
-                log::warn!(
-                    "the Arrow round-trip backend does not author textures yet; \
-                     --texture is ignored (use --backend inproc for Textured mode)"
-                );
-            }
-            ArrowRoundTripRenderer::new(&[mesh], cli.width, cli.height)
-                .map(|r| Box::new(r) as Box<dyn SceneRenderer>)
-        }
+        Backend::Arrow => ArrowRoundTripRenderer::new(
+            &[mesh],
+            texture.as_ref().map(|t| t as &dyn trd_core::Texture),
+            cli.width,
+            cli.height,
+        )
+        .map(|r| Box::new(r) as Box<dyn SceneRenderer>),
     };
     let renderer = match renderer {
         Ok(renderer) => renderer,

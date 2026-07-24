@@ -35,7 +35,8 @@ fn cube() -> trd_core::Mesh {
 #[ignore = "requires a GPU adapter; run locally"]
 fn arrow_backend_defers_and_renders_a_nonblank_frame() {
     let (w, h) = (128, 128);
-    let mut renderer = ArrowRoundTripRenderer::new(&[cube()], w, h).expect("arrow backend builds");
+    let mut renderer =
+        ArrowRoundTripRenderer::new(&[cube()], None, w, h).expect("arrow backend builds");
     assert!(renderer.defer_expensive());
 
     let image = renderer
@@ -58,7 +59,7 @@ fn arrow_backend_matches_inproc_pixel_for_pixel() {
     let state = SceneState::default();
 
     let mut inproc = InProcRenderer::new(&[cube()], None, w, h).expect("inproc builds");
-    let mut arrow = ArrowRoundTripRenderer::new(&[cube()], w, h).expect("arrow builds");
+    let mut arrow = ArrowRoundTripRenderer::new(&[cube()], None, w, h).expect("arrow builds");
 
     let a = inproc.render(&state).expect("inproc render").rgba;
     let b = arrow.render(&state).expect("arrow render").rgba;
@@ -66,5 +67,36 @@ fn arrow_backend_matches_inproc_pixel_for_pixel() {
     assert_eq!(
         a, b,
         "the Arrow round-trip must be pixel-identical to the in-process backend"
+    );
+}
+
+#[test]
+#[ignore = "requires a GPU adapter; run locally"]
+fn arrow_textured_matches_inproc_textured() {
+    let (w, h) = (128, 128);
+    // A uniform red albedo; both backends must sample it identically in Textured.
+    let red = trd_core::ImageTexture::from_rgba(
+        2,
+        2,
+        vec![
+            255, 0, 0, 255, 255, 0, 0, 255, //
+            255, 0, 0, 255, 255, 0, 0, 255,
+        ],
+    )
+    .expect("texture builds");
+    let state = SceneState {
+        mode: trd_core::RenderMode::Textured,
+        ..Default::default()
+    };
+
+    let mut inproc = InProcRenderer::new(&[cube()], Some(&red), w, h).expect("inproc builds");
+    let mut arrow = ArrowRoundTripRenderer::new(&[cube()], Some(&red), w, h).expect("arrow builds");
+
+    let a = inproc.render(&state).expect("inproc render").rgba;
+    let b = arrow.render(&state).expect("arrow render").rgba;
+
+    assert_eq!(
+        a, b,
+        "the Arrow round-trip must bind the texture identically to the in-process backend"
     );
 }
