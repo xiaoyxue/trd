@@ -13,7 +13,7 @@
 //! image stream) and the wasm offscreen backend are the design's later slices;
 //! both slot behind this same trait.
 
-use trd_core::{BatchRenderer, Mesh};
+use trd_core::{BatchRenderer, Mesh, Texture};
 
 use crate::error::GuiError;
 use crate::scene::SceneState;
@@ -50,9 +50,21 @@ pub struct InProcRenderer {
 impl InProcRenderer {
     /// Builds the backend for the given meshes (drawn by index; the interactive
     /// scene draws mesh `0`) at a fixed `width` × `height`. The meshes are
-    /// centered + scaled to fit by their preview transform inside `trd-core`.
-    pub fn new(meshes: &[Mesh], width: u32, height: u32) -> Result<Self, GuiError> {
-        let renderer = BatchRenderer::with_meshes(width, height, meshes)?;
+    /// centered + scaled to fit by their preview transform inside `trd-core`. An
+    /// optional `texture` is bound as the albedo sampled by [`RenderMode::Textured`]
+    /// meshes; when `None`, Textured mode uses `trd-core`'s 1×1 white default.
+    ///
+    /// [`RenderMode::Textured`]: trd_core::RenderMode::Textured
+    pub fn new(
+        meshes: &[Mesh],
+        texture: Option<&dyn Texture>,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, GuiError> {
+        let mut renderer = BatchRenderer::with_meshes(width, height, meshes)?;
+        if let Some(texture) = texture {
+            renderer.set_texture(texture);
+        }
         Ok(Self {
             renderer,
             width,

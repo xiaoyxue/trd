@@ -27,4 +27,18 @@ pub enum GuiError {
     #[cfg(not(target_arch = "wasm32"))]
     #[error("render failed: {0}")]
     Render(#[from] trd_core::StreamError),
+
+    /// The texture image file could not be read or decoded.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error("failed to load texture '{path}': {source}")]
+    TextureIo {
+        path: String,
+        #[source]
+        source: image::error::ImageError,
+    },
+
+    /// The decoded texture pixels were rejected by `trd-core`.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error("invalid texture: {0}")]
+    TextureData(#[from] trd_core::TextureError),
 }

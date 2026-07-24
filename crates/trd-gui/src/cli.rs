@@ -7,9 +7,14 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use trd_core::Mesh;
+use trd_core::{ImageTexture, Mesh};
 
 use crate::error::GuiError;
+
+/// Textures are downscaled to fit this square before upload — `trd-core`'s
+/// headless renderer uses wgpu's `downlevel_defaults` limits, whose
+/// `max_texture_dimension_2d` is 2048, and the demo albedo maps are 3072².
+const MAX_TEXTURE_DIM: u32 = 2048;
 
 /// A built-in origin-centered unit cube with per-corner colors, used as the
 /// default object when no `--mesh` is supplied (`v x y z r g b` OBJ extension).
@@ -46,6 +51,13 @@ pub struct Cli {
     /// Path to a Wavefront OBJ mesh to view. Defaults to a built-in cube.
     #[arg(long)]
     pub mesh: Option<PathBuf>,
+
+    /// Path to a texture image (PNG/JPEG) bound as the albedo for the
+    /// **Textured** render mode. Requires a UV-mapped mesh (e.g.
+    /// `assets/meshes/bunny_with_texture/bunny.obj`); without it, Textured mode
+    /// samples a flat white default.
+    #[arg(long)]
+    pub texture: Option<PathBuf>,
 }
 
 impl Cli {
@@ -62,6 +74,40 @@ impl Cli {
             None => Ok(Mesh::from_obj(DEFAULT_MESH_OBJ)?),
         }
     }
+
+    /// Loads and decodes the `--texture` image (if any) into an [`ImageTexture`],
+    /// downscaling to [`MAX_TEXTURE_DIM`] so it fits the renderer's texture-size
+    /// limit. Returns `None` when no texture was requested.
+    pub fn load_texture(&self) -> Result<Option<ImageTexture>, GuiError> {
+        let Some(path) = &self.texture else {
+            return Ok(None);
+        };
+        let image = image::open(path).map_err(|source| GuiError::TextureIo {
+            path: path.display().to_string(),
+            source,
+        })?;
+        let image = if image.width() > MAX_TEXTURE_DIM || image.height() > MAX_TEXTURE_DIM {
+            log::info!(
+                "downscaling texture {}×{} to fit {MAX_TEXTURE_DIM}²",
+                image.width(),
+                image.height()
+            );
+            image.resize(
+                MAX_TEXTURE_DIM,
+                MAX_TEXTURE_DIM,
+                image::imageops::FilterType::Triangle,
+            )
+        } else {
+            image
+        };
+        let rgba = image.to_rgba8();
+        let (width, height) = rgba.dimensions();
+        Ok(Some(ImageTexture::from_rgba(
+            width,
+            height,
+            rgba.into_raw(),
+        )?))
+    }
 }
 
 #[cfg(test)]
@@ -74,6 +120,7 @@ mod tests {
             width: 512,
             height: 512,
             mesh: None,
+            texture: None,
         };
         let mesh = cli.load_mesh().expect("built-in cube parses");
         assert!(!mesh.vertices.is_empty());

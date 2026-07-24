@@ -104,6 +104,9 @@ impl TrdGuiApp {
             self.needs_render |= ui
                 .selectable_value(mode, RenderMode::Wireframe, "Wireframe")
                 .changed();
+            self.needs_render |= ui
+                .selectable_value(mode, RenderMode::Textured, "Textured")
+                .changed();
         });
         ui.separator();
 

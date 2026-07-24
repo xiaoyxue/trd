@@ -30,7 +30,7 @@ f 1 5 6 2
 
 fn backend(width: u32, height: u32) -> InProcRenderer {
     let mesh = trd_core::Mesh::from_obj(CUBE_OBJ).expect("cube parses");
-    InProcRenderer::new(&[mesh], width, height).expect("GPU backend builds")
+    InProcRenderer::new(&[mesh], None, width, height).expect("GPU backend builds")
 }
 
 #[test]
@@ -53,6 +53,36 @@ fn renders_a_nonblank_frame_of_expected_size() {
         image.rgba.chunks_exact(4).any(|px| px != first),
         "frame is a flat color — nothing was drawn"
     );
+}
+
+#[test]
+#[ignore = "requires a GPU adapter; run locally"]
+fn textured_mode_samples_the_bound_texture() {
+    let (w, h) = (128, 128);
+    let mesh = trd_core::Mesh::from_obj(CUBE_OBJ).expect("cube parses");
+    // A uniform 2×2 red albedo; the untextured cube (uv = 0,0) samples red.
+    let red = trd_core::ImageTexture::from_rgba(
+        2,
+        2,
+        vec![
+            255, 0, 0, 255, 255, 0, 0, 255, //
+            255, 0, 0, 255, 255, 0, 0, 255,
+        ],
+    )
+    .expect("texture builds");
+    let mut renderer = InProcRenderer::new(&[mesh], Some(&red), w, h).expect("GPU backend builds");
+
+    let state = SceneState {
+        mode: trd_core::RenderMode::Textured,
+        ..Default::default()
+    };
+    let image = renderer.render(&state).expect("render succeeds");
+
+    let red_px = image
+        .rgba
+        .chunks_exact(4)
+        .any(|p| p[0] > 150 && p[1] < 100 && p[2] < 100);
+    assert!(red_px, "textured cube shows no red from the bound texture");
 }
 
 #[test]

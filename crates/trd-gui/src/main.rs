@@ -31,7 +31,19 @@ fn main() -> eframe::Result<()> {
             std::process::exit(1);
         }
     };
-    let renderer = match InProcRenderer::new(&[mesh], cli.width, cli.height) {
+    let texture = match cli.load_texture() {
+        Ok(texture) => texture,
+        Err(err) => {
+            log::error!("{err}");
+            std::process::exit(1);
+        }
+    };
+    let renderer = match InProcRenderer::new(
+        &[mesh],
+        texture.as_ref().map(|t| t as &dyn trd_core::Texture),
+        cli.width,
+        cli.height,
+    ) {
         Ok(renderer) => renderer,
         Err(err) => {
             log::error!("failed to create renderer: {err}");

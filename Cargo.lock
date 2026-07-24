@@ -3991,6 +3991,7 @@ dependencies = [
  "eframe",
  "egui",
  "env_logger",
+ "image",
  "log",
  "thiserror 2.0.18",
  "trd-core",
