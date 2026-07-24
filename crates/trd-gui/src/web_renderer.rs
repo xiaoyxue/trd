@@ -14,8 +14,8 @@
 
 use trd_core::{
     build_scene, decode_params_stream, encode_params_stream, read_image_stream, DrawableObject,
-    FrameParams, Mesh, MeshRenderer, OffscreenTarget, OutputSession, Texture, DEFAULT_PREVIEW_TARGET,
-    OFFSCREEN_FORMAT,
+    FrameParams, Mesh, MeshRenderer, OffscreenTarget, OutputSession, Texture,
+    DEFAULT_PREVIEW_TARGET, OFFSCREEN_FORMAT,
 };
 
 use crate::error::GuiError;
