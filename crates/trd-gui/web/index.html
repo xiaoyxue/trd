@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>trd-gui — interactive viewer (wasm)</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #0c0c0c;
+        overflow: hidden;
+      }
+      /* eframe sizes the app to this canvas; fill the viewport. */
+      #trd-gui-canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- The whole UI + interaction + rendering happen in Rust (trd-gui wasm);
+         this page is only the thin bootstrap the repo's "JS is a thin bootstrap
+         only" invariant allows: load the wasm-bindgen module and hand it the
+         canvas. Build the ./pkg/ output first (see crates/trd-gui/web/README.md). -->
+    <canvas id="trd-gui-canvas"></canvas>
+    <script type="module">
+      import init, { start } from "./pkg/trd_gui.js";
+
+      async function main() {
+        await init();
+        const canvas = document.getElementById("trd-gui-canvas");
+        await start(canvas);
+      }
+
+      main().catch((err) => {
+        console.error("trd-gui failed to start:", err);
+        document.body.innerHTML =
+          `<pre style="color:#f88;padding:1rem;font-family:monospace">` +
+          `trd-gui failed to start:\n${err}\n\n` +
+          `A WebGPU-capable browser is required (Chrome/Edge 113+, or Firefox ` +
+          `with WebGPU enabled).</pre>`;
+      });
+    </script>
+  </body>
+</html>

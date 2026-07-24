@@ -1206,6 +1206,7 @@ dependencies = [
  "egui-wgpu",
  "egui-winit",
  "egui_glow",
+ "glow",
  "glutin",
  "glutin-winit",
  "image",
@@ -3988,13 +3989,20 @@ name = "trd-gui"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "console_error_panic_hook",
  "eframe",
  "egui",
  "env_logger",
+ "futures-channel",
  "image",
+ "js-sys",
  "log",
  "thiserror 2.0.18",
  "trd-core",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "wgpu 30.0.0",
 ]
 
 [[package]]

@@ -12,11 +12,11 @@
 
 use std::time::Instant;
 
-use egui::{Color32, PointerButton, Sense, TextureHandle, TextureOptions, Vec2};
-use trd_core::RenderMode;
+use egui::{TextureHandle, TextureOptions};
 
-use crate::interaction::{InteractionController, InteractionEvent, InteractionTarget};
+use crate::interaction::InteractionController;
 use crate::render_backend::SceneRenderer;
+use crate::ui;
 
 /// The interactive viewer application.
 pub struct TrdGuiApp {
@@ -75,158 +75,34 @@ impl TrdGuiApp {
             }
         }
     }
-
-    /// The left control panel: primary-drag target, render mode, overlays, reset,
-    /// and a status readout. Returns nothing; it mutates the scene directly.
-    fn controls_panel(&mut self, ui: &mut egui::Ui) {
-        ui.heading("trd-gui");
-        ui.label(format!("trd-core protocol {}", trd_core::PROTOCOL_VERSION));
-        ui.separator();
-
-        ui.label("Primary drag");
-        let target = &mut self.controller.target;
-        ui.horizontal(|ui| {
-            self.needs_render |= ui
-                .selectable_value(target, InteractionTarget::Camera, "Orbit camera")
-                .changed();
-            self.needs_render |= ui
-                .selectable_value(target, InteractionTarget::Object, "Rotate object")
-                .changed();
-        });
-        ui.separator();
-
-        ui.label("Render mode");
-        let mode = &mut self.controller.state.mode;
-        ui.horizontal(|ui| {
-            self.needs_render |= ui
-                .selectable_value(mode, RenderMode::Filled, "Filled")
-                .changed();
-            self.needs_render |= ui
-                .selectable_value(mode, RenderMode::Wireframe, "Wireframe")
-                .changed();
-            self.needs_render |= ui
-                .selectable_value(mode, RenderMode::Textured, "Textured")
-                .changed();
-        });
-        ui.separator();
-
-        ui.label("Overlays");
-        let state = &mut self.controller.state;
-        self.needs_render |= ui.checkbox(&mut state.show_aabb, "Bounding box").changed();
-        self.needs_render |= ui.checkbox(&mut state.show_axes, "World axes").changed();
-        self.needs_render |= ui
-            .checkbox(&mut state.show_local_axes, "Local axes")
-            .changed();
-        ui.separator();
-
-        if ui.button("Reset view").clicked() {
-            self.needs_render |= self.controller.apply(InteractionEvent::Reset);
-        }
-        ui.separator();
-
-        if let Some(ms) = self.last_render {
-            ui.label(format!("Last render: {:.1} ms", ms * 1000.0));
-        }
-        let (w, h) = self.renderer.size();
-        ui.label(format!("Render size: {w}×{h}"));
-        ui.add_space(8.0);
-        ui.label(
-            egui::RichText::new("Left-drag: orbit / rotate\nRight-drag: move object\nScroll: zoom")
-                .small()
-                .color(Color32::GRAY),
-        );
-    }
-
-    /// The central image panel: shows the current frame scaled to fit and turns
-    /// pointer/scroll input over it into interaction events.
-    fn image_panel(&mut self, ui: &mut egui::Ui) {
-        let Some(texture) = self.texture.clone() else {
-            ui.centered_and_justified(|ui| {
-                ui.label("Rendering…");
-            });
-            return;
-        };
-
-        let (img_w, img_h) = self.renderer.size();
-        let img_aspect = img_w as f32 / img_h.max(1) as f32;
-        let avail = ui.available_size();
-        // Fit the image inside the panel, preserving aspect (letterboxed).
-        let disp = if avail.x / avail.y.max(1.0) > img_aspect {
-            Vec2::new(avail.y * img_aspect, avail.y)
-        } else {
-            Vec2::new(avail.x, avail.x / img_aspect)
-        };
-
-        let response = ui.centered_and_justified(|ui| {
-            ui.add(
-                egui::Image::new(egui::load::SizedTexture::from_handle(&texture))
-                    .fit_to_exact_size(disp)
-                    .sense(Sense::drag()),
-            )
-        });
-        let response = response.inner;
-
-        let size = response.rect.size();
-        if size.x <= 0.0 || size.y <= 0.0 {
-            return;
-        }
-        let delta = response.drag_delta();
-        let (dx, dy) = (delta.x / size.x, delta.y / size.y);
-
-        let mut changed = false;
-        if response.dragged_by(PointerButton::Primary) {
-            changed |= self.controller.apply(InteractionEvent::Primary { dx, dy });
-        } else if response.dragged_by(PointerButton::Secondary)
-            || response.dragged_by(PointerButton::Middle)
-        {
-            changed |= self.controller.apply(InteractionEvent::Pan { dx, dy });
-        }
-
-        if response.hovered() {
-            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-            if scroll != 0.0 {
-                changed |= self.controller.apply(InteractionEvent::Zoom {
-                    delta: scroll / 100.0,
-                });
-            }
-        }
-
-        if changed {
-            self.needs_render = true;
-            ui.ctx().request_repaint();
-        }
-    }
 }
 
 impl eframe::App for TrdGuiApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
 
-        // An expensive backend (Arrow round-trip) re-runs the whole pipeline per
-        // frame, so defer its re-render until a pointer interaction *ends* rather
-        // than every drag frame; cheap backends render every changed frame.
+        // An expensive backend (e.g. a future Arrow round-trip variant) can ask to
+        // re-render only when a pointer interaction *ends*; cheap backends render
+        // every changed frame. The first frame (no texture yet) always renders.
         let interacting = ctx.input(|i| i.pointer.any_down());
         let defer = self.renderer.defer_expensive() && interacting;
 
-        egui::Panel::left("controls")
-            .resizable(false)
-            .exact_size(200.0)
-            .show(ui, |ui| self.controls_panel(ui));
+        if self.texture.is_none() || (self.needs_render && !defer) {
+            self.render_scene(&ctx);
+        }
 
-        egui::CentralPanel::default().show(ui, |ui| {
-            // Render before displaying so control-panel edits made this frame
-            // (mode/overlay toggles set `needs_render`) show immediately. The
-            // first frame (no texture yet) always renders.
-            if self.texture.is_none() || (self.needs_render && !defer) {
-                self.render_scene(&ctx);
-            }
-            self.image_panel(ui);
+        let mut view = ui::View {
+            controller: &mut self.controller,
+            texture: self.texture.as_ref(),
+            render_size: self.renderer.size(),
+            last_render_ms: self.last_render,
+        };
+        self.needs_render |= ui::show(ui, &mut view);
 
-            // While deferring, keep requesting repaints so the pending render
-            // fires as soon as the interaction ends.
-            if self.needs_render && defer {
-                ctx.request_repaint();
-            }
-        });
+        // While deferring, keep requesting repaints so the pending render fires as
+        // soon as the interaction ends.
+        if self.needs_render && defer {
+            ctx.request_repaint();
+        }
     }
 }

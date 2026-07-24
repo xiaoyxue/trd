@@ -56,4 +56,9 @@ pub enum GuiError {
     #[cfg(not(target_arch = "wasm32"))]
     #[error("the render pipeline produced no frame")]
     NoFrame,
+
+    /// A browser offscreen render (wasm) failed (adapter/device/readback).
+    #[cfg(target_arch = "wasm32")]
+    #[error("wasm render failed: {0}")]
+    WasmRender(String),
 }
