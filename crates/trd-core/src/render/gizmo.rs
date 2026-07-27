@@ -1,7 +1,7 @@
-//! Overlay gizmo geometry: the AABB box edge indices and the
-//! coordinate-axes line vertices.
+//! Overlay gizmo geometry: the AABB box edge indices, the coordinate-axes line
+//! vertices, and the coordinate-plane grid line vertices.
 
-use super::Vertex;
+use super::{GridPlane, Vertex};
 
 /// RGB color of the optional AABB overlay box (bright green), chosen to stand
 /// out against the default white mesh. See [`MeshRenderer::set_show_aabb`].
@@ -71,4 +71,65 @@ pub(crate) const fn axes_vertices() -> [Vertex; 6] {
             uv: [0.0, 0.0],
         },
     ]
+}
+
+/// RGB color of the coordinate-plane grid overlay (#PlaneGrid): a neutral light
+/// gray so the grid reads as a reference lattice without competing with the
+/// red/green/blue axes gizmo drawn over it.
+pub(crate) const GRID_COLOR: [f32; 3] = [0.75, 0.75, 0.75];
+
+/// Number of cells per side of the coordinate-plane grid. The grid spans the
+/// model-space square `[-GRID_HALF, GRID_HALF]²`; at `GRID_HALF = 3` (three
+/// times the #77 placement-quad extent), `30` cells keep the classic `0.2`
+/// model-unit spacing so the lattice extends well beyond the reconstructed quad
+/// — enough of the floor to read the recovered plane — without thinning out.
+pub(crate) const GRID_DIVISIONS: u32 = 30;
+
+/// Half-extent of the coordinate-plane grid in model space (the grid spans
+/// `[-GRID_HALF, GRID_HALF]` on each in-plane axis). `3.0` reaches three times
+/// past the unit placement-quad edge, so the grid carpets a large patch of the
+/// recovered plane around the quad (the quad still occupies the central
+/// `[-1, 1]²`) — making the found floor plane easy to eyeball.
+const GRID_HALF: f32 = 3.0;
+
+/// Number of `LineList` vertices in the coordinate-plane grid: `GRID_DIVISIONS +
+/// 1` lines in each of the two in-plane directions, two vertices per line →
+/// `4 · (GRID_DIVISIONS + 1)`. Drawn non-indexed like the axes gizmo.
+pub(crate) const GRID_VERTEX_COUNT: u32 = 4 * (GRID_DIVISIONS + 1);
+
+/// The `LineList` vertices of a coordinate-plane grid on `plane`, spanning the
+/// model-space square `[-GRID_HALF, GRID_HALF]²` at `0` on the third axis:
+/// `GRID_DIVISIONS + 1` lines along each in-plane axis, all colored
+/// [`GRID_COLOR`]. Drawn non-indexed
+/// (`draw(0..GRID_VERTEX_COUNT, ..)`) under the camera `P·V` with a per-instance
+/// model, so a [`DrawableObject::PlaneGrid`](super::DrawableObject::PlaneGrid)
+/// lays the grid in that object's local frame (e.g. #77's quad plane).
+pub(crate) fn grid_vertices(plane: GridPlane) -> Vec<Vertex> {
+    // Lift a 2D in-plane coordinate `(u, w)` into the 3D plane (0 on the third
+    // axis): XY → (u, w, 0), XZ → (u, 0, w), YZ → (0, u, w).
+    let lift = |u: f32, w: f32| -> [f32; 3] {
+        match plane {
+            GridPlane::Xy => [u, w, 0.0],
+            GridPlane::Xz => [u, 0.0, w],
+            GridPlane::Yz => [0.0, u, w],
+        }
+    };
+    let vert = |p: [f32; 3]| Vertex {
+        position: p,
+        color: GRID_COLOR,
+        uv: [0.0, 0.0],
+    };
+    let n = GRID_DIVISIONS;
+    let step = 2.0 * GRID_HALF / n as f32;
+    let mut verts = Vec::with_capacity(GRID_VERTEX_COUNT as usize);
+    for i in 0..=n {
+        let t = -GRID_HALF + step * i as f32;
+        // Line at fixed first axis = t, spanning the second axis.
+        verts.push(vert(lift(t, -GRID_HALF)));
+        verts.push(vert(lift(t, GRID_HALF)));
+        // Line at fixed second axis = t, spanning the first axis.
+        verts.push(vert(lift(-GRID_HALF, t)));
+        verts.push(vert(lift(GRID_HALF, t)));
+    }
+    verts
 }

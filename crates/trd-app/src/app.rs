@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-use trd_core::{ImageTexture, Mesh, RenderMode};
+use trd_core::{GridPlane, ImageTexture, Mesh, RenderMode};
 use winit::application::ApplicationHandler;
 #[cfg(not(target_os = "windows"))]
 use winit::dpi::LogicalSize;
@@ -72,6 +72,8 @@ struct App {
     show_axes: bool,
     /// Overlay a coordinate-axes gizmo at each drawn object's local (model) frame.
     show_local_axes: bool,
+    /// Overlay a coordinate-plane grid on each drawn object's local (model) frame.
+    show_local_grid: Option<GridPlane>,
 }
 
 impl App {
@@ -86,6 +88,7 @@ impl App {
         show_aabb: bool,
         show_axes: bool,
         show_local_axes: bool,
+        show_local_grid: Option<GridPlane>,
     ) -> Self {
         Self {
             gpu: None,
@@ -107,6 +110,7 @@ impl App {
             show_aabb,
             show_axes,
             show_local_axes,
+            show_local_grid,
         }
     }
 
@@ -254,6 +258,7 @@ impl ApplicationHandler for App {
                 self.show_aabb,
                 self.show_axes,
                 self.show_local_axes,
+                self.show_local_grid,
             ),
             _ => {}
         }
@@ -338,6 +343,7 @@ pub fn run() -> Result<(), AppError> {
         cli.aabb,
         cli.axes,
         cli.axes_local,
+        cli.grid_local.map(Into::into),
     );
     event_loop.run_app(&mut app)?;
     Ok(())

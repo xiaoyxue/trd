@@ -287,6 +287,7 @@ fn golden_stage1_placement_quad() {
             show_aabb: false,
             show_axes: false,
             show_local_axes: true,
+            show_local_grid: None,
         },
     );
 }
@@ -306,6 +307,7 @@ fn golden_stage2_textured_bunny() {
             show_aabb: true,
             show_axes: false,
             show_local_axes: true,
+            show_local_grid: None,
         },
     );
 }

@@ -148,6 +148,7 @@ impl WebRenderer {
             state.show_axes,
             state.show_local_axes,
             None,
+            None,
         );
         self.render_scene(params, &scene).await
     }
@@ -182,6 +183,7 @@ impl WebRenderer {
             state.show_aabb,
             state.show_axes,
             state.show_local_axes,
+            None,
             None,
         );
         let rgba = self.render_scene(frame.params, &scene).await?;

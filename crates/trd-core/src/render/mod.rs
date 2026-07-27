@@ -24,13 +24,16 @@ pub use gpu_types::{Mesh, Vertex};
 pub use mesh_renderer::MeshRenderer;
 pub use offscreen::{OffscreenError, OffscreenTarget, OFFSCREEN_FORMAT};
 pub use pipeline::create_mesh_pipeline;
-pub use scene::{build_scene, Draw, DrawableObject, FrameFit, RenderMode, Scene};
+pub use scene::{build_scene, Draw, DrawableObject, FrameFit, GridPlane, RenderMode, Scene};
 pub use triangle_renderer::TriangleRenderer;
 
 // Crate-internal items shared across render submodules and sibling modules.
 pub(crate) use color::upload_texture;
 pub(crate) use frame_params::{projection_from_intrinsics, DEFAULT_FAR, DEFAULT_NEAR};
-pub(crate) use gizmo::{axes_vertices, AABB_COLOR, AABB_EDGE_INDICES, AXES_VERTEX_COUNT};
+pub(crate) use gizmo::{
+    axes_vertices, grid_vertices, AABB_COLOR, AABB_EDGE_INDICES, AXES_VERTEX_COUNT,
+    GRID_VERTEX_COUNT,
+};
 pub(crate) use gpu_types::{InstanceRaw, Uniform};
 pub(crate) use pipeline::{
     create_depth_target, create_frame_bind_group_layout, create_frame_plane_pipeline,

@@ -88,6 +88,49 @@ pub(crate) fn frame_fit_uv_scale(
     }
 }
 
+/// Which coordinate plane a [`DrawableObject::PlaneGrid`] lattices, i.e. the two
+/// model-space axes it spans (the third is held at 0): `Xy` → the X/Y plane,
+/// `Xz` → X/Z, `Yz` → Y/Z. For a #77 placement quad (whose local Z is the plane
+/// normal), `Xy` is the quad's own plane — a grid on the reconstructed surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GridPlane {
+    /// The model-space X/Y plane (Z = 0). The placement-quad's own surface.
+    Xy,
+    /// The model-space X/Z plane (Y = 0).
+    Xz,
+    /// The model-space Y/Z plane (X = 0).
+    Yz,
+}
+
+impl GridPlane {
+    /// A stable `0..3` index (`Xy`→0, `Xz`→1, `Yz`→2) used to key the renderer's
+    /// per-plane grid vertex buffers.
+    pub(crate) fn index(self) -> usize {
+        match self {
+            GridPlane::Xy => 0,
+            GridPlane::Xz => 1,
+            GridPlane::Yz => 2,
+        }
+    }
+}
+
+impl std::str::FromStr for GridPlane {
+    type Err = String;
+
+    /// Parses `xy` / `xz` / `yz` (case-insensitive) into a [`GridPlane`], so
+    /// front-ends can accept the plane as a plain flag value.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "xy" => Ok(GridPlane::Xy),
+            "xz" => Ok(GridPlane::Xz),
+            "yz" => Ok(GridPlane::Yz),
+            other => Err(format!(
+                "unknown grid plane {other:?} (expected xy, xz, or yz)"
+            )),
+        }
+    }
+}
+
 /// A single instance placement decoded from a frame's protocol draw list
 /// (`draw_mesh` / `draw_model`): which mesh to draw (index into the leading mesh
 /// table) and the per-instance model matrix (column-major), applied beneath that
@@ -134,6 +177,12 @@ pub enum DrawableObject {
     /// along +X/+Y/+Z, colored red/green/blue. Placed by `model` (identity marks
     /// the world origin); not tied to any mesh, so no base model is applied.
     CoordinateAxes { model: [f32; 16] },
+    /// A **coordinate-plane grid** lattice on `plane` (X/Y, X/Z, or Y/Z),
+    /// spanning the model-space square `[-1, 1]²`, placed by `model`. Like
+    /// [`CoordinateAxes`](Self::CoordinateAxes) it is a line-topology gizmo tied
+    /// to no mesh (no base model); with a #77 placement-quad `model` the `Xy`
+    /// grid lays exactly over the reconstructed quad in its local frame.
+    PlaneGrid { plane: GridPlane, model: [f32; 16] },
     /// A screen-aligned **background frame plane** (#63): a fullscreen quad that
     /// samples the renderer's bound background frame texture (set via
     /// [`MeshRenderer::update_frame_texture_rgba`]), composited **under** the
@@ -157,14 +206,17 @@ pub type Scene = Vec<DrawableObject>;
 /// composites on top of it. Each [`Draw`] becomes one [`DrawableObject::Mesh`]
 /// in the draw's own [`Draw::mode`] when set, else the passed `mode`; with
 /// `show_aabb`, each also emits a tracking
-/// [`DrawableObject::AabbBox`]; with `show_axes`, one **world-origin**
+/// [`DrawableObject::AabbBox`]; with `local_grid = Some(plane)`, each draw emits
+/// a [`DrawableObject::PlaneGrid`] on `plane` at **its own `model`** (a
+/// coordinate-plane lattice in that object's local frame — e.g. the `Xy` grid on
+/// a #77 placement quad's surface); with `show_axes`, one **world-origin**
 /// [`DrawableObject::CoordinateAxes`] is appended; with `show_local_axes`, each
 /// draw also emits a [`DrawableObject::CoordinateAxes`] at **its own `model`** —
 /// i.e. that object's *local* coordinate frame (its model-space X/Y/Z axes as
 /// placed, e.g. #77's `(e1,e2,e3)` quad frame). The order (frame plane, then all
-/// meshes, then all boxes, then per-draw local axes, then the world-origin axes)
-/// matches the renderer's draw buckets so output is pixel-identical to the
-/// pre-scene, flag-driven path.
+/// meshes, then all boxes, then per-draw grids, then per-draw local axes, then
+/// the world-origin axes) matches the renderer's draw buckets so output is
+/// pixel-identical to the pre-scene, flag-driven path.
 ///
 /// Shared by the native ([`crate::run_stream`]) and wasm front-ends so neither
 /// branches per primitive type: both author the same ordered `Scene` and hand
@@ -175,10 +227,14 @@ pub fn build_scene(
     show_aabb: bool,
     show_axes: bool,
     show_local_axes: bool,
+    local_grid: Option<GridPlane>,
     frame: Option<FrameFit>,
 ) -> Scene {
     let mut scene = Vec::with_capacity(
-        draws.len() * (1 + usize::from(show_aabb) + usize::from(show_local_axes))
+        draws.len()
+            * (1 + usize::from(show_aabb)
+                + usize::from(show_local_axes)
+                + usize::from(local_grid.is_some()))
             + usize::from(show_axes)
             + usize::from(frame.is_some()),
     );
@@ -196,6 +252,14 @@ pub fn build_scene(
         for draw in draws {
             scene.push(DrawableObject::AabbBox {
                 mesh_id: draw.mesh_id,
+                model: draw.model,
+            });
+        }
+    }
+    if let Some(plane) = local_grid {
+        for draw in draws {
+            scene.push(DrawableObject::PlaneGrid {
+                plane,
                 model: draw.model,
             });
         }
@@ -227,7 +291,7 @@ mod tests {
 
         // No frame ⇒ no FramePlane in the scene (byte-identical to the pre-0.0.5
         // scene).
-        let scene = build_scene(&draws, RenderMode::Filled, true, true, false, None);
+        let scene = build_scene(&draws, RenderMode::Filled, true, true, false, None, None);
         assert!(
             !scene
                 .iter()
@@ -243,6 +307,7 @@ mod tests {
             true,
             true,
             false,
+            None,
             Some(FrameFit::Cover),
         );
         assert!(
@@ -305,7 +370,7 @@ mod tests {
         };
 
         // Filled default: only the `None` draw is Filled; the overrides stand.
-        let scene = build_scene(&draws, RenderMode::Filled, false, false, false, None);
+        let scene = build_scene(&draws, RenderMode::Filled, false, false, false, None, None);
         assert_eq!(
             mesh_modes(&scene),
             vec![
@@ -318,7 +383,15 @@ mod tests {
 
         // Wireframe default: only the `None` draw changes (now Wireframe); the two
         // explicit overrides are unaffected — the override is per draw, not global.
-        let scene = build_scene(&draws, RenderMode::Wireframe, false, false, false, None);
+        let scene = build_scene(
+            &draws,
+            RenderMode::Wireframe,
+            false,
+            false,
+            false,
+            None,
+            None,
+        );
         assert_eq!(
             mesh_modes(&scene),
             vec![
@@ -371,6 +444,7 @@ mod tests {
             true,                  // show_aabb
             true,                  // show_axes (world)
             true,                  // show_local_axes
+            None,                  // local_grid
             Some(FrameFit::Cover), // background frame plane
         );
 
@@ -393,12 +467,92 @@ mod tests {
 
         // --axes-local WITHOUT --axes ⇒ only the per-draw local gizmos, no world
         // one (both draw models are non-identity, so this is unambiguous).
-        let scene = build_scene(&draws, RenderMode::Filled, false, false, true, None);
+        let scene = build_scene(&draws, RenderMode::Filled, false, false, true, None, None);
         assert_eq!(
             axes_models(&scene),
             vec![model_a, model_b],
             "local gizmos only; no extra world-origin gizmo"
         );
+    }
+
+    #[test]
+    fn build_scene_local_grid_one_per_draw_at_its_own_model() {
+        // --grid-local (PlaneGrid slice) overlays a coordinate-plane grid at EACH
+        // drawn object's own frame (its `model`), on the requested plane — the
+        // lattice twin of --axes-local. For the FIBA quad-only scene this is one
+        // Xy grid laid exactly over the placement quad's surface.
+        let mut model_a = Matrix4::IDENTITY.to_cols_array();
+        model_a[12] = 2.0; // distinct translations (col-major tx)
+        let mut model_b = Matrix4::IDENTITY.to_cols_array();
+        model_b[12] = 7.0;
+        let draws = [
+            Draw {
+                mesh_id: 0,
+                model: model_a,
+                mode: None,
+            },
+            Draw {
+                mesh_id: 1,
+                model: model_b,
+                mode: None,
+            },
+        ];
+
+        let grids = |scene: &[DrawableObject]| -> Vec<(GridPlane, [f32; 16])> {
+            scene
+                .iter()
+                .filter_map(|o| match o {
+                    DrawableObject::PlaneGrid { plane, model } => Some((*plane, *model)),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        // None ⇒ no grid at all (byte-identical to the pre-grid scene).
+        let scene = build_scene(&draws, RenderMode::Filled, false, false, false, None, None);
+        assert!(grids(&scene).is_empty(), "no grid when local_grid is None");
+
+        // Some(plane) ⇒ one PlaneGrid per draw, on that plane, at the draw's model.
+        let scene = build_scene(
+            &draws,
+            RenderMode::Filled,
+            false,
+            false,
+            false,
+            Some(GridPlane::Xy),
+            None,
+        );
+        assert_eq!(
+            grids(&scene),
+            vec![(GridPlane::Xy, model_a), (GridPlane::Xy, model_b)],
+            "one Xy grid per draw at its own model"
+        );
+
+        // The plane is honored (Yz here) and grids sit after the meshes.
+        let scene = build_scene(
+            &draws,
+            RenderMode::Filled,
+            false,
+            false,
+            false,
+            Some(GridPlane::Yz),
+            None,
+        );
+        assert!(matches!(scene[0], DrawableObject::Mesh { .. }));
+        assert!(matches!(scene[1], DrawableObject::Mesh { .. }));
+        assert_eq!(
+            grids(&scene),
+            vec![(GridPlane::Yz, model_a), (GridPlane::Yz, model_b)],
+        );
+    }
+
+    #[test]
+    fn grid_plane_from_str_roundtrip() {
+        use std::str::FromStr;
+        assert_eq!(GridPlane::from_str("xy"), Ok(GridPlane::Xy));
+        assert_eq!(GridPlane::from_str("XZ"), Ok(GridPlane::Xz));
+        assert_eq!(GridPlane::from_str("yz"), Ok(GridPlane::Yz));
+        assert!(GridPlane::from_str("zz").is_err());
     }
 
     #[test]

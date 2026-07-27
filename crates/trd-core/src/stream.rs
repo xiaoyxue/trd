@@ -29,7 +29,7 @@ use arrow::datatypes::Schema;
 use crate::math::Matrix4;
 use crate::protocol::{ProtocolError, PROTOCOL_VERSION};
 use crate::render::{
-    Draw, DrawableObject, FrameFit, FrameParams, Mesh, MeshRenderer, OffscreenError,
+    Draw, DrawableObject, FrameFit, FrameParams, GridPlane, Mesh, MeshRenderer, OffscreenError,
     OffscreenTarget, RenderMode, OFFSCREEN_FORMAT,
 };
 use crate::texture::ImageTexture;
@@ -285,6 +285,10 @@ pub struct BatchRenderer {
     /// Whether to add a [`DrawableObject::CoordinateAxes`] at *each* drawn
     /// instance's own `model` — the object's local coordinate frame.
     show_local_axes: bool,
+    /// If `Some(plane)`, add a [`DrawableObject::PlaneGrid`] on that coordinate
+    /// plane at *each* drawn instance's own `model` — a grid lattice in the
+    /// object's local frame (e.g. an `xy` grid tiling a placement quad).
+    show_local_grid: Option<GridPlane>,
 }
 
 impl BatchRenderer {
@@ -355,6 +359,7 @@ impl BatchRenderer {
             show_aabb: false,
             show_axes: false,
             show_local_axes: false,
+            show_local_grid: None,
         })
     }
 
@@ -396,6 +401,15 @@ impl BatchRenderer {
         self.show_local_axes = show;
     }
 
+    /// Selects the per-instance *local* coordinate-plane grid overlay: when
+    /// `Some(plane)`, each drawn instance also gains a
+    /// [`DrawableObject::PlaneGrid`] on that plane placed by its own `model`,
+    /// laying a grid lattice across the object's local frame (e.g. an `xy` grid
+    /// tiling a placement quad's floor). `None` disables it.
+    pub fn set_show_local_grid(&mut self, plane: Option<GridPlane>) {
+        self.show_local_grid = plane;
+    }
+
     /// Uploads `image` as the **background frame texture** (#63) sampled by a
     /// [`DrawableObject::FramePlane`]. The GPU texture is reused across frames
     /// (grown only on a resolution change). Call before a
@@ -420,6 +434,7 @@ impl BatchRenderer {
             self.show_aabb,
             self.show_axes,
             self.show_local_axes,
+            self.show_local_grid,
             frame,
         )
     }
@@ -605,6 +620,10 @@ pub struct RenderOptions {
     /// Overlay a coordinate-axes gizmo at *each* drawn object's local (model)
     /// frame — its model-space X/Y/Z axes as placed (e.g. #77's `(e1,e2,e3)`).
     pub show_local_axes: bool,
+    /// Overlay a coordinate-plane grid lattice on the given plane at *each*
+    /// drawn object's local (model) frame — e.g. `Some(GridPlane::Xy)` tiles a
+    /// grid across a placement quad's local floor. `None` disables it.
+    pub show_local_grid: Option<GridPlane>,
 }
 
 /// Reads a trd input stream, renders each frame, and writes an Arrow IPC stream
@@ -661,6 +680,7 @@ pub fn run_stream<R: Read, W: Write>(
             built.set_show_aabb(options.show_aabb);
             built.set_show_axes(options.show_axes);
             built.set_show_local_axes(options.show_local_axes);
+            built.set_show_local_grid(options.show_local_grid);
             if let Some(texture) = session.texture() {
                 built.set_texture(texture);
             }
@@ -1135,7 +1155,7 @@ mod tests {
 
         // Plain filled: exactly one Mesh drawable per draw, no gizmos.
         assert_eq!(
-            build_scene(&draws, RenderMode::Filled, false, false, false, None),
+            build_scene(&draws, RenderMode::Filled, false, false, false, None, None),
             vec![
                 DrawableObject::Mesh {
                     mesh_id: 0,
@@ -1152,7 +1172,15 @@ mod tests {
 
         // Wireframe propagates the mode to every mesh drawable.
         assert_eq!(
-            build_scene(&draws, RenderMode::Wireframe, false, false, false, None),
+            build_scene(
+                &draws,
+                RenderMode::Wireframe,
+                false,
+                false,
+                false,
+                None,
+                None
+            ),
             vec![
                 DrawableObject::Mesh {
                     mesh_id: 0,
@@ -1169,7 +1197,7 @@ mod tests {
 
         // Both overlays: meshes, then a tracking box per draw, then one gizmo.
         assert_eq!(
-            build_scene(&draws, RenderMode::Filled, true, true, false, None),
+            build_scene(&draws, RenderMode::Filled, true, true, false, None, None),
             vec![
                 DrawableObject::Mesh {
                     mesh_id: 0,
@@ -1198,7 +1226,7 @@ mod tests {
         // Local axes: one CoordinateAxes per draw at its own model (in the mesh
         // bucket order, before the world-origin gizmo), each tracking its draw.
         assert_eq!(
-            build_scene(&draws, RenderMode::Filled, false, false, true, None),
+            build_scene(&draws, RenderMode::Filled, false, false, true, None, None),
             vec![
                 DrawableObject::Mesh {
                     mesh_id: 0,
@@ -1230,7 +1258,15 @@ mod tests {
             },
         ];
         assert_eq!(
-            build_scene(&mixed, RenderMode::Textured, false, false, false, None),
+            build_scene(
+                &mixed,
+                RenderMode::Textured,
+                false,
+                false,
+                false,
+                None,
+                None
+            ),
             vec![
                 DrawableObject::Mesh {
                     mesh_id: 0,

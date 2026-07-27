@@ -129,7 +129,8 @@ fn draw_indexed(
 }
 
 /// Which geometry a [`DrawCommand`] binds. The `usize` is a mesh id (index into
-/// [`MeshStore::meshes`]); `Axes` uses the shared gizmo geometry.
+/// [`MeshStore::meshes`]) for the mesh kinds, or a [`GridPlane::index`] for
+/// `Grid`; `Axes` uses the shared gizmo geometry.
 enum DrawKind {
     /// Filled triangles of a mesh (its triangle index buffer + filled pipeline).
     Filled(usize),
@@ -140,6 +141,9 @@ enum DrawKind {
     Wireframe(usize),
     /// A mesh's AABB box (its precomputed corner geometry + line pipeline).
     Aabb(usize),
+    /// A coordinate-plane grid (the shared per-plane grid vertex buffer indexed
+    /// by [`GridPlane::index`], non-indexed line draw).
+    Grid(usize),
     /// The coordinate-axes gizmo (shared vertex buffer, non-indexed line draw).
     Axes,
 }
@@ -275,6 +279,11 @@ struct MeshStore {
     /// [`DrawableObject::CoordinateAxes`] draws it under its own model, supplied
     /// through the shared instance buffer.
     axes_vertex_buffer: wgpu::Buffer,
+    /// The coordinate-plane grid geometry, one `LineList` vertex buffer per
+    /// [`GridPlane`] (indexed by [`GridPlane::index`]): XY, XZ, YZ. Each
+    /// [`DrawableObject::PlaneGrid`] draws the buffer for its plane under its own
+    /// model, supplied through the shared instance buffer.
+    grid_vertex_buffers: [wgpu::Buffer; 3],
     instance_buffer: wgpu::Buffer,
     instance_capacity: u32,
 }
@@ -302,9 +311,26 @@ impl MeshStore {
             usage: wgpu::BufferUsages::VERTEX,
         });
 
+        // Coordinate-plane grids: one LineList vertex buffer per plane (XY/XZ/YZ),
+        // spanning the unit model-space square. Each PlaneGrid drawable draws its
+        // plane's buffer under its own model via the shared instance buffer.
+        let grid_buffer = |plane: GridPlane| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("trd grid vertex buffer"),
+                contents: bytemuck::cast_slice(&grid_vertices(plane)),
+                usage: wgpu::BufferUsages::VERTEX,
+            })
+        };
+        let grid_vertex_buffers = [
+            grid_buffer(GridPlane::Xy),
+            grid_buffer(GridPlane::Xz),
+            grid_buffer(GridPlane::Yz),
+        ];
+
         Self {
             meshes: gpu_meshes,
             axes_vertex_buffer,
+            grid_vertex_buffers,
             instance_buffer,
             instance_capacity,
         }
@@ -317,15 +343,18 @@ impl MeshStore {
     /// Walks `scene` once, bucketing each drawable's instance model by the
     /// geometry it draws (its base model pre-multiplied in, `effective = model ·
     /// base`), then flattens the buckets into one instance list + ordered
-    /// [`DrawCommand`]s. Draw order: filled, textured, wireframe, AABB boxes,
-    /// then axes — so opaque meshes precede the line overlays that composite on
-    /// top. Out-of-range mesh ids are skipped.
+    /// [`DrawCommand`]s. Draw order: filled, textured, grids, wireframe, AABB
+    /// boxes, then axes — so opaque meshes precede the line overlays, and the
+    /// plane grid sits beneath the wireframe/axes gizmos drawn over it.
+    /// Out-of-range mesh ids are skipped.
     fn build_batches(&self, scene: &[DrawableObject]) -> Batches {
         let mesh_count = self.meshes.len();
         let mut filled: Vec<Vec<InstanceRaw>> = vec![Vec::new(); mesh_count];
         let mut textured: Vec<Vec<InstanceRaw>> = vec![Vec::new(); mesh_count];
         let mut wireframe: Vec<Vec<InstanceRaw>> = vec![Vec::new(); mesh_count];
         let mut aabb: Vec<Vec<InstanceRaw>> = vec![Vec::new(); mesh_count];
+        // One instance bucket per grid plane (XY/XZ/YZ), keyed by GridPlane::index.
+        let mut grid: [Vec<InstanceRaw>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         let mut axes: Vec<InstanceRaw> = Vec::new();
         // The background frame plane is a singleton overlay (there is one bound
         // frame texture); the last FramePlane in the scene wins its fit.
@@ -363,6 +392,9 @@ impl MeshStore {
                 DrawableObject::CoordinateAxes { model } => {
                     axes.push(InstanceRaw { model });
                 }
+                DrawableObject::PlaneGrid { plane, model } => {
+                    grid[plane.index()].push(InstanceRaw { model });
+                }
                 DrawableObject::FramePlane { fit } => {
                     frame_fit = Some(fit);
                 }
@@ -383,6 +415,9 @@ impl MeshStore {
                 DrawKind::Textured(id),
                 bucket,
             );
+        }
+        for (plane, bucket) in grid.iter().enumerate() {
+            push_command(&mut instances, &mut commands, DrawKind::Grid(plane), bucket);
         }
         for (id, bucket) in wireframe.iter().enumerate() {
             push_command(
@@ -654,6 +689,11 @@ impl MeshRenderer {
                     let mesh = &self.store.meshes[id];
                     pass.set_pipeline(&self.pass.wireframe);
                     draw_indexed(&mut pass, &mesh.aabb.vertex_buffer, &mesh.aabb.index, range);
+                }
+                DrawKind::Grid(plane) => {
+                    pass.set_pipeline(&self.pass.wireframe);
+                    pass.set_vertex_buffer(0, self.store.grid_vertex_buffers[plane].slice(..));
+                    pass.draw(0..GRID_VERTEX_COUNT, range);
                 }
                 DrawKind::Axes => {
                     pass.set_pipeline(&self.pass.wireframe);

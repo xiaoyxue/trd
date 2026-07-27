@@ -505,6 +505,16 @@ uv run --with pyarrow --with numpy examples/placement_quad_by_local_coord.py \
 examples/render.sh --cli --placement-quad --axes-local \
   --frames-base output/fiba \
   examples/frames.fiba.stage1.jsonl output/fiba_stage1.mp4 1920 1080 24
+
+# 3c. stage 1 + XY floor grid — a coordinate-plane grid laid in the placement
+#     quad's P² local frame (#110). `--grid-local xy` overlays a PlaneGrid on
+#     each drawn object's local XY plane; on the quad-only stage-1 stream that is
+#     exactly one lattice carpeting the recovered court floor (extends ~3× past
+#     the quad so the found plane is easy to eyeball). `xz`/`yz` pick the other
+#     coordinate planes.
+examples/render.sh --cli --placement-quad --grid-local xy \
+  --frames-base output/fiba \
+  examples/frames.fiba.stage1.jsonl output/fiba_stage1_grid.mp4 1920 1080 24
 ```
 
 At 1080p (and 4K) an animated GIF balloons to hundreds of MB, so the output is
@@ -601,7 +611,8 @@ PORT=9000 examples/render.sh --web          # serve on a custom port
 
 Every `--cli` content flag applies to `--web` unchanged — `--mesh`, `--texture`,
 `--wireframe`, `--aabb`, `--axes`, `--axes-local`, `--placement-quad`,
-`--frames-base`, and the positional `WIDTH`/`HEIGHT`. The render resolution is baked
+`--frames-base`, and the positional `WIDTH`/`HEIGHT` (the `--grid-local` floor
+grid is native/`--cli` + `--native` only). The render resolution is baked
 into the stream's CV `k`, so it is a positional argument, **not** a URL param; the
 only live URL param is **`?fps=N`** (1..240, default = the `FPS` positional). Two
 render targets share the one bundle: **`--canvas-renderer`** (default) draws to the
