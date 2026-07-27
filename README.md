@@ -453,7 +453,10 @@ repacks the vendored per-frame calibration
 its `DATASET.md`) into the perception stream that
 [`examples/placement_quad_by_local_coord.py`](examples/placement_quad_by_local_coord.py)
 consumes, and the bunny stays glued to the same court spot as the camera pans and
-zooms. The trustworthy focal here is **`2VP_4510`** (`1circle_4252` corroborates) —
+zooms. It is placed at **half scale** and shifted along the placement-quad's local
+**+e1** axis onto the open right side of the free-throw key (all still expressed in
+the quad's P² local frame), so it clears the active players instead of covering the
+shooter at the quad centre. The trustworthy focal here is **`2VP_4510`** (`1circle_4252` corroborates) —
 the **inverse of nba-short**, where BA was trusted and 2VP was degenerate; a clean
 demonstration of why multiple K-methods are stored (the best flips with the
 footage). The parquet tracks the ad quad for the first **222** frames; the
@@ -478,9 +481,13 @@ ffmpeg -i "$FIBA_MP4" -vf "select='between(n,0,287)',scale=1920:1080" \
   -vsync 0 -start_number 0 -q:v 3 output/fiba/frames/frame_%06d.jpg
 
 # 3a. stage 2 — perception → placed scene (bunny on the court quad, Pose-free #77)
+#     0.5 scale + a +0.6 half-edge shift along the quad's local +e1 keeps the
+#     bunny on the open right side of the key, clear of the active players (it
+#     stays anchored in the placement-quad's P² local frame).
 uv run --with pyarrow --with numpy examples/placement_quad_by_local_coord.py \
   --from-perception examples/frames.fiba.perception.arrow --place-mesh --placement-quad \
-  --size-factor 0.7 --src-width 1920 --src-height 1080 --width 1920 --height 1080 \
+  --size-factor 0.5 --place-offset-e1 0.6 --place-offset-e2 0.0 \
+  --src-width 1920 --src-height 1080 --width 1920 --height 1080 \
   -o examples/frames.fiba.stage2.jsonl
 examples/render.sh --cli --placement-quad --axes-local --aabb \
   --mesh assets/meshes/bunny_with_texture/bunny.obj \

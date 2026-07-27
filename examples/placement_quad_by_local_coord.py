@@ -350,6 +350,14 @@ def emit_records(records, args):
         if args.place_mesh:
             size = lam * args.size_factor  # mesh half-extent in the (scaled) reconstruction
             theta = 2.0 * np.pi * args.turns * (placed_i / n_tracked)
+            # In-plane translation stays in the P² local frame: shift the anchor
+            # off the quad centre along the plane axes e1/e2, in quad half-edge
+            # (lam) units, then lift along the normal e3 so the feet rest on the
+            # plane. Used to move the mesh clear of the active players onto the
+            # open side of the court without leaving the placement-quad plane.
+            anchor = (o3d
+                      + args.place_offset_e1 * lam * e1
+                      + args.place_offset_e2 * lam * e2)
             # OpenCV camera-frame placement: mesh +X→e1, +Y(up)→e3, +Z→e1×e3 (=−e2);
             # centre lifted half a height along e3 so the feet rest on the plane.
             r_place = np.eye(4)
@@ -357,7 +365,7 @@ def emit_records(records, args):
             r_place[:3, 1] = e3
             r_place[:3, 2] = -e2
             trans = np.eye(4)
-            trans[:3, 3] = o3d + args.lift * size * e3
+            trans[:3, 3] = anchor + args.lift * size * e3
             s_mat = np.diag([size, size, size, 1.0])
             m_cam = trans @ r_place @ rotate_y(theta) @ s_mat
             model = C4 @ m_cam  # camera frame → GL camera frame (view = identity)
@@ -493,6 +501,15 @@ def main():
     ap.add_argument("--turns", type=float, default=1.0, help="mesh spins this many turns over the clip")
     ap.add_argument("--lift", type=float, default=1.0,
                     help="fraction of the mesh half-extent lifted along the plane normal (feet ≈ 1.0)")
+    ap.add_argument("--place-offset-e1", type=float, default=0.0,
+                    help="shift the placed mesh in the placement-quad plane along +e1 "
+                         "(the quad's local X), in quad half-edge (lam) units: +1.0 ≈ the "
+                         "quad edge. Stays in the P² local frame; e.g. move the mesh off the "
+                         "active players to the open side of the court. Default 0 (quad centre).")
+    ap.add_argument("--place-offset-e2", type=float, default=0.0,
+                    help="shift the placed mesh in the placement-quad plane along +e2 "
+                         "(the quad's local Y, deeper into the plane), in quad half-edge (lam) "
+                         "units. Default 0 (quad centre).")
     ap.add_argument("--place-mesh", action=argparse.BooleanOptionalAction, default=True,
                     help="anchor the model mesh on the placement-quad frame (stage 2). "
                          "Use --no-place-mesh for stage 1 (placement quad only, before placing the mesh).")
