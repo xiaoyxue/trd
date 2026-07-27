@@ -442,6 +442,66 @@ shot. `K` is authored for 1920×1080, so keep `--src-width 1920 --src-height 108
 (it is scaled to the render size). On Windows, run the same three steps with
 `examples\render.ps1 -CLI` for the final render.
 
+#### FIBA court AR demo — native 1080p (#110)
+
+The same single-view placement pipeline on the **2024 Paris Olympic basketball
+final** (France vs USA), rendered at the clip's **native 1920×1080** (instead of
+the NBA demo's downscaled 960×540). It reuses the identical stages —
+[`scripts/fiba_perception_to_arrow.py`](scripts/fiba_perception_to_arrow.py)
+repacks the vendored per-frame calibration
+([`assets/videos/fiba/per_frame_KVP_cube_best.parquet`](assets/videos/fiba/), see
+its `DATASET.md`) into the perception stream that
+[`examples/placement_quad_by_local_coord.py`](examples/placement_quad_by_local_coord.py)
+consumes, and the bunny stays glued to the same court spot as the camera pans and
+zooms. The trustworthy focal here is **`2VP_4510`** (`1circle_4252` corroborates) —
+the **inverse of nba-short**, where BA was trusted and 2VP was degenerate; a clean
+demonstration of why multiple K-methods are stored (the best flips with the
+footage). Only the image-free calibration is vendored; the copyrighted broadcast
+clip stays external.
+
+```sh
+FIBA_MP4=~/Asset/fiba-shot1/shot_0001.mp4   # only the (copyrighted) video is external
+
+# 1. vendored parquet → perception Arrow (shot 1, the best-K method 2VP_4510).
+#    Skips untracked frames; prints the present_index range to extract next.
+uv run --with pyarrow scripts/fiba_perception_to_arrow.py \
+  --method 2VP_4510 \
+  -o examples/frames.fiba.perception.arrow
+
+# 2. extract those broadcast frames (present_index 0..221) at native 1080p
+mkdir -p output/fiba/frames
+ffmpeg -i "$FIBA_MP4" -vf "select='between(n,0,221)',scale=1920:1080" \
+  -vsync 0 -start_number 0 -q:v 3 output/fiba/frames/frame_%06d.jpg
+
+# 3a. stage 2 — perception → placed scene (bunny on the court quad, Pose-free #77)
+uv run --with pyarrow --with numpy examples/placement_quad_by_local_coord.py \
+  --from-perception examples/frames.fiba.perception.arrow --place-mesh --placement-quad \
+  --size-factor 0.7 --src-width 1920 --src-height 1080 --width 1920 --height 1080 \
+  -o examples/frames.fiba.stage2.jsonl
+examples/render.sh --cli --placement-quad --axes-local --aabb \
+  --mesh assets/meshes/bunny_with_texture/bunny.obj \
+  --texture assets/meshes/bunny_with_texture/bunny_uv_map1.jpg \
+  --frames-base output/fiba \
+  examples/frames.fiba.stage2.jsonl output/fiba_stage2.mp4 1920 1080 24
+
+# 3b. stage 1 — the anchor before the mesh (placement quad + local axes, no bunny)
+uv run --with pyarrow --with numpy examples/placement_quad_by_local_coord.py \
+  --from-perception examples/frames.fiba.perception.arrow --no-place-mesh --placement-quad \
+  --placement-quad-mesh-index 0 --src-width 1920 --src-height 1080 --width 1920 --height 1080 \
+  -o examples/frames.fiba.stage1.jsonl
+examples/render.sh --cli --placement-quad --axes-local \
+  --frames-base output/fiba \
+  examples/frames.fiba.stage1.jsonl output/fiba_stage1.mp4 1920 1080 24
+```
+
+At 1080p (and 4K) an animated GIF balloons to hundreds of MB, so the output is
+written as **H.264 `.mp4`** — [`scripts/encode.py`](scripts/encode.py) picks the
+codec from the `-o` extension (`.mp4`/`.mov` → H.264, `.webp` → animated WebP,
+else GIF). To render the NBA-style GIF instead, just name the output
+`output/fiba_stage2.gif`. On Windows, run the same steps with
+`examples\render.ps1 -CLI`.
+
+
 #### The render pipeline
 
 Under the hood it is a fully-piped `JSONL → Arrow → trd → ffmpeg` flow, no
