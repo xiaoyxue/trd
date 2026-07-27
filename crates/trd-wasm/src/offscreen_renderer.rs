@@ -354,17 +354,10 @@ impl OffscreenRenderer {
             );
         }
         let params = frame.params;
-        // Absent per-frame draw list ⇒ one instance of mesh 0 placed by the
+        // Explicit wire draw list ⇒ drawn verbatim (an empty list ⇒ background
+        // only); an absent draw list ⇒ one instance of mesh 0 placed by the
         // frame's own model (legacy single-object behavior).
-        let draws: Vec<Draw> = if frame.draws.is_empty() {
-            vec![Draw {
-                mesh_id: 0,
-                model: params.model_matrix().to_cols_array(),
-                mode: None,
-            }]
-        } else {
-            frame.draws.clone()
-        };
+        let draws: Vec<Draw> = frame.resolved_draws();
 
         let mesh_count = self.ensure_renderer().mesh_count();
         for draw in &draws {

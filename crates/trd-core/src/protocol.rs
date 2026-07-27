@@ -46,17 +46,45 @@ pub fn frame_rate_from_metadata(metadata: &HashMap<String, String>) -> f64 {
 pub type FrameBatch = Vec<DecodedFrame>;
 
 /// One decoded frame: its [`FrameParams`] plus the optional per-frame instanced
-/// draw list (`draw_mesh`/`draw_model`). `draws` is empty for a single-object
-/// frame, in which case the renderer draws one default instance of mesh `0`
-/// placed by the frame's own [`FrameParams::model_matrix`]. `frame_ref` is the
-/// optional `0.0.5` background frame reference (`frame_path`/`frame_url`) the
-/// browser shell resolves + composites beneath the scene; `None` when the frame
-/// has no background.
+/// draw list (`draw_mesh`/`draw_model`) and optional background frame reference.
+///
+/// `draws` distinguishes two cases the renderer treats differently (via
+/// [`DecodedFrame::resolved_draws`]):
+///   * `None` — the stream carries **no** `draw_mesh`/`draw_model` columns
+///     (legacy single-object stream); the renderer draws one default instance of
+///     mesh `0` placed by the frame's own [`FrameParams::model_matrix`].
+///   * `Some(list)` — an **explicit** draw list. `Some(vec![…])` places those
+///     instances; `Some(vec![])` (an explicit *empty* list) draws **no meshes**,
+///     so the frame is just its background plate (e.g. an AR frame where tracking
+///     dropped out) rather than a default mesh.
+///
+/// `frame_ref` is the optional `0.0.5` background frame reference
+/// (`frame_path`/`frame_url`) the shell resolves + composites beneath the scene;
+/// `None` when the frame has no background.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecodedFrame {
     pub params: FrameParams,
-    pub draws: Vec<Draw>,
+    pub draws: Option<Vec<Draw>>,
     pub frame_ref: Option<String>,
+}
+
+impl DecodedFrame {
+    /// Resolves this frame's [`draws`](Self::draws) to the concrete instance list
+    /// the renderer draws. An **explicit** list (`Some`, including an empty one →
+    /// background only) is used verbatim; an **absent** list (`None`, legacy
+    /// single-object stream) becomes one default instance of mesh `0` placed by
+    /// the frame's own [`FrameParams::model_matrix`]. Shared by the native and
+    /// wasm render paths so they resolve draws identically.
+    pub fn resolved_draws(&self) -> Vec<Draw> {
+        match &self.draws {
+            Some(draws) => draws.clone(),
+            None => vec![Draw {
+                mesh_id: 0,
+                model: self.params.model_matrix().to_cols_array(),
+                mode: None,
+            }],
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -388,8 +416,10 @@ pub(crate) fn check_version(schema: &Schema) -> Result<(), ProtocolError> {
 
 /// Decodes one params batch into [`DecodedFrame`]s: each row's [`FrameParams`]
 /// zipped with its optional per-frame instanced draw list and optional background
-/// frame reference. Rows without draw columns get an empty `draws` (the renderer
-/// draws one default instance); rows without a frame column get `frame_ref: None`.
+/// frame reference. Rows from a stream without `draw_mesh`/`draw_model` columns
+/// get `draws: None` (the renderer draws one default instance); when the columns
+/// are present each row's list is carried as `Some(list)` (an explicit empty list
+/// ⇒ background only). Rows without a frame column get `frame_ref: None`.
 fn decode_frame_batch(batch: &RecordBatch) -> Result<FrameBatch, ProtocolError> {
     let params = decode_batch(batch)?;
     let draws = decode_draws(batch)?;
@@ -399,10 +429,7 @@ fn decode_frame_batch(batch: &RecordBatch) -> Result<FrameBatch, ProtocolError> 
         .enumerate()
         .map(|(row, params)| DecodedFrame {
             params,
-            draws: draws
-                .as_ref()
-                .map(|rows| rows[row].clone())
-                .unwrap_or_default(),
+            draws: draws.as_ref().map(|rows| rows[row].clone()),
             frame_ref: frame_refs.as_ref().and_then(|rows| rows[row].clone()),
         })
         .collect())
@@ -911,7 +938,7 @@ mod tests {
             .into_iter()
             .map(|params| DecodedFrame {
                 params,
-                draws: Vec::new(),
+                draws: None,
                 frame_ref: None,
             })
             .collect()
@@ -1658,6 +1685,42 @@ mod tests {
     }
 
     #[test]
+    fn resolved_draws_distinguishes_absent_from_explicit_empty() {
+        // Absent draw list (`None`, legacy single-object stream) ⇒ one default
+        // instance of mesh 0 placed by the frame's own model.
+        let absent = DecodedFrame {
+            params: identity_frame(),
+            draws: None,
+            frame_ref: None,
+        };
+        let resolved = absent.resolved_draws();
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].mesh_id, 0);
+
+        // Explicit *empty* draw list ⇒ no meshes: the frame is just its
+        // background plate (e.g. an AR frame where tracking dropped out).
+        let empty = DecodedFrame {
+            params: identity_frame(),
+            draws: Some(Vec::new()),
+            frame_ref: None,
+        };
+        assert!(empty.resolved_draws().is_empty());
+
+        // Explicit non-empty list ⇒ used verbatim.
+        let one = Draw {
+            mesh_id: 3,
+            model: [1.0_f32; 16],
+            mode: None,
+        };
+        let explicit = DecodedFrame {
+            params: identity_frame(),
+            draws: Some(vec![one]),
+            frame_ref: None,
+        };
+        assert_eq!(explicit.resolved_draws(), vec![one]);
+    }
+
+    #[test]
     fn decodes_per_frame_instanced_draw_lists() {
         let a = [1.0_f32; 16];
         let b = [2.0_f32; 16];
@@ -1673,7 +1736,7 @@ mod tests {
         assert_eq!(batches[0].len(), 1);
         assert_eq!(
             batches[0][0].draws,
-            vec![
+            Some(vec![
                 Draw {
                     mesh_id: 0,
                     model: a,
@@ -1684,7 +1747,7 @@ mod tests {
                     model: b,
                     mode: None
                 },
-            ]
+            ])
         );
     }
 

@@ -14,9 +14,15 @@ single-view placement stage (``examples/placement_quad_by_local_coord.py
 
 Difference from the NBA adapter — the ``*_best.parquet`` keeps the whole 288-frame
 timeline but stores **only the frame identity on untracked frames** (geometry
-columns ``K``/``ad_quad``/… are ``null`` once the ad quad leaves the frame). This
-adapter therefore **skips untracked / null-geometry rows** and emits only the
-tracked frames (``present_index`` 0..221 for shot 1).
+columns ``K``/``ad_quad``/… are ``null`` once the ad quad leaves the frame; for
+shot 1 that is the tail, ``present_index`` 222..287). This adapter emits **all
+288 frames** by default: tracked frames carry ``k`` + ``placement_quad``,
+untracked frames carry a **null** ``k``/``placement_quad`` (geometry columns are
+nullable) with only their ``frame_path``. The downstream stage turns those
+null-geometry rows into **background-plate-only** frames (no AR mesh), so the
+rendered clip stays continuous with the source video instead of being trimmed to
+the tracked span. Pass ``--tracked-only`` for the old behavior (emit just the 222
+tracked frames).
 
 Mapping (parquet → perception stream), per tracked ``(shot, method, present_index)``
 row:
@@ -71,6 +77,9 @@ def main():
     ap.add_argument("--frame-rel", default="frames",
                     help="frame_path prefix relative to the renderer's --frames-base")
     ap.add_argument("--frame-ext", default="jpg", help="still extension (jpg|png)")
+    ap.add_argument("--tracked-only", action="store_true",
+                    help="emit only the tracked frames (drop the null-geometry / untracked tail) "
+                         "instead of the full timeline of frame-only background plates")
     ap.add_argument("-o", "--output", default="-",
                     help="output Arrow IPC path (default: stdout)")
     args = ap.parse_args()
@@ -92,26 +101,38 @@ def main():
             f"available methods for that shot: {methods}")
 
     # The *_best.parquet keeps untracked frames as frame-id-only rows (geometry
-    # null); skip them so the perception stream carries only drawable frames.
-    tracked = [r for r in picked if r.get("K") is not None and r.get("ad_quad") is not None]
-    skipped = len(picked) - len(tracked)
+    # null). By default we emit the full timeline — tracked frames carry k/quad,
+    # untracked frames carry null k/quad (nullable columns) so the downstream
+    # stage renders them as background-plate-only frames. --tracked-only drops
+    # the untracked tail (the legacy behavior).
+    def is_tracked(r):
+        return r.get("K") is not None and r.get("ad_quad") is not None
+
+    emitted = [r for r in picked if is_tracked(r)] if args.tracked_only else picked
+    tracked = [r for r in emitted if is_tracked(r)]
+    skipped = len(picked) - len(emitted)
     if not tracked:
         raise SystemExit(
             f"error: all {len(picked)} rows for shot={args.shot} method={args.method} "
             "have null geometry (no tracked frames)")
 
     k_col, quad_col, frame_col = [], [], []
-    for r in tracked:
-        K = [float(x) for x in r["K"]]            # row-major 3×3, already 9 floats
-        quad = [float(x) for x in r["ad_quad"]]   # x0,y0,…,x3,y3 (UL,UR,LR,LL)
-        if len(K) != 9:
-            raise SystemExit(f"error: K has {len(K)} elems (want 9)")
-        if len(quad) != 8:
-            raise SystemExit(f"error: ad_quad has {len(quad)} elems (want 8)")
+    for r in emitted:
         pi = int(r["present_index"])
-        k_col.append(K)
-        quad_col.append(quad)
         frame_col.append(f"{args.frame_rel}/frame_{pi:06d}.{args.frame_ext}")
+        if is_tracked(r):
+            K = [float(x) for x in r["K"]]            # row-major 3×3, already 9 floats
+            quad = [float(x) for x in r["ad_quad"]]   # x0,y0,…,x3,y3 (UL,UR,LR,LL)
+            if len(K) != 9:
+                raise SystemExit(f"error: K has {len(K)} elems (want 9)")
+            if len(quad) != 8:
+                raise SystemExit(f"error: ad_quad has {len(quad)} elems (want 8)")
+            k_col.append(K)
+            quad_col.append(quad)
+        else:
+            # Untracked frame: only the frame identity survives — null geometry.
+            k_col.append(None)
+            quad_col.append(None)
 
     schema = pa.schema(
         [
@@ -137,14 +158,23 @@ def main():
         with open(args.output, "wb") as fh, ipc.new_stream(fh, schema) as writer:
             writer.write_batch(batch)
 
-    pmin = tracked[0]["present_index"]
-    pmax = tracked[-1]["present_index"]
+    tpmin = tracked[0]["present_index"]
+    tpmax = tracked[-1]["present_index"]
+    emin = int(emitted[0]["present_index"])
+    emax = int(emitted[-1]["present_index"])
     f = float(tracked[0]["K"][0])
     dest = "stdout" if args.output == "-" else args.output
+    untracked = len(emitted) - len(tracked)
+    tail = (
+        f"dropped {skipped} untracked frame(s)"
+        if args.tracked_only
+        else f"{untracked} untracked frame(s) carry null geometry (background-plate only)"
+    )
     print(
-        f"wrote {len(tracked)} perception rows (shot {args.shot}, {args.method}, "
-        f"f={f:.0f}px) to {dest}; skipped {skipped} untracked frame(s); "
-        f"present_index {pmin}..{pmax} (extract these frames of shot_0001.mp4 to "
+        f"wrote {len(emitted)} perception rows (shot {args.shot}, {args.method}, "
+        f"f={f:.0f}px) to {dest}; {len(tracked)} tracked (present_index "
+        f"{tpmin}..{tpmax}), {tail}; "
+        f"present_index {emin}..{emax} (extract these frames of shot_0001.mp4 to "
         f"<frames-base>/{args.frame_rel}/frame_%06d.{args.frame_ext})",
         file=sys.stderr,
     )

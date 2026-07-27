@@ -262,7 +262,10 @@ def read_perception_records(path):
     Returns the per-frame ``(K (3×3), quad (4×2), frame_path)`` records it carries
     — the *input to this stage*. ``k`` is the row-major 3×3 intrinsics and
     ``placement_quad`` the 4 image points ``[x0,y0,…,x3,y3]``, both in the source
-    video's pixel space.
+    video's pixel space. A row whose ``k``/``placement_quad`` are **null** (an
+    untracked frame — the geometry left the frame; e.g. the FIBA clip's tail) is
+    returned as ``(None, None, frame_path)`` so the downstream stage renders it as
+    a background-plate-only frame instead of dropping it.
     """
     import pyarrow as pa  # lazy: only the --from-perception path needs Arrow
     from pyarrow import ipc
@@ -281,6 +284,10 @@ def read_perception_records(path):
     frames = table.column("frame_path").to_pylist()
     records = []
     for k_flat, q_flat, frame_path in zip(ks, quads, frames):
+        if k_flat is None or q_flat is None:
+            # Untracked frame: geometry is null → background plate only.
+            records.append((None, None, frame_path))
+            continue
         K = np.array(k_flat, dtype=np.float64).reshape(3, 3)  # row-major
         quad = np.array(q_flat, dtype=np.float64).reshape(4, 2)
         records.append((K, quad, frame_path))
@@ -299,12 +306,41 @@ def emit_records(records, args):
     pose**, so trd renders in camera space (view = identity, projection from ``k``).
     ``k`` is the record's (possibly per-frame) intrinsics scaled to the render
     resolution.
+
+    A record with **null geometry** (``K``/``quad`` is ``None`` — an untracked
+    frame) is emitted as a **background-plate-only** row: an explicit *empty*
+    ``draws`` list (trd-core draws no mesh for it, per
+    ``DecodedFrame::resolved_draws``) plus its ``frame_path``. It carries a
+    placeholder ``k`` (the last tracked frame's render-K) only so
+    ``scripts/jsonl_to_arrow.py``'s all-or-nothing ``k`` column stays present for
+    the tracked frames; the frame plane ignores the camera, so it is never
+    projected. The mesh spin phase is normalized over the **tracked** frames, so
+    the placed animation is identical whether or not the untracked tail is kept.
     """
     C4 = np.diag([1.0, -1.0, -1.0, 1.0])  # OpenCV camera (Y-down,Z-fwd) → GL (Y-up,Z-back)
     out = sys.stdout if args.output == "-" else open(args.output, "w", encoding="utf-8")
     written = 0
-    n = max(1, len(records))
-    for out_i, (K, quad, frame_path) in enumerate(records):
+
+    def render_k(K):
+        return [float(x) for x in k_render_columns(K, args.width, args.height,
+                                                   args.src_width, args.src_height)]
+
+    tracked = [(K, quad) for (K, quad, _fp) in records if K is not None and quad is not None]
+    n_tracked = max(1, len(tracked))
+    # Placeholder render-K for untracked (background-only) rows; seed with the
+    # first tracked frame's so a leading untracked run still has one, then hold
+    # the last tracked frame's as playback advances.
+    last_render_k = render_k(tracked[0][0]) if tracked else None
+    placed_i = 0
+    for K, quad, frame_path in records:
+        if K is None or quad is None:
+            # Untracked frame → just the video still: empty draw list = no mesh.
+            row = {"draws": [], "frame_path": frame_path}
+            if last_render_k is not None:
+                row["k"] = last_render_k
+            out.write(json.dumps(row) + "\n")
+            written += 1
+            continue
         nb = normal_basis_from_quad(quad, K)
         if nb is None:
             continue
@@ -313,7 +349,7 @@ def emit_records(records, args):
         draws = []
         if args.place_mesh:
             size = lam * args.size_factor  # mesh half-extent in the (scaled) reconstruction
-            theta = 2.0 * np.pi * args.turns * (out_i / n)
+            theta = 2.0 * np.pi * args.turns * (placed_i / n_tracked)
             # OpenCV camera-frame placement: mesh +X→e1, +Y(up)→e3, +Z→e1×e3 (=−e2);
             # centre lifted half a height along e3 so the feet rest on the plane.
             r_place = np.eye(4)
@@ -352,19 +388,21 @@ def emit_records(records, args):
             })
         if not draws:
             continue
+        last_render_k = render_k(K)
         row = {
-            "k": [float(x) for x in k_render_columns(K, args.width, args.height,
-                                                     args.src_width, args.src_height)],
+            "k": last_render_k,
             "draws": draws,
             "frame_path": frame_path,
         }
         out.write(json.dumps(row) + "\n")
         written += 1
+        placed_i += 1
     if out is not sys.stdout:
         out.close()
     dest = "stdout" if args.output == "-" else args.output
     print(f"wrote {written} single-view (#77, Pose-free) placements to {dest} "
-          f"({args.width}×{args.height})", file=sys.stderr)
+          f"({args.width}×{args.height}); {placed_i} placed + "
+          f"{written - placed_i} background-only frame(s)", file=sys.stderr)
 
 
 # --------------------------------------------------------------------------- #

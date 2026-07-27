@@ -195,7 +195,7 @@ mod native {
             self.renderer.set_show_local_axes(opts.show_local_axes);
             let rgba = self
                 .renderer
-                .render_frame(frame.params, &frame.draws, None)?;
+                .render_frame(frame.params, &frame.resolved_draws(), None)?;
 
             // 4. Serialize the rendered image to an Arrow stream and decode it back —
             // the output half of the round-trip an external consumer would read.

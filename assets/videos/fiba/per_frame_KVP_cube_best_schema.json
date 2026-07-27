@@ -1,7 +1,7 @@
 {
   "dataset": "per_frame_KVP_cube_best.parquet",
-  "description": "fiba-shot1 (Paris 2024 France-USA) 最准 K 版:留一几何评估选出的 2VP(f=4510) + 1circle(f=4252) 两个方法,保留全部 288 帧。追踪有效帧带完整几何,无效帧仅保留帧标识(几何列=null)。",
-  "grain": "一行 = (method, present_index)",
+  "description": "fiba-shot1 (Paris 2024 France-USA) most-accurate K version: the 2VP (f=4510) and 1circle (f=4252) methods selected by held-out geometric evaluation, keeping all 288 frames. Tracked frames carry full geometry; invalid frames keep only the frame identity (geometry columns = null).",
+  "grain": "one row per (method, present_index)",
   "row_count": 576,
   "n_methods": 2,
   "methods": [
@@ -10,120 +10,120 @@
   ],
   "n_frames": 288,
   "tracked_frames_per_method": 222,
-  "coordinates": "像素(原点左上);vp_* 为齐次未归一化(除以 w 前先判 |w|>>0)",
-  "camera_model": "K=[[f,0,cx],[0,f,cy],[0,0,1]];方形像素,零 skew,主点=画面中心;f 每方法常数",
-  "accuracy": "留一交叉验证(gen_K_eval.py):2VP 排名第1,1circle 第2。判据=用该K矫正后 held-out 特征(罚球圈圆度/直角)的误差。BA(2397)因变焦离群,已剔除。",
-  "null_policy": "tracked=False 的帧:所有几何列(f/K/vp/quad/cube/H/tilt/has_ad_quad/n_corners*)=null,仅保留 shot/method/present_index/W/H/cx/cy/tracked/visibility。",
+  "coordinates": "pixels (origin top-left); vp_* are homogeneous un-normalized (guard |w|>>0 before dividing)",
+  "camera_model": "K=[[f,0,cx],[0,f,cy],[0,0,1]]; square pixels, zero skew, principal point = frame center; f constant per method",
+  "accuracy": "held-out cross-validation (gen_K_eval.py): 2VP rank 1, 1circle rank 2. Metric = error of held-out features (free-throw circle roundness / right angles) after rectifying with that K. BA (2397) is a zoom-degraded outlier and is excluded.",
+  "null_policy": "For tracked=False frames: all geometry columns (f/K/vp/quad/cube/H/tilt/has_ad_quad/n_corners*) = null; only shot/method/present_index/W/H/cx/cy/tracked/visibility are kept.",
   "columns": [
     {
       "name": "shot",
       "arrow_type": "int64",
-      "desc": "int 镜头 id"
+      "desc": "int shot id"
     },
     {
       "name": "method",
       "arrow_type": "large_string",
-      "desc": "str 焦距方法+px(2VP_4510 或 1circle_4252);best 只含这两个最准方法"
+      "desc": "str focal method + px (2VP_4510 or 1circle_4252); best keeps only these two most-accurate methods"
     },
     {
       "name": "present_index",
       "arrow_type": "int64",
-      "desc": "int 视频帧号(0-based, shot_0001.mp4)"
+      "desc": "int 0-based frame index into shot_0001.mp4"
     },
     {
       "name": "f_ref_px",
       "arrow_type": "double",
-      "desc": "double 该方法焦距 px(每方法常数);无效帧=null"
+      "desc": "double method focal px (constant per method); null on invalid frames"
     },
     {
       "name": "f_frame_px",
       "arrow_type": "double",
-      "desc": "double == f_ref_px(结构一致性保留)"
+      "desc": "double == f_ref_px (kept for schema stability)"
     },
     {
       "name": "tilt_deg",
       "arrow_type": "double",
-      "desc": "double 地面法向倾角;无效帧=null"
+      "desc": "double floor-normal tilt; null on invalid frames"
     },
     {
       "name": "cx",
       "arrow_type": "double",
-      "desc": "double 主点 x = W/2"
+      "desc": "double principal point x = W/2"
     },
     {
       "name": "cy",
       "arrow_type": "double",
-      "desc": "double 主点 y = H/2"
+      "desc": "double principal point y = H/2"
     },
     {
       "name": "W",
       "arrow_type": "int64",
-      "desc": "int 帧宽 1920"
+      "desc": "int frame width 1920"
     },
     {
       "name": "H",
       "arrow_type": "int64",
-      "desc": "int 帧高 1080"
+      "desc": "int frame height 1080"
     },
     {
       "name": "K",
       "arrow_type": "list<element: double>",
-      "desc": "double[9] 3x3 行主序内参 [f,0,cx,0,f,cy,0,0,1];无效帧=null"
+      "desc": "double[9] 3x3 row-major intrinsics [f,0,cx,0,f,cy,0,0,1]; null on invalid frames"
     },
     {
       "name": "vp_len",
       "arrow_type": "list<element: double>",
-      "desc": "double[3] cube X 轴灭点(球场长/paint长边 r1)齐次 [x,y,w] 本帧;无效帧=null"
+      "desc": "double[3] cube X-axis VP (court length / paint long edge r1), homogeneous [x,y,w] this frame; null on invalid frames"
     },
     {
       "name": "vp_wid",
       "arrow_type": "list<element: double>",
-      "desc": "double[3] cube Y 轴灭点(球场宽 r2)齐次;无效帧=null"
+      "desc": "double[3] cube Y-axis VP (court width r2), homogeneous; null on invalid frames"
     },
     {
       "name": "vp_up",
       "arrow_type": "list<element: double>",
-      "desc": "double[3] cube Z 轴灭点(地面法向 r3)齐次(w~0=无穷远);无效帧=null"
+      "desc": "double[3] cube Z-axis VP (floor normal r3), homogeneous (w~0 => at infinity); null on invalid frames"
     },
     {
       "name": "has_ad_quad",
       "arrow_type": "bool",
-      "desc": "bool ad_quad 有效(此数据集里追踪帧恒 True);无效帧=null"
+      "desc": "bool ad_quad valid (True on tracked frames); null on invalid frames"
     },
     {
       "name": "n_corners_in",
       "arrow_type": "int64",
-      "desc": "int 当前帧在画面内的 quad 角数(0..4);无效帧=null"
+      "desc": "int quad corners inside the frame (0..4); null on invalid frames"
     },
     {
       "name": "n_corners_out",
       "arrow_type": "int64",
-      "desc": "int 出画面的角数 = 4 - n_corners_in;无效帧=null"
+      "desc": "int corners outside = 4 - n_corners_in; null on invalid frames"
     },
     {
       "name": "tracked",
       "arrow_type": "bool",
-      "desc": "bool 追踪是否有效(>=3 角在画面内)。False=已结束(>=2 角出画面)"
+      "desc": "bool tracking valid (>=3 corners in-frame). False = ended (>=2 corners out)"
     },
     {
       "name": "visibility",
       "arrow_type": "large_string",
-      "desc": "str 'tracked' 或 'ended'"
+      "desc": "str 'tracked' or 'ended'"
     },
     {
       "name": "ad_quad",
       "arrow_type": "list<element: double>",
-      "desc": "double[8] cube 底面四边形 UL,UR,LR,LL 像素(=追踪的广告面);无效帧=null"
+      "desc": "double[8] cube base ring UL,UR,LR,LL px (the tracked ad surface); null on invalid frames"
     },
     {
       "name": "cube_verts",
       "arrow_type": "list<element: double>",
-      "desc": "double[16] 8 顶点(x,y) [b0..b3,t0..t3];底=ad_quad,顶=沿地面法向拉伸;无效帧=null"
+      "desc": "double[16] 8 verts (x,y) [b0..b3,t0..t3]; base = ad_quad, top extruded along floor normal; null on invalid frames"
     },
     {
       "name": "h_ref_to_i",
       "arrow_type": "list<element: double>",
-      "desc": "double[9] 3x3 行主序 参考帧->本帧 单应(链式/直接混合);无效帧=null"
+      "desc": "double[9] 3x3 row-major ref->frame homography (hybrid chained/direct); null on invalid frames"
     }
   ],
   "vertex_order": [
@@ -131,14 +131,14 @@
     "b1=UR",
     "b2=LR",
     "b3=LL",
-    "t0..t3 = 沿地面法向拉伸"
+    "t0..t3 = extruded along floor normal"
   ],
   "provenance": {
-    "homography": "RAFT dense flow + FB-consistency + USAC_MAGSAC;混合 direct(231)/chained(57) 修复远帧 (gen_homography_chained.py)",
-    "quad": "手工在参考帧标注 paint(quad_drawer --role paint),H 逐帧传播 (gen_track/gen_dataset)",
-    "2VP": "paint 两正交边灭点 -> two_vp_focal_squared (va.detection.vp_algebra)",
-    "1circle": "BEV 上标注三秒区半圆 -> 拟合椭圆 -> 映射回图像 C_img=H^T C_bev H -> 圆-IAC (gen_bev_circle.py --from-annot)",
+    "homography": "RAFT dense flow + FB-consistency + USAC_MAGSAC; hybrid direct(231)/chained(57) to fix far frames (gen_homography_chained.py)",
+    "quad": "manual paint annotation on the reference frame (quad_drawer --role paint), H-propagated per frame (gen_track/gen_dataset)",
+    "2VP": "paint two orthogonal edge VPs -> two_vp_focal_squared (va.detection.vp_algebra)",
+    "1circle": "BEV-annotated restricted-area semicircle -> ellipse fit -> map back to image C_img=H^T C_bev H -> circle-IAC (gen_bev_circle.py --from-annot)",
     "cube_math": "s18_rrd_separate.basis/cube_top/warp (nba-short canonical)",
-    "eval": "gen_K_eval.py 留一几何一致性排名"
+    "eval": "gen_K_eval.py held-out geometric consistency ranking"
   }
 }

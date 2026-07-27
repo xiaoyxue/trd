@@ -41,12 +41,14 @@ fn native_frames(bytes: &[u8]) -> Vec<Frame> {
 }
 
 /// Feed the same bytes to the wasm push decoder, flattening its decoded frames.
+/// Resolves each frame's draws (via [`trd_core::DecodedFrame::resolved_draws`])
+/// so it compares against the native path's already-resolved draw list.
 fn wasm_frames(bytes: &[u8]) -> Vec<Frame> {
     let mut session = InputSession::new();
     let mut frames = Vec::new();
     for batch in session.push(bytes).expect("wasm push") {
         for frame in batch {
-            frames.push((frame.params, frame.draws, frame.frame_ref));
+            frames.push((frame.params, frame.resolved_draws(), frame.frame_ref));
         }
     }
     session.finish().expect("wasm finish");

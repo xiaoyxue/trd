@@ -447,23 +447,17 @@ impl BatchRenderer {
 }
 
 /// Resolves one decoded frame's instanced draw list: its wire `draws` when
-/// present, else one instance of mesh 0 placed by the frame's own model (legacy
-/// single-object behavior). Every referenced `mesh_id` is validated against
-/// `mesh_count`. Shared by the headless [`run_stream`] path and the live
-/// [`read_scene_stream_with_meta`] front-end so both resolve draws identically.
+/// present (an explicit empty list ⇒ no meshes, so just the background plate),
+/// else one instance of mesh 0 placed by the frame's own model (legacy
+/// single-object behavior) — see [`DecodedFrame::resolved_draws`]. Every
+/// referenced `mesh_id` is validated against `mesh_count`. Shared by the headless
+/// [`run_stream`] path and the live [`read_scene_stream_with_meta`] front-end so
+/// both resolve draws identically.
 fn resolve_frame_draws(
     frame: &crate::DecodedFrame,
     mesh_count: usize,
 ) -> Result<Vec<Draw>, StreamError> {
-    let draws = if frame.draws.is_empty() {
-        vec![Draw {
-            mesh_id: 0,
-            model: frame.params.model_matrix().to_cols_array(),
-            mode: None,
-        }]
-    } else {
-        frame.draws.clone()
-    };
+    let draws = frame.resolved_draws();
     for draw in &draws {
         if draw.mesh_id as usize >= mesh_count {
             return Err(StreamError::MeshIndexOutOfRange {

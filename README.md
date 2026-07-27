@@ -456,21 +456,25 @@ consumes, and the bunny stays glued to the same court spot as the camera pans an
 zooms. The trustworthy focal here is **`2VP_4510`** (`1circle_4252` corroborates) —
 the **inverse of nba-short**, where BA was trusted and 2VP was degenerate; a clean
 demonstration of why multiple K-methods are stored (the best flips with the
-footage). Only the image-free calibration is vendored; the copyrighted broadcast
-clip stays external.
+footage). The parquet tracks the ad quad for the first **222** frames; the
+remaining **66** (the tail, where the quad leaves frame) carry null geometry and
+are rendered as **plain video plates** (no AR mesh) so the clip stays continuous
+with the source rather than being trimmed. Only the image-free calibration is
+vendored; the copyrighted broadcast clip stays external.
 
 ```sh
 FIBA_MP4=~/Asset/fiba-shot1/shot_0001.mp4   # only the (copyrighted) video is external
 
 # 1. vendored parquet → perception Arrow (shot 1, the best-K method 2VP_4510).
-#    Skips untracked frames; prints the present_index range to extract next.
+#    Emits all 288 frames: 222 tracked (k+quad) + 66 untracked (null geometry →
+#    background-plate only). Prints the present_index range to extract next.
 uv run --with pyarrow scripts/fiba_perception_to_arrow.py \
   --method 2VP_4510 \
   -o examples/frames.fiba.perception.arrow
 
-# 2. extract those broadcast frames (present_index 0..221) at native 1080p
+# 2. extract the full broadcast span (present_index 0..287) at native 1080p
 mkdir -p output/fiba/frames
-ffmpeg -i "$FIBA_MP4" -vf "select='between(n,0,221)',scale=1920:1080" \
+ffmpeg -i "$FIBA_MP4" -vf "select='between(n,0,287)',scale=1920:1080" \
   -vsync 0 -start_number 0 -q:v 3 output/fiba/frames/frame_%06d.jpg
 
 # 3a. stage 2 — perception → placed scene (bunny on the court quad, Pose-free #77)

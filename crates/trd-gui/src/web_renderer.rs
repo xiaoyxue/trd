@@ -170,10 +170,11 @@ impl WebRenderer {
             .ok_or(GuiError::WasmRender("decoder produced no frame".to_owned()))?;
 
         // 2. Build the scene from the decoded frame and render on the device.
-        let draws = if frame.draws.is_empty() {
-            state.draws()
-        } else {
-            frame.draws.clone()
+        //    The round-trip always encodes the state's draws, so a decoded empty
+        //    or absent list falls back to the live state's draws.
+        let draws = match &frame.draws {
+            Some(d) if !d.is_empty() => d.clone(),
+            _ => state.draws(),
         };
         let scene = build_scene(
             &draws,
