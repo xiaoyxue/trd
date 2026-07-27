@@ -506,15 +506,23 @@ examples/render.sh --cli --placement-quad --axes-local \
   --frames-base output/fiba \
   examples/frames.fiba.stage1.jsonl output/fiba_stage1.mp4 1920 1080 24
 
-# 3c. stage 1 + XY floor grid — a coordinate-plane grid laid in the placement
-#     quad's P² local frame (#110). `--grid-local xy` overlays a PlaneGrid on
-#     each drawn object's local XY plane; on the quad-only stage-1 stream that is
-#     exactly one lattice carpeting the recovered court floor (extends ~3× past
-#     the quad so the found plane is easy to eyeball). `xz`/`yz` pick the other
-#     coordinate planes.
+# 3c. XY floor grid — a coordinate-plane grid laid in the placement quad's P²
+#     local frame (#110). `--grid-local xy` overlays a PlaneGrid on each
+#     *wireframe* draw's local XY plane; since the placement quad is the wireframe
+#     draw, that is exactly one lattice carpeting the recovered court floor
+#     (extends ~3× past the quad so the found plane is easy to eyeball) — a
+#     filled/textured content mesh (the bunny) gets no stray grid. `xz`/`yz` pick
+#     the other coordinate planes. Works on the quad-only stage-1 stream …
 examples/render.sh --cli --placement-quad --grid-local xy \
   --frames-base output/fiba \
   examples/frames.fiba.stage1.jsonl output/fiba_stage1_grid.mp4 1920 1080 24
+# … and on the full bunny + quad stage-2 scene (grid on the quad floor, AABB on
+#     the bunny — the grid never walls off the bunny thanks to wireframe scoping):
+examples/render.sh --cli --placement-quad --grid-local xy --aabb \
+  --mesh assets/meshes/bunny_with_texture/bunny.obj \
+  --texture assets/meshes/bunny_with_texture/bunny_uv_map1.jpg \
+  --frames-base output/fiba \
+  examples/frames.fiba.stage2.jsonl output/fiba_stage2_grid.mp4 1920 1080 24
 ```
 
 At 1080p (and 4K) an animated GIF balloons to hundreds of MB, so the output is

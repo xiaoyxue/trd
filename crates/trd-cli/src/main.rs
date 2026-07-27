@@ -63,9 +63,11 @@ struct Cli {
     /// `(e1,e2,e3)` quad frame the bunny is anchored in.
     #[arg(long)]
     axes_local: bool,
-    /// Overlay a coordinate-plane grid lattice on the given plane at *each* drawn
-    /// object's local frame (its `model`) — e.g. `--grid-local xy` tiles a grid
-    /// across a placement quad's local floor. One of `xy`, `xz`, `yz`.
+    /// Overlay a coordinate-plane grid lattice on the given plane at each
+    /// *wireframe* drawn object's local frame (its `model`) — e.g. `--grid-local
+    /// xy` tiles a grid across the placement quad's local floor. Scoped to
+    /// wireframe draws, so a filled/textured mesh gets no stray grid. One of
+    /// `xy`, `xz`, `yz`.
     #[arg(long, value_enum)]
     grid_local: Option<GridPlaneArg>,
     /// Base directory for per-frame background images (`0.0.5`). When set, a

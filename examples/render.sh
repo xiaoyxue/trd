@@ -129,9 +129,10 @@ CONTENT FLAGS (--cli and --native):
   --axes              Overlay a coordinate-axes gizmo (X=red, Y=green, Z=blue) at the origin (#42).
   --axes-local        Overlay a coordinate-axes gizmo at EACH drawn object's own local
                       frame (its model), e.g. #77's (e1,e2,e3) quad placement frame.
-  --grid-local PLANE  Overlay a coordinate-plane grid lattice (PLANE = xy|xz|yz) at EACH
-                      drawn object's own local frame, e.g. --grid-local xy tiles a grid
-                      across a placement quad's local floor (#110).
+  --grid-local PLANE  Overlay a coordinate-plane grid lattice (PLANE = xy|xz|yz) on each
+                      WIREFRAME drawn object's own local frame — e.g. --grid-local xy tiles
+                      a grid across the placement quad's local floor (#110). Scoped to
+                      wireframe draws, so a filled/textured mesh (the bunny) gets no grid.
   --placement-quad    Draw the reconstructed placement quad as a colored wireframe outline
                       (debug check vs. the filmed poster). Appends a canonical quad mesh;
                       author its per-frame draw with placement_quad_by_local_coord.py --placement-quad.

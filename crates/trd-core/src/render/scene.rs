@@ -206,10 +206,12 @@ pub type Scene = Vec<DrawableObject>;
 /// composites on top of it. Each [`Draw`] becomes one [`DrawableObject::Mesh`]
 /// in the draw's own [`Draw::mode`] when set, else the passed `mode`; with
 /// `show_aabb`, each also emits a tracking
-/// [`DrawableObject::AabbBox`]; with `local_grid = Some(plane)`, each draw emits
-/// a [`DrawableObject::PlaneGrid`] on `plane` at **its own `model`** (a
-/// coordinate-plane lattice in that object's local frame — e.g. the `Xy` grid on
-/// a #77 placement quad's surface); with `show_axes`, one **world-origin**
+/// [`DrawableObject::AabbBox`]; with `local_grid = Some(plane)`, each
+/// **wireframe-mode** draw emits a [`DrawableObject::PlaneGrid`] on `plane` at
+/// **its own `model`** (a coordinate-plane lattice in that object's local frame —
+/// e.g. the `Xy` grid on a #77 placement quad's surface; scoped to wireframe
+/// draws so a filled/textured content mesh whose local `Xy` is vertical gets no
+/// stray grid wall); with `show_axes`, one **world-origin**
 /// [`DrawableObject::CoordinateAxes`] is appended; with `show_local_axes`, each
 /// draw also emits a [`DrawableObject::CoordinateAxes`] at **its own `model`** —
 /// i.e. that object's *local* coordinate frame (its model-space X/Y/Z axes as
@@ -258,10 +260,17 @@ pub fn build_scene(
     }
     if let Some(plane) = local_grid {
         for draw in draws {
-            scene.push(DrawableObject::PlaneGrid {
-                plane,
-                model: draw.model,
-            });
+            // Scope the grid to wireframe draws only — the #77 placement quad is
+            // always an outline (its local Xy *is* the placement surface), while a
+            // filled/textured content mesh's local Xy may be a vertical plane, so a
+            // per-mesh grid there would draw a stray grid "wall". This lays exactly
+            // one floor grid on the quad in a mixed bunny + quad scene.
+            if draw.mode.unwrap_or(mode) == RenderMode::Wireframe {
+                scene.push(DrawableObject::PlaneGrid {
+                    plane,
+                    model: draw.model,
+                });
+            }
         }
     }
     if show_local_axes {
@@ -476,11 +485,12 @@ mod tests {
     }
 
     #[test]
-    fn build_scene_local_grid_one_per_draw_at_its_own_model() {
-        // --grid-local (PlaneGrid slice) overlays a coordinate-plane grid at EACH
-        // drawn object's own frame (its `model`), on the requested plane — the
-        // lattice twin of --axes-local. For the FIBA quad-only scene this is one
-        // Xy grid laid exactly over the placement quad's surface.
+    fn build_scene_local_grid_one_per_wireframe_draw_at_its_own_model() {
+        // --grid-local (PlaneGrid slice) overlays a coordinate-plane grid at each
+        // *wireframe* drawn object's own frame (its `model`), on the requested
+        // plane — the lattice twin of --axes-local, but scoped to wireframe draws
+        // (the placement quad) so a filled/textured content mesh gets no grid. For
+        // the FIBA quad-only scene this is one Xy grid over the quad's surface.
         let mut model_a = Matrix4::IDENTITY.to_cols_array();
         model_a[12] = 2.0; // distinct translations (col-major tx)
         let mut model_b = Matrix4::IDENTITY.to_cols_array();
@@ -509,13 +519,22 @@ mod tests {
         };
 
         // None ⇒ no grid at all (byte-identical to the pre-grid scene).
-        let scene = build_scene(&draws, RenderMode::Filled, false, false, false, None, None);
-        assert!(grids(&scene).is_empty(), "no grid when local_grid is None");
-
-        // Some(plane) ⇒ one PlaneGrid per draw, on that plane, at the draw's model.
         let scene = build_scene(
             &draws,
-            RenderMode::Filled,
+            RenderMode::Wireframe,
+            false,
+            false,
+            false,
+            None,
+            None,
+        );
+        assert!(grids(&scene).is_empty(), "no grid when local_grid is None");
+
+        // Global wireframe mode ⇒ both draws are wireframe ⇒ one PlaneGrid per
+        // draw, on that plane, at the draw's model.
+        let scene = build_scene(
+            &draws,
+            RenderMode::Wireframe,
             false,
             false,
             false,
@@ -525,13 +544,13 @@ mod tests {
         assert_eq!(
             grids(&scene),
             vec![(GridPlane::Xy, model_a), (GridPlane::Xy, model_b)],
-            "one Xy grid per draw at its own model"
+            "one Xy grid per wireframe draw at its own model"
         );
 
         // The plane is honored (Yz here) and grids sit after the meshes.
         let scene = build_scene(
             &draws,
-            RenderMode::Filled,
+            RenderMode::Wireframe,
             false,
             false,
             false,
@@ -543,6 +562,35 @@ mod tests {
         assert_eq!(
             grids(&scene),
             vec![(GridPlane::Yz, model_a), (GridPlane::Yz, model_b)],
+        );
+
+        // Mixed scene (bunny + quad): only the wireframe quad (draw b) gets the
+        // grid; the filled/textured content mesh (draw a) does not.
+        let mixed = [
+            Draw {
+                mesh_id: 0,
+                model: model_a,
+                mode: Some(RenderMode::Textured),
+            },
+            Draw {
+                mesh_id: 1,
+                model: model_b,
+                mode: Some(RenderMode::Wireframe),
+            },
+        ];
+        let scene = build_scene(
+            &mixed,
+            RenderMode::Filled,
+            false,
+            false,
+            false,
+            Some(GridPlane::Xy),
+            None,
+        );
+        assert_eq!(
+            grids(&scene),
+            vec![(GridPlane::Xy, model_b)],
+            "only the wireframe quad draw gets a grid, not the textured mesh"
         );
     }
 
