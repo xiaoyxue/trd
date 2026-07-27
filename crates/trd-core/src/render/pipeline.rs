@@ -3,8 +3,29 @@
 
 use super::{FrameParams, InstanceRaw, Uniform, Vertex, Viewport};
 
+/// The mesh pass's MSAA sample count. 4× multisampling is the WebGPU-guaranteed
+/// level for renderable formats (native Vulkan/Metal/DX + the WebGL2 downlevel
+/// backend), so it needs no adapter feature check. It smooths the aliased edges
+/// of the wireframe / local-axes gizmo / AABB line geometry (and the mesh
+/// silhouette). Every part of the mesh pass — the color attachment, the depth
+/// attachment, and all four participating pipelines — must share this count; the
+/// multisampled color target is resolved into the caller's single-sample `view`.
+pub(crate) const MSAA_SAMPLE_COUNT: u32 = 4;
+
+/// A [`wgpu::MultisampleState`] for `sample_count` (full coverage mask, no
+/// alpha-to-coverage). `sample_count == 1` is byte-identical to the wgpu default
+/// (the non-MSAA / legacy pipelines).
+pub(crate) fn multisample_state(sample_count: u32) -> wgpu::MultisampleState {
+    wgpu::MultisampleState {
+        count: sample_count,
+        mask: !0,
+        alpha_to_coverage_enabled: false,
+    }
+}
+
 /// Builds the indexed mesh render pipeline for `format` using an auto bind-group
 /// layout (group 0, binding 0 = the params uniform), drawn as filled triangles.
+/// Single-sampled (the standalone/legacy pass draws to a non-MSAA target).
 pub fn create_mesh_pipeline(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
@@ -20,6 +41,7 @@ pub fn create_mesh_pipeline(
         &layout,
         wgpu::PrimitiveTopology::TriangleList,
         None,
+        1,
     )
 }
 
@@ -79,7 +101,8 @@ pub(crate) fn overlay_depth_stencil() -> wgpu::DepthStencilState {
 
 /// A depth attachment sized to a render target. The [`MeshRenderer`] owns one
 /// and recreates it when the viewport changes, so the mesh pass always has a
-/// matching depth buffer for solid occlusion.
+/// matching depth buffer for solid occlusion. `sample_count` must match the
+/// pass's color attachment (MSAA depth is not resolved — it is discardable).
 pub(crate) struct DepthTarget {
     pub(crate) view: wgpu::TextureView,
     pub(crate) width: u32,
@@ -87,8 +110,13 @@ pub(crate) struct DepthTarget {
 }
 
 /// Creates a [`DEPTH_FORMAT`] depth texture + view of `width`×`height` (each
-/// clamped to ≥ 1) for use as a render-pass depth attachment.
-pub(crate) fn create_depth_target(device: &wgpu::Device, width: u32, height: u32) -> DepthTarget {
+/// clamped to ≥ 1) and `sample_count` for use as a render-pass depth attachment.
+pub(crate) fn create_depth_target(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    sample_count: u32,
+) -> DepthTarget {
     let width = width.max(1);
     let height = height.max(1);
     let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -99,7 +127,7 @@ pub(crate) fn create_depth_target(device: &wgpu::Device, width: u32, height: u32
             depth_or_array_layers: 1,
         },
         mip_level_count: 1,
-        sample_count: 1,
+        sample_count,
         dimension: wgpu::TextureDimension::D2,
         format: DEPTH_FORMAT,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -107,6 +135,50 @@ pub(crate) fn create_depth_target(device: &wgpu::Device, width: u32, height: u32
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     DepthTarget {
+        view,
+        width,
+        height,
+    }
+}
+
+/// A multisampled color attachment sized to a render target. The [`MeshRenderer`]
+/// owns one (mirroring [`DepthTarget`]) and recreates it when the viewport
+/// changes; each frame the mesh pass renders into it and resolves it into the
+/// caller's single-sample `view`. Only present when `sample_count > 1`.
+pub(crate) struct MsaaColorTarget {
+    pub(crate) view: wgpu::TextureView,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+}
+
+/// Creates a `format` multisampled color texture + view of `width`×`height`
+/// (each clamped to ≥ 1) and `sample_count`, usable only as a render attachment
+/// (its contents are resolved, never copied/sampled).
+pub(crate) fn create_msaa_color_target(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    width: u32,
+    height: u32,
+    sample_count: u32,
+) -> MsaaColorTarget {
+    let width = width.max(1);
+    let height = height.max(1);
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("trd msaa color texture"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    MsaaColorTarget {
         view,
         width,
         height,
@@ -125,6 +197,7 @@ pub(crate) fn create_mesh_pipeline_with(
     layout: &wgpu::PipelineLayout,
     topology: wgpu::PrimitiveTopology,
     depth_stencil: Option<wgpu::DepthStencilState>,
+    sample_count: u32,
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::include_wgsl!("../mesh.wgsl"));
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -147,7 +220,7 @@ pub(crate) fn create_mesh_pipeline_with(
             ..Default::default()
         },
         depth_stencil,
-        multisample: wgpu::MultisampleState::default(),
+        multisample: multisample_state(sample_count),
         multiview_mask: None,
         cache: None,
     })
@@ -187,6 +260,7 @@ pub(crate) fn create_textured_pipeline(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
     layout: &wgpu::PipelineLayout,
+    sample_count: u32,
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::include_wgsl!("../textured.wgsl"));
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -209,7 +283,7 @@ pub(crate) fn create_textured_pipeline(
             ..Default::default()
         },
         depth_stencil: Some(solid_depth_stencil()),
-        multisample: wgpu::MultisampleState::default(),
+        multisample: multisample_state(sample_count),
         multiview_mask: None,
         cache: None,
     })
@@ -262,6 +336,7 @@ pub(crate) fn create_frame_plane_pipeline(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
     layout: &wgpu::PipelineLayout,
+    sample_count: u32,
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::include_wgsl!("../frame_plane.wgsl"));
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -284,7 +359,7 @@ pub(crate) fn create_frame_plane_pipeline(
             ..Default::default()
         },
         depth_stencil: Some(overlay_depth_stencil()),
-        multisample: wgpu::MultisampleState::default(),
+        multisample: multisample_state(sample_count),
         multiview_mask: None,
         cache: None,
     })

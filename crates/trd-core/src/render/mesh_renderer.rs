@@ -219,6 +219,7 @@ impl MeshPass {
             &pipeline_layout,
             wgpu::PrimitiveTopology::TriangleList,
             Some(solid_depth_stencil()),
+            MSAA_SAMPLE_COUNT,
         );
         let wireframe = create_mesh_pipeline_with(
             device,
@@ -226,6 +227,7 @@ impl MeshPass {
             &pipeline_layout,
             wgpu::PrimitiveTopology::LineList,
             Some(overlay_depth_stencil()),
+            MSAA_SAMPLE_COUNT,
         );
         // Textured pipeline (#20): group 0 = the shared camera uniform, group 1 =
         // the bound albedo texture + sampler.
@@ -235,7 +237,8 @@ impl MeshPass {
                 bind_group_layouts: &[Some(&camera_layout), Some(texture_layout)],
                 immediate_size: 0,
             });
-        let textured = create_textured_pipeline(device, format, &textured_pipeline_layout);
+        let textured =
+            create_textured_pipeline(device, format, &textured_pipeline_layout, MSAA_SAMPLE_COUNT);
         // Identity params ignore the viewport (no intrinsics); each frame's
         // `write_camera` supplies the real target dimensions.
         let (camera_uniform, camera_bind_group) = create_view_proj_binding(
@@ -435,6 +438,14 @@ pub struct MeshRenderer {
     /// The mesh pass's depth attachment, (re)created lazily in `encode` to match
     /// the viewport. Gives solid (filled/textured) meshes real z-occlusion.
     depth: Option<DepthTarget>,
+    /// The mesh pass's multisampled color attachment ([`MSAA_SAMPLE_COUNT`]×),
+    /// (re)created lazily in `encode` to match the viewport. The pass renders into
+    /// it and resolves into the caller's single-sample `view`, so every front-end
+    /// gets anti-aliased edges transparently.
+    msaa: Option<MsaaColorTarget>,
+    /// The color format the pipelines were built for; the MSAA color target must
+    /// be created with the same format.
+    format: wgpu::TextureFormat,
     /// Retained so `encode` can grow GPU resources on demand without the caller
     /// threading a `&Device` through every call (`wgpu::Device` is a cheap `Arc`).
     device: wgpu::Device,
@@ -492,6 +503,8 @@ impl MeshRenderer {
             store,
             frame_plane,
             depth: None,
+            msaa: None,
+            format,
             device: device.clone(),
         }
     }
@@ -561,8 +574,10 @@ impl MeshRenderer {
         self.store
             .upload_instances(&self.device, queue, &batches.instances);
 
-        // 3. Match the depth attachment to the viewport (solid meshes z-occlude).
+        // 3. Match the depth + MSAA color attachments to the viewport (solid
+        //    meshes z-occlude; the multisampled color is resolved into `view`).
         self.ensure_depth(viewport);
+        self.ensure_msaa(viewport);
 
         // 4. Background frame-plane fit for this viewport (no-op if the scene has
         //    no FramePlane or no frame texture is bound yet).
@@ -574,14 +589,18 @@ impl MeshRenderer {
         //    (#20): encode is where a GPU queue is available.
         let texture_bind_group = self.texture.ensure_uploaded(&self.device, queue);
 
-        // 6. Record the pass.
+        // 6. Record the pass. The mesh pass renders into the multisampled color
+        //    attachment and resolves into the caller's single-sample `view`, so
+        //    every front-end (offscreen CLI, native window, wasm canvas) gets
+        //    anti-aliased edges with no API change.
         let depth_view = &self.depth.as_ref().expect("depth set in step 3").view;
+        let msaa_view = &self.msaa.as_ref().expect("msaa set in step 3").view;
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("trd mesh pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view,
+                view: msaa_view,
                 depth_slice: None,
-                resolve_target: None,
+                resolve_target: Some(view),
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                     store: wgpu::StoreOp::Store,
@@ -646,7 +665,8 @@ impl MeshRenderer {
     }
 
     /// Ensures the depth attachment matches `viewport` (each dimension clamped to
-    /// ≥ 1), recreating it only when the target size changes.
+    /// ≥ 1) at [`MSAA_SAMPLE_COUNT`] (the depth sample count must match the color
+    /// attachment), recreating it only when the target size changes.
     fn ensure_depth(&mut self, viewport: Viewport) {
         let dw = viewport.width.max(1);
         let dh = viewport.height.max(1);
@@ -655,7 +675,28 @@ impl MeshRenderer {
             .as_ref()
             .is_none_or(|d| d.width != dw || d.height != dh)
         {
-            self.depth = Some(create_depth_target(&self.device, dw, dh));
+            self.depth = Some(create_depth_target(&self.device, dw, dh, MSAA_SAMPLE_COUNT));
+        }
+    }
+
+    /// Ensures the multisampled color attachment matches `viewport` (each
+    /// dimension clamped to ≥ 1) at [`MSAA_SAMPLE_COUNT`] and the renderer's
+    /// color `format`, recreating it only when the target size changes.
+    fn ensure_msaa(&mut self, viewport: Viewport) {
+        let dw = viewport.width.max(1);
+        let dh = viewport.height.max(1);
+        if self
+            .msaa
+            .as_ref()
+            .is_none_or(|m| m.width != dw || m.height != dh)
+        {
+            self.msaa = Some(create_msaa_color_target(
+                &self.device,
+                self.format,
+                dw,
+                dh,
+                MSAA_SAMPLE_COUNT,
+            ));
         }
     }
 }

@@ -10,7 +10,7 @@
 
 use super::{
     create_frame_bind_group_layout, create_frame_plane_pipeline, frame_fit_uv_scale, FrameFit,
-    Viewport,
+    Viewport, MSAA_SAMPLE_COUNT,
 };
 
 /// The reused GPU frame texture plus its bind group and fit uniform. Recreated
@@ -49,7 +49,8 @@ impl FramePlane {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let pipeline = create_frame_plane_pipeline(device, format, &pipeline_layout);
+        let pipeline =
+            create_frame_plane_pipeline(device, format, &pipeline_layout, MSAA_SAMPLE_COUNT);
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("trd frame plane sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,

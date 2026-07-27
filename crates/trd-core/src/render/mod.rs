@@ -34,8 +34,9 @@ pub(crate) use gizmo::{axes_vertices, AABB_COLOR, AABB_EDGE_INDICES, AXES_VERTEX
 pub(crate) use gpu_types::{InstanceRaw, Uniform};
 pub(crate) use pipeline::{
     create_depth_target, create_frame_bind_group_layout, create_frame_plane_pipeline,
-    create_mesh_bind_group_layout, create_mesh_pipeline_with, create_texture_bind_group_layout,
-    create_textured_pipeline, create_view_proj_binding, overlay_depth_stencil, solid_depth_stencil,
-    write_view_proj, DepthTarget,
+    create_mesh_bind_group_layout, create_mesh_pipeline_with, create_msaa_color_target,
+    create_texture_bind_group_layout, create_textured_pipeline, create_view_proj_binding,
+    overlay_depth_stencil, solid_depth_stencil, write_view_proj, DepthTarget, MsaaColorTarget,
+    MSAA_SAMPLE_COUNT,
 };
 pub(crate) use scene::{frame_fit_uv_scale, DRAW_MODE_INHERIT};
