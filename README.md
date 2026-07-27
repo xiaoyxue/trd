@@ -481,12 +481,14 @@ ffmpeg -i "$FIBA_MP4" -vf "select='between(n,0,287)',scale=1920:1080" \
   -vsync 0 -start_number 0 -q:v 3 output/fiba/frames/frame_%06d.jpg
 
 # 3a. stage 2 — perception → placed scene (bunny on the court quad, Pose-free #77)
-#     0.5 scale + a +0.6 half-edge shift along the quad's local +e1 keeps the
-#     bunny on the open right side of the key, clear of the active players (it
-#     stays anchored in the placement-quad's P² local frame).
+#     0.35 scale + a −1.6 half-edge shift along the quad's local −green (−r2)
+#     gizmo axis lifts the small bunny up-court, above the players roaming the
+#     key, so it never occludes an active player (it stays anchored in the
+#     placement-quad's P² local frame). --place-offset-e1 shifts along the red
+#     (r1) axis, --place-offset-e2 along the green (r2) axis, in half-edge units.
 uv run --with pyarrow --with numpy examples/placement_quad_by_local_coord.py \
   --from-perception examples/frames.fiba.perception.arrow --place-mesh --placement-quad \
-  --size-factor 0.5 --place-offset-e1 0.6 --place-offset-e2 0.0 \
+  --size-factor 0.35 --place-offset-e1 0.0 --place-offset-e2 -1.6 \
   --src-width 1920 --src-height 1080 --width 1920 --height 1080 \
   -o examples/frames.fiba.stage2.jsonl
 examples/render.sh --cli --placement-quad --axes-local --aabb \

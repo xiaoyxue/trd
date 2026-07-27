@@ -346,18 +346,24 @@ def emit_records(records, args):
             continue
         o3d, e, _o_px, lam = nb
         e1, e2, e3 = e
+        # The placement quad's gizmo axes (what --axes-local draws): red = r1,
+        # green = r2, i.e. the two quad half-edges r1/2, r2/2. In-plane offsets
+        # are expressed in *these* axes (not the orthonormalised e1/e2), so a
+        # request like "move along −green" maps directly to −r2 as seen on screen.
+        r1, r2, t = pose_from_quad(quad, K)
         draws = []
         if args.place_mesh:
             size = lam * args.size_factor  # mesh half-extent in the (scaled) reconstruction
             theta = 2.0 * np.pi * args.turns * (placed_i / n_tracked)
             # In-plane translation stays in the P² local frame: shift the anchor
-            # off the quad centre along the plane axes e1/e2, in quad half-edge
-            # (lam) units, then lift along the normal e3 so the feet rest on the
-            # plane. Used to move the mesh clear of the active players onto the
-            # open side of the court without leaving the placement-quad plane.
+            # off the quad centre along the quad's own gizmo axes — red (r1) and
+            # green (r2) — in quad half-edge units (±1 ≈ a quad edge), then lift
+            # along the normal e3 so the feet rest on the plane. Used to move the
+            # mesh clear of the active players without leaving the quad plane
+            # (e.g. −green/−r2 pushes it down-court, off the mid-court action).
             anchor = (o3d
-                      + args.place_offset_e1 * lam * e1
-                      + args.place_offset_e2 * lam * e2)
+                      + args.place_offset_e1 * (r1 / 2.0)
+                      + args.place_offset_e2 * (r2 / 2.0))
             # OpenCV camera-frame placement: mesh +X→e1, +Y(up)→e3, +Z→e1×e3 (=−e2);
             # centre lifted half a height along e3 so the feet rest on the plane.
             r_place = np.eye(4)
@@ -377,7 +383,6 @@ def emit_records(records, args):
             # alone maps its ±1 corners onto the camera-space quad corners
             # `a·r1 + b·r2 + t` (unit-square (a,b)), i.e. exactly the poster
             # (H = K·[r1 r2 t] reprojects onto it).
-            r1, r2, t = pose_from_quad(quad, K)
             nrm = _n(np.cross(r1, r2))  # plane normal (z=0 column: keeps the model invertible)
             m_quad = np.eye(4)
             m_quad[:3, 0] = r1 / 2.0
@@ -502,14 +507,15 @@ def main():
     ap.add_argument("--lift", type=float, default=1.0,
                     help="fraction of the mesh half-extent lifted along the plane normal (feet ≈ 1.0)")
     ap.add_argument("--place-offset-e1", type=float, default=0.0,
-                    help="shift the placed mesh in the placement-quad plane along +e1 "
-                         "(the quad's local X), in quad half-edge (lam) units: +1.0 ≈ the "
-                         "quad edge. Stays in the P² local frame; e.g. move the mesh off the "
-                         "active players to the open side of the court. Default 0 (quad centre).")
+                    help="shift the placed mesh in the placement-quad plane along the quad's "
+                         "RED gizmo axis (r1 / local X), in quad half-edge units: +1.0 ≈ the "
+                         "quad edge. Matches the --axes-local red arm; stays in the P² local "
+                         "frame. Default 0 (quad centre).")
     ap.add_argument("--place-offset-e2", type=float, default=0.0,
-                    help="shift the placed mesh in the placement-quad plane along +e2 "
-                         "(the quad's local Y, deeper into the plane), in quad half-edge (lam) "
-                         "units. Default 0 (quad centre).")
+                    help="shift the placed mesh in the placement-quad plane along the quad's "
+                         "GREEN gizmo axis (r2 / local Y), in quad half-edge units. Matches the "
+                         "--axes-local green arm; e.g. a negative value moves the mesh down-court "
+                         "(−green), off the mid-court action. Default 0 (quad centre).")
     ap.add_argument("--place-mesh", action=argparse.BooleanOptionalAction, default=True,
                     help="anchor the model mesh on the placement-quad frame (stage 2). "
                          "Use --no-place-mesh for stage 1 (placement quad only, before placing the mesh).")
