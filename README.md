@@ -442,6 +442,100 @@ shot. `K` is authored for 1920×1080, so keep `--src-width 1920 --src-height 108
 (it is scaled to the render size). On Windows, run the same three steps with
 `examples\render.ps1 -CLI` for the final render.
 
+#### FIBA court AR demo — native 1080p (#110)
+
+The same single-view placement pipeline on the **2024 Paris Olympic basketball
+final** (France vs USA), rendered at the clip's **native 1920×1080** (instead of
+the NBA demo's downscaled 960×540). It reuses the identical stages —
+[`scripts/fiba_perception_to_arrow.py`](scripts/fiba_perception_to_arrow.py)
+repacks the vendored per-frame calibration
+([`assets/videos/fiba/per_frame_KVP_cube_best.parquet`](assets/videos/fiba/), see
+its `DATASET.md`) into the perception stream that
+[`examples/placement_quad_by_local_coord.py`](examples/placement_quad_by_local_coord.py)
+consumes, and the bunny stays glued to the same court spot as the camera pans and
+zooms. It is placed at **half scale** and shifted along the placement-quad's local
+**+e1** axis onto the open right side of the free-throw key (all still expressed in
+the quad's P² local frame), so it clears the active players instead of covering the
+shooter at the quad centre. The trustworthy focal here is **`2VP_4510`** (`1circle_4252` corroborates) —
+the **inverse of nba-short**, where BA was trusted and 2VP was degenerate; a clean
+demonstration of why multiple K-methods are stored (the best flips with the
+footage). The parquet tracks the ad quad for the first **222** frames; the
+remaining **66** (the tail, where the quad leaves frame) carry null geometry and
+are rendered as **plain video plates** (no AR mesh) so the clip stays continuous
+with the source rather than being trimmed. Only the image-free calibration is
+vendored; the copyrighted broadcast clip stays external.
+
+```sh
+FIBA_MP4=~/Asset/fiba-shot1/shot_0001.mp4   # only the (copyrighted) video is external
+
+# 1. vendored parquet → perception Arrow (shot 1, the best-K method 2VP_4510).
+#    Emits all 288 frames: 222 tracked (k+quad) + 66 untracked (null geometry →
+#    background-plate only). Prints the present_index range to extract next.
+uv run --with pyarrow scripts/fiba_perception_to_arrow.py \
+  --method 2VP_4510 \
+  -o examples/frames.fiba.perception.arrow
+
+# 2. extract the full broadcast span (present_index 0..287) at native 1080p
+mkdir -p output/fiba/frames
+ffmpeg -i "$FIBA_MP4" -vf "select='between(n,0,287)',scale=1920:1080" \
+  -vsync 0 -start_number 0 -q:v 3 output/fiba/frames/frame_%06d.jpg
+
+# 3a. stage 2 — perception → placed scene (bunny on the court quad, Pose-free #77)
+#     0.35 scale + a −1.6 half-edge shift along the quad's local −green (−r2)
+#     gizmo axis lifts the small bunny up-court, above the players roaming the
+#     key, so it never occludes an active player (it stays anchored in the
+#     placement-quad's P² local frame). --place-offset-e1 shifts along the red
+#     (r1) axis, --place-offset-e2 along the green (r2) axis, in half-edge units.
+uv run --with pyarrow --with numpy examples/placement_quad_by_local_coord.py \
+  --from-perception examples/frames.fiba.perception.arrow --place-mesh --placement-quad \
+  --size-factor 0.35 --place-offset-e1 0.0 --place-offset-e2 -1.6 \
+  --src-width 1920 --src-height 1080 --width 1920 --height 1080 \
+  -o examples/frames.fiba.stage2.jsonl
+examples/render.sh --cli --placement-quad --axes-local --aabb \
+  --mesh assets/meshes/bunny_with_texture/bunny.obj \
+  --texture assets/meshes/bunny_with_texture/bunny_uv_map1.jpg \
+  --frames-base output/fiba \
+  examples/frames.fiba.stage2.jsonl output/fiba_stage2.mp4 1920 1080 24
+
+# 3b. stage 1 — the anchor before the mesh (placement quad + local axes, no bunny)
+uv run --with pyarrow --with numpy examples/placement_quad_by_local_coord.py \
+  --from-perception examples/frames.fiba.perception.arrow --no-place-mesh --placement-quad \
+  --placement-quad-mesh-index 0 --src-width 1920 --src-height 1080 --width 1920 --height 1080 \
+  -o examples/frames.fiba.stage1.jsonl
+examples/render.sh --cli --placement-quad --axes-local \
+  --frames-base output/fiba \
+  examples/frames.fiba.stage1.jsonl output/fiba_stage1.mp4 1920 1080 24
+
+# 3c. XY floor grid + local axes — a coordinate-plane grid laid in the placement
+#     quad's P² local frame (#110), with `--axes-local` drawing that frame's axes
+#     (red = r1, green = r2, blue = normal) at the quad origin. `--grid-local xy`
+#     overlays a PlaneGrid on each *wireframe* draw's local XY plane; since the
+#     placement quad is the wireframe draw, that is exactly one lattice carpeting
+#     the recovered court floor (extends ~3× past the quad so the found plane is
+#     easy to eyeball) — a filled/textured content mesh (the bunny) gets no stray
+#     grid. `xz`/`yz` pick the other coordinate planes. Works on the quad-only
+#     stage-1 stream …
+examples/render.sh --cli --placement-quad --grid-local xy --axes-local \
+  --frames-base output/fiba \
+  examples/frames.fiba.stage1.jsonl output/fiba_stage1_grid.mp4 1920 1080 24
+# … and on the full bunny + quad stage-2 scene (grid + P² axes on the quad floor,
+#     AABB + local axes on the bunny — the grid never walls off the bunny thanks
+#     to wireframe scoping):
+examples/render.sh --cli --placement-quad --grid-local xy --axes-local --aabb \
+  --mesh assets/meshes/bunny_with_texture/bunny.obj \
+  --texture assets/meshes/bunny_with_texture/bunny_uv_map1.jpg \
+  --frames-base output/fiba \
+  examples/frames.fiba.stage2.jsonl output/fiba_stage2_grid.mp4 1920 1080 24
+```
+
+At 1080p (and 4K) an animated GIF balloons to hundreds of MB, so the output is
+written as **H.264 `.mp4`** — [`scripts/encode.py`](scripts/encode.py) picks the
+codec from the `-o` extension (`.mp4`/`.mov` → H.264, `.webp` → animated WebP,
+else GIF). To render the NBA-style GIF instead, just name the output
+`output/fiba_stage2.gif`. On Windows, run the same steps with
+`examples\render.ps1 -CLI`.
+
+
 #### The render pipeline
 
 Under the hood it is a fully-piped `JSONL → Arrow → trd → ffmpeg` flow, no
@@ -528,7 +622,8 @@ PORT=9000 examples/render.sh --web          # serve on a custom port
 
 Every `--cli` content flag applies to `--web` unchanged — `--mesh`, `--texture`,
 `--wireframe`, `--aabb`, `--axes`, `--axes-local`, `--placement-quad`,
-`--frames-base`, and the positional `WIDTH`/`HEIGHT`. The render resolution is baked
+`--frames-base`, and the positional `WIDTH`/`HEIGHT` (the `--grid-local` floor
+grid is native/`--cli` + `--native` only). The render resolution is baked
 into the stream's CV `k`, so it is a positional argument, **not** a URL param; the
 only live URL param is **`?fps=N`** (1..240, default = the `FPS` positional). Two
 render targets share the one bundle: **`--canvas-renderer`** (default) draws to the

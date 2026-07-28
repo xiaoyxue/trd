@@ -129,7 +129,8 @@ fn draw_indexed(
 }
 
 /// Which geometry a [`DrawCommand`] binds. The `usize` is a mesh id (index into
-/// [`MeshStore::meshes`]); `Axes` uses the shared gizmo geometry.
+/// [`MeshStore::meshes`]) for the mesh kinds, or a [`GridPlane::index`] for
+/// `Grid`; `Axes` uses the shared gizmo geometry.
 enum DrawKind {
     /// Filled triangles of a mesh (its triangle index buffer + filled pipeline).
     Filled(usize),
@@ -140,6 +141,9 @@ enum DrawKind {
     Wireframe(usize),
     /// A mesh's AABB box (its precomputed corner geometry + line pipeline).
     Aabb(usize),
+    /// A coordinate-plane grid (the shared per-plane grid vertex buffer indexed
+    /// by [`GridPlane::index`], non-indexed line draw).
+    Grid(usize),
     /// The coordinate-axes gizmo (shared vertex buffer, non-indexed line draw).
     Axes,
 }
@@ -219,6 +223,7 @@ impl MeshPass {
             &pipeline_layout,
             wgpu::PrimitiveTopology::TriangleList,
             Some(solid_depth_stencil()),
+            MSAA_SAMPLE_COUNT,
         );
         let wireframe = create_mesh_pipeline_with(
             device,
@@ -226,6 +231,7 @@ impl MeshPass {
             &pipeline_layout,
             wgpu::PrimitiveTopology::LineList,
             Some(overlay_depth_stencil()),
+            MSAA_SAMPLE_COUNT,
         );
         // Textured pipeline (#20): group 0 = the shared camera uniform, group 1 =
         // the bound albedo texture + sampler.
@@ -235,7 +241,8 @@ impl MeshPass {
                 bind_group_layouts: &[Some(&camera_layout), Some(texture_layout)],
                 immediate_size: 0,
             });
-        let textured = create_textured_pipeline(device, format, &textured_pipeline_layout);
+        let textured =
+            create_textured_pipeline(device, format, &textured_pipeline_layout, MSAA_SAMPLE_COUNT);
         // Identity params ignore the viewport (no intrinsics); each frame's
         // `write_camera` supplies the real target dimensions.
         let (camera_uniform, camera_bind_group) = create_view_proj_binding(
@@ -272,6 +279,11 @@ struct MeshStore {
     /// [`DrawableObject::CoordinateAxes`] draws it under its own model, supplied
     /// through the shared instance buffer.
     axes_vertex_buffer: wgpu::Buffer,
+    /// The coordinate-plane grid geometry, one `LineList` vertex buffer per
+    /// [`GridPlane`] (indexed by [`GridPlane::index`]): XY, XZ, YZ. Each
+    /// [`DrawableObject::PlaneGrid`] draws the buffer for its plane under its own
+    /// model, supplied through the shared instance buffer.
+    grid_vertex_buffers: [wgpu::Buffer; 3],
     instance_buffer: wgpu::Buffer,
     instance_capacity: u32,
 }
@@ -299,9 +311,26 @@ impl MeshStore {
             usage: wgpu::BufferUsages::VERTEX,
         });
 
+        // Coordinate-plane grids: one LineList vertex buffer per plane (XY/XZ/YZ),
+        // spanning the unit model-space square. Each PlaneGrid drawable draws its
+        // plane's buffer under its own model via the shared instance buffer.
+        let grid_buffer = |plane: GridPlane| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("trd grid vertex buffer"),
+                contents: bytemuck::cast_slice(&grid_vertices(plane)),
+                usage: wgpu::BufferUsages::VERTEX,
+            })
+        };
+        let grid_vertex_buffers = [
+            grid_buffer(GridPlane::Xy),
+            grid_buffer(GridPlane::Xz),
+            grid_buffer(GridPlane::Yz),
+        ];
+
         Self {
             meshes: gpu_meshes,
             axes_vertex_buffer,
+            grid_vertex_buffers,
             instance_buffer,
             instance_capacity,
         }
@@ -314,15 +343,18 @@ impl MeshStore {
     /// Walks `scene` once, bucketing each drawable's instance model by the
     /// geometry it draws (its base model pre-multiplied in, `effective = model ·
     /// base`), then flattens the buckets into one instance list + ordered
-    /// [`DrawCommand`]s. Draw order: filled, textured, wireframe, AABB boxes,
-    /// then axes — so opaque meshes precede the line overlays that composite on
-    /// top. Out-of-range mesh ids are skipped.
+    /// [`DrawCommand`]s. Draw order: filled, textured, grids, wireframe, AABB
+    /// boxes, then axes — so opaque meshes precede the line overlays, and the
+    /// plane grid sits beneath the wireframe/axes gizmos drawn over it.
+    /// Out-of-range mesh ids are skipped.
     fn build_batches(&self, scene: &[DrawableObject]) -> Batches {
         let mesh_count = self.meshes.len();
         let mut filled: Vec<Vec<InstanceRaw>> = vec![Vec::new(); mesh_count];
         let mut textured: Vec<Vec<InstanceRaw>> = vec![Vec::new(); mesh_count];
         let mut wireframe: Vec<Vec<InstanceRaw>> = vec![Vec::new(); mesh_count];
         let mut aabb: Vec<Vec<InstanceRaw>> = vec![Vec::new(); mesh_count];
+        // One instance bucket per grid plane (XY/XZ/YZ), keyed by GridPlane::index.
+        let mut grid: [Vec<InstanceRaw>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         let mut axes: Vec<InstanceRaw> = Vec::new();
         // The background frame plane is a singleton overlay (there is one bound
         // frame texture); the last FramePlane in the scene wins its fit.
@@ -360,6 +392,9 @@ impl MeshStore {
                 DrawableObject::CoordinateAxes { model } => {
                     axes.push(InstanceRaw { model });
                 }
+                DrawableObject::PlaneGrid { plane, model } => {
+                    grid[plane.index()].push(InstanceRaw { model });
+                }
                 DrawableObject::FramePlane { fit } => {
                     frame_fit = Some(fit);
                 }
@@ -380,6 +415,9 @@ impl MeshStore {
                 DrawKind::Textured(id),
                 bucket,
             );
+        }
+        for (plane, bucket) in grid.iter().enumerate() {
+            push_command(&mut instances, &mut commands, DrawKind::Grid(plane), bucket);
         }
         for (id, bucket) in wireframe.iter().enumerate() {
             push_command(
@@ -435,6 +473,14 @@ pub struct MeshRenderer {
     /// The mesh pass's depth attachment, (re)created lazily in `encode` to match
     /// the viewport. Gives solid (filled/textured) meshes real z-occlusion.
     depth: Option<DepthTarget>,
+    /// The mesh pass's multisampled color attachment ([`MSAA_SAMPLE_COUNT`]×),
+    /// (re)created lazily in `encode` to match the viewport. The pass renders into
+    /// it and resolves into the caller's single-sample `view`, so every front-end
+    /// gets anti-aliased edges transparently.
+    msaa: Option<MsaaColorTarget>,
+    /// The color format the pipelines were built for; the MSAA color target must
+    /// be created with the same format.
+    format: wgpu::TextureFormat,
     /// Retained so `encode` can grow GPU resources on demand without the caller
     /// threading a `&Device` through every call (`wgpu::Device` is a cheap `Arc`).
     device: wgpu::Device,
@@ -492,6 +538,8 @@ impl MeshRenderer {
             store,
             frame_plane,
             depth: None,
+            msaa: None,
+            format,
             device: device.clone(),
         }
     }
@@ -561,8 +609,10 @@ impl MeshRenderer {
         self.store
             .upload_instances(&self.device, queue, &batches.instances);
 
-        // 3. Match the depth attachment to the viewport (solid meshes z-occlude).
+        // 3. Match the depth + MSAA color attachments to the viewport (solid
+        //    meshes z-occlude; the multisampled color is resolved into `view`).
         self.ensure_depth(viewport);
+        self.ensure_msaa(viewport);
 
         // 4. Background frame-plane fit for this viewport (no-op if the scene has
         //    no FramePlane or no frame texture is bound yet).
@@ -574,14 +624,18 @@ impl MeshRenderer {
         //    (#20): encode is where a GPU queue is available.
         let texture_bind_group = self.texture.ensure_uploaded(&self.device, queue);
 
-        // 6. Record the pass.
+        // 6. Record the pass. The mesh pass renders into the multisampled color
+        //    attachment and resolves into the caller's single-sample `view`, so
+        //    every front-end (offscreen CLI, native window, wasm canvas) gets
+        //    anti-aliased edges with no API change.
         let depth_view = &self.depth.as_ref().expect("depth set in step 3").view;
+        let msaa_view = &self.msaa.as_ref().expect("msaa set in step 3").view;
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("trd mesh pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view,
+                view: msaa_view,
                 depth_slice: None,
-                resolve_target: None,
+                resolve_target: Some(view),
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                     store: wgpu::StoreOp::Store,
@@ -636,6 +690,11 @@ impl MeshRenderer {
                     pass.set_pipeline(&self.pass.wireframe);
                     draw_indexed(&mut pass, &mesh.aabb.vertex_buffer, &mesh.aabb.index, range);
                 }
+                DrawKind::Grid(plane) => {
+                    pass.set_pipeline(&self.pass.wireframe);
+                    pass.set_vertex_buffer(0, self.store.grid_vertex_buffers[plane].slice(..));
+                    pass.draw(0..GRID_VERTEX_COUNT, range);
+                }
                 DrawKind::Axes => {
                     pass.set_pipeline(&self.pass.wireframe);
                     pass.set_vertex_buffer(0, self.store.axes_vertex_buffer.slice(..));
@@ -646,7 +705,8 @@ impl MeshRenderer {
     }
 
     /// Ensures the depth attachment matches `viewport` (each dimension clamped to
-    /// ≥ 1), recreating it only when the target size changes.
+    /// ≥ 1) at [`MSAA_SAMPLE_COUNT`] (the depth sample count must match the color
+    /// attachment), recreating it only when the target size changes.
     fn ensure_depth(&mut self, viewport: Viewport) {
         let dw = viewport.width.max(1);
         let dh = viewport.height.max(1);
@@ -655,7 +715,28 @@ impl MeshRenderer {
             .as_ref()
             .is_none_or(|d| d.width != dw || d.height != dh)
         {
-            self.depth = Some(create_depth_target(&self.device, dw, dh));
+            self.depth = Some(create_depth_target(&self.device, dw, dh, MSAA_SAMPLE_COUNT));
+        }
+    }
+
+    /// Ensures the multisampled color attachment matches `viewport` (each
+    /// dimension clamped to ≥ 1) at [`MSAA_SAMPLE_COUNT`] and the renderer's
+    /// color `format`, recreating it only when the target size changes.
+    fn ensure_msaa(&mut self, viewport: Viewport) {
+        let dw = viewport.width.max(1);
+        let dh = viewport.height.max(1);
+        if self
+            .msaa
+            .as_ref()
+            .is_none_or(|m| m.width != dw || m.height != dh)
+        {
+            self.msaa = Some(create_msaa_color_target(
+                &self.device,
+                self.format,
+                dw,
+                dh,
+                MSAA_SAMPLE_COUNT,
+            ));
         }
     }
 }

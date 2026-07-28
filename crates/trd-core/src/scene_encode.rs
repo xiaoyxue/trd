@@ -412,7 +412,7 @@ mod tests {
         let decoded: Vec<_> = batches.into_iter().flatten().collect();
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0].params, frame);
-        assert_eq!(decoded[0].draws, draws[0]);
+        assert_eq!(decoded[0].draws, Some(draws[0].clone()));
     }
 
     #[test]
@@ -482,8 +482,38 @@ mod tests {
         assert_eq!(decoded.len(), 2);
         for (i, frame) in decoded.iter().enumerate() {
             assert_eq!(frame.params, frames[i]);
-            assert_eq!(frame.draws, draws[i]);
+            assert_eq!(frame.draws, Some(draws[i].clone()));
         }
+    }
+
+    #[test]
+    fn explicit_empty_draw_list_roundtrips_as_background_only() {
+        // A frame with an **explicit empty** draw list must decode to
+        // `Some(vec![])` (no meshes → background plate only), distinct from a
+        // frame with a real draw (`Some(vec![draw])`). Both go through the wire
+        // encode/decode, so the empty-list row proves the draw columns stay
+        // present and the empty list survives (rather than collapsing to "absent
+        // ⇒ default instance"). Guards the FIBA tail (untracked frames).
+        let frames = vec![FrameParams::IDENTITY, FrameParams::IDENTITY];
+        let placed = Draw {
+            mesh_id: 0,
+            model: [
+                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.2, -0.1, 0.0, 1.0,
+            ],
+            mode: None,
+        };
+        let draws = vec![vec![placed], Vec::new()];
+
+        let bytes = encode_params_stream(&frames, Some(&draws)).unwrap();
+        let decoded = crate::decode_params_stream(&bytes).unwrap();
+
+        assert_eq!(decoded.len(), 2);
+        // Frame 0: the placed draw survives verbatim.
+        assert_eq!(decoded[0].draws, Some(vec![placed]));
+        assert_eq!(decoded[0].resolved_draws(), vec![placed]);
+        // Frame 1: explicit empty ⇒ no meshes (not a default instance).
+        assert_eq!(decoded[1].draws, Some(Vec::new()));
+        assert!(decoded[1].resolved_draws().is_empty());
     }
 
     #[test]

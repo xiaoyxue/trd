@@ -3,7 +3,9 @@
 
 use std::sync::Arc;
 
-use trd_core::{build_scene, FrameFit, ImageTexture, Mesh, MeshRenderer, RenderMode, Viewport};
+use trd_core::{
+    build_scene, FrameFit, GridPlane, ImageTexture, Mesh, MeshRenderer, RenderMode, Viewport,
+};
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
@@ -134,6 +136,7 @@ impl WindowRenderer {
         show_aabb: bool,
         show_axes: bool,
         show_local_axes: bool,
+        show_local_grid: Option<GridPlane>,
     ) {
         let (Some(renderer), Some(frame)) = (self.renderer.as_mut(), frame) else {
             return;
@@ -171,6 +174,7 @@ impl WindowRenderer {
             show_aabb,
             show_axes,
             show_local_axes,
+            show_local_grid,
             frame_fit,
         );
         let mut encoder = self

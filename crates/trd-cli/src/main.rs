@@ -6,7 +6,30 @@
 use std::io::{self, Write};
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
+
+/// Coordinate plane selector for the `--grid-local` overlay, mapped to
+/// [`trd_core::GridPlane`]. Kept in the binary so `trd-core` needn't depend on
+/// clap.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum GridPlaneArg {
+    /// The local XY plane (Z = 0) — e.g. a placement quad's floor.
+    Xy,
+    /// The local XZ plane (Y = 0).
+    Xz,
+    /// The local YZ plane (X = 0).
+    Yz,
+}
+
+impl From<GridPlaneArg> for trd_core::GridPlane {
+    fn from(value: GridPlaneArg) -> Self {
+        match value {
+            GridPlaneArg::Xy => trd_core::GridPlane::Xy,
+            GridPlaneArg::Xz => trd_core::GridPlane::Xz,
+            GridPlaneArg::Yz => trd_core::GridPlane::Yz,
+        }
+    }
+}
 
 /// Streaming Arrow renderer for trd (protocol 0.0.5).
 #[derive(Parser)]
@@ -40,6 +63,13 @@ struct Cli {
     /// `(e1,e2,e3)` quad frame the bunny is anchored in.
     #[arg(long)]
     axes_local: bool,
+    /// Overlay a coordinate-plane grid lattice on the given plane at each
+    /// *wireframe* drawn object's local frame (its `model`) — e.g. `--grid-local
+    /// xy` tiles a grid across the placement quad's local floor. Scoped to
+    /// wireframe draws, so a filled/textured mesh gets no stray grid. One of
+    /// `xy`, `xz`, `yz`.
+    #[arg(long, value_enum)]
+    grid_local: Option<GridPlaneArg>,
     /// Base directory for per-frame background images (`0.0.5`). When set, a
     /// frame's `frame_path` (relative, e.g. `frames/frame_000000.png`) is joined
     /// to this dir, decoded (PNG/JPEG), and composited beneath the scene as a
@@ -102,6 +132,7 @@ fn main() -> Result<(), trd_core::StreamError> {
             show_aabb: cli.aabb,
             show_axes: cli.axes,
             show_local_axes: cli.axes_local,
+            show_local_grid: cli.grid_local.map(Into::into),
         },
         frame_resolver,
     )?;

@@ -1,0 +1,144 @@
+{
+  "dataset": "per_frame_KVP_cube_best.parquet",
+  "description": "fiba-shot1 (Paris 2024 France-USA) most-accurate K version: the 2VP (f=4510) and 1circle (f=4252) methods selected by held-out geometric evaluation, keeping all 288 frames. Tracked frames carry full geometry; invalid frames keep only the frame identity (geometry columns = null).",
+  "grain": "one row per (method, present_index)",
+  "row_count": 576,
+  "n_methods": 2,
+  "methods": [
+    "1circle_4252",
+    "2VP_4510"
+  ],
+  "n_frames": 288,
+  "tracked_frames_per_method": 222,
+  "coordinates": "pixels (origin top-left); vp_* are homogeneous un-normalized (guard |w|>>0 before dividing)",
+  "camera_model": "K=[[f,0,cx],[0,f,cy],[0,0,1]]; square pixels, zero skew, principal point = frame center; f constant per method",
+  "accuracy": "held-out cross-validation (gen_K_eval.py): 2VP rank 1, 1circle rank 2. Metric = error of held-out features (free-throw circle roundness / right angles) after rectifying with that K. BA (2397) is a zoom-degraded outlier and is excluded.",
+  "null_policy": "For tracked=False frames: all geometry columns (f/K/vp/quad/cube/H/tilt/has_ad_quad/n_corners*) = null; only shot/method/present_index/W/H/cx/cy/tracked/visibility are kept.",
+  "columns": [
+    {
+      "name": "shot",
+      "arrow_type": "int64",
+      "desc": "int shot id"
+    },
+    {
+      "name": "method",
+      "arrow_type": "large_string",
+      "desc": "str focal method + px (2VP_4510 or 1circle_4252); best keeps only these two most-accurate methods"
+    },
+    {
+      "name": "present_index",
+      "arrow_type": "int64",
+      "desc": "int 0-based frame index into shot_0001.mp4"
+    },
+    {
+      "name": "f_ref_px",
+      "arrow_type": "double",
+      "desc": "double method focal px (constant per method); null on invalid frames"
+    },
+    {
+      "name": "f_frame_px",
+      "arrow_type": "double",
+      "desc": "double == f_ref_px (kept for schema stability)"
+    },
+    {
+      "name": "tilt_deg",
+      "arrow_type": "double",
+      "desc": "double floor-normal tilt; null on invalid frames"
+    },
+    {
+      "name": "cx",
+      "arrow_type": "double",
+      "desc": "double principal point x = W/2"
+    },
+    {
+      "name": "cy",
+      "arrow_type": "double",
+      "desc": "double principal point y = H/2"
+    },
+    {
+      "name": "W",
+      "arrow_type": "int64",
+      "desc": "int frame width 1920"
+    },
+    {
+      "name": "H",
+      "arrow_type": "int64",
+      "desc": "int frame height 1080"
+    },
+    {
+      "name": "K",
+      "arrow_type": "list<element: double>",
+      "desc": "double[9] 3x3 row-major intrinsics [f,0,cx,0,f,cy,0,0,1]; null on invalid frames"
+    },
+    {
+      "name": "vp_len",
+      "arrow_type": "list<element: double>",
+      "desc": "double[3] cube X-axis VP (court length / paint long edge r1), homogeneous [x,y,w] this frame; null on invalid frames"
+    },
+    {
+      "name": "vp_wid",
+      "arrow_type": "list<element: double>",
+      "desc": "double[3] cube Y-axis VP (court width r2), homogeneous; null on invalid frames"
+    },
+    {
+      "name": "vp_up",
+      "arrow_type": "list<element: double>",
+      "desc": "double[3] cube Z-axis VP (floor normal r3), homogeneous (w~0 => at infinity); null on invalid frames"
+    },
+    {
+      "name": "has_ad_quad",
+      "arrow_type": "bool",
+      "desc": "bool ad_quad valid (True on tracked frames); null on invalid frames"
+    },
+    {
+      "name": "n_corners_in",
+      "arrow_type": "int64",
+      "desc": "int quad corners inside the frame (0..4); null on invalid frames"
+    },
+    {
+      "name": "n_corners_out",
+      "arrow_type": "int64",
+      "desc": "int corners outside = 4 - n_corners_in; null on invalid frames"
+    },
+    {
+      "name": "tracked",
+      "arrow_type": "bool",
+      "desc": "bool tracking valid (>=3 corners in-frame). False = ended (>=2 corners out)"
+    },
+    {
+      "name": "visibility",
+      "arrow_type": "large_string",
+      "desc": "str 'tracked' or 'ended'"
+    },
+    {
+      "name": "ad_quad",
+      "arrow_type": "list<element: double>",
+      "desc": "double[8] cube base ring UL,UR,LR,LL px (the tracked ad surface); null on invalid frames"
+    },
+    {
+      "name": "cube_verts",
+      "arrow_type": "list<element: double>",
+      "desc": "double[16] 8 verts (x,y) [b0..b3,t0..t3]; base = ad_quad, top extruded along floor normal; null on invalid frames"
+    },
+    {
+      "name": "h_ref_to_i",
+      "arrow_type": "list<element: double>",
+      "desc": "double[9] 3x3 row-major ref->frame homography (hybrid chained/direct); null on invalid frames"
+    }
+  ],
+  "vertex_order": [
+    "b0=UL",
+    "b1=UR",
+    "b2=LR",
+    "b3=LL",
+    "t0..t3 = extruded along floor normal"
+  ],
+  "provenance": {
+    "homography": "RAFT dense flow + FB-consistency + USAC_MAGSAC; hybrid direct(231)/chained(57) to fix far frames (gen_homography_chained.py)",
+    "quad": "manual paint annotation on the reference frame (quad_drawer --role paint), H-propagated per frame (gen_track/gen_dataset)",
+    "2VP": "paint two orthogonal edge VPs -> two_vp_focal_squared (va.detection.vp_algebra)",
+    "1circle": "BEV-annotated restricted-area semicircle -> ellipse fit -> map back to image C_img=H^T C_bev H -> circle-IAC (gen_bev_circle.py --from-annot)",
+    "cube_math": "s18_rrd_separate.basis/cube_top/warp (nba-short canonical)",
+    "eval": "gen_K_eval.py held-out geometric consistency ranking"
+  }
+}

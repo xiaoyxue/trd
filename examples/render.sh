@@ -129,6 +129,10 @@ CONTENT FLAGS (--cli and --native):
   --axes              Overlay a coordinate-axes gizmo (X=red, Y=green, Z=blue) at the origin (#42).
   --axes-local        Overlay a coordinate-axes gizmo at EACH drawn object's own local
                       frame (its model), e.g. #77's (e1,e2,e3) quad placement frame.
+  --grid-local PLANE  Overlay a coordinate-plane grid lattice (PLANE = xy|xz|yz) on each
+                      WIREFRAME drawn object's own local frame — e.g. --grid-local xy tiles
+                      a grid across the placement quad's local floor (#110). Scoped to
+                      wireframe draws, so a filled/textured mesh (the bunny) gets no grid.
   --placement-quad    Draw the reconstructed placement quad as a colored wireframe outline
                       (debug check vs. the filmed poster). Appends a canonical quad mesh;
                       author its per-frame draw with placement_quad_by_local_coord.py --placement-quad.
@@ -210,6 +214,7 @@ wireframe=0
 aabb=0
 axes=0
 axes_local=0
+grid_local=""
 quad=0
 quad_color="0 1 1"
 meshes=()
@@ -228,6 +233,8 @@ while [ $# -gt 0 ]; do
     --aabb) aabb=1 ;;
     --axes) axes=1 ;;
     --axes-local) axes_local=1 ;;
+    --grid-local) shift; grid_local="${1:?--grid-local requires a plane: xy|xz|yz}" ;;
+    --grid-local=*) grid_local="${1#--grid-local=}" ;;
     --placement-quad) quad=1 ;;
     --placement-quad-color) shift; quad=1; quad_color="${1:?--placement-quad-color requires \"R G B\" (0..1 floats)}" ;;
     --placement-quad-color=*) quad=1; quad_color="${1#--placement-quad-color=}" ;;
@@ -441,6 +448,8 @@ axes_flag=()
 [ "$axes" -eq 1 ] && axes_flag=(--axes)
 axes_local_flag=()
 [ "$axes_local" -eq 1 ] && axes_local_flag=(--axes-local)
+grid_local_flag=()
+[ -n "$grid_local" ] && grid_local_flag=(--grid-local "$grid_local")
 # --frames-base resolves each frame's 0.0.5 `frame_path` (relative to this dir)
 # to the still image trd composites *beneath* the scene via a FramePlane (#63).
 frames_base_flag=()
@@ -553,12 +562,12 @@ if [ "$native" -eq 1 ]; then
   # The appearance flags pass through to trd-app too (it now renders the mesh
   # Scene via the shared trd-core MeshRenderer, like trd-cli).
   stream \
-    | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-app -- --width "$width" --height "$height" --fps "$fps" "${wireframe_flag[@]}" "${textured_flag[@]}" "${aabb_flag[@]}" "${axes_flag[@]}" "${axes_local_flag[@]}" "${frames_base_flag[@]}"
+    | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-app -- --width "$width" --height "$height" --fps "$fps" "${wireframe_flag[@]}" "${textured_flag[@]}" "${aabb_flag[@]}" "${axes_flag[@]}" "${axes_local_flag[@]}" "${grid_local_flag[@]}" "${frames_base_flag[@]}"
   echo "streamed $input to the trd-app window (${width}x${height}, ${fps}fps)"
 else
   mkdir -p "$(dirname "$output")"
   stream \
-    | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-cli -- --width "$width" --height "$height" "${wireframe_flag[@]}" "${textured_flag[@]}" "${aabb_flag[@]}" "${axes_flag[@]}" "${axes_local_flag[@]}" "${frames_base_flag[@]}" \
+    | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-cli -- --width "$width" --height "$height" "${wireframe_flag[@]}" "${textured_flag[@]}" "${aabb_flag[@]}" "${axes_flag[@]}" "${axes_local_flag[@]}" "${grid_local_flag[@]}" "${frames_base_flag[@]}" \
     | uv run --with pyarrow --with numpy "$root/scripts/encode.py" --fps "$fps" -o "$output"
   echo "wrote $output (${width}x${height}, ${fps}fps) from $input"
 fi
