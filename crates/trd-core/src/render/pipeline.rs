@@ -289,7 +289,49 @@ pub(crate) fn create_textured_pipeline(
     })
 }
 
-/// The group-0 bind-group layout for the background frame-plane pipeline (#63):
+/// Builds the **blob-shadow** pipeline (contact / grounding shadow, #110
+/// follow-up): `shadow.wgsl` over the shared vertex/instance layout, group 0 =
+/// the camera `P·V` uniform (same untextured layout as the filled/wireframe
+/// pipelines). Alpha-blended (`src·α + dst·(1−α)`) so the dark blob darkens the
+/// background frame plane, with the depth test on but **depth-write off**
+/// ([`overlay_depth_stencil`]) — the shadow is drawn *before* the opaque content
+/// mesh and never occludes it, so the mesh composites cleanly on top.
+pub(crate) fn create_shadow_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    layout: &wgpu::PipelineLayout,
+    sample_count: u32,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::include_wgsl!("../shadow.wgsl"));
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("trd shadow pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            compilation_options: Default::default(),
+            buffers: &[Some(Vertex::layout()), Some(InstanceRaw::layout())],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            ..Default::default()
+        },
+        depth_stencil: Some(overlay_depth_stencil()),
+        multisample: multisample_state(sample_count),
+        multiview_mask: None,
+        cache: None,
+    })
+}
 /// a filterable `texture_2d<f32>` (binding 0) + a filtering `sampler` (binding 1),
 /// both fragment-visible, plus a small **fit** uniform (binding 2, vertex-visible)
 /// carrying the centered UV scale. Kept separate from the mesh albedo texture

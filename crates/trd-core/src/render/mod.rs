@@ -31,15 +31,15 @@ pub use triangle_renderer::TriangleRenderer;
 pub(crate) use color::upload_texture;
 pub(crate) use frame_params::{projection_from_intrinsics, DEFAULT_FAR, DEFAULT_NEAR};
 pub(crate) use gizmo::{
-    axes_vertices, grid_vertices, AABB_COLOR, AABB_EDGE_INDICES, AXES_VERTEX_COUNT,
-    GRID_VERTEX_COUNT,
+    axes_vertices, blob_shadow_vertices, grid_vertices, AABB_COLOR, AABB_EDGE_INDICES,
+    AXES_VERTEX_COUNT, GRID_VERTEX_COUNT, SHADOW_VERTEX_COUNT,
 };
 pub(crate) use gpu_types::{InstanceRaw, Uniform};
 pub(crate) use pipeline::{
     create_depth_target, create_frame_bind_group_layout, create_frame_plane_pipeline,
     create_mesh_bind_group_layout, create_mesh_pipeline_with, create_msaa_color_target,
-    create_texture_bind_group_layout, create_textured_pipeline, create_view_proj_binding,
-    overlay_depth_stencil, solid_depth_stencil, write_view_proj, DepthTarget, MsaaColorTarget,
-    MSAA_SAMPLE_COUNT,
+    create_shadow_pipeline, create_texture_bind_group_layout, create_textured_pipeline,
+    create_view_proj_binding, overlay_depth_stencil, solid_depth_stencil, write_view_proj,
+    DepthTarget, MsaaColorTarget, MSAA_SAMPLE_COUNT,
 };
 pub(crate) use scene::{frame_fit_uv_scale, DRAW_MODE_INHERIT};

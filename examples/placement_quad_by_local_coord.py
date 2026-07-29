@@ -376,6 +376,26 @@ def emit_records(records, args):
             m_cam = trans @ r_place @ rotate_y(theta) @ s_mat
             model = C4 @ m_cam  # camera frame → GL camera frame (view = identity)
             draws.append({"mesh": args.mesh_index, "model": colmajor(model)})
+            if args.shadow:
+                # Contact / grounding blob shadow on the P² plane, at the mesh's
+                # ground anchor: a flat quad spanning the plane's orthonormal e1/e2
+                # axes, sized to the mesh footprint (--shadow-scale × half-extent).
+                # Stays in the P² local frame so it tracks the recovered floor as
+                # the camera dollies; the renderer feathers a soft dark alpha from
+                # the quad radius (mode "shadow" → DrawableObject::BlobShadow), so
+                # the mesh reads as resting on the court rather than floating.
+                shadow_r = size * args.shadow_scale
+                m_sh = np.eye(4)
+                m_sh[:3, 0] = e1 * shadow_r
+                m_sh[:3, 1] = e2 * shadow_r
+                m_sh[:3, 2] = e3 * shadow_r  # flat quad (local z=0); keeps M invertible
+                m_sh[:3, 3] = anchor
+                shadow_model = C4 @ m_sh
+                draws.insert(0, {
+                    "mesh": args.mesh_index,
+                    "model": colmajor(shadow_model),
+                    "mode": "shadow",
+                })
         if args.placement_quad:
             # Draw the reconstructed placement quad itself as an overlay so it can be
             # checked against the filmed poster. A canonical origin-centred, extent-2
@@ -521,6 +541,16 @@ def main():
                          "Use --no-place-mesh for stage 1 (placement quad only, before placing the mesh).")
     ap.add_argument("--mesh-index", type=int, default=0,
                     help="mesh-table row index of the placed model mesh (default 0)")
+    ap.add_argument("--shadow", action="store_true",
+                    help="lay a soft contact / grounding blob shadow on the placement-quad "
+                         "plane under the placed mesh (a mode:\"shadow\" draw), so the mesh "
+                         "reads as sitting on the recovered floor instead of floating over "
+                         "the composited video plate. Requires --place-mesh; stays in the P² "
+                         "local frame (spans the quad's r1/r2 axes at the mesh anchor).")
+    ap.add_argument("--shadow-scale", type=float, default=1.8,
+                    help="blob-shadow radius as a multiple of the placed mesh's half-extent "
+                         "(default 1.8: a soft grounding shadow spreading a little past the "
+                         "mesh footprint). Larger = a wider, softer shadow.")
     ap.add_argument("--placement-quad", action="store_true",
                     help="emit a per-frame draw of the reconstructed placement quad itself as a "
                          "wireframe overlay (visualizes the local frame / a check that it matches the "

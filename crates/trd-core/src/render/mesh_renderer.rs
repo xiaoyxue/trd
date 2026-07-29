@@ -144,6 +144,9 @@ enum DrawKind {
     /// A coordinate-plane grid (the shared per-plane grid vertex buffer indexed
     /// by [`GridPlane::index`], non-indexed line draw).
     Grid(usize),
+    /// A contact / blob **grounding shadow** (the shared shadow quad geometry,
+    /// non-indexed triangle draw, alpha-blended over the frame plane).
+    Shadow,
     /// The coordinate-axes gizmo (shared vertex buffer, non-indexed line draw).
     Axes,
 }
@@ -195,6 +198,9 @@ struct MeshPass {
     filled: wgpu::RenderPipeline,
     wireframe: wgpu::RenderPipeline,
     textured: wgpu::RenderPipeline,
+    /// The contact / blob grounding-shadow pipeline (alpha-blended, depth-write
+    /// off); shares the untextured camera bind-group layout (group 0).
+    shadow: wgpu::RenderPipeline,
     camera_uniform: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
 }
@@ -233,6 +239,9 @@ impl MeshPass {
             Some(overlay_depth_stencil()),
             MSAA_SAMPLE_COUNT,
         );
+        // Contact / blob grounding-shadow pipeline (#110 follow-up): shares the
+        // untextured camera layout (group 0), alpha-blended, depth-write off.
+        let shadow = create_shadow_pipeline(device, format, &pipeline_layout, MSAA_SAMPLE_COUNT);
         // Textured pipeline (#20): group 0 = the shared camera uniform, group 1 =
         // the bound albedo texture + sampler.
         let textured_pipeline_layout =
@@ -258,6 +267,7 @@ impl MeshPass {
             filled,
             wireframe,
             textured,
+            shadow,
             camera_uniform,
             camera_bind_group,
         }
@@ -284,6 +294,10 @@ struct MeshStore {
     /// [`DrawableObject::PlaneGrid`] draws the buffer for its plane under its own
     /// model, supplied through the shared instance buffer.
     grid_vertex_buffers: [wgpu::Buffer; 3],
+    /// The contact / blob **grounding-shadow** quad geometry (six `TriangleList`
+    /// vertices, a unit XY quad); each [`DrawableObject::BlobShadow`] draws it
+    /// under its own model through the shared instance buffer, alpha-blended.
+    shadow_vertex_buffer: wgpu::Buffer,
     instance_buffer: wgpu::Buffer,
     instance_capacity: u32,
 }
@@ -327,10 +341,20 @@ impl MeshStore {
             grid_buffer(GridPlane::Yz),
         ];
 
+        // Contact / blob grounding-shadow quad: six TriangleList vertices (a unit
+        // XY quad). Each BlobShadow drawable draws them under its own model via
+        // the shared instance buffer, alpha-blended over the frame plane.
+        let shadow_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("trd shadow vertex buffer"),
+            contents: bytemuck::cast_slice(&blob_shadow_vertices()),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
         Self {
             meshes: gpu_meshes,
             axes_vertex_buffer,
             grid_vertex_buffers,
+            shadow_vertex_buffer,
             instance_buffer,
             instance_capacity,
         }
@@ -343,10 +367,10 @@ impl MeshStore {
     /// Walks `scene` once, bucketing each drawable's instance model by the
     /// geometry it draws (its base model pre-multiplied in, `effective = model ·
     /// base`), then flattens the buckets into one instance list + ordered
-    /// [`DrawCommand`]s. Draw order: filled, textured, grids, wireframe, AABB
-    /// boxes, then axes — so opaque meshes precede the line overlays, and the
-    /// plane grid sits beneath the wireframe/axes gizmos drawn over it.
-    /// Out-of-range mesh ids are skipped.
+    /// [`DrawCommand`]s. Draw order: grounding shadows, filled, textured, grids,
+    /// wireframe, AABB boxes, then axes — so the blob shadow sits under the opaque
+    /// meshes, which precede the line overlays, and the plane grid sits beneath
+    /// the wireframe/axes gizmos drawn over it. Out-of-range mesh ids are skipped.
     fn build_batches(&self, scene: &[DrawableObject]) -> Batches {
         let mesh_count = self.meshes.len();
         let mut filled: Vec<Vec<InstanceRaw>> = vec![Vec::new(); mesh_count];
@@ -355,6 +379,8 @@ impl MeshStore {
         let mut aabb: Vec<Vec<InstanceRaw>> = vec![Vec::new(); mesh_count];
         // One instance bucket per grid plane (XY/XZ/YZ), keyed by GridPlane::index.
         let mut grid: [Vec<InstanceRaw>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+        // Contact / blob grounding-shadow instances (shared quad geometry).
+        let mut shadow: Vec<InstanceRaw> = Vec::new();
         let mut axes: Vec<InstanceRaw> = Vec::new();
         // The background frame plane is a singleton overlay (there is one bound
         // frame texture); the last FramePlane in the scene wins its fit.
@@ -378,6 +404,10 @@ impl MeshStore {
                         RenderMode::Filled => filled[mesh_id as usize].push(instance),
                         RenderMode::Textured => textured[mesh_id as usize].push(instance),
                         RenderMode::Wireframe => wireframe[mesh_id as usize].push(instance),
+                        // A Shadow draw is emitted as DrawableObject::BlobShadow by
+                        // build_scene, never as a Mesh — so this arm is unreachable;
+                        // skip defensively rather than panic.
+                        RenderMode::Shadow => {}
                     }
                 }
                 DrawableObject::AabbBox { mesh_id, model } => {
@@ -395,6 +425,9 @@ impl MeshStore {
                 DrawableObject::PlaneGrid { plane, model } => {
                     grid[plane.index()].push(InstanceRaw { model });
                 }
+                DrawableObject::BlobShadow { model } => {
+                    shadow.push(InstanceRaw { model });
+                }
                 DrawableObject::FramePlane { fit } => {
                     frame_fit = Some(fit);
                 }
@@ -405,6 +438,10 @@ impl MeshStore {
         // per non-empty group in the layered draw order.
         let mut instances: Vec<InstanceRaw> = Vec::with_capacity(scene.len());
         let mut commands: Vec<DrawCommand> = Vec::new();
+        // Grounding shadows first (right after the background frame plane) so the
+        // opaque content meshes composite on top and only the surrounding rim
+        // darkens the floor.
+        push_command(&mut instances, &mut commands, DrawKind::Shadow, &shadow);
         for (id, bucket) in filled.iter().enumerate() {
             push_command(&mut instances, &mut commands, DrawKind::Filled(id), bucket);
         }
@@ -694,6 +731,11 @@ impl MeshRenderer {
                     pass.set_pipeline(&self.pass.wireframe);
                     pass.set_vertex_buffer(0, self.store.grid_vertex_buffers[plane].slice(..));
                     pass.draw(0..GRID_VERTEX_COUNT, range);
+                }
+                DrawKind::Shadow => {
+                    pass.set_pipeline(&self.pass.shadow);
+                    pass.set_vertex_buffer(0, self.store.shadow_vertex_buffer.slice(..));
+                    pass.draw(0..SHADOW_VERTEX_COUNT, range);
                 }
                 DrawKind::Axes => {
                     pass.set_pipeline(&self.pass.wireframe);

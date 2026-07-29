@@ -18,6 +18,13 @@ pub enum RenderMode {
     /// Draw triangles filled, sampling the renderer's bound texture at each
     /// vertex UV instead of the vertex color (#20).
     Textured,
+    /// Not a mesh rasterization at all: draw a **contact / blob grounding
+    /// shadow** ([`DrawableObject::BlobShadow`]) instead of the mesh. A per-draw
+    /// `mode: "shadow"` in the stream lifts that draw's `model` into a soft dark
+    /// blob on the placed mesh's ground plane (#110 follow-up), so the placed mesh
+    /// reads as sitting on the reconstructed surface. The draw's `mesh` id is
+    /// ignored (the shadow uses shared gizmo geometry).
+    Shadow,
 }
 
 /// Wire byte meaning "inherit the renderer's global mode" in the optional
@@ -30,7 +37,7 @@ pub const DRAW_MODE_INHERIT: u8 = 255;
 
 impl RenderMode {
     /// Decodes an optional per-draw `draw_mode` wire byte into a [`Draw::mode`]
-    /// override: `0`→`Filled`, `1`→`Wireframe`, `2`→`Textured`, and
+    /// override: `0`→`Filled`, `1`→`Wireframe`, `2`→`Textured`, `3`→`Shadow`, and
     /// [`DRAW_MODE_INHERIT`]→`None` (inherit the global mode). Returns `None`
     /// for an unrecognized byte so callers can raise a decode error.
     pub fn from_wire(byte: u8) -> Option<Option<RenderMode>> {
@@ -38,6 +45,7 @@ impl RenderMode {
             0 => Some(Some(RenderMode::Filled)),
             1 => Some(Some(RenderMode::Wireframe)),
             2 => Some(Some(RenderMode::Textured)),
+            3 => Some(Some(RenderMode::Shadow)),
             DRAW_MODE_INHERIT => Some(None),
             _ => None,
         }
@@ -183,6 +191,15 @@ pub enum DrawableObject {
     /// to no mesh (no base model); with a #77 placement-quad `model` the `Xy`
     /// grid lays exactly over the reconstructed quad in its local frame.
     PlaneGrid { plane: GridPlane, model: [f32; 16] },
+    /// A **contact / blob grounding shadow** (#110 follow-up): a soft dark radial
+    /// blob laid on a placed mesh's ground plane, placed by `model` (a flat quad
+    /// on the plane, sized to the mesh footprint), so the mesh reads as *sitting
+    /// on* the reconstructed surface rather than floating over the composited
+    /// video plate. A [`RenderMode::Shadow`] draw becomes this variant. Tied to no
+    /// mesh (no base model); alpha-blended over the [`FramePlane`](Self::FramePlane)
+    /// and drawn *before* the opaque content mesh (depth-write off) so the mesh
+    /// composites on top while the surrounding rim darkens the floor.
+    BlobShadow { model: [f32; 16] },
     /// A screen-aligned **background frame plane** (#63): a fullscreen quad that
     /// samples the renderer's bound background frame texture (set via
     /// [`MeshRenderer::update_frame_texture_rgba`]), composited **under** the
@@ -244,14 +261,25 @@ pub fn build_scene(
         scene.push(DrawableObject::FramePlane { fit });
     }
     for draw in draws {
+        let resolved = draw.mode.unwrap_or(mode);
+        // A `Shadow` draw is not a mesh rasterization: lift its model into a
+        // BlobShadow grounding blob on the placed mesh's plane (#110 follow-up).
+        if resolved == RenderMode::Shadow {
+            scene.push(DrawableObject::BlobShadow { model: draw.model });
+            continue;
+        }
         scene.push(DrawableObject::Mesh {
             mesh_id: draw.mesh_id,
             model: draw.model,
-            mode: draw.mode.unwrap_or(mode),
+            mode: resolved,
         });
     }
     if show_aabb {
         for draw in draws {
+            // Skip shadow draws — they carry no mesh geometry to box.
+            if draw.mode.unwrap_or(mode) == RenderMode::Shadow {
+                continue;
+            }
             scene.push(DrawableObject::AabbBox {
                 mesh_id: draw.mesh_id,
                 model: draw.model,
@@ -275,6 +303,11 @@ pub fn build_scene(
     }
     if show_local_axes {
         for draw in draws {
+            // Skip shadow draws — the blob is a floor decal, not a placed object
+            // whose local frame warrants an axes gizmo.
+            if draw.mode.unwrap_or(mode) == RenderMode::Shadow {
+                continue;
+            }
             scene.push(DrawableObject::CoordinateAxes { model: draw.model });
         }
     }
@@ -592,6 +625,72 @@ mod tests {
             vec![(GridPlane::Xy, model_b)],
             "only the wireframe quad draw gets a grid, not the textured mesh"
         );
+    }
+
+    #[test]
+    fn build_scene_shadow_draw_becomes_blob_shadow_not_mesh() {
+        // A per-draw mode "shadow" lifts that draw's model into a BlobShadow
+        // grounding blob (not a Mesh), and it carries no AABB / axes gizmo even
+        // when those overlays are on. A mixed FIBA-style scene [shadow, bunny,
+        // quad] must yield exactly one BlobShadow at the shadow draw's model.
+        let mut shadow_m = Matrix4::IDENTITY.to_cols_array();
+        shadow_m[12] = 3.0; // distinct col-major tx
+        let mut bunny_m = Matrix4::IDENTITY.to_cols_array();
+        bunny_m[12] = 4.0;
+        let mut quad_m = Matrix4::IDENTITY.to_cols_array();
+        quad_m[12] = 5.0;
+        let draws = [
+            Draw {
+                mesh_id: 0,
+                model: shadow_m,
+                mode: Some(RenderMode::Shadow),
+            },
+            Draw {
+                mesh_id: 0,
+                model: bunny_m,
+                mode: Some(RenderMode::Textured),
+            },
+            Draw {
+                mesh_id: 1,
+                model: quad_m,
+                mode: Some(RenderMode::Wireframe),
+            },
+        ];
+
+        // aabb + local axes on: the shadow draw contributes a BlobShadow but no
+        // Mesh / AabbBox / CoordinateAxes.
+        let scene = build_scene(&draws, RenderMode::Filled, true, false, true, None, None);
+
+        let blobs: Vec<[f32; 16]> = scene
+            .iter()
+            .filter_map(|o| match o {
+                DrawableObject::BlobShadow { model } => Some(*model),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            blobs,
+            vec![shadow_m],
+            "exactly one BlobShadow, at the shadow draw's model"
+        );
+
+        // The shadow draw must NOT produce a Mesh, and only the two non-shadow
+        // draws get AABB boxes / local axes gizmos.
+        let meshes = scene
+            .iter()
+            .filter(|o| matches!(o, DrawableObject::Mesh { .. }))
+            .count();
+        let aabbs = scene
+            .iter()
+            .filter(|o| matches!(o, DrawableObject::AabbBox { .. }))
+            .count();
+        let axes = scene
+            .iter()
+            .filter(|o| matches!(o, DrawableObject::CoordinateAxes { .. }))
+            .count();
+        assert_eq!(meshes, 2, "shadow draw is not a Mesh; bunny + quad are");
+        assert_eq!(aabbs, 2, "no AABB for the shadow draw");
+        assert_eq!(axes, 2, "no local-axes gizmo for the shadow draw");
     }
 
     #[test]
