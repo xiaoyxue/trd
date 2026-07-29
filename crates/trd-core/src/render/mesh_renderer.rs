@@ -244,15 +244,17 @@ struct MeshPass {
 
 impl MeshPass {
     /// Constructs a `MeshPass` for `format`, building all pipelines over their
-    /// bind-group layouts. `texture_layout` is the albedo texture's group-1 layout
-    /// (from [`BoundTexture::layout`]), shared by the textured and PBR pipelines;
-    /// `env_layout` is the PBR pipeline's group-2 environment-map layout (from
-    /// [`BoundEnv::layout`]).
+    /// bind-group layouts at `sample_count`× MSAA. `texture_layout` is the albedo
+    /// texture's group-1 layout (from [`BoundTexture::layout`]), shared by the
+    /// textured and PBR pipelines; `env_layout` is the PBR pipeline's group-2
+    /// environment-map layout (from [`BoundEnv::layout`]). Every pipeline in the
+    /// pass shares the one `sample_count` (`1` = no MSAA, single-sample).
     fn new(
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
         texture_layout: &wgpu::BindGroupLayout,
         env_layout: &wgpu::BindGroupLayout,
+        sample_count: u32,
     ) -> Self {
         // One explicit bind-group layout shared by both untextured pipelines, so
         // the single camera bind group is valid whichever RenderMode is active.
@@ -268,7 +270,7 @@ impl MeshPass {
             &pipeline_layout,
             wgpu::PrimitiveTopology::TriangleList,
             Some(solid_depth_stencil()),
-            MSAA_SAMPLE_COUNT,
+            sample_count,
         );
         let wireframe = create_mesh_pipeline_with(
             device,
@@ -276,11 +278,11 @@ impl MeshPass {
             &pipeline_layout,
             wgpu::PrimitiveTopology::LineList,
             Some(overlay_depth_stencil()),
-            MSAA_SAMPLE_COUNT,
+            sample_count,
         );
         // Contact / blob grounding-shadow pipeline (#110 follow-up): shares the
         // untextured camera layout (group 0), alpha-blended, depth-write off.
-        let shadow = create_shadow_pipeline(device, format, &pipeline_layout, MSAA_SAMPLE_COUNT);
+        let shadow = create_shadow_pipeline(device, format, &pipeline_layout, sample_count);
         // Textured pipeline (#20): group 0 = the shared camera uniform, group 1 =
         // the bound albedo texture + sampler.
         let textured_pipeline_layout =
@@ -290,7 +292,7 @@ impl MeshPass {
                 immediate_size: 0,
             });
         let textured =
-            create_textured_pipeline(device, format, &textured_pipeline_layout, MSAA_SAMPLE_COUNT);
+            create_textured_pipeline(device, format, &textured_pipeline_layout, sample_count);
         // Disney PBR pipeline (#): group 0 = the PbrUniform, group 1 = the shared
         // albedo texture layout, group 2 = the HDR environment map. Its group-0
         // layout differs from the camera layout, so the encode arm restores the
@@ -301,7 +303,7 @@ impl MeshPass {
             bind_group_layouts: &[Some(&pbr_layout), Some(texture_layout), Some(env_layout)],
             immediate_size: 0,
         });
-        let pbr = create_pbr_pipeline(device, format, &pbr_pipeline_layout, MSAA_SAMPLE_COUNT);
+        let pbr = create_pbr_pipeline(device, format, &pbr_pipeline_layout, sample_count);
         // The PbrUniform buffer is (re)written every frame; seed it with a neutral
         // material so an unconfigured PBR draw still renders something sane.
         let pbr_uniform = device.create_buffer(&wgpu::BufferDescriptor {
@@ -608,11 +610,17 @@ pub struct MeshRenderer {
     /// The mesh pass's depth attachment, (re)created lazily in `encode` to match
     /// the viewport. Gives solid (filled/textured) meshes real z-occlusion.
     depth: Option<DepthTarget>,
-    /// The mesh pass's multisampled color attachment ([`MSAA_SAMPLE_COUNT`]×),
+    /// The mesh pass's multisampled color attachment ([`sample_count`](Self::sample_count)×),
     /// (re)created lazily in `encode` to match the viewport. The pass renders into
     /// it and resolves into the caller's single-sample `view`, so every front-end
-    /// gets anti-aliased edges transparently.
+    /// gets anti-aliased edges transparently. `None` when MSAA is disabled
+    /// (`sample_count == 1`): the pass then renders straight into `view`.
     msaa: Option<MsaaColorTarget>,
+    /// The mesh pass's MSAA sample count — `4` (the default,
+    /// [`MSAA_SAMPLE_COUNT`]) for anti-aliased edges, or `1` to render
+    /// single-sampled (no MSAA). Fixed at construction because every pipeline +
+    /// the depth/color attachments must share it.
+    sample_count: u32,
     /// The color format the pipelines were built for; the MSAA color target must
     /// be created with the same format.
     format: wgpu::TextureFormat,
@@ -643,7 +651,10 @@ impl MeshRenderer {
     /// explicit base (preview) model that is pre-multiplied beneath every
     /// per-frame instance model (`effective = model · base`). This is the primary
     /// constructor; [`auto_fit`](Self::auto_fit) derives the base models for you.
-    /// A frame's [`Scene`] references these meshes by id (row index).
+    /// A frame's [`Scene`] references these meshes by id (row index). The mesh
+    /// pass renders at [`MSAA_SAMPLE_COUNT`]×; use
+    /// [`with_sample_count`](Self::with_sample_count) to override (e.g. `1` = no
+    /// MSAA).
     ///
     /// Panics if `meshes` is empty or `meshes`/`base_models` differ in length.
     pub fn new(
@@ -651,6 +662,24 @@ impl MeshRenderer {
         format: wgpu::TextureFormat,
         meshes: &[Mesh],
         base_models: &[Matrix4],
+    ) -> Self {
+        Self::with_sample_count(device, format, meshes, base_models, MSAA_SAMPLE_COUNT)
+    }
+
+    /// Like [`new`](Self::new), but with an explicit mesh-pass MSAA
+    /// `sample_count`: `4` ([`MSAA_SAMPLE_COUNT`]) for anti-aliased edges, or `1`
+    /// to render single-sampled (no MSAA — aliased edges, the raw rasterized
+    /// coverage). All pipelines and the depth/color attachments are built for this
+    /// count.
+    ///
+    /// Panics if `meshes` is empty, `meshes`/`base_models` differ in length, or
+    /// `sample_count` is 0.
+    pub fn with_sample_count(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        meshes: &[Mesh],
+        base_models: &[Matrix4],
+        sample_count: u32,
     ) -> Self {
         assert!(
             !meshes.is_empty(),
@@ -661,12 +690,13 @@ impl MeshRenderer {
             base_models.len(),
             "meshes and base_models must have equal length"
         );
+        assert!(sample_count >= 1, "sample_count must be >= 1");
 
         let texture = BoundTexture::new(device);
         let env = BoundEnv::new(device);
-        let pass = MeshPass::new(device, format, texture.layout(), env.layout());
+        let pass = MeshPass::new(device, format, texture.layout(), env.layout(), sample_count);
         let store = MeshStore::new(device, meshes, base_models);
-        let frame_plane = FramePlane::new(device, format);
+        let frame_plane = FramePlane::new(device, format, sample_count);
 
         Self {
             pass,
@@ -677,6 +707,7 @@ impl MeshRenderer {
             frame_plane,
             depth: None,
             msaa: None,
+            sample_count,
             format,
             device: device.clone(),
         }
@@ -772,8 +803,9 @@ impl MeshRenderer {
         self.store
             .upload_instances(&self.device, queue, &batches.instances);
 
-        // 3. Match the depth + MSAA color attachments to the viewport (solid
-        //    meshes z-occlude; the multisampled color is resolved into `view`).
+        // 3. Match the depth + (when MSAA is on) color attachments to the viewport
+        //    (solid meshes z-occlude; the multisampled color, if any, is resolved
+        //    into `view`).
         self.ensure_depth(viewport);
         self.ensure_msaa(viewport);
 
@@ -789,23 +821,36 @@ impl MeshRenderer {
         let texture_bind_group = self.texture.ensure_uploaded(&self.device, queue);
         let env_bind_group = self.env.ensure_uploaded(&self.device, queue);
 
-        // 6. Record the pass. The mesh pass renders into the multisampled color
-        //    attachment and resolves into the caller's single-sample `view`, so
-        //    every front-end (offscreen CLI, native window, wasm canvas) gets
-        //    anti-aliased edges with no API change.
+        // 6. Record the pass. With MSAA (`sample_count > 1`) the mesh pass renders
+        //    into the multisampled color attachment and resolves into the caller's
+        //    single-sample `view`, so every front-end (offscreen CLI, native
+        //    window, wasm canvas) gets anti-aliased edges with no API change.
+        //    Without MSAA (`sample_count == 1`) there is no MSAA target — the pass
+        //    renders straight into `view` (no resolve).
         let depth_view = &self.depth.as_ref().expect("depth set in step 3").view;
-        let msaa_view = &self.msaa.as_ref().expect("msaa set in step 3").view;
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("trd mesh pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: msaa_view,
+        let color_attachment = match self.msaa.as_ref() {
+            Some(msaa) => wgpu::RenderPassColorAttachment {
+                view: &msaa.view,
                 depth_slice: None,
                 resolve_target: Some(view),
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                     store: wgpu::StoreOp::Store,
                 },
-            })],
+            },
+            None => wgpu::RenderPassColorAttachment {
+                view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            },
+        };
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("trd mesh pass"),
+            color_attachments: &[Some(color_attachment)],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: depth_view,
                 depth_ops: Some(wgpu::Operations {
@@ -888,8 +933,9 @@ impl MeshRenderer {
     }
 
     /// Ensures the depth attachment matches `viewport` (each dimension clamped to
-    /// ≥ 1) at [`MSAA_SAMPLE_COUNT`] (the depth sample count must match the color
-    /// attachment), recreating it only when the target size changes.
+    /// ≥ 1) at the renderer's [`sample_count`](Self::sample_count) (the depth
+    /// sample count must match the color attachment), recreating it only when the
+    /// target size changes.
     fn ensure_depth(&mut self, viewport: Viewport) {
         let dw = viewport.width.max(1);
         let dh = viewport.height.max(1);
@@ -898,14 +944,21 @@ impl MeshRenderer {
             .as_ref()
             .is_none_or(|d| d.width != dw || d.height != dh)
         {
-            self.depth = Some(create_depth_target(&self.device, dw, dh, MSAA_SAMPLE_COUNT));
+            self.depth = Some(create_depth_target(&self.device, dw, dh, self.sample_count));
         }
     }
 
     /// Ensures the multisampled color attachment matches `viewport` (each
-    /// dimension clamped to ≥ 1) at [`MSAA_SAMPLE_COUNT`] and the renderer's
-    /// color `format`, recreating it only when the target size changes.
+    /// dimension clamped to ≥ 1) at the renderer's
+    /// [`sample_count`](Self::sample_count) and color `format`, recreating it only
+    /// when the target size changes. When MSAA is disabled (`sample_count == 1`)
+    /// no MSAA target is needed — the pass renders straight into the caller's
+    /// single-sample `view` — so this clears it to `None`.
     fn ensure_msaa(&mut self, viewport: Viewport) {
+        if self.sample_count <= 1 {
+            self.msaa = None;
+            return;
+        }
         let dw = viewport.width.max(1);
         let dh = viewport.height.max(1);
         if self
@@ -918,7 +971,7 @@ impl MeshRenderer {
                 self.format,
                 dw,
                 dh,
-                MSAA_SAMPLE_COUNT,
+                self.sample_count,
             ));
         }
     }

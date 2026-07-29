@@ -109,6 +109,11 @@ struct Cli {
     /// background frame plane. Without it, `frame_path` columns are ignored.
     #[arg(long, value_name = "DIR")]
     frames_base: Option<PathBuf>,
+    /// Disable 4× MSAA on the mesh pass, rendering single-sampled (aliased
+    /// wireframe / gizmo / silhouette edges). By default the mesh pass is
+    /// anti-aliased at 4×.
+    #[arg(long)]
+    no_msaa: bool,
 }
 
 fn main() -> Result<(), trd_core::StreamError> {
@@ -193,6 +198,11 @@ fn main() -> Result<(), trd_core::StreamError> {
             show_local_axes: cli.axes_local,
             show_local_grid: cli.grid_local.map(Into::into),
             pbr,
+            msaa: if cli.no_msaa {
+                trd_core::Msaa::Off
+            } else {
+                trd_core::Msaa::X4
+            },
         },
         frame_resolver,
     )?;

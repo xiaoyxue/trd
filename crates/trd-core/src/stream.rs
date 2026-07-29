@@ -297,8 +297,21 @@ impl BatchRenderer {
     /// leading mesh table, applying each mesh's [`Mesh::preview_transform`]
     /// (center + uniform scale-to-fit) beneath its per-frame model so an
     /// arbitrary-unit asset renders centered and at a reasonable size. Per-frame
-    /// draw lists place instances of these meshes by index.
+    /// draw lists place instances of these meshes by index. The mesh pass renders
+    /// at 4× MSAA; use [`with_meshes_sample_count`](Self::with_meshes_sample_count)
+    /// to override (e.g. `1` = no MSAA).
     pub fn with_meshes(width: u32, height: u32, meshes: &[Mesh]) -> Result<Self, StreamError> {
+        Self::with_meshes_sample_count(width, height, meshes, crate::render::MSAA_SAMPLE_COUNT)
+    }
+
+    /// Like [`with_meshes`](Self::with_meshes) but with an explicit mesh-pass MSAA
+    /// `sample_count` (`4` = anti-aliased, `1` = single-sampled / no MSAA).
+    pub fn with_meshes_sample_count(
+        width: u32,
+        height: u32,
+        meshes: &[Mesh],
+        sample_count: u32,
+    ) -> Result<Self, StreamError> {
         let base_models: Vec<Matrix4> = meshes
             .iter()
             .map(|mesh| {
@@ -306,7 +319,13 @@ impl BatchRenderer {
                     .matrix()
             })
             .collect();
-        pollster::block_on(Self::new_async(width, height, meshes, &base_models))
+        pollster::block_on(Self::new_async(
+            width,
+            height,
+            meshes,
+            &base_models,
+            sample_count,
+        ))
     }
 
     async fn new_async(
@@ -314,6 +333,7 @@ impl BatchRenderer {
         height: u32,
         meshes: &[Mesh],
         base_models: &[Matrix4],
+        sample_count: u32,
     ) -> Result<Self, StreamError> {
         // Guard against zero / overflow before allocating (device limits below).
         check_dimensions(width, height)?;
@@ -344,7 +364,8 @@ impl BatchRenderer {
             .map_err(|e| StreamError::Render(e.to_string()))?;
 
         let format = OFFSCREEN_FORMAT;
-        let renderer = MeshRenderer::new(&device, format, meshes, base_models);
+        let renderer =
+            MeshRenderer::with_sample_count(&device, format, meshes, base_models, sample_count);
 
         // The shared offscreen harness owns the render target + readback buffer
         // and re-validates the size against the adapter's max dimension.
@@ -631,10 +652,36 @@ pub struct PbrConfig {
     pub env_map: Option<crate::EnvMapData>,
 }
 
+/// The mesh-pass multisample anti-aliasing setting threaded through
+/// [`RenderOptions`]. [`Msaa::X4`] (the default) renders the 4×-multisampled mesh
+/// pass — smooth wireframe / gizmo / AABB / silhouette edges; [`Msaa::Off`]
+/// renders single-sampled (aliased edges, the raw rasterized coverage). Both are
+/// covered by the golden-render test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Msaa {
+    /// 4× multisampling — the default anti-aliased mesh pass.
+    #[default]
+    X4,
+    /// No multisampling: render the mesh pass single-sampled (aliased edges).
+    Off,
+}
+
+impl Msaa {
+    /// The wgpu sample count for this setting (`4` for [`Msaa::X4`], `1` for
+    /// [`Msaa::Off`]).
+    pub(crate) fn sample_count(self) -> u32 {
+        match self {
+            Msaa::X4 => crate::render::MSAA_SAMPLE_COUNT,
+            Msaa::Off => 1,
+        }
+    }
+}
+
 /// Appearance options for [`run_stream`]: the mesh draw [`RenderMode`] plus the
 /// optional AABB / coordinate-axes gizmo overlays. Bundled into one value so the
 /// entry point threads a single struct instead of many positional flags (and
-/// stays within clippy's argument budget). [`Default`] is filled, no overlays.
+/// stays within clippy's argument budget). [`Default`] is filled, no overlays,
+/// 4× MSAA.
 #[derive(Debug, Clone, Default)]
 pub struct RenderOptions {
     /// How meshes are drawn (filled / wireframe / textured / PBR).
@@ -653,6 +700,8 @@ pub struct RenderOptions {
     /// Disney PBR material + environment map, applied when `mode` is
     /// [`RenderMode::Pbr`] (also honoured for any per-draw PBR-mode draws).
     pub pbr: Option<PbrConfig>,
+    /// Mesh-pass multisample anti-aliasing (default [`Msaa::X4`]).
+    pub msaa: Msaa,
 }
 
 /// Reads a trd input stream, renders each frame, and writes an Arrow IPC stream
@@ -704,7 +753,12 @@ pub fn run_stream<R: Read, W: Write>(
             if session.meshes().is_empty() {
                 return Err(StreamError::MissingMeshStream);
             }
-            let mut built = BatchRenderer::with_meshes(width, height, session.meshes())?;
+            let mut built = BatchRenderer::with_meshes_sample_count(
+                width,
+                height,
+                session.meshes(),
+                options.msaa.sample_count(),
+            )?;
             built.set_mode(options.mode);
             built.set_show_aabb(options.show_aabb);
             built.set_show_axes(options.show_axes);

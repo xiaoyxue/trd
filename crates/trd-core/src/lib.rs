@@ -40,7 +40,7 @@ pub use texture::{
 mod stream;
 #[cfg(not(target_arch = "wasm32"))]
 pub use stream::{
-    decode_frames, read_scene_stream_with_meta, run_stream, BatchRenderer, FrameResolver,
+    decode_frames, read_scene_stream_with_meta, run_stream, BatchRenderer, FrameResolver, Msaa,
     PbrConfig, RenderOptions, StreamError,
 };
 

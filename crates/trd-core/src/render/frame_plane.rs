@@ -10,7 +10,7 @@
 
 use super::{
     create_frame_bind_group_layout, create_frame_plane_pipeline, frame_fit_uv_scale, FrameFit,
-    Viewport, MSAA_SAMPLE_COUNT,
+    Viewport,
 };
 
 /// The reused GPU frame texture plus its bind group and fit uniform. Recreated
@@ -40,17 +40,20 @@ pub(super) struct FramePlane {
 
 impl FramePlane {
     /// Constructs a `FramePlane` with its pipeline and sampler built for `format`
-    /// and no frame texture yet (the first [`upload_rgba`](Self::upload_rgba)
-    /// creates it).
-    pub(super) fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+    /// at `sample_count`× (matching the mesh pass it draws within) and no frame
+    /// texture yet (the first [`upload_rgba`](Self::upload_rgba) creates it).
+    pub(super) fn new(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        sample_count: u32,
+    ) -> Self {
         let layout = create_frame_bind_group_layout(device);
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("trd frame plane pipeline layout"),
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let pipeline =
-            create_frame_plane_pipeline(device, format, &pipeline_layout, MSAA_SAMPLE_COUNT);
+        let pipeline = create_frame_plane_pipeline(device, format, &pipeline_layout, sample_count);
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("trd frame plane sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
