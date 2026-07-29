@@ -289,6 +289,10 @@ pub struct BatchRenderer {
     /// plane at *each* drawn instance's own `model` — a grid lattice in the
     /// object's local frame (e.g. an `xy` grid tiling a placement quad).
     show_local_grid: Option<GridPlane>,
+    /// If `Some(id)`, narrow the [`show_local_grid`](Self::show_local_grid)
+    /// overlay to draws of that `mesh_id` only (the placement quad), so a
+    /// wireframe *content* mesh doesn't also pick up a floor grid (#114).
+    show_local_grid_mesh: Option<u32>,
 }
 
 impl BatchRenderer {
@@ -341,7 +345,10 @@ impl BatchRenderer {
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions::default())
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                ..Default::default()
+            })
             .await
             .map_err(|e| StreamError::Render(e.to_string()))?;
         let info = adapter.get_info();
@@ -381,6 +388,7 @@ impl BatchRenderer {
             show_axes: false,
             show_local_axes: false,
             show_local_grid: None,
+            show_local_grid_mesh: None,
         })
     }
 
@@ -444,6 +452,15 @@ impl BatchRenderer {
         self.show_local_grid = plane;
     }
 
+    /// Narrows the [`set_show_local_grid`](Self::set_show_local_grid) overlay to
+    /// draws of a single `mesh_id` (the placement quad). `Some(id)` lays the grid
+    /// only under that mesh — so a *content* mesh drawn wireframe (e.g. a
+    /// wireframe-reveal intro) doesn't also pick up a floor grid; `None` keeps the
+    /// grid on every wireframe draw (#114).
+    pub fn set_show_local_grid_mesh(&mut self, mesh: Option<u32>) {
+        self.show_local_grid_mesh = mesh;
+    }
+
     /// Uploads `image` as the **background frame texture** (#63) sampled by a
     /// [`DrawableObject::FramePlane`]. The GPU texture is reused across frames
     /// (grown only on a resolution change). Call before a
@@ -469,6 +486,7 @@ impl BatchRenderer {
             self.show_axes,
             self.show_local_axes,
             self.show_local_grid,
+            self.show_local_grid_mesh,
             frame,
         )
     }
@@ -697,6 +715,10 @@ pub struct RenderOptions {
     /// drawn object's local (model) frame — e.g. `Some(GridPlane::Xy)` tiles a
     /// grid across a placement quad's local floor. `None` disables it.
     pub show_local_grid: Option<GridPlane>,
+    /// Narrows [`show_local_grid`](Self::show_local_grid) to draws of a single
+    /// `mesh_id` (the placement quad), so a wireframe *content* mesh doesn't also
+    /// pick up a floor grid. `None` keeps the grid on every wireframe draw (#114).
+    pub show_local_grid_mesh: Option<u32>,
     /// Disney PBR material + environment map, applied when `mode` is
     /// [`RenderMode::Pbr`] (also honoured for any per-draw PBR-mode draws).
     pub pbr: Option<PbrConfig>,
@@ -764,6 +786,7 @@ pub fn run_stream<R: Read, W: Write>(
             built.set_show_axes(options.show_axes);
             built.set_show_local_axes(options.show_local_axes);
             built.set_show_local_grid(options.show_local_grid);
+            built.set_show_local_grid_mesh(options.show_local_grid_mesh);
             if let Some(pbr) = &options.pbr {
                 built.set_pbr_material(pbr.material);
                 if let Some(env) = &pbr.env_map {
@@ -1244,7 +1267,16 @@ mod tests {
 
         // Plain filled: exactly one Mesh drawable per draw, no gizmos.
         assert_eq!(
-            build_scene(&draws, RenderMode::Filled, false, false, false, None, None),
+            build_scene(
+                &draws,
+                RenderMode::Filled,
+                false,
+                false,
+                false,
+                None,
+                None,
+                None
+            ),
             vec![
                 DrawableObject::Mesh {
                     mesh_id: 0,
@@ -1268,6 +1300,7 @@ mod tests {
                 false,
                 false,
                 None,
+                None,
                 None
             ),
             vec![
@@ -1286,7 +1319,16 @@ mod tests {
 
         // Both overlays: meshes, then a tracking box per draw, then one gizmo.
         assert_eq!(
-            build_scene(&draws, RenderMode::Filled, true, true, false, None, None),
+            build_scene(
+                &draws,
+                RenderMode::Filled,
+                true,
+                true,
+                false,
+                None,
+                None,
+                None
+            ),
             vec![
                 DrawableObject::Mesh {
                     mesh_id: 0,
@@ -1315,7 +1357,16 @@ mod tests {
         // Local axes: one CoordinateAxes per draw at its own model (in the mesh
         // bucket order, before the world-origin gizmo), each tracking its draw.
         assert_eq!(
-            build_scene(&draws, RenderMode::Filled, false, false, true, None, None),
+            build_scene(
+                &draws,
+                RenderMode::Filled,
+                false,
+                false,
+                true,
+                None,
+                None,
+                None
+            ),
             vec![
                 DrawableObject::Mesh {
                     mesh_id: 0,
@@ -1353,6 +1404,7 @@ mod tests {
                 false,
                 false,
                 false,
+                None,
                 None,
                 None
             ),

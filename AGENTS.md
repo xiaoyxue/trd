@@ -85,6 +85,20 @@ Guidance for agents working in this repository.
   won't include them.
 - We always work on GPU machines. GPU-dependent tests are marked `#[ignore]`
   and run locally; CI skips them.
+- **Always render on the most powerful GPU available.** When a box exposes more
+  than one adapter, pick the strongest discrete card and never fall back to a
+  weak display/iGPU (e.g. a Quadro P620) or software (llvmpipe). Preference order
+  (strongest first):
+  `RTX PRO 6000 > RTX 5090 > RTX 6000 Ada > RTX 4090 > RTX A6000 > RTX 3090 > others`.
+  Check what's present with `nvidia-smi --query-gpu=index,name,memory.total --format=csv`,
+  and confirm which adapter trd actually chose from its `trd_core=info` log line
+  `using Vulkan adapter "…" (DiscreteGpu)`. The native CLI render path
+  (`stream.rs`) requests `PowerPreference::HighPerformance`, so wgpu's Vulkan
+  backend prefers the discrete card (verified: picks the RTX 3090 over a P620 on
+  the dev box). If a weaker adapter is ever selected, force it: on Mesa use
+  `MESA_VK_DEVICE_SELECT=<vendorId>:<deviceId>`; on multi-GPU NVIDIA use
+  `__NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia` (GL) — plain
+  `CUDA_VISIBLE_DEVICES` does not filter Vulkan physical devices.
 - **Golden / snapshot render test (#88).** `crates/trd-core/tests/golden_render.rs`
   feeds committed Arrow fixtures (`crates/trd-core/tests/golden/stage{1,2}.arrow`,
   the reduced two-stage cornellbox placement demo) through the real

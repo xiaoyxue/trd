@@ -386,6 +386,7 @@ impl CanvasRenderer {
             self.show_axes,
             self.show_local_axes,
             None,
+            None,
             self.composite_frame.then_some(FrameFit::Stretch),
         );
 

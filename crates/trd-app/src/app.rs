@@ -74,6 +74,9 @@ struct App {
     show_local_axes: bool,
     /// Overlay a coordinate-plane grid on each drawn object's local (model) frame.
     show_local_grid: Option<GridPlane>,
+    /// Narrow the local grid to a single `mesh_id` (the placement quad) so a
+    /// wireframe content mesh doesn't also pick up a floor grid (#114).
+    show_local_grid_mesh: Option<u32>,
     /// The Disney PBR material + optional HDR env probe (`--pbr`), held until the
     /// renderer is built so it can be applied; `None` unless `--pbr` is set.
     pbr_config: Option<PbrConfig>,
@@ -94,6 +97,7 @@ impl App {
         show_axes: bool,
         show_local_axes: bool,
         show_local_grid: Option<GridPlane>,
+        show_local_grid_mesh: Option<u32>,
         pbr_config: Option<PbrConfig>,
     ) -> Self {
         Self {
@@ -117,6 +121,7 @@ impl App {
             show_axes,
             show_local_axes,
             show_local_grid,
+            show_local_grid_mesh,
             pbr_config,
             pbr_applied: false,
         }
@@ -267,6 +272,7 @@ impl ApplicationHandler for App {
                 self.show_axes,
                 self.show_local_axes,
                 self.show_local_grid,
+                self.show_local_grid_mesh,
             ),
             _ => {}
         }
@@ -385,6 +391,7 @@ pub fn run() -> Result<(), AppError> {
         cli.axes,
         cli.axes_local,
         cli.grid_local.map(Into::into),
+        cli.grid_mesh,
         pbr_config,
     );
     event_loop.run_app(&mut app)?;

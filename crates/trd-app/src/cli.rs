@@ -108,6 +108,12 @@ pub(crate) struct Cli {
     /// `xy`, `xz`, `yz`.
     #[arg(long, value_enum)]
     pub(crate) grid_local: Option<GridPlaneArg>,
+    /// Narrow `--grid-local` to draws of this `mesh_id` only (the placement
+    /// quad). Use when a *content* mesh is also drawn wireframe (e.g. a
+    /// wireframe-reveal intro) so the floor grid lands only under the quad, not
+    /// under every wireframe object (#114). Ignored without `--grid-local`.
+    #[arg(long, value_name = "MESH_ID")]
+    pub(crate) grid_mesh: Option<u32>,
     /// Base directory for per-frame background images (`0.0.5`, #63). When set, a
     /// frame's `frame_path` (relative) is joined to this dir, decoded (PNG/JPEG),
     /// and composited beneath the scene as a background frame plane. Without it,

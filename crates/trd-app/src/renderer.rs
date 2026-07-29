@@ -146,6 +146,7 @@ impl WindowRenderer {
 
     /// Renders one frame's [`Scene`](trd_core::Scene) to the window surface.
     /// No-op until the renderer is built and a frame is available.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn render(
         &mut self,
         frame: Option<&FrameData>,
@@ -154,6 +155,7 @@ impl WindowRenderer {
         show_axes: bool,
         show_local_axes: bool,
         show_local_grid: Option<GridPlane>,
+        show_local_grid_mesh: Option<u32>,
     ) {
         let (Some(renderer), Some(frame)) = (self.renderer.as_mut(), frame) else {
             return;
@@ -192,6 +194,7 @@ impl WindowRenderer {
             show_axes,
             show_local_axes,
             show_local_grid,
+            show_local_grid_mesh,
             frame_fit,
         );
         let mut encoder = self

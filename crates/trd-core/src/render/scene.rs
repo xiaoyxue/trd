@@ -236,7 +236,12 @@ pub type Scene = Vec<DrawableObject>;
 /// **its own `model`** (a coordinate-plane lattice in that object's local frame —
 /// e.g. the `Xy` grid on a #77 placement quad's surface; scoped to wireframe
 /// draws so a filled/textured content mesh whose local `Xy` is vertical gets no
-/// stray grid wall); with `show_axes`, one **world-origin**
+/// stray grid wall). `grid_mesh = Some(id)` narrows the grid further to draws of
+/// **that** mesh only (#110 follow-up): when the *content* mesh is also drawn
+/// wireframe (e.g. a wireframe-reveal intro over a placement quad), the grid
+/// would otherwise land on every wireframe object; pin it to the placement
+/// quad's `mesh_id` so exactly one floor grid is laid. `grid_mesh = None` keeps
+/// the "all wireframe draws" behaviour. With `show_axes`, one **world-origin**
 /// [`DrawableObject::CoordinateAxes`] is appended; with `show_local_axes`, each
 /// draw also emits a [`DrawableObject::CoordinateAxes`] at **its own `model`** —
 /// i.e. that object's *local* coordinate frame (its model-space X/Y/Z axes as
@@ -248,6 +253,7 @@ pub type Scene = Vec<DrawableObject>;
 /// Shared by the native ([`crate::run_stream`]) and wasm front-ends so neither
 /// branches per primitive type: both author the same ordered `Scene` and hand
 /// it to [`MeshRenderer::encode`].
+#[allow(clippy::too_many_arguments)]
 pub fn build_scene(
     draws: &[Draw],
     mode: RenderMode,
@@ -255,6 +261,7 @@ pub fn build_scene(
     show_axes: bool,
     show_local_axes: bool,
     local_grid: Option<GridPlane>,
+    grid_mesh: Option<u32>,
     frame: Option<FrameFit>,
 ) -> Scene {
     let mut scene = Vec::with_capacity(
@@ -299,9 +306,13 @@ pub fn build_scene(
             // Scope the grid to wireframe draws only — the #77 placement quad is
             // always an outline (its local Xy *is* the placement surface), while a
             // filled/textured content mesh's local Xy may be a vertical plane, so a
-            // per-mesh grid there would draw a stray grid "wall". This lays exactly
-            // one floor grid on the quad in a mixed bunny + quad scene.
-            if draw.mode.unwrap_or(mode) == RenderMode::Wireframe {
+            // per-mesh grid there would draw a stray grid "wall". When the content
+            // mesh is *also* wireframe (e.g. a wireframe-reveal intro), `grid_mesh`
+            // narrows the grid to the placement quad's `mesh_id` so exactly one
+            // floor grid is laid — not one under every wireframe object (#114).
+            let is_wireframe = draw.mode.unwrap_or(mode) == RenderMode::Wireframe;
+            let mesh_selected = grid_mesh.is_none_or(|id| draw.mesh_id == id);
+            if is_wireframe && mesh_selected {
                 scene.push(DrawableObject::PlaneGrid {
                     plane,
                     model: draw.model,
@@ -341,7 +352,16 @@ mod tests {
 
         // No frame ⇒ no FramePlane in the scene (byte-identical to the pre-0.0.5
         // scene).
-        let scene = build_scene(&draws, RenderMode::Filled, true, true, false, None, None);
+        let scene = build_scene(
+            &draws,
+            RenderMode::Filled,
+            true,
+            true,
+            false,
+            None,
+            None,
+            None,
+        );
         assert!(
             !scene
                 .iter()
@@ -357,6 +377,7 @@ mod tests {
             true,
             true,
             false,
+            None,
             None,
             Some(FrameFit::Cover),
         );
@@ -420,7 +441,16 @@ mod tests {
         };
 
         // Filled default: only the `None` draw is Filled; the overrides stand.
-        let scene = build_scene(&draws, RenderMode::Filled, false, false, false, None, None);
+        let scene = build_scene(
+            &draws,
+            RenderMode::Filled,
+            false,
+            false,
+            false,
+            None,
+            None,
+            None,
+        );
         assert_eq!(
             mesh_modes(&scene),
             vec![
@@ -439,6 +469,7 @@ mod tests {
             false,
             false,
             false,
+            None,
             None,
             None,
         );
@@ -495,6 +526,7 @@ mod tests {
             true,                  // show_axes (world)
             true,                  // show_local_axes
             None,                  // local_grid
+            None,                  // grid_mesh
             Some(FrameFit::Cover), // background frame plane
         );
 
@@ -517,7 +549,16 @@ mod tests {
 
         // --axes-local WITHOUT --axes ⇒ only the per-draw local gizmos, no world
         // one (both draw models are non-identity, so this is unambiguous).
-        let scene = build_scene(&draws, RenderMode::Filled, false, false, true, None, None);
+        let scene = build_scene(
+            &draws,
+            RenderMode::Filled,
+            false,
+            false,
+            true,
+            None,
+            None,
+            None,
+        );
         assert_eq!(
             axes_models(&scene),
             vec![model_a, model_b],
@@ -568,6 +609,7 @@ mod tests {
             false,
             None,
             None,
+            None,
         );
         assert!(grids(&scene).is_empty(), "no grid when local_grid is None");
 
@@ -580,6 +622,7 @@ mod tests {
             false,
             false,
             Some(GridPlane::Xy),
+            None,
             None,
         );
         assert_eq!(
@@ -596,6 +639,7 @@ mod tests {
             false,
             false,
             Some(GridPlane::Yz),
+            None,
             None,
         );
         assert!(matches!(scene[0], DrawableObject::Mesh { .. }));
@@ -627,11 +671,106 @@ mod tests {
             false,
             Some(GridPlane::Xy),
             None,
+            None,
         );
         assert_eq!(
             grids(&scene),
             vec![(GridPlane::Xy, model_b)],
             "only the wireframe quad draw gets a grid, not the textured mesh"
+        );
+    }
+
+    #[test]
+    fn build_scene_grid_mesh_scopes_grid_to_the_placement_quad_only() {
+        // `grid_mesh = Some(id)` narrows the --grid-local overlay to draws of that
+        // mesh only. This is the wireframe-reveal case (#114): a *content* mesh
+        // (the can, mesh 0) is drawn wireframe alongside the placement quad (mesh
+        // 1), so the plain "all wireframe draws" scoping would lay a stray floor
+        // grid under every can. Pinning `grid_mesh = Some(1)` keeps exactly one
+        // grid — under the quad — while the cans stay wireframe with no grid.
+        let mut model_can = Matrix4::IDENTITY.to_cols_array();
+        model_can[12] = 3.0;
+        let mut model_quad = Matrix4::IDENTITY.to_cols_array();
+        model_quad[12] = 9.0;
+        // Two cans (mesh 0) + one placement quad (mesh 1), all wireframe.
+        let draws = [
+            Draw {
+                mesh_id: 0,
+                model: model_can,
+                mode: Some(RenderMode::Wireframe),
+            },
+            Draw {
+                mesh_id: 0,
+                model: Matrix4::IDENTITY.to_cols_array(),
+                mode: Some(RenderMode::Wireframe),
+            },
+            Draw {
+                mesh_id: 1,
+                model: model_quad,
+                mode: Some(RenderMode::Wireframe),
+            },
+        ];
+
+        let grids = |scene: &[DrawableObject]| -> Vec<(GridPlane, [f32; 16])> {
+            scene
+                .iter()
+                .filter_map(|o| match o {
+                    DrawableObject::PlaneGrid { plane, model } => Some((*plane, *model)),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        // Without a mesh filter, every wireframe draw gets a grid (3 here) — the
+        // very over-emission #110 fixes.
+        let scene = build_scene(
+            &draws,
+            RenderMode::Filled,
+            false,
+            false,
+            false,
+            Some(GridPlane::Xy),
+            None,
+            None,
+        );
+        assert_eq!(
+            grids(&scene).len(),
+            3,
+            "unscoped grid lands on every wireframe draw"
+        );
+
+        // Scoped to the placement quad's mesh (id 1) ⇒ exactly one grid, at the
+        // quad's model — no grid under either can.
+        let scene = build_scene(
+            &draws,
+            RenderMode::Filled,
+            false,
+            false,
+            false,
+            Some(GridPlane::Xy),
+            Some(1),
+            None,
+        );
+        assert_eq!(
+            grids(&scene),
+            vec![(GridPlane::Xy, model_quad)],
+            "grid_mesh = Some(1) lays exactly one grid, under the placement quad only"
+        );
+
+        // A mesh filter with no matching draw ⇒ no grid at all.
+        let scene = build_scene(
+            &draws,
+            RenderMode::Filled,
+            false,
+            false,
+            false,
+            Some(GridPlane::Xy),
+            Some(7),
+            None,
+        );
+        assert!(
+            grids(&scene).is_empty(),
+            "grid_mesh naming an absent mesh yields no grid"
         );
     }
 
@@ -667,7 +806,16 @@ mod tests {
 
         // aabb + local axes on: the shadow draw contributes a BlobShadow but no
         // Mesh / AabbBox / CoordinateAxes.
-        let scene = build_scene(&draws, RenderMode::Filled, true, false, true, None, None);
+        let scene = build_scene(
+            &draws,
+            RenderMode::Filled,
+            true,
+            false,
+            true,
+            None,
+            None,
+            None,
+        );
 
         let blobs: Vec<[f32; 16]> = scene
             .iter()

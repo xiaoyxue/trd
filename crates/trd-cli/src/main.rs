@@ -103,6 +103,12 @@ struct Cli {
     /// `xy`, `xz`, `yz`.
     #[arg(long, value_enum)]
     grid_local: Option<GridPlaneArg>,
+    /// Narrow `--grid-local` to draws of this `mesh_id` only (the placement
+    /// quad). Use when a *content* mesh is also drawn wireframe (e.g. a
+    /// wireframe-reveal intro) so the floor grid lands only under the quad, not
+    /// under every wireframe object. Ignored without `--grid-local`.
+    #[arg(long, value_name = "MESH_ID")]
+    grid_mesh: Option<u32>,
     /// Base directory for per-frame background images (`0.0.5`). When set, a
     /// frame's `frame_path` (relative, e.g. `frames/frame_000000.png`) is joined
     /// to this dir, decoded (PNG/JPEG), and composited beneath the scene as a
@@ -197,6 +203,7 @@ fn main() -> Result<(), trd_core::StreamError> {
             show_axes: cli.axes,
             show_local_axes: cli.axes_local,
             show_local_grid: cli.grid_local.map(Into::into),
+            show_local_grid_mesh: cli.grid_mesh,
             pbr,
             msaa: if cli.no_msaa {
                 trd_core::Msaa::Off
