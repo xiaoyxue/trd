@@ -191,6 +191,14 @@ impl FrameParams {
     pub(crate) fn view_proj_matrix(&self, viewport: Viewport) -> Matrix4 {
         self.projection_matrix(viewport) * self.view_matrix()
     }
+
+    /// The camera's **world-space position** — the translation of the inverse
+    /// view (`world-from-camera`) matrix. Needed by the Disney PBR path for the
+    /// view vector `V` (and environment reflection). Identity view ⇒ origin.
+    pub(crate) fn camera_position(&self) -> [f32; 3] {
+        let cols = self.view_matrix().inverse().to_cols_array();
+        [cols[12], cols[13], cols[14]]
+    }
 }
 
 /// Builds a right-handed, wgpu-clip-space (`z ∈ [0, 1]`) perspective projection

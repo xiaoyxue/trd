@@ -67,6 +67,7 @@ mod native {
             show_axes: state.show_axes,
             show_local_axes: state.show_local_axes,
             show_local_grid: None,
+            pbr: None,
         }
     }
 

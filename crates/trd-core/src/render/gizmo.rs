@@ -73,10 +73,10 @@ pub(crate) const fn axes_vertices() -> [Vertex; 6] {
     ]
 }
 
-/// RGB color of the coordinate-plane grid overlay (#PlaneGrid): a neutral light
-/// gray so the grid reads as a reference lattice without competing with the
-/// red/green/blue axes gizmo drawn over it.
-pub(crate) const GRID_COLOR: [f32; 3] = [0.75, 0.75, 0.75];
+/// RGB color of the coordinate-plane grid overlay (#PlaneGrid): a light gray —
+/// bright enough to read clearly over the court, but softened off pure white so
+/// it doesn't compete with the red/green/blue axes gizmo drawn over it.
+pub(crate) const GRID_COLOR: [f32; 3] = [0.65, 0.65, 0.65];
 
 /// Number of cells per side of the coordinate-plane grid. The grid spans the
 /// model-space square `[-GRID_HALF, GRID_HALF]²`; at `GRID_HALF = 3` (three

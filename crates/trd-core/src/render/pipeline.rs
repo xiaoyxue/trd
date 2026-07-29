@@ -1,7 +1,7 @@
 //! wgpu render-pipeline, bind-group-layout, depth-target, and camera
 //! uniform construction helpers.
 
-use super::{FrameParams, InstanceRaw, Uniform, Vertex, Viewport};
+use super::{FrameParams, InstanceRaw, PbrVertex, Uniform, Vertex, Viewport};
 
 /// The mesh pass's MSAA sample count. 4× multisampling is the WebGPU-guaranteed
 /// level for renderable formats (native Vulkan/Metal/DX + the WebGL2 downlevel
@@ -448,4 +448,91 @@ pub(crate) fn write_view_proj(
         0,
         bytemuck::bytes_of(&Uniform::view_proj(params, viewport)),
     );
+}
+
+/// The group-0 bind-group layout for the Disney PBR pipeline (#, `disney.wgsl`):
+/// a single `PbrUniform` (binding 0) visible to **both** the vertex stage (the
+/// `P·V` transform) and the fragment stage (camera position, material, lights,
+/// env/exposure controls).
+pub(crate) fn create_pbr_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("trd pbr bind group layout"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }],
+    })
+}
+
+/// The group-2 bind-group layout for the PBR pipeline's **environment map**: a
+/// filterable `texture_2d<f32>` (binding 0) + a filtering `sampler` (binding 1),
+/// both fragment-visible. Mirrors [`create_texture_bind_group_layout`], but the
+/// texture is the equirectangular HDR probe (uploaded as `Rgba16Float`, which is
+/// filterable on the downlevel target).
+pub(crate) fn create_env_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("trd env bind group layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    })
+}
+
+/// Builds the Disney **PBR** `TriangleList` pipeline: `disney.wgsl` over the
+/// dedicated [`PbrVertex`] (position + normal + UV) buffer plus the shared
+/// [`InstanceRaw`] model buffer, with group 0 = the `PbrUniform`, group 1 = the
+/// bound albedo texture + sampler, group 2 = the HDR environment map. Opaque
+/// ([`solid_depth_stencil`]), multisampled to match the mesh pass.
+pub(crate) fn create_pbr_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    layout: &wgpu::PipelineLayout,
+    sample_count: u32,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::include_wgsl!("../disney.wgsl"));
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("trd pbr pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            compilation_options: Default::default(),
+            buffers: &[Some(PbrVertex::layout()), Some(InstanceRaw::layout())],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            compilation_options: Default::default(),
+            targets: &[Some(format.into())],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            ..Default::default()
+        },
+        depth_stencil: Some(solid_depth_stencil()),
+        multisample: multisample_state(sample_count),
+        multiview_mask: None,
+        cache: None,
+    })
 }

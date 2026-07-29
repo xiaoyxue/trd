@@ -380,6 +380,19 @@ impl BatchRenderer {
         self.renderer.set_texture(texture);
     }
 
+    /// Sets the Disney [`PbrMaterial`](crate::PbrMaterial) applied globally to
+    /// [`RenderMode::Pbr`] meshes. Delegates to [`MeshRenderer::set_pbr_material`].
+    pub fn set_pbr_material(&mut self, material: crate::PbrMaterial) {
+        self.renderer.set_pbr_material(material);
+    }
+
+    /// Binds `env` as the equirectangular HDR environment map reflected by
+    /// [`RenderMode::Pbr`] meshes. Delegates to [`MeshRenderer::set_env_map`]; the
+    /// probe is (re)uploaded on the next `render`.
+    pub fn set_env_map(&mut self, env: crate::EnvMapData) {
+        self.renderer.set_env_map(env);
+    }
+
     /// Enables/disables the per-instance AABB overlay box: when on, each drawn
     /// instance also contributes a [`DrawableObject::AabbBox`] to the scene.
     pub fn set_show_aabb(&mut self, show: bool) {
@@ -605,13 +618,26 @@ fn render_and_write_batch<W: Write>(
     Ok(())
 }
 
+/// The Disney PBR configuration threaded through [`RenderOptions`]: the global
+/// [`PbrMaterial`](crate::PbrMaterial) plus an optional equirectangular HDR
+/// environment map. When present (and the mode is [`RenderMode::Pbr`]), meshes
+/// are shaded with the physically-based `disney.wgsl` path.
+#[derive(Debug, Clone, Default)]
+pub struct PbrConfig {
+    /// The Disney material applied to every PBR mesh.
+    pub material: crate::PbrMaterial,
+    /// The HDR environment probe reflected by metallic surfaces (`None` ⇒ no
+    /// environment reflection).
+    pub env_map: Option<crate::EnvMapData>,
+}
+
 /// Appearance options for [`run_stream`]: the mesh draw [`RenderMode`] plus the
 /// optional AABB / coordinate-axes gizmo overlays. Bundled into one value so the
-/// entry point threads a single struct instead of three positional flags (and
+/// entry point threads a single struct instead of many positional flags (and
 /// stays within clippy's argument budget). [`Default`] is filled, no overlays.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct RenderOptions {
-    /// How meshes are drawn (filled / wireframe / textured).
+    /// How meshes are drawn (filled / wireframe / textured / PBR).
     pub mode: RenderMode,
     /// Overlay each drawn mesh instance's axis-aligned bounding box (#42).
     pub show_aabb: bool,
@@ -624,6 +650,9 @@ pub struct RenderOptions {
     /// drawn object's local (model) frame — e.g. `Some(GridPlane::Xy)` tiles a
     /// grid across a placement quad's local floor. `None` disables it.
     pub show_local_grid: Option<GridPlane>,
+    /// Disney PBR material + environment map, applied when `mode` is
+    /// [`RenderMode::Pbr`] (also honoured for any per-draw PBR-mode draws).
+    pub pbr: Option<PbrConfig>,
 }
 
 /// Reads a trd input stream, renders each frame, and writes an Arrow IPC stream
@@ -681,6 +710,12 @@ pub fn run_stream<R: Read, W: Write>(
             built.set_show_axes(options.show_axes);
             built.set_show_local_axes(options.show_local_axes);
             built.set_show_local_grid(options.show_local_grid);
+            if let Some(pbr) = &options.pbr {
+                built.set_pbr_material(pbr.material);
+                if let Some(env) = &pbr.env_map {
+                    built.set_env_map(env.clone());
+                }
+            }
             if let Some(texture) = session.texture() {
                 built.set_texture(texture);
             }

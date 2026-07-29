@@ -211,6 +211,15 @@ web=0
 offscreen_renderer=0
 canvas_renderer=0
 wireframe=0
+pbr=0
+env=""
+metallic="0.0"
+roughness="0.35"
+env_intensity="1.0"
+exposure="1.2"
+ambient="0.12"
+specular="0.5"
+clearcoat="0.0"
 aabb=0
 axes=0
 axes_local=0
@@ -230,6 +239,23 @@ while [ $# -gt 0 ]; do
     --offscreen-renderer|--arrow-renderer) offscreen_renderer=1 ;;
     --canvas-renderer) canvas_renderer=1 ;;
     --wireframe) wireframe=1 ;;
+    --pbr) pbr=1 ;;
+    --env) shift; env="${1:?--env requires an .hdr path}" ;;
+    --env=*) env="${1#--env=}" ;;
+    --metallic) shift; metallic="${1:?--metallic requires a float}" ;;
+    --metallic=*) metallic="${1#--metallic=}" ;;
+    --roughness) shift; roughness="${1:?--roughness requires a float}" ;;
+    --roughness=*) roughness="${1#--roughness=}" ;;
+    --env-intensity) shift; env_intensity="${1:?--env-intensity requires a float}" ;;
+    --env-intensity=*) env_intensity="${1#--env-intensity=}" ;;
+    --exposure) shift; exposure="${1:?--exposure requires a float}" ;;
+    --exposure=*) exposure="${1#--exposure=}" ;;
+    --ambient) shift; ambient="${1:?--ambient requires a float}" ;;
+    --ambient=*) ambient="${1#--ambient=}" ;;
+    --specular) shift; specular="${1:?--specular requires a float}" ;;
+    --specular=*) specular="${1#--specular=}" ;;
+    --clearcoat) shift; clearcoat="${1:?--clearcoat requires a float}" ;;
+    --clearcoat=*) clearcoat="${1#--clearcoat=}" ;;
     --aabb) aabb=1 ;;
     --axes) axes=1 ;;
     --axes-local) axes_local=1 ;;
@@ -275,6 +301,20 @@ if [ -n "$texture" ]; then
   fi
   if [ "$wireframe" -eq 1 ]; then
     echo "error: --texture and --wireframe are mutually exclusive" >&2
+    exit 1
+  fi
+fi
+
+# --pbr renders the bound albedo with the Disney principled BRDF (a virtual
+# light rig + smooth normals + optional --env HDR reflection). It needs a
+# --texture (the albedo) and is mutually exclusive with --wireframe/--textured.
+if [ "$pbr" -eq 1 ]; then
+  if [ -z "$texture" ]; then
+    echo "error: --pbr requires a --texture (the albedo to shade)" >&2
+    exit 1
+  fi
+  if [ "$wireframe" -eq 1 ]; then
+    echo "error: --pbr and --wireframe are mutually exclusive" >&2
     exit 1
   fi
 fi
@@ -442,6 +482,15 @@ wireframe_flag=()
 [ "$wireframe" -eq 1 ] && wireframe_flag=(--wireframe)
 textured_flag=()
 [ -n "$texture" ] && textured_flag=(--textured)
+# --pbr shades the same bound albedo with the Disney BRDF; it replaces
+# --textured (the two are mutually exclusive at the trd-cli layer) and forwards
+# the material + optional HDR env probe.
+pbr_flag=()
+if [ "$pbr" -eq 1 ]; then
+  textured_flag=()
+  pbr_flag=(--pbr --metallic "$metallic" --roughness "$roughness" --env-intensity "$env_intensity" --exposure "$exposure" --ambient "$ambient" --specular "$specular" --clearcoat "$clearcoat")
+  [ -n "$env" ] && pbr_flag+=(--env "$env")
+fi
 aabb_flag=()
 [ "$aabb" -eq 1 ] && aabb_flag=(--aabb)
 axes_flag=()
@@ -562,12 +611,12 @@ if [ "$native" -eq 1 ]; then
   # The appearance flags pass through to trd-app too (it now renders the mesh
   # Scene via the shared trd-core MeshRenderer, like trd-cli).
   stream \
-    | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-app -- --width "$width" --height "$height" --fps "$fps" "${wireframe_flag[@]}" "${textured_flag[@]}" "${aabb_flag[@]}" "${axes_flag[@]}" "${axes_local_flag[@]}" "${grid_local_flag[@]}" "${frames_base_flag[@]}"
+    | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-app -- --width "$width" --height "$height" --fps "$fps" "${wireframe_flag[@]}" "${textured_flag[@]}" "${pbr_flag[@]}" "${aabb_flag[@]}" "${axes_flag[@]}" "${axes_local_flag[@]}" "${grid_local_flag[@]}" "${frames_base_flag[@]}"
   echo "streamed $input to the trd-app window (${width}x${height}, ${fps}fps)"
 else
   mkdir -p "$(dirname "$output")"
   stream \
-    | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-cli -- --width "$width" --height "$height" "${wireframe_flag[@]}" "${textured_flag[@]}" "${aabb_flag[@]}" "${axes_flag[@]}" "${axes_local_flag[@]}" "${grid_local_flag[@]}" "${frames_base_flag[@]}" \
+    | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-cli -- --width "$width" --height "$height" "${wireframe_flag[@]}" "${textured_flag[@]}" "${pbr_flag[@]}" "${aabb_flag[@]}" "${axes_flag[@]}" "${axes_local_flag[@]}" "${grid_local_flag[@]}" "${frames_base_flag[@]}" \
     | uv run --with pyarrow --with numpy "$root/scripts/encode.py" --fps "$fps" -o "$output"
   echo "wrote $output (${width}x${height}, ${fps}fps) from $input"
 fi

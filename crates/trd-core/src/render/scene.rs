@@ -18,6 +18,13 @@ pub enum RenderMode {
     /// Draw triangles filled, sampling the renderer's bound texture at each
     /// vertex UV instead of the vertex color (#20).
     Textured,
+    /// Physically-based **Disney principled BRDF** shading (`disney.wgsl`): the
+    /// bound albedo lit by a small virtual light rig plus an optional
+    /// equirectangular HDR environment-map reflection, with smooth shading
+    /// normals derived at upload. Metallic materials read as shiny reflective
+    /// metal (e.g. the coke can). Configured globally via the renderer's
+    /// [`PbrMaterial`](crate::PbrMaterial) + bound environment map.
+    Pbr,
     /// Not a mesh rasterization at all: draw a **contact / blob grounding
     /// shadow** ([`DrawableObject::BlobShadow`]) instead of the mesh. A per-draw
     /// `mode: "shadow"` in the stream lifts that draw's `model` into a soft dark
@@ -37,15 +44,16 @@ pub const DRAW_MODE_INHERIT: u8 = 255;
 
 impl RenderMode {
     /// Decodes an optional per-draw `draw_mode` wire byte into a [`Draw::mode`]
-    /// override: `0`→`Filled`, `1`→`Wireframe`, `2`→`Textured`, `3`→`Shadow`, and
-    /// [`DRAW_MODE_INHERIT`]→`None` (inherit the global mode). Returns `None`
-    /// for an unrecognized byte so callers can raise a decode error.
+    /// override: `0`→`Filled`, `1`→`Wireframe`, `2`→`Textured`, `3`→`Shadow`,
+    /// `4`→`Pbr`, and [`DRAW_MODE_INHERIT`]→`None` (inherit the global mode).
+    /// Returns `None` for an unrecognized byte so callers can raise a decode error.
     pub fn from_wire(byte: u8) -> Option<Option<RenderMode>> {
         match byte {
             0 => Some(Some(RenderMode::Filled)),
             1 => Some(Some(RenderMode::Wireframe)),
             2 => Some(Some(RenderMode::Textured)),
             3 => Some(Some(RenderMode::Shadow)),
+            4 => Some(Some(RenderMode::Pbr)),
             DRAW_MODE_INHERIT => Some(None),
             _ => None,
         }

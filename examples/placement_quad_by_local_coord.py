@@ -327,6 +327,10 @@ def emit_records(records, args):
 
     tracked = [(K, quad) for (K, quad, _fp) in records if K is not None and quad is not None]
     n_tracked = max(1, len(tracked))
+    # One in-plane anchor per mesh copy. --place-offset (repeatable) wins; otherwise
+    # the single --place-offset-e1/e2 pair (backward compatible).
+    placements = (args.place_offset if args.place_offset
+                  else [(args.place_offset_e1, args.place_offset_e2)])
     # Placeholder render-K for untracked (background-only) rows; seed with the
     # first tracked frame's so a leading untracked run still has one, then hold
     # the last tracked frame's as playback advances.
@@ -354,48 +358,55 @@ def emit_records(records, args):
         draws = []
         if args.place_mesh:
             size = lam * args.size_factor  # mesh half-extent in the (scaled) reconstruction
-            theta = 2.0 * np.pi * args.turns * (placed_i / n_tracked)
-            # In-plane translation stays in the P² local frame: shift the anchor
-            # off the quad centre along the quad's own gizmo axes — red (r1) and
-            # green (r2) — in quad half-edge units (±1 ≈ a quad edge), then lift
-            # along the normal e3 so the feet rest on the plane. Used to move the
-            # mesh clear of the active players without leaving the quad plane
-            # (e.g. −green/−r2 pushes it down-court, off the mid-court action).
-            anchor = (o3d
-                      + args.place_offset_e1 * (r1 / 2.0)
-                      + args.place_offset_e2 * (r2 / 2.0))
-            # OpenCV camera-frame placement: mesh +X→e1, +Y(up)→e3, +Z→e1×e3 (=−e2);
-            # centre lifted half a height along e3 so the feet rest on the plane.
-            r_place = np.eye(4)
-            r_place[:3, 0] = e1
-            r_place[:3, 1] = e3
-            r_place[:3, 2] = -e2
-            trans = np.eye(4)
-            trans[:3, 3] = anchor + args.lift * size * e3
-            s_mat = np.diag([size, size, size, 1.0])
-            m_cam = trans @ r_place @ rotate_y(theta) @ s_mat
-            model = C4 @ m_cam  # camera frame → GL camera frame (view = identity)
-            draws.append({"mesh": args.mesh_index, "model": colmajor(model)})
-            if args.shadow:
-                # Contact / grounding blob shadow on the P² plane, at the mesh's
-                # ground anchor: a flat quad spanning the plane's orthonormal e1/e2
-                # axes, sized to the mesh footprint (--shadow-scale × half-extent).
-                # Stays in the P² local frame so it tracks the recovered floor as
-                # the camera dollies; the renderer feathers a soft dark alpha from
-                # the quad radius (mode "shadow" → DrawableObject::BlobShadow), so
-                # the mesh reads as resting on the court rather than floating.
-                shadow_r = size * args.shadow_scale
-                m_sh = np.eye(4)
-                m_sh[:3, 0] = e1 * shadow_r
-                m_sh[:3, 1] = e2 * shadow_r
-                m_sh[:3, 2] = e3 * shadow_r  # flat quad (local z=0); keeps M invertible
-                m_sh[:3, 3] = anchor
-                shadow_model = C4 @ m_sh
-                draws.insert(0, {
-                    "mesh": args.mesh_index,
-                    "model": colmajor(shadow_model),
-                    "mode": "shadow",
-                })
+            # One or more in-plane anchors: each (e1_off, e2_off) drops a copy of
+            # the mesh at a different spot on the P² plane (a --place-offset repeated
+            # for a row of cans; falls back to the single --place-offset-e1/e2). A
+            # per-copy phase offset spins them out of lockstep so a row doesn't look
+            # mirror-identical.
+            for copy_i, (oe1, oe2) in enumerate(placements):
+                theta = (2.0 * np.pi * args.turns * (placed_i / n_tracked)
+                         + 2.0 * np.pi * args.copy_phase * copy_i)
+                # In-plane translation stays in the P² local frame: shift the anchor
+                # off the quad centre along the quad's own gizmo axes — red (r1) and
+                # green (r2) — in quad half-edge units (±1 ≈ a quad edge), then lift
+                # along the normal e3 so the feet rest on the plane. Used to move the
+                # mesh clear of the active players without leaving the quad plane
+                # (e.g. −green/−r2 pushes it down-court, off the mid-court action).
+                anchor = (o3d
+                          + oe1 * (r1 / 2.0)
+                          + oe2 * (r2 / 2.0))
+                # OpenCV camera-frame placement: mesh +X→e1, +Y(up)→e3, +Z→e1×e3 (=−e2);
+                # centre lifted half a height along e3 so the feet rest on the plane.
+                r_place = np.eye(4)
+                r_place[:3, 0] = e1
+                r_place[:3, 1] = e3
+                r_place[:3, 2] = -e2
+                trans = np.eye(4)
+                trans[:3, 3] = anchor + args.lift * size * e3
+                s_mat = np.diag([size, size, size, 1.0])
+                m_cam = trans @ r_place @ rotate_y(theta) @ s_mat
+                model = C4 @ m_cam  # camera frame → GL camera frame (view = identity)
+                draws.append({"mesh": args.mesh_index, "model": colmajor(model)})
+                if args.shadow:
+                    # Contact / grounding blob shadow on the P² plane, at the mesh's
+                    # ground anchor: a flat quad spanning the plane's orthonormal e1/e2
+                    # axes, sized to the mesh footprint (--shadow-scale × half-extent).
+                    # Stays in the P² local frame so it tracks the recovered floor as
+                    # the camera dollies; the renderer feathers a soft dark alpha from
+                    # the quad radius (mode "shadow" → DrawableObject::BlobShadow), so
+                    # the mesh reads as resting on the court rather than floating.
+                    shadow_r = size * args.shadow_scale
+                    m_sh = np.eye(4)
+                    m_sh[:3, 0] = e1 * shadow_r
+                    m_sh[:3, 1] = e2 * shadow_r
+                    m_sh[:3, 2] = e3 * shadow_r  # flat quad (local z=0); keeps M invertible
+                    m_sh[:3, 3] = anchor
+                    shadow_model = C4 @ m_sh
+                    draws.insert(0, {
+                        "mesh": args.mesh_index,
+                        "model": colmajor(shadow_model),
+                        "mode": "shadow",
+                    })
         if args.placement_quad:
             # Draw the reconstructed placement quad itself as an overlay so it can be
             # checked against the filmed poster. A canonical origin-centred, extent-2
@@ -536,6 +547,17 @@ def main():
                          "GREEN gizmo axis (r2 / local Y), in quad half-edge units. Matches the "
                          "--axes-local green arm; e.g. a negative value moves the mesh down-court "
                          "(−green), off the mid-court action. Default 0 (quad centre).")
+    ap.add_argument("--place-offset", type=float, nargs=2, action="append",
+                    metavar=("E1", "E2"), default=None,
+                    help="place a mesh copy at this (e1, e2) in-plane offset (quad "
+                         "half-edge units, same axes as --place-offset-e1/e2). Repeat "
+                         "for a row of cans, e.g. --place-offset 1.4 -1.7 --place-offset "
+                         "2.1 -1.5 --place-offset 2.8 -1.3. When given, overrides the "
+                         "single --place-offset-e1/e2. Each copy gets its own shadow.")
+    ap.add_argument("--copy-phase", type=float, default=0.0,
+                    help="per-copy spin phase offset (turns) between successive "
+                         "--place-offset cans, so a row doesn't look mirror-identical "
+                         "(default 0: all copies share the same spin phase).")
     ap.add_argument("--place-mesh", action=argparse.BooleanOptionalAction, default=True,
                     help="anchor the model mesh on the placement-quad frame (stage 2). "
                          "Use --no-place-mesh for stage 1 (placement quad only, before placing the mesh).")

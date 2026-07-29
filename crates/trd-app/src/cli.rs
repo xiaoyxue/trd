@@ -64,6 +64,30 @@ pub(crate) struct Cli {
     /// white).
     #[arg(long, conflicts_with = "wireframe")]
     pub(crate) textured: bool,
+    /// Render meshes with the physically-based **Disney principled BRDF**: the
+    /// bound albedo lit by a virtual light rig plus an optional HDR
+    /// environment-map reflection (`--env`), with smooth shading normals. Use
+    /// `--metallic 1 --roughness 0.3` for a shiny metal look. Requires a stream
+    /// carrying a texture table for the albedo.
+    #[arg(long, conflicts_with_all = ["wireframe", "textured"])]
+    pub(crate) pbr: bool,
+    /// Equirectangular HDR environment map (Radiance `.hdr`) reflected by
+    /// metallic PBR surfaces. Decoded here (trd-core does no file I/O) and
+    /// downscaled to the renderer's 2048px limit. Only used with `--pbr`.
+    #[arg(long, value_name = "FILE")]
+    pub(crate) env: Option<PathBuf>,
+    /// PBR metallic parameter (0 = dielectric, 1 = metal).
+    #[arg(long, default_value_t = 0.0)]
+    pub(crate) metallic: f32,
+    /// PBR surface roughness (0 = mirror, 1 = fully rough).
+    #[arg(long, default_value_t = 0.35)]
+    pub(crate) roughness: f32,
+    /// PBR environment-map reflection gain (0 disables the probe reflection).
+    #[arg(long, default_value_t = 1.0)]
+    pub(crate) env_intensity: f32,
+    /// PBR tone-map exposure applied before the Reinhard curve.
+    #[arg(long, default_value_t = 1.2)]
+    pub(crate) exposure: f32,
     /// Overlay each drawn mesh's axis-aligned bounding box as a green wireframe
     /// box (#42).
     #[arg(long)]

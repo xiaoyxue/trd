@@ -4,7 +4,8 @@
 use std::sync::Arc;
 
 use trd_core::{
-    build_scene, FrameFit, GridPlane, ImageTexture, Mesh, MeshRenderer, RenderMode, Viewport,
+    build_scene, EnvMapData, FrameFit, GridPlane, ImageTexture, Mesh, MeshRenderer, PbrMaterial,
+    RenderMode, Viewport,
 };
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
@@ -124,6 +125,22 @@ impl WindowRenderer {
     pub(crate) fn set_texture(&mut self, texture: &ImageTexture) {
         if let Some(renderer) = self.renderer.as_mut() {
             renderer.set_texture(texture);
+        }
+    }
+
+    /// Sets the Disney PBR material applied to [`RenderMode::Pbr`] meshes. No-op
+    /// until the renderer is built.
+    pub(crate) fn set_pbr_material(&mut self, material: PbrMaterial) {
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.set_pbr_material(material);
+        }
+    }
+
+    /// Binds the HDR environment probe reflected by PBR meshes. No-op until the
+    /// renderer is built; re-uploaded lazily on the next `render`.
+    pub(crate) fn set_env_map(&mut self, env: EnvMapData) {
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.set_env_map(env);
         }
     }
 

@@ -25,9 +25,9 @@ pub use protocol::{
     ProtocolError, DEFAULT_FRAME_RATE, FRAME_RATE_KEY, PROTOCOL_VERSION, PROTOCOL_VERSION_KEY,
 };
 pub use render::{
-    build_scene, create_mesh_pipeline, CameraFormError, Draw, DrawableObject, FrameFit,
-    FrameParams, GridPlane, Mesh, MeshRenderer, OffscreenError, OffscreenTarget, RenderMode, Scene,
-    TriangleRenderer, Vertex, Viewport, OFFSCREEN_FORMAT,
+    build_scene, create_mesh_pipeline, CameraFormError, Draw, DrawableObject, EnvMapData, FrameFit,
+    FrameParams, GridPlane, Mesh, MeshRenderer, OffscreenError, OffscreenTarget, PbrMaterial,
+    RenderMode, Scene, TriangleRenderer, Vertex, Viewport, OFFSCREEN_FORMAT,
 };
 pub use scene_encode::{
     encode_mesh_stream, encode_params_stream, encode_scene, encode_texture_stream, SceneEncodeError,
@@ -41,7 +41,7 @@ mod stream;
 #[cfg(not(target_arch = "wasm32"))]
 pub use stream::{
     decode_frames, read_scene_stream_with_meta, run_stream, BatchRenderer, FrameResolver,
-    RenderOptions, StreamError,
+    PbrConfig, RenderOptions, StreamError,
 };
 
 /// Returns the project greeting used by the CLI and web entry points.

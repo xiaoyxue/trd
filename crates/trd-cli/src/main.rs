@@ -50,6 +50,39 @@ struct Cli {
     /// carrying a texture table (else the bound texture is 1×1 white).
     #[arg(long, conflicts_with = "wireframe")]
     textured: bool,
+    /// Render meshes with the physically-based **Disney principled BRDF**
+    /// (`disney.wgsl`): the bound albedo lit by a virtual light rig plus an
+    /// optional HDR environment-map reflection (`--env`), with smooth shading
+    /// normals. Use `--metallic 1 --roughness 0.3` (or the defaults) for a shiny
+    /// metal look. Requires a stream carrying a texture table for the albedo.
+    #[arg(long, conflicts_with_all = ["wireframe", "textured"])]
+    pbr: bool,
+    /// Equirectangular HDR environment map (Radiance `.hdr`) reflected by
+    /// metallic PBR surfaces. Decoded here (trd-core does no file I/O) and
+    /// downscaled to the renderer's 2048px limit. Only used with `--pbr`.
+    #[arg(long, value_name = "FILE")]
+    env: Option<PathBuf>,
+    /// PBR metallic parameter (0 = dielectric, 1 = metal).
+    #[arg(long, default_value_t = 0.0)]
+    metallic: f32,
+    /// PBR surface roughness (0 = mirror, 1 = fully rough).
+    #[arg(long, default_value_t = 0.35)]
+    roughness: f32,
+    /// PBR dielectric specular reflectance strength (`0.5` ≈ 4% F0).
+    #[arg(long, default_value_t = 0.5)]
+    specular: f32,
+    /// PBR clearcoat lobe strength (a second colorless specular layer).
+    #[arg(long, default_value_t = 0.0)]
+    clearcoat: f32,
+    /// PBR environment-map reflection gain (0 disables the probe reflection).
+    #[arg(long, default_value_t = 1.0)]
+    env_intensity: f32,
+    /// PBR tone-map exposure applied before the Reinhard curve.
+    #[arg(long, default_value_t = 1.2)]
+    exposure: f32,
+    /// PBR constant ambient fill (× base color) so shadows are not pure black.
+    #[arg(long, default_value_t = 0.12)]
+    ambient: f32,
     /// Overlay each drawn mesh's axis-aligned bounding box as a green
     /// wireframe box.
     #[arg(long)]
@@ -85,13 +118,39 @@ fn main() -> Result<(), trd_core::StreamError> {
     .init();
 
     let cli = Cli::parse();
-    let mode = if cli.textured {
+    let mode = if cli.pbr {
+        trd_core::RenderMode::Pbr
+    } else if cli.textured {
         trd_core::RenderMode::Textured
     } else if cli.wireframe {
         trd_core::RenderMode::Wireframe
     } else {
         trd_core::RenderMode::Filled
     };
+
+    // Assemble the Disney PBR config (material + optional HDR environment probe)
+    // when `--pbr` is set. The `.hdr` file is decoded here so trd-core does no
+    // file/codec I/O; it is downscaled to the renderer's portable 2048px limit.
+    let pbr = if cli.pbr {
+        let material = trd_core::PbrMaterial {
+            metallic: cli.metallic,
+            roughness: cli.roughness,
+            specular: cli.specular,
+            clearcoat: cli.clearcoat,
+            env_intensity: cli.env_intensity,
+            exposure: cli.exposure,
+            ambient: cli.ambient,
+            ..Default::default()
+        };
+        let env_map = match cli.env.as_ref() {
+            Some(path) => Some(load_env_map(path)?),
+            None => None,
+        };
+        Some(trd_core::PbrConfig { material, env_map })
+    } else {
+        None
+    };
+
     let stdin = io::stdin().lock();
     let stdout = io::stdout().lock();
 
@@ -133,9 +192,29 @@ fn main() -> Result<(), trd_core::StreamError> {
             show_axes: cli.axes,
             show_local_axes: cli.axes_local,
             show_local_grid: cli.grid_local.map(Into::into),
+            pbr,
         },
         frame_resolver,
     )?;
     io::stdout().flush()?;
     Ok(())
+}
+
+/// Decodes an equirectangular Radiance `.hdr` file into a linear-RGBA f32
+/// [`trd_core::EnvMapData`], downscaled (integer box filter) so neither
+/// dimension exceeds the renderer's portable 2048px texture limit. Kept in the
+/// CLI shell so trd-core does no file/codec I/O.
+fn load_env_map(path: &std::path::Path) -> Result<trd_core::EnvMapData, trd_core::StreamError> {
+    let img = image::open(path)
+        .map_err(|e| {
+            trd_core::StreamError::Render(format!("read env map {}: {e}", path.display()))
+        })?
+        .to_rgba32f();
+    let (w, h) = img.dimensions();
+    Ok(trd_core::EnvMapData::from_rgba32f(
+        w,
+        h,
+        img.into_raw(),
+        2048,
+    ))
 }

@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-use trd_core::{GridPlane, ImageTexture, Mesh, RenderMode};
+use trd_core::{EnvMapData, GridPlane, ImageTexture, Mesh, PbrConfig, PbrMaterial, RenderMode};
 use winit::application::ApplicationHandler;
 #[cfg(not(target_os = "windows"))]
 use winit::dpi::LogicalSize;
@@ -74,6 +74,11 @@ struct App {
     show_local_axes: bool,
     /// Overlay a coordinate-plane grid on each drawn object's local (model) frame.
     show_local_grid: Option<GridPlane>,
+    /// The Disney PBR material + optional HDR env probe (`--pbr`), held until the
+    /// renderer is built so it can be applied; `None` unless `--pbr` is set.
+    pbr_config: Option<PbrConfig>,
+    /// Whether `pbr_config` has been applied to the built renderer (once).
+    pbr_applied: bool,
 }
 
 impl App {
@@ -89,6 +94,7 @@ impl App {
         show_axes: bool,
         show_local_axes: bool,
         show_local_grid: Option<GridPlane>,
+        pbr_config: Option<PbrConfig>,
     ) -> Self {
         Self {
             gpu: None,
@@ -111,6 +117,8 @@ impl App {
             show_axes,
             show_local_axes,
             show_local_grid,
+            pbr_config,
+            pbr_applied: false,
         }
     }
 
@@ -285,6 +293,17 @@ impl ApplicationHandler for App {
                     gpu.window.request_redraw();
                 }
             }
+            // Apply the Disney PBR material + env probe once the renderer exists.
+            if !self.pbr_applied && gpu.renderer.is_some() {
+                if let Some(pbr) = self.pbr_config.take() {
+                    gpu.set_pbr_material(pbr.material);
+                    if let Some(env) = pbr.env_map {
+                        gpu.set_env_map(env);
+                    }
+                    gpu.window.request_redraw();
+                }
+                self.pbr_applied = true;
+            }
         }
 
         // Select the frame for the current wall-clock time (speed = rate()),
@@ -317,12 +336,34 @@ pub fn run() -> Result<(), AppError> {
 
     let cli = Cli::parse();
     let rate_override = cli.fps.filter(|fps| fps.is_finite() && *fps > 0.0);
-    let mode = if cli.textured {
+    let mode = if cli.pbr {
+        RenderMode::Pbr
+    } else if cli.textured {
         RenderMode::Textured
     } else if cli.wireframe {
         RenderMode::Wireframe
     } else {
         RenderMode::Filled
+    };
+
+    // Assemble the Disney PBR config (material + optional HDR env probe) when
+    // `--pbr` is set. The `.hdr` file is decoded here so trd-core does no
+    // file/codec I/O; it is downscaled to the renderer's portable 2048px limit.
+    let pbr_config = if cli.pbr {
+        let material = PbrMaterial {
+            metallic: cli.metallic,
+            roughness: cli.roughness,
+            env_intensity: cli.env_intensity,
+            exposure: cli.exposure,
+            ..Default::default()
+        };
+        let env_map = match cli.env.as_ref() {
+            Some(path) => Some(load_env_map(path)?),
+            None => None,
+        };
+        Some(PbrConfig { material, env_map })
+    } else {
+        None
     };
 
     let (tx, rx) = mpsc::channel();
@@ -344,7 +385,19 @@ pub fn run() -> Result<(), AppError> {
         cli.axes,
         cli.axes_local,
         cli.grid_local.map(Into::into),
+        pbr_config,
     );
     event_loop.run_app(&mut app)?;
     Ok(())
+}
+
+/// Decodes an equirectangular Radiance `.hdr` file into a linear-RGBA f32
+/// [`EnvMapData`], downscaled to the renderer's portable 2048px limit. Kept in
+/// the app shell so trd-core does no file/codec I/O.
+fn load_env_map(path: &std::path::Path) -> Result<EnvMapData, AppError> {
+    let img = image::open(path)
+        .map_err(|e| AppError::EnvMap(format!("read {}: {e}", path.display())))?
+        .to_rgba32f();
+    let (w, h) = img.dimensions();
+    Ok(EnvMapData::from_rgba32f(w, h, img.into_raw(), 2048))
 }
