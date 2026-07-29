@@ -60,8 +60,50 @@ impl Vertex {
     }
 }
 
-/// Per-instance model matrix fed to `mesh.wgsl` as four `vec4` instance
-/// attributes (shader locations 2-5, column-major, 64-byte stride).
+/// A mesh vertex for the Disney PBR path (`disney.wgsl`): position + smooth
+/// shading **normal** (loc 1) + UV. Mirrors [`Vertex`]'s 32-byte stride, but the
+/// second attribute is a normal rather than a color — the assets carry no `vn`,
+/// so [`compute_smooth_normals`](super::pbr::compute_smooth_normals) derives it
+/// at upload time into a dedicated buffer (leaving the shared [`Vertex`] used by
+/// every other pipeline untouched).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct PbrVertex {
+    pub(crate) position: [f32; 3],
+    pub(crate) normal: [f32; 3],
+    pub(crate) uv: [f32; 2],
+}
+
+impl PbrVertex {
+    const ATTRIBUTES: [wgpu::VertexAttribute; 3] = [
+        wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Float32x3,
+            offset: 0,
+            shader_location: 0,
+        },
+        wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Float32x3,
+            offset: 12,
+            shader_location: 1,
+        },
+        wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Float32x2,
+            offset: 24,
+            shader_location: 2,
+        },
+    ];
+
+    /// Returns the vertex buffer layout expected by `disney.wgsl`.
+    pub(crate) const fn layout() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &Self::ATTRIBUTES,
+        }
+    }
+}
+
+/// Per-instance model matrix fed to `mesh.wgsl` as four `vec4` instance/// attributes (shader locations 2-5, column-major, 64-byte stride).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct InstanceRaw {

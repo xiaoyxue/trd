@@ -133,6 +133,9 @@ CONTENT FLAGS (--cli and --native):
                       WIREFRAME drawn object's own local frame — e.g. --grid-local xy tiles
                       a grid across the placement quad's local floor (#110). Scoped to
                       wireframe draws, so a filled/textured mesh (the bunny) gets no grid.
+  --grid-mesh ID      Narrow --grid-local to draws of mesh ID only (the placement quad), so a
+                      content mesh drawn WIREFRAME (e.g. a wireframe-reveal intro) doesn't also
+                      pick up a floor grid. Ignored without --grid-local (#114).
   --placement-quad    Draw the reconstructed placement quad as a colored wireframe outline
                       (debug check vs. the filmed poster). Appends a canonical quad mesh;
                       author its per-frame draw with placement_quad_by_local_coord.py --placement-quad.
@@ -211,10 +214,20 @@ web=0
 offscreen_renderer=0
 canvas_renderer=0
 wireframe=0
+pbr=0
+env=""
+metallic="0.0"
+roughness="0.35"
+env_intensity="1.0"
+exposure="1.2"
+ambient="0.12"
+specular="0.5"
+clearcoat="0.0"
 aabb=0
 axes=0
 axes_local=0
 grid_local=""
+grid_mesh=""
 quad=0
 quad_color="0 1 1"
 meshes=()
@@ -230,11 +243,30 @@ while [ $# -gt 0 ]; do
     --offscreen-renderer|--arrow-renderer) offscreen_renderer=1 ;;
     --canvas-renderer) canvas_renderer=1 ;;
     --wireframe) wireframe=1 ;;
+    --pbr) pbr=1 ;;
+    --env) shift; env="${1:?--env requires an .hdr path}" ;;
+    --env=*) env="${1#--env=}" ;;
+    --metallic) shift; metallic="${1:?--metallic requires a float}" ;;
+    --metallic=*) metallic="${1#--metallic=}" ;;
+    --roughness) shift; roughness="${1:?--roughness requires a float}" ;;
+    --roughness=*) roughness="${1#--roughness=}" ;;
+    --env-intensity) shift; env_intensity="${1:?--env-intensity requires a float}" ;;
+    --env-intensity=*) env_intensity="${1#--env-intensity=}" ;;
+    --exposure) shift; exposure="${1:?--exposure requires a float}" ;;
+    --exposure=*) exposure="${1#--exposure=}" ;;
+    --ambient) shift; ambient="${1:?--ambient requires a float}" ;;
+    --ambient=*) ambient="${1#--ambient=}" ;;
+    --specular) shift; specular="${1:?--specular requires a float}" ;;
+    --specular=*) specular="${1#--specular=}" ;;
+    --clearcoat) shift; clearcoat="${1:?--clearcoat requires a float}" ;;
+    --clearcoat=*) clearcoat="${1#--clearcoat=}" ;;
     --aabb) aabb=1 ;;
     --axes) axes=1 ;;
     --axes-local) axes_local=1 ;;
     --grid-local) shift; grid_local="${1:?--grid-local requires a plane: xy|xz|yz}" ;;
     --grid-local=*) grid_local="${1#--grid-local=}" ;;
+    --grid-mesh) shift; grid_mesh="${1:?--grid-mesh requires a mesh id (integer)}" ;;
+    --grid-mesh=*) grid_mesh="${1#--grid-mesh=}" ;;
     --placement-quad) quad=1 ;;
     --placement-quad-color) shift; quad=1; quad_color="${1:?--placement-quad-color requires \"R G B\" (0..1 floats)}" ;;
     --placement-quad-color=*) quad=1; quad_color="${1#--placement-quad-color=}" ;;
@@ -275,6 +307,20 @@ if [ -n "$texture" ]; then
   fi
   if [ "$wireframe" -eq 1 ]; then
     echo "error: --texture and --wireframe are mutually exclusive" >&2
+    exit 1
+  fi
+fi
+
+# --pbr renders the bound albedo with the Disney principled BRDF (a virtual
+# light rig + smooth normals + optional --env HDR reflection). It needs a
+# --texture (the albedo) and is mutually exclusive with --wireframe/--textured.
+if [ "$pbr" -eq 1 ]; then
+  if [ -z "$texture" ]; then
+    echo "error: --pbr requires a --texture (the albedo to shade)" >&2
+    exit 1
+  fi
+  if [ "$wireframe" -eq 1 ]; then
+    echo "error: --pbr and --wireframe are mutually exclusive" >&2
     exit 1
   fi
 fi
@@ -442,6 +488,15 @@ wireframe_flag=()
 [ "$wireframe" -eq 1 ] && wireframe_flag=(--wireframe)
 textured_flag=()
 [ -n "$texture" ] && textured_flag=(--textured)
+# --pbr shades the same bound albedo with the Disney BRDF; it replaces
+# --textured (the two are mutually exclusive at the trd-cli layer) and forwards
+# the material + optional HDR env probe.
+pbr_flag=()
+if [ "$pbr" -eq 1 ]; then
+  textured_flag=()
+  pbr_flag=(--pbr --metallic "$metallic" --roughness "$roughness" --env-intensity "$env_intensity" --exposure "$exposure" --ambient "$ambient" --specular "$specular" --clearcoat "$clearcoat")
+  [ -n "$env" ] && pbr_flag+=(--env "$env")
+fi
 aabb_flag=()
 [ "$aabb" -eq 1 ] && aabb_flag=(--aabb)
 axes_flag=()
@@ -450,6 +505,8 @@ axes_local_flag=()
 [ "$axes_local" -eq 1 ] && axes_local_flag=(--axes-local)
 grid_local_flag=()
 [ -n "$grid_local" ] && grid_local_flag=(--grid-local "$grid_local")
+grid_mesh_flag=()
+[ -n "$grid_mesh" ] && grid_mesh_flag=(--grid-mesh "$grid_mesh")
 # --frames-base resolves each frame's 0.0.5 `frame_path` (relative to this dir)
 # to the still image trd composites *beneath* the scene via a FramePlane (#63).
 frames_base_flag=()
@@ -562,12 +619,12 @@ if [ "$native" -eq 1 ]; then
   # The appearance flags pass through to trd-app too (it now renders the mesh
   # Scene via the shared trd-core MeshRenderer, like trd-cli).
   stream \
-    | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-app -- --width "$width" --height "$height" --fps "$fps" "${wireframe_flag[@]}" "${textured_flag[@]}" "${aabb_flag[@]}" "${axes_flag[@]}" "${axes_local_flag[@]}" "${grid_local_flag[@]}" "${frames_base_flag[@]}"
+    | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-app -- --width "$width" --height "$height" --fps "$fps" "${wireframe_flag[@]}" "${textured_flag[@]}" "${pbr_flag[@]}" "${aabb_flag[@]}" "${axes_flag[@]}" "${axes_local_flag[@]}" "${grid_local_flag[@]}" "${grid_mesh_flag[@]}" "${frames_base_flag[@]}"
   echo "streamed $input to the trd-app window (${width}x${height}, ${fps}fps)"
 else
   mkdir -p "$(dirname "$output")"
   stream \
-    | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-cli -- --width "$width" --height "$height" "${wireframe_flag[@]}" "${textured_flag[@]}" "${aabb_flag[@]}" "${axes_flag[@]}" "${axes_local_flag[@]}" "${grid_local_flag[@]}" "${frames_base_flag[@]}" \
+    | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-cli -- --width "$width" --height "$height" "${wireframe_flag[@]}" "${textured_flag[@]}" "${pbr_flag[@]}" "${aabb_flag[@]}" "${axes_flag[@]}" "${axes_local_flag[@]}" "${grid_local_flag[@]}" "${grid_mesh_flag[@]}" "${frames_base_flag[@]}" \
     | uv run --with pyarrow --with numpy "$root/scripts/encode.py" --fps "$fps" -o "$output"
   echo "wrote $output (${width}x${height}, ${fps}fps) from $input"
 fi

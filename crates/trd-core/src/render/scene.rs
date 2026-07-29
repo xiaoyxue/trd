@@ -18,6 +18,20 @@ pub enum RenderMode {
     /// Draw triangles filled, sampling the renderer's bound texture at each
     /// vertex UV instead of the vertex color (#20).
     Textured,
+    /// Physically-based **Disney principled BRDF** shading (`disney.wgsl`): the
+    /// bound albedo lit by a small virtual light rig plus an optional
+    /// equirectangular HDR environment-map reflection, with smooth shading
+    /// normals derived at upload. Metallic materials read as shiny reflective
+    /// metal (e.g. the coke can). Configured globally via the renderer's
+    /// [`PbrMaterial`](crate::PbrMaterial) + bound environment map.
+    Pbr,
+    /// Not a mesh rasterization at all: draw a **contact / blob grounding
+    /// shadow** ([`DrawableObject::BlobShadow`]) instead of the mesh. A per-draw
+    /// `mode: "shadow"` in the stream lifts that draw's `model` into a soft dark
+    /// blob on the placed mesh's ground plane (#110 follow-up), so the placed mesh
+    /// reads as sitting on the reconstructed surface. The draw's `mesh` id is
+    /// ignored (the shadow uses shared gizmo geometry).
+    Shadow,
 }
 
 /// Wire byte meaning "inherit the renderer's global mode" in the optional
@@ -30,14 +44,16 @@ pub const DRAW_MODE_INHERIT: u8 = 255;
 
 impl RenderMode {
     /// Decodes an optional per-draw `draw_mode` wire byte into a [`Draw::mode`]
-    /// override: `0`→`Filled`, `1`→`Wireframe`, `2`→`Textured`, and
-    /// [`DRAW_MODE_INHERIT`]→`None` (inherit the global mode). Returns `None`
-    /// for an unrecognized byte so callers can raise a decode error.
+    /// override: `0`→`Filled`, `1`→`Wireframe`, `2`→`Textured`, `3`→`Shadow`,
+    /// `4`→`Pbr`, and [`DRAW_MODE_INHERIT`]→`None` (inherit the global mode).
+    /// Returns `None` for an unrecognized byte so callers can raise a decode error.
     pub fn from_wire(byte: u8) -> Option<Option<RenderMode>> {
         match byte {
             0 => Some(Some(RenderMode::Filled)),
             1 => Some(Some(RenderMode::Wireframe)),
             2 => Some(Some(RenderMode::Textured)),
+            3 => Some(Some(RenderMode::Shadow)),
+            4 => Some(Some(RenderMode::Pbr)),
             DRAW_MODE_INHERIT => Some(None),
             _ => None,
         }
@@ -183,6 +199,15 @@ pub enum DrawableObject {
     /// to no mesh (no base model); with a #77 placement-quad `model` the `Xy`
     /// grid lays exactly over the reconstructed quad in its local frame.
     PlaneGrid { plane: GridPlane, model: [f32; 16] },
+    /// A **contact / blob grounding shadow** (#110 follow-up): a soft dark radial
+    /// blob laid on a placed mesh's ground plane, placed by `model` (a flat quad
+    /// on the plane, sized to the mesh footprint), so the mesh reads as *sitting
+    /// on* the reconstructed surface rather than floating over the composited
+    /// video plate. A [`RenderMode::Shadow`] draw becomes this variant. Tied to no
+    /// mesh (no base model); alpha-blended over the [`FramePlane`](Self::FramePlane)
+    /// and drawn *before* the opaque content mesh (depth-write off) so the mesh
+    /// composites on top while the surrounding rim darkens the floor.
+    BlobShadow { model: [f32; 16] },
     /// A screen-aligned **background frame plane** (#63): a fullscreen quad that
     /// samples the renderer's bound background frame texture (set via
     /// [`MeshRenderer::update_frame_texture_rgba`]), composited **under** the
@@ -211,7 +236,12 @@ pub type Scene = Vec<DrawableObject>;
 /// **its own `model`** (a coordinate-plane lattice in that object's local frame —
 /// e.g. the `Xy` grid on a #77 placement quad's surface; scoped to wireframe
 /// draws so a filled/textured content mesh whose local `Xy` is vertical gets no
-/// stray grid wall); with `show_axes`, one **world-origin**
+/// stray grid wall). `grid_mesh = Some(id)` narrows the grid further to draws of
+/// **that** mesh only (#110 follow-up): when the *content* mesh is also drawn
+/// wireframe (e.g. a wireframe-reveal intro over a placement quad), the grid
+/// would otherwise land on every wireframe object; pin it to the placement
+/// quad's `mesh_id` so exactly one floor grid is laid. `grid_mesh = None` keeps
+/// the "all wireframe draws" behaviour. With `show_axes`, one **world-origin**
 /// [`DrawableObject::CoordinateAxes`] is appended; with `show_local_axes`, each
 /// draw also emits a [`DrawableObject::CoordinateAxes`] at **its own `model`** —
 /// i.e. that object's *local* coordinate frame (its model-space X/Y/Z axes as
@@ -223,6 +253,7 @@ pub type Scene = Vec<DrawableObject>;
 /// Shared by the native ([`crate::run_stream`]) and wasm front-ends so neither
 /// branches per primitive type: both author the same ordered `Scene` and hand
 /// it to [`MeshRenderer::encode`].
+#[allow(clippy::too_many_arguments)]
 pub fn build_scene(
     draws: &[Draw],
     mode: RenderMode,
@@ -230,6 +261,7 @@ pub fn build_scene(
     show_axes: bool,
     show_local_axes: bool,
     local_grid: Option<GridPlane>,
+    grid_mesh: Option<u32>,
     frame: Option<FrameFit>,
 ) -> Scene {
     let mut scene = Vec::with_capacity(
@@ -244,14 +276,25 @@ pub fn build_scene(
         scene.push(DrawableObject::FramePlane { fit });
     }
     for draw in draws {
+        let resolved = draw.mode.unwrap_or(mode);
+        // A `Shadow` draw is not a mesh rasterization: lift its model into a
+        // BlobShadow grounding blob on the placed mesh's plane (#110 follow-up).
+        if resolved == RenderMode::Shadow {
+            scene.push(DrawableObject::BlobShadow { model: draw.model });
+            continue;
+        }
         scene.push(DrawableObject::Mesh {
             mesh_id: draw.mesh_id,
             model: draw.model,
-            mode: draw.mode.unwrap_or(mode),
+            mode: resolved,
         });
     }
     if show_aabb {
         for draw in draws {
+            // Skip shadow draws — they carry no mesh geometry to box.
+            if draw.mode.unwrap_or(mode) == RenderMode::Shadow {
+                continue;
+            }
             scene.push(DrawableObject::AabbBox {
                 mesh_id: draw.mesh_id,
                 model: draw.model,
@@ -263,9 +306,13 @@ pub fn build_scene(
             // Scope the grid to wireframe draws only — the #77 placement quad is
             // always an outline (its local Xy *is* the placement surface), while a
             // filled/textured content mesh's local Xy may be a vertical plane, so a
-            // per-mesh grid there would draw a stray grid "wall". This lays exactly
-            // one floor grid on the quad in a mixed bunny + quad scene.
-            if draw.mode.unwrap_or(mode) == RenderMode::Wireframe {
+            // per-mesh grid there would draw a stray grid "wall". When the content
+            // mesh is *also* wireframe (e.g. a wireframe-reveal intro), `grid_mesh`
+            // narrows the grid to the placement quad's `mesh_id` so exactly one
+            // floor grid is laid — not one under every wireframe object (#114).
+            let is_wireframe = draw.mode.unwrap_or(mode) == RenderMode::Wireframe;
+            let mesh_selected = grid_mesh.is_none_or(|id| draw.mesh_id == id);
+            if is_wireframe && mesh_selected {
                 scene.push(DrawableObject::PlaneGrid {
                     plane,
                     model: draw.model,
@@ -275,6 +322,11 @@ pub fn build_scene(
     }
     if show_local_axes {
         for draw in draws {
+            // Skip shadow draws — the blob is a floor decal, not a placed object
+            // whose local frame warrants an axes gizmo.
+            if draw.mode.unwrap_or(mode) == RenderMode::Shadow {
+                continue;
+            }
             scene.push(DrawableObject::CoordinateAxes { model: draw.model });
         }
     }
@@ -300,7 +352,16 @@ mod tests {
 
         // No frame ⇒ no FramePlane in the scene (byte-identical to the pre-0.0.5
         // scene).
-        let scene = build_scene(&draws, RenderMode::Filled, true, true, false, None, None);
+        let scene = build_scene(
+            &draws,
+            RenderMode::Filled,
+            true,
+            true,
+            false,
+            None,
+            None,
+            None,
+        );
         assert!(
             !scene
                 .iter()
@@ -316,6 +377,7 @@ mod tests {
             true,
             true,
             false,
+            None,
             None,
             Some(FrameFit::Cover),
         );
@@ -379,7 +441,16 @@ mod tests {
         };
 
         // Filled default: only the `None` draw is Filled; the overrides stand.
-        let scene = build_scene(&draws, RenderMode::Filled, false, false, false, None, None);
+        let scene = build_scene(
+            &draws,
+            RenderMode::Filled,
+            false,
+            false,
+            false,
+            None,
+            None,
+            None,
+        );
         assert_eq!(
             mesh_modes(&scene),
             vec![
@@ -398,6 +469,7 @@ mod tests {
             false,
             false,
             false,
+            None,
             None,
             None,
         );
@@ -454,6 +526,7 @@ mod tests {
             true,                  // show_axes (world)
             true,                  // show_local_axes
             None,                  // local_grid
+            None,                  // grid_mesh
             Some(FrameFit::Cover), // background frame plane
         );
 
@@ -476,7 +549,16 @@ mod tests {
 
         // --axes-local WITHOUT --axes ⇒ only the per-draw local gizmos, no world
         // one (both draw models are non-identity, so this is unambiguous).
-        let scene = build_scene(&draws, RenderMode::Filled, false, false, true, None, None);
+        let scene = build_scene(
+            &draws,
+            RenderMode::Filled,
+            false,
+            false,
+            true,
+            None,
+            None,
+            None,
+        );
         assert_eq!(
             axes_models(&scene),
             vec![model_a, model_b],
@@ -527,6 +609,7 @@ mod tests {
             false,
             None,
             None,
+            None,
         );
         assert!(grids(&scene).is_empty(), "no grid when local_grid is None");
 
@@ -539,6 +622,7 @@ mod tests {
             false,
             false,
             Some(GridPlane::Xy),
+            None,
             None,
         );
         assert_eq!(
@@ -555,6 +639,7 @@ mod tests {
             false,
             false,
             Some(GridPlane::Yz),
+            None,
             None,
         );
         assert!(matches!(scene[0], DrawableObject::Mesh { .. }));
@@ -586,12 +671,182 @@ mod tests {
             false,
             Some(GridPlane::Xy),
             None,
+            None,
         );
         assert_eq!(
             grids(&scene),
             vec![(GridPlane::Xy, model_b)],
             "only the wireframe quad draw gets a grid, not the textured mesh"
         );
+    }
+
+    #[test]
+    fn build_scene_grid_mesh_scopes_grid_to_the_placement_quad_only() {
+        // `grid_mesh = Some(id)` narrows the --grid-local overlay to draws of that
+        // mesh only. This is the wireframe-reveal case (#114): a *content* mesh
+        // (the can, mesh 0) is drawn wireframe alongside the placement quad (mesh
+        // 1), so the plain "all wireframe draws" scoping would lay a stray floor
+        // grid under every can. Pinning `grid_mesh = Some(1)` keeps exactly one
+        // grid — under the quad — while the cans stay wireframe with no grid.
+        let mut model_can = Matrix4::IDENTITY.to_cols_array();
+        model_can[12] = 3.0;
+        let mut model_quad = Matrix4::IDENTITY.to_cols_array();
+        model_quad[12] = 9.0;
+        // Two cans (mesh 0) + one placement quad (mesh 1), all wireframe.
+        let draws = [
+            Draw {
+                mesh_id: 0,
+                model: model_can,
+                mode: Some(RenderMode::Wireframe),
+            },
+            Draw {
+                mesh_id: 0,
+                model: Matrix4::IDENTITY.to_cols_array(),
+                mode: Some(RenderMode::Wireframe),
+            },
+            Draw {
+                mesh_id: 1,
+                model: model_quad,
+                mode: Some(RenderMode::Wireframe),
+            },
+        ];
+
+        let grids = |scene: &[DrawableObject]| -> Vec<(GridPlane, [f32; 16])> {
+            scene
+                .iter()
+                .filter_map(|o| match o {
+                    DrawableObject::PlaneGrid { plane, model } => Some((*plane, *model)),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        // Without a mesh filter, every wireframe draw gets a grid (3 here) — the
+        // very over-emission #110 fixes.
+        let scene = build_scene(
+            &draws,
+            RenderMode::Filled,
+            false,
+            false,
+            false,
+            Some(GridPlane::Xy),
+            None,
+            None,
+        );
+        assert_eq!(
+            grids(&scene).len(),
+            3,
+            "unscoped grid lands on every wireframe draw"
+        );
+
+        // Scoped to the placement quad's mesh (id 1) ⇒ exactly one grid, at the
+        // quad's model — no grid under either can.
+        let scene = build_scene(
+            &draws,
+            RenderMode::Filled,
+            false,
+            false,
+            false,
+            Some(GridPlane::Xy),
+            Some(1),
+            None,
+        );
+        assert_eq!(
+            grids(&scene),
+            vec![(GridPlane::Xy, model_quad)],
+            "grid_mesh = Some(1) lays exactly one grid, under the placement quad only"
+        );
+
+        // A mesh filter with no matching draw ⇒ no grid at all.
+        let scene = build_scene(
+            &draws,
+            RenderMode::Filled,
+            false,
+            false,
+            false,
+            Some(GridPlane::Xy),
+            Some(7),
+            None,
+        );
+        assert!(
+            grids(&scene).is_empty(),
+            "grid_mesh naming an absent mesh yields no grid"
+        );
+    }
+
+    #[test]
+    fn build_scene_shadow_draw_becomes_blob_shadow_not_mesh() {
+        // A per-draw mode "shadow" lifts that draw's model into a BlobShadow
+        // grounding blob (not a Mesh), and it carries no AABB / axes gizmo even
+        // when those overlays are on. A mixed FIBA-style scene [shadow, bunny,
+        // quad] must yield exactly one BlobShadow at the shadow draw's model.
+        let mut shadow_m = Matrix4::IDENTITY.to_cols_array();
+        shadow_m[12] = 3.0; // distinct col-major tx
+        let mut bunny_m = Matrix4::IDENTITY.to_cols_array();
+        bunny_m[12] = 4.0;
+        let mut quad_m = Matrix4::IDENTITY.to_cols_array();
+        quad_m[12] = 5.0;
+        let draws = [
+            Draw {
+                mesh_id: 0,
+                model: shadow_m,
+                mode: Some(RenderMode::Shadow),
+            },
+            Draw {
+                mesh_id: 0,
+                model: bunny_m,
+                mode: Some(RenderMode::Textured),
+            },
+            Draw {
+                mesh_id: 1,
+                model: quad_m,
+                mode: Some(RenderMode::Wireframe),
+            },
+        ];
+
+        // aabb + local axes on: the shadow draw contributes a BlobShadow but no
+        // Mesh / AabbBox / CoordinateAxes.
+        let scene = build_scene(
+            &draws,
+            RenderMode::Filled,
+            true,
+            false,
+            true,
+            None,
+            None,
+            None,
+        );
+
+        let blobs: Vec<[f32; 16]> = scene
+            .iter()
+            .filter_map(|o| match o {
+                DrawableObject::BlobShadow { model } => Some(*model),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            blobs,
+            vec![shadow_m],
+            "exactly one BlobShadow, at the shadow draw's model"
+        );
+
+        // The shadow draw must NOT produce a Mesh, and only the two non-shadow
+        // draws get AABB boxes / local axes gizmos.
+        let meshes = scene
+            .iter()
+            .filter(|o| matches!(o, DrawableObject::Mesh { .. }))
+            .count();
+        let aabbs = scene
+            .iter()
+            .filter(|o| matches!(o, DrawableObject::AabbBox { .. }))
+            .count();
+        let axes = scene
+            .iter()
+            .filter(|o| matches!(o, DrawableObject::CoordinateAxes { .. }))
+            .count();
+        assert_eq!(meshes, 2, "shadow draw is not a Mesh; bunny + quad are");
+        assert_eq!(aabbs, 2, "no AABB for the shadow draw");
+        assert_eq!(axes, 2, "no local-axes gizmo for the shadow draw");
     }
 
     #[test]

@@ -67,6 +67,9 @@ mod native {
             show_axes: state.show_axes,
             show_local_axes: state.show_local_axes,
             show_local_grid: None,
+            show_local_grid_mesh: None,
+            pbr: None,
+            msaa: trd_core::Msaa::X4,
         }
     }
 

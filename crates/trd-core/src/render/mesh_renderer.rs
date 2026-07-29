@@ -55,6 +55,11 @@ struct IndexedGeometry {
 /// instance model (`effective = model · base`).
 struct MeshGpu {
     vertex_buffer: wgpu::Buffer,
+    /// Parallel vertex buffer for the Disney PBR path (`disney.wgsl`): the same
+    /// positions + UVs as `vertex_buffer`, but with a derived smooth shading
+    /// **normal** in place of the vertex color. Reuses the `triangles` index
+    /// buffer. Built once per mesh; only bound by [`RenderMode::Pbr`] draws.
+    pbr_vertex_buffer: wgpu::Buffer,
     triangles: IndexBuf,
     edges: IndexBuf,
     aabb: IndexedGeometry,
@@ -72,6 +77,26 @@ fn upload_mesh(device: &wgpu::Device, mesh: &Mesh, base_model: Matrix4) -> MeshG
     let triangles = IndexBuf::new(device, "trd mesh index buffer", &mesh.indices);
     let edges = mesh.edge_indices();
     let edges = IndexBuf::new(device, "trd mesh edge buffer", &edges);
+
+    // PBR vertex buffer (#): derive area-weighted smooth normals (the assets have
+    // no `vn`) and pack position + normal + UV for `disney.wgsl`, reusing the
+    // triangle index buffer above.
+    let normals = compute_smooth_normals(&mesh.vertices, &mesh.indices);
+    let pbr_vertices: Vec<PbrVertex> = mesh
+        .vertices
+        .iter()
+        .zip(&normals)
+        .map(|(v, &normal)| PbrVertex {
+            position: v.position,
+            normal,
+            uv: v.uv,
+        })
+        .collect();
+    let pbr_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("trd mesh pbr vertex buffer"),
+        contents: bytemuck::cast_slice(&pbr_vertices),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
 
     // AABB overlay box: the mesh's own bounding box (mesh-local coords) as 8
     // colored corner vertices + a 12-edge line list. Built once per mesh; drawn
@@ -95,6 +120,7 @@ fn upload_mesh(device: &wgpu::Device, mesh: &Mesh, base_model: Matrix4) -> MeshG
 
     MeshGpu {
         vertex_buffer,
+        pbr_vertex_buffer,
         triangles,
         edges,
         aabb: IndexedGeometry {
@@ -137,6 +163,10 @@ enum DrawKind {
     /// Textured triangles of a mesh (triangle index buffer + textured pipeline,
     /// sampling the bound texture at each vertex UV) (#20).
     Textured(usize),
+    /// Disney **PBR** triangles of a mesh (its dedicated position+normal+UV
+    /// vertex buffer + `disney.wgsl` pipeline, lit by the virtual light rig and
+    /// the bound HDR environment map). Reuses the triangle index buffer.
+    Pbr(usize),
     /// Edge lines of a mesh (its deduped edge index buffer + line pipeline).
     Wireframe(usize),
     /// A mesh's AABB box (its precomputed corner geometry + line pipeline).
@@ -144,6 +174,9 @@ enum DrawKind {
     /// A coordinate-plane grid (the shared per-plane grid vertex buffer indexed
     /// by [`GridPlane::index`], non-indexed line draw).
     Grid(usize),
+    /// A contact / blob **grounding shadow** (the shared shadow quad geometry,
+    /// non-indexed triangle draw, alpha-blended over the frame plane).
+    Shadow,
     /// The coordinate-axes gizmo (shared vertex buffer, non-indexed line draw).
     Axes,
 }
@@ -195,19 +228,33 @@ struct MeshPass {
     filled: wgpu::RenderPipeline,
     wireframe: wgpu::RenderPipeline,
     textured: wgpu::RenderPipeline,
+    /// The contact / blob grounding-shadow pipeline (alpha-blended, depth-write
+    /// off); shares the untextured camera bind-group layout (group 0).
+    shadow: wgpu::RenderPipeline,
+    /// The Disney PBR pipeline (`disney.wgsl`): group 0 = [`pbr_uniform`], group 1
+    /// = the bound albedo texture, group 2 = the HDR environment map.
+    pbr: wgpu::RenderPipeline,
+    /// The per-frame `PbrUniform` (camera `P·V` + world pos, material, lights),
+    /// rewritten each `encode`; bound as group 0 by the PBR pipeline.
+    pbr_uniform: wgpu::Buffer,
+    pbr_bind_group: wgpu::BindGroup,
     camera_uniform: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
 }
 
 impl MeshPass {
-    /// Constructs a `MeshPass` for `format`, building all three pipelines over a
-    /// shared camera bind-group layout. `texture_layout` is the albedo texture's
-    /// group-1 layout (from [`BoundTexture::layout`]), needed by the textured
-    /// pipeline's layout.
+    /// Constructs a `MeshPass` for `format`, building all pipelines over their
+    /// bind-group layouts at `sample_count`× MSAA. `texture_layout` is the albedo
+    /// texture's group-1 layout (from [`BoundTexture::layout`]), shared by the
+    /// textured and PBR pipelines; `env_layout` is the PBR pipeline's group-2
+    /// environment-map layout (from [`BoundEnv::layout`]). Every pipeline in the
+    /// pass shares the one `sample_count` (`1` = no MSAA, single-sample).
     fn new(
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
         texture_layout: &wgpu::BindGroupLayout,
+        env_layout: &wgpu::BindGroupLayout,
+        sample_count: u32,
     ) -> Self {
         // One explicit bind-group layout shared by both untextured pipelines, so
         // the single camera bind group is valid whichever RenderMode is active.
@@ -223,7 +270,7 @@ impl MeshPass {
             &pipeline_layout,
             wgpu::PrimitiveTopology::TriangleList,
             Some(solid_depth_stencil()),
-            MSAA_SAMPLE_COUNT,
+            sample_count,
         );
         let wireframe = create_mesh_pipeline_with(
             device,
@@ -231,8 +278,11 @@ impl MeshPass {
             &pipeline_layout,
             wgpu::PrimitiveTopology::LineList,
             Some(overlay_depth_stencil()),
-            MSAA_SAMPLE_COUNT,
+            sample_count,
         );
+        // Contact / blob grounding-shadow pipeline (#110 follow-up): shares the
+        // untextured camera layout (group 0), alpha-blended, depth-write off.
+        let shadow = create_shadow_pipeline(device, format, &pipeline_layout, sample_count);
         // Textured pipeline (#20): group 0 = the shared camera uniform, group 1 =
         // the bound albedo texture + sampler.
         let textured_pipeline_layout =
@@ -242,7 +292,34 @@ impl MeshPass {
                 immediate_size: 0,
             });
         let textured =
-            create_textured_pipeline(device, format, &textured_pipeline_layout, MSAA_SAMPLE_COUNT);
+            create_textured_pipeline(device, format, &textured_pipeline_layout, sample_count);
+        // Disney PBR pipeline (#): group 0 = the PbrUniform, group 1 = the shared
+        // albedo texture layout, group 2 = the HDR environment map. Its group-0
+        // layout differs from the camera layout, so the encode arm restores the
+        // camera bind group after each PBR draw.
+        let pbr_layout = create_pbr_bind_group_layout(device);
+        let pbr_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("trd pbr pipeline layout"),
+            bind_group_layouts: &[Some(&pbr_layout), Some(texture_layout), Some(env_layout)],
+            immediate_size: 0,
+        });
+        let pbr = create_pbr_pipeline(device, format, &pbr_pipeline_layout, sample_count);
+        // The PbrUniform buffer is (re)written every frame; seed it with a neutral
+        // material so an unconfigured PBR draw still renders something sane.
+        let pbr_uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("trd pbr uniform"),
+            size: std::mem::size_of::<PbrUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let pbr_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("trd pbr bind group"),
+            layout: &pbr_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: pbr_uniform.as_entire_binding(),
+            }],
+        });
         // Identity params ignore the viewport (no intrinsics); each frame's
         // `write_camera` supplies the real target dimensions.
         let (camera_uniform, camera_bind_group) = create_view_proj_binding(
@@ -258,6 +335,10 @@ impl MeshPass {
             filled,
             wireframe,
             textured,
+            shadow,
+            pbr,
+            pbr_uniform,
+            pbr_bind_group,
             camera_uniform,
             camera_bind_group,
         }
@@ -266,6 +347,25 @@ impl MeshPass {
     /// Rewrites the camera `P·V` uniform for this frame's `params`/`viewport`.
     fn write_camera(&self, queue: &wgpu::Queue, params: FrameParams, viewport: Viewport) {
         write_view_proj(queue, &self.camera_uniform, params, viewport);
+    }
+
+    /// Rewrites the Disney PBR uniform (camera `P·V` + world position, material,
+    /// light rig, env gate) for this frame.
+    fn write_pbr(
+        &self,
+        queue: &wgpu::Queue,
+        params: FrameParams,
+        viewport: Viewport,
+        material: &PbrMaterial,
+        use_env: bool,
+    ) {
+        let uniform = PbrUniform::new(
+            params.view_proj_matrix(viewport).to_cols_array(),
+            params.camera_position(),
+            material,
+            use_env,
+        );
+        queue.write_buffer(&self.pbr_uniform, 0, bytemuck::bytes_of(&uniform));
     }
 }
 
@@ -284,6 +384,10 @@ struct MeshStore {
     /// [`DrawableObject::PlaneGrid`] draws the buffer for its plane under its own
     /// model, supplied through the shared instance buffer.
     grid_vertex_buffers: [wgpu::Buffer; 3],
+    /// The contact / blob **grounding-shadow** quad geometry (six `TriangleList`
+    /// vertices, a unit XY quad); each [`DrawableObject::BlobShadow`] draws it
+    /// under its own model through the shared instance buffer, alpha-blended.
+    shadow_vertex_buffer: wgpu::Buffer,
     instance_buffer: wgpu::Buffer,
     instance_capacity: u32,
 }
@@ -327,10 +431,20 @@ impl MeshStore {
             grid_buffer(GridPlane::Yz),
         ];
 
+        // Contact / blob grounding-shadow quad: six TriangleList vertices (a unit
+        // XY quad). Each BlobShadow drawable draws them under its own model via
+        // the shared instance buffer, alpha-blended over the frame plane.
+        let shadow_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("trd shadow vertex buffer"),
+            contents: bytemuck::cast_slice(&blob_shadow_vertices()),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
         Self {
             meshes: gpu_meshes,
             axes_vertex_buffer,
             grid_vertex_buffers,
+            shadow_vertex_buffer,
             instance_buffer,
             instance_capacity,
         }
@@ -343,18 +457,22 @@ impl MeshStore {
     /// Walks `scene` once, bucketing each drawable's instance model by the
     /// geometry it draws (its base model pre-multiplied in, `effective = model ·
     /// base`), then flattens the buckets into one instance list + ordered
-    /// [`DrawCommand`]s. Draw order: filled, textured, grids, wireframe, AABB
-    /// boxes, then axes — so opaque meshes precede the line overlays, and the
-    /// plane grid sits beneath the wireframe/axes gizmos drawn over it.
-    /// Out-of-range mesh ids are skipped.
+    /// [`DrawCommand`]s. Draw order: grounding shadows, filled, textured, PBR,
+    /// grids, wireframe, AABB boxes, then axes — so the blob shadow sits under the
+    /// opaque meshes, which precede the line overlays, and the plane grid sits
+    /// beneath the wireframe/axes gizmos drawn over it. Out-of-range mesh ids are
+    /// skipped.
     fn build_batches(&self, scene: &[DrawableObject]) -> Batches {
         let mesh_count = self.meshes.len();
         let mut filled: Vec<Vec<InstanceRaw>> = vec![Vec::new(); mesh_count];
         let mut textured: Vec<Vec<InstanceRaw>> = vec![Vec::new(); mesh_count];
+        let mut pbr: Vec<Vec<InstanceRaw>> = vec![Vec::new(); mesh_count];
         let mut wireframe: Vec<Vec<InstanceRaw>> = vec![Vec::new(); mesh_count];
         let mut aabb: Vec<Vec<InstanceRaw>> = vec![Vec::new(); mesh_count];
         // One instance bucket per grid plane (XY/XZ/YZ), keyed by GridPlane::index.
         let mut grid: [Vec<InstanceRaw>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+        // Contact / blob grounding-shadow instances (shared quad geometry).
+        let mut shadow: Vec<InstanceRaw> = Vec::new();
         let mut axes: Vec<InstanceRaw> = Vec::new();
         // The background frame plane is a singleton overlay (there is one bound
         // frame texture); the last FramePlane in the scene wins its fit.
@@ -377,7 +495,12 @@ impl MeshStore {
                     match mode {
                         RenderMode::Filled => filled[mesh_id as usize].push(instance),
                         RenderMode::Textured => textured[mesh_id as usize].push(instance),
+                        RenderMode::Pbr => pbr[mesh_id as usize].push(instance),
                         RenderMode::Wireframe => wireframe[mesh_id as usize].push(instance),
+                        // A Shadow draw is emitted as DrawableObject::BlobShadow by
+                        // build_scene, never as a Mesh — so this arm is unreachable;
+                        // skip defensively rather than panic.
+                        RenderMode::Shadow => {}
                     }
                 }
                 DrawableObject::AabbBox { mesh_id, model } => {
@@ -395,6 +518,9 @@ impl MeshStore {
                 DrawableObject::PlaneGrid { plane, model } => {
                     grid[plane.index()].push(InstanceRaw { model });
                 }
+                DrawableObject::BlobShadow { model } => {
+                    shadow.push(InstanceRaw { model });
+                }
                 DrawableObject::FramePlane { fit } => {
                     frame_fit = Some(fit);
                 }
@@ -405,6 +531,10 @@ impl MeshStore {
         // per non-empty group in the layered draw order.
         let mut instances: Vec<InstanceRaw> = Vec::with_capacity(scene.len());
         let mut commands: Vec<DrawCommand> = Vec::new();
+        // Grounding shadows first (right after the background frame plane) so the
+        // opaque content meshes composite on top and only the surrounding rim
+        // darkens the floor.
+        push_command(&mut instances, &mut commands, DrawKind::Shadow, &shadow);
         for (id, bucket) in filled.iter().enumerate() {
             push_command(&mut instances, &mut commands, DrawKind::Filled(id), bucket);
         }
@@ -415,6 +545,9 @@ impl MeshStore {
                 DrawKind::Textured(id),
                 bucket,
             );
+        }
+        for (id, bucket) in pbr.iter().enumerate() {
+            push_command(&mut instances, &mut commands, DrawKind::Pbr(id), bucket);
         }
         for (plane, bucket) in grid.iter().enumerate() {
             push_command(&mut instances, &mut commands, DrawKind::Grid(plane), bucket);
@@ -468,16 +601,26 @@ impl MeshStore {
 pub struct MeshRenderer {
     pass: MeshPass,
     texture: BoundTexture,
+    /// The bound HDR environment map reflected by [`RenderMode::Pbr`] draws.
+    env: BoundEnv,
+    /// The Disney material applied globally to every [`RenderMode::Pbr`] draw.
+    pbr_material: PbrMaterial,
     store: MeshStore,
     frame_plane: FramePlane,
     /// The mesh pass's depth attachment, (re)created lazily in `encode` to match
     /// the viewport. Gives solid (filled/textured) meshes real z-occlusion.
     depth: Option<DepthTarget>,
-    /// The mesh pass's multisampled color attachment ([`MSAA_SAMPLE_COUNT`]×),
+    /// The mesh pass's multisampled color attachment ([`sample_count`](Self::sample_count)×),
     /// (re)created lazily in `encode` to match the viewport. The pass renders into
     /// it and resolves into the caller's single-sample `view`, so every front-end
-    /// gets anti-aliased edges transparently.
+    /// gets anti-aliased edges transparently. `None` when MSAA is disabled
+    /// (`sample_count == 1`): the pass then renders straight into `view`.
     msaa: Option<MsaaColorTarget>,
+    /// The mesh pass's MSAA sample count — `4` (the default,
+    /// [`MSAA_SAMPLE_COUNT`]) for anti-aliased edges, or `1` to render
+    /// single-sampled (no MSAA). Fixed at construction because every pipeline +
+    /// the depth/color attachments must share it.
+    sample_count: u32,
     /// The color format the pipelines were built for; the MSAA color target must
     /// be created with the same format.
     format: wgpu::TextureFormat,
@@ -508,7 +651,10 @@ impl MeshRenderer {
     /// explicit base (preview) model that is pre-multiplied beneath every
     /// per-frame instance model (`effective = model · base`). This is the primary
     /// constructor; [`auto_fit`](Self::auto_fit) derives the base models for you.
-    /// A frame's [`Scene`] references these meshes by id (row index).
+    /// A frame's [`Scene`] references these meshes by id (row index). The mesh
+    /// pass renders at [`MSAA_SAMPLE_COUNT`]×; use
+    /// [`with_sample_count`](Self::with_sample_count) to override (e.g. `1` = no
+    /// MSAA).
     ///
     /// Panics if `meshes` is empty or `meshes`/`base_models` differ in length.
     pub fn new(
@@ -516,6 +662,24 @@ impl MeshRenderer {
         format: wgpu::TextureFormat,
         meshes: &[Mesh],
         base_models: &[Matrix4],
+    ) -> Self {
+        Self::with_sample_count(device, format, meshes, base_models, MSAA_SAMPLE_COUNT)
+    }
+
+    /// Like [`new`](Self::new), but with an explicit mesh-pass MSAA
+    /// `sample_count`: `4` ([`MSAA_SAMPLE_COUNT`]) for anti-aliased edges, or `1`
+    /// to render single-sampled (no MSAA — aliased edges, the raw rasterized
+    /// coverage). All pipelines and the depth/color attachments are built for this
+    /// count.
+    ///
+    /// Panics if `meshes` is empty, `meshes`/`base_models` differ in length, or
+    /// `sample_count` is 0.
+    pub fn with_sample_count(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        meshes: &[Mesh],
+        base_models: &[Matrix4],
+        sample_count: u32,
     ) -> Self {
         assert!(
             !meshes.is_empty(),
@@ -526,19 +690,24 @@ impl MeshRenderer {
             base_models.len(),
             "meshes and base_models must have equal length"
         );
+        assert!(sample_count >= 1, "sample_count must be >= 1");
 
         let texture = BoundTexture::new(device);
-        let pass = MeshPass::new(device, format, texture.layout());
+        let env = BoundEnv::new(device);
+        let pass = MeshPass::new(device, format, texture.layout(), env.layout(), sample_count);
         let store = MeshStore::new(device, meshes, base_models);
-        let frame_plane = FramePlane::new(device, format);
+        let frame_plane = FramePlane::new(device, format, sample_count);
 
         Self {
             pass,
             texture,
+            env,
+            pbr_material: PbrMaterial::default(),
             store,
             frame_plane,
             depth: None,
             msaa: None,
+            sample_count,
             format,
             device: device.clone(),
         }
@@ -556,6 +725,21 @@ impl MeshRenderer {
     /// [`encode`](Self::encode). Until set, the bound texture is 1×1 white.
     pub fn set_texture(&mut self, texture: &dyn Texture) {
         self.texture.set(texture);
+    }
+
+    /// Sets the Disney [`PbrMaterial`] applied to every [`RenderMode::Pbr`] draw
+    /// (the material is global — one per render invocation). Takes effect on the
+    /// next [`encode`](Self::encode).
+    pub fn set_pbr_material(&mut self, material: PbrMaterial) {
+        self.pbr_material = material;
+    }
+
+    /// Binds `env` as the equirectangular HDR environment map reflected by
+    /// [`RenderMode::Pbr`] draws. The probe is (re)uploaded lazily on the next
+    /// [`encode`](Self::encode). Until set, PBR draws use no environment
+    /// reflection (a 1×1 black probe keeps the bind group valid).
+    pub fn set_env_map(&mut self, env: EnvMapData) {
+        self.env.set(env);
     }
 
     /// Uploads `rgba` (tightly-packed, row-major `height`×`width`×4) as the
@@ -602,6 +786,16 @@ impl MeshRenderer {
     ) {
         // 1. Camera P·V for this frame.
         self.pass.write_camera(queue, params, viewport);
+        // 1b. Disney PBR uniform for this frame (camera P·V + world pos, the
+        //     global material, and whether an HDR probe is bound). Cheap; written
+        //     unconditionally so a PBR draw always has a current uniform.
+        self.pass.write_pbr(
+            queue,
+            params,
+            viewport,
+            &self.pbr_material,
+            self.env.has_env(),
+        );
 
         // 2. Walk the scene once into per-geometry instance batches, then upload
         //    the flattened instance models (growing the buffer if needed).
@@ -609,8 +803,9 @@ impl MeshRenderer {
         self.store
             .upload_instances(&self.device, queue, &batches.instances);
 
-        // 3. Match the depth + MSAA color attachments to the viewport (solid
-        //    meshes z-occlude; the multisampled color is resolved into `view`).
+        // 3. Match the depth + (when MSAA is on) color attachments to the viewport
+        //    (solid meshes z-occlude; the multisampled color, if any, is resolved
+        //    into `view`).
         self.ensure_depth(viewport);
         self.ensure_msaa(viewport);
 
@@ -621,26 +816,41 @@ impl MeshRenderer {
         }
 
         // 5. (Re)upload the bound albedo texture on first use / after set_texture
-        //    (#20): encode is where a GPU queue is available.
+        //    (#20) and the HDR environment map (after set_env_map): encode is where
+        //    a GPU queue is available.
         let texture_bind_group = self.texture.ensure_uploaded(&self.device, queue);
+        let env_bind_group = self.env.ensure_uploaded(&self.device, queue);
 
-        // 6. Record the pass. The mesh pass renders into the multisampled color
-        //    attachment and resolves into the caller's single-sample `view`, so
-        //    every front-end (offscreen CLI, native window, wasm canvas) gets
-        //    anti-aliased edges with no API change.
+        // 6. Record the pass. With MSAA (`sample_count > 1`) the mesh pass renders
+        //    into the multisampled color attachment and resolves into the caller's
+        //    single-sample `view`, so every front-end (offscreen CLI, native
+        //    window, wasm canvas) gets anti-aliased edges with no API change.
+        //    Without MSAA (`sample_count == 1`) there is no MSAA target — the pass
+        //    renders straight into `view` (no resolve).
         let depth_view = &self.depth.as_ref().expect("depth set in step 3").view;
-        let msaa_view = &self.msaa.as_ref().expect("msaa set in step 3").view;
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("trd mesh pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: msaa_view,
+        let color_attachment = match self.msaa.as_ref() {
+            Some(msaa) => wgpu::RenderPassColorAttachment {
+                view: &msaa.view,
                 depth_slice: None,
                 resolve_target: Some(view),
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                     store: wgpu::StoreOp::Store,
                 },
-            })],
+            },
+            None => wgpu::RenderPassColorAttachment {
+                view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            },
+        };
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("trd mesh pass"),
+            color_attachments: &[Some(color_attachment)],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: depth_view,
                 depth_ops: Some(wgpu::Operations {
@@ -680,6 +890,19 @@ impl MeshRenderer {
                     pass.set_bind_group(1, texture_bind_group, &[]);
                     draw_indexed(&mut pass, &mesh.vertex_buffer, &mesh.triangles, range);
                 }
+                DrawKind::Pbr(id) => {
+                    let mesh = &self.store.meshes[id];
+                    pass.set_pipeline(&self.pass.pbr);
+                    // group 0 = PbrUniform (differs from the camera layout),
+                    // group 1 = albedo, group 2 = HDR environment map.
+                    pass.set_bind_group(0, &self.pass.pbr_bind_group, &[]);
+                    pass.set_bind_group(1, texture_bind_group, &[]);
+                    pass.set_bind_group(2, env_bind_group, &[]);
+                    draw_indexed(&mut pass, &mesh.pbr_vertex_buffer, &mesh.triangles, range);
+                    // Restore group 0 = camera for the following non-PBR draws
+                    // (their pipelines' group-0 layout is the camera uniform).
+                    pass.set_bind_group(0, &self.pass.camera_bind_group, &[]);
+                }
                 DrawKind::Wireframe(id) => {
                     let mesh = &self.store.meshes[id];
                     pass.set_pipeline(&self.pass.wireframe);
@@ -695,6 +918,11 @@ impl MeshRenderer {
                     pass.set_vertex_buffer(0, self.store.grid_vertex_buffers[plane].slice(..));
                     pass.draw(0..GRID_VERTEX_COUNT, range);
                 }
+                DrawKind::Shadow => {
+                    pass.set_pipeline(&self.pass.shadow);
+                    pass.set_vertex_buffer(0, self.store.shadow_vertex_buffer.slice(..));
+                    pass.draw(0..SHADOW_VERTEX_COUNT, range);
+                }
                 DrawKind::Axes => {
                     pass.set_pipeline(&self.pass.wireframe);
                     pass.set_vertex_buffer(0, self.store.axes_vertex_buffer.slice(..));
@@ -705,8 +933,9 @@ impl MeshRenderer {
     }
 
     /// Ensures the depth attachment matches `viewport` (each dimension clamped to
-    /// ≥ 1) at [`MSAA_SAMPLE_COUNT`] (the depth sample count must match the color
-    /// attachment), recreating it only when the target size changes.
+    /// ≥ 1) at the renderer's [`sample_count`](Self::sample_count) (the depth
+    /// sample count must match the color attachment), recreating it only when the
+    /// target size changes.
     fn ensure_depth(&mut self, viewport: Viewport) {
         let dw = viewport.width.max(1);
         let dh = viewport.height.max(1);
@@ -715,14 +944,21 @@ impl MeshRenderer {
             .as_ref()
             .is_none_or(|d| d.width != dw || d.height != dh)
         {
-            self.depth = Some(create_depth_target(&self.device, dw, dh, MSAA_SAMPLE_COUNT));
+            self.depth = Some(create_depth_target(&self.device, dw, dh, self.sample_count));
         }
     }
 
     /// Ensures the multisampled color attachment matches `viewport` (each
-    /// dimension clamped to ≥ 1) at [`MSAA_SAMPLE_COUNT`] and the renderer's
-    /// color `format`, recreating it only when the target size changes.
+    /// dimension clamped to ≥ 1) at the renderer's
+    /// [`sample_count`](Self::sample_count) and color `format`, recreating it only
+    /// when the target size changes. When MSAA is disabled (`sample_count == 1`)
+    /// no MSAA target is needed — the pass renders straight into the caller's
+    /// single-sample `view` — so this clears it to `None`.
     fn ensure_msaa(&mut self, viewport: Viewport) {
+        if self.sample_count <= 1 {
+            self.msaa = None;
+            return;
+        }
         let dw = viewport.width.max(1);
         let dh = viewport.height.max(1);
         if self
@@ -735,7 +971,7 @@ impl MeshRenderer {
                 self.format,
                 dw,
                 dh,
-                MSAA_SAMPLE_COUNT,
+                self.sample_count,
             ));
         }
     }

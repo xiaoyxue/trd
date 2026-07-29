@@ -22,10 +22,11 @@ Emitted params columns (all optional except `model`, which is always emitted):
     (`List<UInt32>`) + `draw_model` (`List<FixedSizeList<f32>[16]>`) only when
     *every* row provides `"draws"`. When absent, one instance of mesh 0 is placed
     by each frame's own `model`. Each draw may carry an optional `"mode"`
-    (`"filled"`/`"wireframe"`/`"textured"`) render-mode override; when *any* draw
-    names one, the per-draw `draw_mode` (`List<UInt8>`) column is emitted
-    (`0`=filled, `1`=wireframe, `2`=textured, `255`=inherit the front-end's global
-    mode). This lets one frame mix e.g. a textured mesh with a wireframe overlay.
+    (`"filled"`/`"wireframe"`/`"textured"`/`"shadow"`) render-mode override; when
+    *any* draw names one, the per-draw `draw_mode` (`List<UInt8>`) column is emitted
+    (`0`=filled, `1`=wireframe, `2`=textured, `3`=shadow grounding blob,
+    `255`=inherit the front-end's global mode). This lets one frame mix e.g. a
+    textured mesh with a wireframe overlay and a grounding shadow.
   * **Background frame reference** (per-frame): `frame_path` (native filesystem
     path) and/or `frame_url` (browser URL) name the still image the shell loads and
     composites *beneath* the scene via a `FramePlane`. Each is emitted when *any*
@@ -113,7 +114,7 @@ def main() -> None:
         # 255 = "inherit the front-end's global mode". So a stream can flip
         # just an overlay quad to wireframe while every other draw follows
         # the renderer's `--wireframe`/`--textured`/default mode.
-        mode_wire = {"filled": 0, "wireframe": 1, "textured": 2, "inherit": 255}
+        mode_wire = {"filled": 0, "wireframe": 1, "textured": 2, "shadow": 3, "inherit": 255}
         if any("mode" in d for r in rows for d in r["draws"]):
             def to_mode_byte(d):
                 m = d.get("mode", "inherit")
@@ -122,7 +123,7 @@ def main() -> None:
                 if m not in mode_wire:
                     raise SystemExit(
                         f"error: draw mode {m!r} must be one of "
-                        f"{sorted(mode_wire)} or an int 0/1/2/255"
+                        f"{sorted(mode_wire)} or an int 0/1/2/3/255"
                     )
                 return mode_wire[m]
 

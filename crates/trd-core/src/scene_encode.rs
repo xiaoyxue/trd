@@ -208,6 +208,8 @@ fn mode_to_wire(mode: Option<RenderMode>) -> u8 {
         Some(RenderMode::Filled) => 0,
         Some(RenderMode::Wireframe) => 1,
         Some(RenderMode::Textured) => 2,
+        Some(RenderMode::Shadow) => 3,
+        Some(RenderMode::Pbr) => 4,
     }
 }
 

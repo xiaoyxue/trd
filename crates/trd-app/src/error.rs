@@ -18,4 +18,7 @@ pub enum AppError {
     /// The adapter does not support the window surface.
     #[error("the GPU adapter does not support the window surface")]
     SurfaceUnsupported,
+    /// The `--env` HDR environment map could not be decoded.
+    #[error("failed to load environment map: {0}")]
+    EnvMap(String),
 }

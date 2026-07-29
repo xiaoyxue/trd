@@ -73,10 +73,10 @@ pub(crate) const fn axes_vertices() -> [Vertex; 6] {
     ]
 }
 
-/// RGB color of the coordinate-plane grid overlay (#PlaneGrid): a neutral light
-/// gray so the grid reads as a reference lattice without competing with the
-/// red/green/blue axes gizmo drawn over it.
-pub(crate) const GRID_COLOR: [f32; 3] = [0.75, 0.75, 0.75];
+/// RGB color of the coordinate-plane grid overlay (#PlaneGrid): a light gray —
+/// bright enough to read clearly over the court, but softened off pure white so
+/// it doesn't compete with the red/green/blue axes gizmo drawn over it.
+pub(crate) const GRID_COLOR: [f32; 3] = [0.65, 0.65, 0.65];
 
 /// Number of cells per side of the coordinate-plane grid. The grid spans the
 /// model-space square `[-GRID_HALF, GRID_HALF]²`; at `GRID_HALF = 3` (three
@@ -132,4 +132,32 @@ pub(crate) fn grid_vertices(plane: GridPlane) -> Vec<Vertex> {
         verts.push(vert(lift(GRID_HALF, t)));
     }
     verts
+}
+
+/// Number of `TriangleList` vertices in the **contact/blob-shadow** quad: two
+/// triangles → `6`.
+pub(crate) const SHADOW_VERTEX_COUNT: u32 = 6;
+
+/// The `TriangleList` vertices of the **contact/blob-shadow** quad: a unit square
+/// in the model-space XY plane (`[-1, 1]²` at `z = 0`). `shadow.wgsl` reads each
+/// vertex's local `position.xy` as the radial coordinate and feathers a soft dark
+/// alpha (darkest under the placed mesh, fading to `0` at the rim), so a
+/// [`DrawableObject::BlobShadow`](super::DrawableObject::BlobShadow) lays a
+/// grounding shadow on the plane beneath a placed mesh via its per-instance
+/// model. Drawn non-indexed (`draw(0..SHADOW_VERTEX_COUNT, ..)`), alpha-blended
+/// over the background frame plane.
+pub(crate) fn blob_shadow_vertices() -> [Vertex; SHADOW_VERTEX_COUNT as usize] {
+    let v = |x: f32, y: f32| Vertex {
+        position: [x, y, 0.0],
+        color: [0.0, 0.0, 0.0],
+        uv: [0.0, 0.0],
+    };
+    [
+        v(-1.0, -1.0),
+        v(1.0, -1.0),
+        v(1.0, 1.0),
+        v(-1.0, -1.0),
+        v(1.0, 1.0),
+        v(-1.0, 1.0),
+    ]
 }

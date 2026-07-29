@@ -19,6 +19,11 @@
 //! * `stage2.arrow` — a textured bunny anchored on that quad, with AABB + local
 //!   axes + the wireframe quad overlay.
 //!
+//! Each fixture is rendered **twice** — at 4× MSAA (the default anti-aliased mesh
+//! pass) and with MSAA disabled ([`trd_core::Msaa::Off`], single-sample) — each
+//! pinned to its own goldens (`stageN_*` vs `stageN_noaa_*`), so both the
+//! multisampled + resolve path and the raw single-sample path are covered.
+//!
 //! GPU-gated (`#[ignore]`, like the other render tests): run on a GPU box with
 //! ```text
 //! cargo test -p trd-core --test golden_render -- --ignored
@@ -43,7 +48,7 @@ use std::path::{Path, PathBuf};
 
 use arrow::array::{Array, FixedSizeListArray, UInt8Array};
 use arrow::ipc::reader::StreamReader;
-use trd_core::{run_stream, ImageData, RenderMode, RenderOptions};
+use trd_core::{run_stream, ImageData, Msaa, RenderMode, RenderOptions};
 
 /// Golden render resolution (16:9; the fixtures' CV `k` is rescaled to match).
 const WIDTH: u32 = 320;
@@ -275,7 +280,9 @@ fn check_fixture(name: &str, fixture: &str, options: RenderOptions) {
 /// Stage 1: the reconstructed placement quad only — a cyan wireframe quad placed
 /// by the authored CV camera, with each draw's local axes. Exercises Arrow
 /// mesh+params decode, CV `k` normalization, per-draw model + `wireframe` mode,
-/// and the local-axes gizmo.
+/// and the local-axes gizmo. Rendered at 4× MSAA (the default anti-aliased mesh
+/// pass); the [`golden_stage1_placement_quad_no_msaa`] counterpart covers the
+/// single-sample path.
 #[test]
 #[ignore = "requires a GPU adapter"]
 fn golden_stage1_placement_quad() {
@@ -288,6 +295,32 @@ fn golden_stage1_placement_quad() {
             show_axes: false,
             show_local_axes: true,
             show_local_grid: None,
+            show_local_grid_mesh: None,
+            pbr: None,
+            msaa: Msaa::X4,
+        },
+    );
+}
+
+/// Stage 1 with **MSAA disabled** ([`Msaa::Off`], single-sample): the same
+/// placement-quad scene rendered without multisampling, so the wireframe / axes
+/// edges are the raw rasterized coverage. Guards the non-MSAA color-attachment
+/// path (no MSAA target, no resolve) against regression, and pins its own golden.
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn golden_stage1_placement_quad_no_msaa() {
+    check_fixture(
+        "stage1_noaa",
+        "stage1.arrow",
+        RenderOptions {
+            mode: RenderMode::Filled,
+            show_aabb: false,
+            show_axes: false,
+            show_local_axes: true,
+            show_local_grid: None,
+            show_local_grid_mesh: None,
+            pbr: None,
+            msaa: Msaa::Off,
         },
     );
 }
@@ -295,7 +328,9 @@ fn golden_stage1_placement_quad() {
 /// Stage 2: the textured bunny anchored on the placement quad, with its AABB,
 /// local axes, and the wireframe quad overlay. Exercises the full textured
 /// pipeline (0.0.4 texture table), multi-mesh draw lists, AABB + local-axes
-/// gizmos, and per-draw mode inheritance.
+/// gizmos, and per-draw mode inheritance. Rendered at 4× MSAA; the
+/// [`golden_stage2_textured_bunny_no_msaa`] counterpart covers the single-sample
+/// path.
 #[test]
 #[ignore = "requires a GPU adapter"]
 fn golden_stage2_textured_bunny() {
@@ -308,6 +343,32 @@ fn golden_stage2_textured_bunny() {
             show_axes: false,
             show_local_axes: true,
             show_local_grid: None,
+            show_local_grid_mesh: None,
+            pbr: None,
+            msaa: Msaa::X4,
+        },
+    );
+}
+
+/// Stage 2 with **MSAA disabled** ([`Msaa::Off`], single-sample): the textured
+/// bunny + AABB + local axes rendered without multisampling. The mesh silhouette
+/// and gizmo edges are aliased, so its golden differs from the 4× one — together
+/// they pin both the anti-aliased and the raw single-sample mesh passes.
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn golden_stage2_textured_bunny_no_msaa() {
+    check_fixture(
+        "stage2_noaa",
+        "stage2.arrow",
+        RenderOptions {
+            mode: RenderMode::Textured,
+            show_aabb: true,
+            show_axes: false,
+            show_local_axes: true,
+            show_local_grid: None,
+            show_local_grid_mesh: None,
+            pbr: None,
+            msaa: Msaa::Off,
         },
     );
 }

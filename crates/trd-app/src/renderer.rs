@@ -4,7 +4,8 @@
 use std::sync::Arc;
 
 use trd_core::{
-    build_scene, FrameFit, GridPlane, ImageTexture, Mesh, MeshRenderer, RenderMode, Viewport,
+    build_scene, EnvMapData, FrameFit, GridPlane, ImageTexture, Mesh, MeshRenderer, PbrMaterial,
+    RenderMode, Viewport,
 };
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
@@ -127,8 +128,25 @@ impl WindowRenderer {
         }
     }
 
+    /// Sets the Disney PBR material applied to [`RenderMode::Pbr`] meshes. No-op
+    /// until the renderer is built.
+    pub(crate) fn set_pbr_material(&mut self, material: PbrMaterial) {
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.set_pbr_material(material);
+        }
+    }
+
+    /// Binds the HDR environment probe reflected by PBR meshes. No-op until the
+    /// renderer is built; re-uploaded lazily on the next `render`.
+    pub(crate) fn set_env_map(&mut self, env: EnvMapData) {
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.set_env_map(env);
+        }
+    }
+
     /// Renders one frame's [`Scene`](trd_core::Scene) to the window surface.
     /// No-op until the renderer is built and a frame is available.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn render(
         &mut self,
         frame: Option<&FrameData>,
@@ -137,6 +155,7 @@ impl WindowRenderer {
         show_axes: bool,
         show_local_axes: bool,
         show_local_grid: Option<GridPlane>,
+        show_local_grid_mesh: Option<u32>,
     ) {
         let (Some(renderer), Some(frame)) = (self.renderer.as_mut(), frame) else {
             return;
@@ -175,6 +194,7 @@ impl WindowRenderer {
             show_axes,
             show_local_axes,
             show_local_grid,
+            show_local_grid_mesh,
             frame_fit,
         );
         let mut encoder = self

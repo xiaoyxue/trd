@@ -14,4 +14,4 @@ trd-core.workspace = true
 clap = { version = "4", features = ["derive"] }
 env_logger = "0.11"
 log = "0.4"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "hdr"] }
