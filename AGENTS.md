@@ -99,7 +99,8 @@ Guidance for agents working in this repository.
   `MESA_VK_DEVICE_SELECT=<vendorId>:<deviceId>`; on multi-GPU NVIDIA use
   `__NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia` (GL) — plain
   `CUDA_VISIBLE_DEVICES` does not filter Vulkan physical devices.
-- **Golden / snapshot render test (#88).** `crates/trd-core/tests/golden_render.rs`
+- **Golden / snapshot render test (#88) — the required render-regression gate.**
+  `crates/trd-core/tests/golden_render.rs`
   feeds committed Arrow fixtures (`crates/trd-core/tests/golden/stage{1,2}.arrow`,
   the reduced two-stage cornellbox placement demo) through the real
   `run_stream` pipeline and pixel-diffs the frames against committed golden PNGs
@@ -107,7 +108,12 @@ Guidance for agents working in this repository.
   `0.0.5` `frame_path`, which the test resolves against `tests/golden/frames/`
   (committed cornellbox stills) and composites the scene over — an AR composite
   over the cornellbox background (test-side `--frames-base`). It is GPU-gated
-  (`#[ignore]`), so run it with the nixGL wrapper below. After changing the
+  (`#[ignore]`), so run it with the nixGL wrapper below (Linux) or directly on a
+  Windows box with a discrete GPU. **It is a mandatory test:** any change that
+  touches the render path (`crates/trd-core` render code, PBR/tone-map, shaders,
+  or the golden fixtures) MUST run `golden_render -- --ignored` on a real GPU and
+  land green — on **every** platform where a GPU is available — before the task
+  is done. After changing the
   fixtures or making an *intended* visual change, regenerate:
   ```sh
   # 1. rebuild the .arrow fixtures + stills (needs uv + ffmpeg on PATH)
@@ -156,6 +162,15 @@ Guidance for agents working in this repository.
     plus the GPU-gated tests (`golden_render` etc.) via the nixGL wrapper.
   - **Windows:** build/run the affected native path (`trd-cli`/`trd-app` with the
     MSVC toolchain; `examples/render.ps1` for the demo) and confirm it renders.
+    On a box with a discrete GPU, the golden test is **runnable on Windows too**
+    (wgpu Vulkan — verified on a GTX 1080 Ti), so also run
+    `cargo test -p trd-core --test golden_render -- --ignored` there — don't
+    defer it entirely to Linux.
+  - **Required render gate:** for any change touching the render path, the
+    GPU-gated `golden_render` suite (incl. `golden_stage2_pbr_{aces,reinhard}`)
+    MUST pass on a real GPU (or the goldens be regenerated for an *intended*
+    visual change) and the result recorded on the PR — it is the primary
+    pixel-level regression net.
   - Whichever platform you cannot run yourself, leave an explicit **handoff** note
     (exact commands + expected result) in the issue **and** the PR so the other
     platform's verification can be completed and recorded there.
