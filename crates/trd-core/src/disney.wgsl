@@ -35,6 +35,8 @@ struct PbrUniform {
     mat3: vec4<f32>,
     // num_dir_lights, num_point_lights, use_env, light_scale
     counts: vec4<f32>,
+    // tonemap mode (0 = reinhard, 1 = aces), reserved, reserved, reserved
+    mat4: vec4<f32>,
     // xyz = direction the light travels, w = intensity
     dir_lights: array<vec4<f32>, MAX_LIGHTS>,
     // xyz = world position, w = intensity
@@ -197,6 +199,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let ambient = u.mat3.w;
     let light_scale = u.counts.w;
     let use_env = u.counts.z > 0.5;
+    let tonemap_mode = u.mat4.x;
 
     let base_color = textureSample(albedo_tex, albedo_samp, in.uv).rgb * u.mat3.rgb;
 
@@ -236,9 +239,23 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         color = color + env * fres;
     }
 
-    // Exposure + Reinhard tone map, keeping the result in linear space for the
-    // sRGB color target to encode.
+    // Exposure + tone map. `tonemap_mode` selects the curve: 0 = per-channel
+    // Reinhard `x/(1+x)` (the default, byte-identical to trd's historical
+    // pipeline), 1 = ACES filmic (Narkowicz RRT+ODT fit,
+    // ref/ToneMapping/tonemap.frag) — a softer highlight roll-off that retains
+    // hue/saturation on bright albedo. `exposure` scales the linear radiance
+    // first (the ACES adapted_lum); the result stays linear for the sRGB target.
     let exposed = color * exposure;
-    let mapped = exposed / (vec3<f32>(1.0) + exposed);
-    return vec4<f32>(mapped, 1.0);
+    var mapped: vec3<f32>;
+    if (tonemap_mode > 0.5) {
+        let aa: f32 = 2.51;
+        let bb: f32 = 0.03;
+        let cc: f32 = 2.43;
+        let dd: f32 = 0.59;
+        let ee: f32 = 0.14;
+        mapped = (exposed * (aa * exposed + bb)) / (exposed * (cc * exposed + dd) + ee);
+    } else {
+        mapped = exposed / (vec3<f32>(1.0) + exposed);
+    }
+    return vec4<f32>(clamp(mapped, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
 }

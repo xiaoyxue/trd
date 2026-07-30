@@ -361,6 +361,7 @@ pub fn run() -> Result<(), AppError> {
             roughness: cli.roughness,
             env_intensity: cli.env_intensity,
             exposure: cli.exposure,
+            tonemap: cli.tonemap.into(),
             ..Default::default()
         };
         let env_map = match cli.env.as_ref() {
