@@ -19,10 +19,19 @@
 //! * `stage2.arrow` — a textured bunny anchored on that quad, with AABB + local
 //!   axes + the wireframe quad overlay.
 //!
-//! Each fixture is rendered **twice** — at 4× MSAA (the default anti-aliased mesh
-//! pass) and with MSAA disabled ([`trd_core::Msaa::Off`], single-sample) — each
-//! pinned to its own goldens (`stageN_*` vs `stageN_noaa_*`), so both the
-//! multisampled + resolve path and the raw single-sample path are covered.
+//! The `stage1`/`stage2` fixtures are each rendered **twice** — at 4× MSAA (the
+//! default anti-aliased mesh pass) and with MSAA disabled ([`trd_core::Msaa::Off`],
+//! single-sample) — each pinned to its own goldens (`stageN_*` vs `stageN_noaa_*`),
+//! so both the multisampled + resolve path and the raw single-sample path are
+//! covered.
+//!
+//! The **`stage2` mesh is additionally rendered through the Disney PBR path**
+//! ([`trd_core::RenderMode::Pbr`]) with a deterministic synthetic HDR environment
+//! probe (no external `.hdr` decode), once per tone-map operator — pinning both
+//! the historical [`trd_core::Tonemap::Reinhard`] curve and the [`Tonemap::Aces`]
+//! filmic curve (#116). These `stage2_pbr_{reinhard,aces}_*` goldens are the
+//! regression net for the physically-based shading + envmap-reflection + tone-map
+//! stages of `disney.wgsl`.
 //!
 //! GPU-gated (`#[ignore]`, like the other render tests): run on a GPU box with
 //! ```text
@@ -48,7 +57,10 @@ use std::path::{Path, PathBuf};
 
 use arrow::array::{Array, FixedSizeListArray, UInt8Array};
 use arrow::ipc::reader::StreamReader;
-use trd_core::{run_stream, ImageData, Msaa, RenderMode, RenderOptions};
+use trd_core::{
+    run_stream, EnvMapData, ImageData, Msaa, PbrConfig, PbrMaterial, RenderMode, RenderOptions,
+    Tonemap,
+};
 
 /// Golden render resolution (16:9; the fixtures' CV `k` is rescaled to match).
 const WIDTH: u32 = 320;
@@ -124,8 +136,83 @@ fn resolve_background(path: &str) -> Option<ImageData> {
     })
 }
 
-/// Run the committed fixture through the real pipeline and decode the output
-/// Arrow stream back into per-frame tightly-packed RGBA.
+/// A small, deterministic synthetic HDR environment probe (equirectangular,
+/// linear-RGB `height`×`width`×4 f32) for the PBR golden cases. Building it in
+/// code keeps the fixture self-contained — no `.hdr` file decode, no extra
+/// binary asset — while still exercising the real envmap-reflection path: a
+/// vertical sky→ground gradient with a bright "sun" lobe, so metallic surfaces
+/// pick up a non-trivial, reproducible reflection (and HDR highlights that the
+/// tone-map curve must roll off).
+fn synthetic_env() -> EnvMapData {
+    const W: u32 = 64;
+    const H: u32 = 32;
+    let sky = [0.30f32, 0.45, 0.85]; // linear-RGB zenith
+    let ground = [0.35f32, 0.28, 0.20]; // linear-RGB nadir
+    let mut rgba = vec![0.0f32; (W * H * 4) as usize];
+    for y in 0..H {
+        let v = y as f32 / (H - 1) as f32; // 0 top .. 1 bottom
+        for x in 0..W {
+            let u = x as f32 / (W - 1) as f32;
+            let mut c = [
+                sky[0] * (1.0 - v) + ground[0] * v,
+                sky[1] * (1.0 - v) + ground[1] * v,
+                sky[2] * (1.0 - v) + ground[2] * v,
+            ];
+            // A bright warm sun lobe in the upper hemisphere (HDR: > 1.0).
+            let du = u - 0.5;
+            let dv = v - 0.18;
+            let sun = (-(du * du + dv * dv) * 60.0).exp() * 6.0;
+            c[0] += sun;
+            c[1] += sun * 0.95;
+            c[2] += sun * 0.82;
+            let i = ((y * W + x) * 4) as usize;
+            rgba[i] = c[0];
+            rgba[i + 1] = c[1];
+            rgba[i + 2] = c[2];
+            rgba[i + 3] = 1.0;
+        }
+    }
+    EnvMapData::from_rgba32f(W, H, rgba, 2048)
+}
+
+/// The shared Disney material for the PBR golden cases: a saturated, strongly
+/// metallic green under a bright rig — the "deep-green metallic can" scenario
+/// (#116) where per-channel Reinhard desaturates the highlights toward grey and
+/// ACES retains the hue. Only the tone-map operator differs between the two
+/// PBR goldens, isolating the tone-map stage.
+fn pbr_material(tonemap: Tonemap) -> PbrMaterial {
+    PbrMaterial {
+        base_color: [0.20, 0.85, 0.35],
+        metallic: 0.9,
+        roughness: 0.30,
+        specular: 0.6,
+        env_intensity: 1.0,
+        exposure: 1.4,
+        ambient: 0.05,
+        tonemap,
+        ..PbrMaterial::default()
+    }
+}
+
+/// [`RenderOptions`] for a PBR golden case: PBR mesh mode + the synthetic env
+/// probe and the shared material (with `tonemap`), AABB + local-axes overlays
+/// like `stage2`, 4× MSAA.
+fn pbr_options(tonemap: Tonemap) -> RenderOptions {
+    RenderOptions {
+        mode: RenderMode::Pbr,
+        show_aabb: true,
+        show_axes: false,
+        show_local_axes: true,
+        show_local_grid: None,
+        show_local_grid_mesh: None,
+        pbr: Some(PbrConfig {
+            material: pbr_material(tonemap),
+            env_map: Some(synthetic_env()),
+        }),
+        msaa: Msaa::X4,
+    }
+}
+
 fn render_fixture(fixture: &str, options: RenderOptions) -> Vec<Vec<u8>> {
     let bytes = std::fs::read(golden_dir().join(fixture))
         .unwrap_or_else(|e| panic!("read fixture {fixture}: {e}"));
@@ -370,5 +457,38 @@ fn golden_stage2_textured_bunny_no_msaa() {
             pbr: None,
             msaa: Msaa::Off,
         },
+    );
+}
+
+/// Stage 2 (**Disney PBR**, ACES tone-map): the same bunny + wireframe-quad
+/// scene as [`golden_stage2_textured_bunny`], but the bunny is shaded through the
+/// physically-based `disney.wgsl` path — a saturated strongly-metallic green
+/// under the synthetic HDR env probe — and tone-mapped with the ACES filmic
+/// curve ([`Tonemap::Aces`], #116). Exercises PBR material upload, the
+/// environment-map reflection, and the ACES tone-map stage end-to-end; the
+/// [`golden_stage2_pbr_reinhard`] counterpart pins the historical Reinhard curve
+/// on the identical scene, so a regression in *either* operator is caught.
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn golden_stage2_pbr_aces() {
+    check_fixture(
+        "stage2_pbr_aces",
+        "stage2.arrow",
+        pbr_options(Tonemap::Aces),
+    );
+}
+
+/// Stage 2 (**Disney PBR**, Reinhard tone-map): the PBR bunny scene tone-mapped
+/// with the historical per-channel Reinhard curve ([`Tonemap::Reinhard`], the
+/// default). Together with [`golden_stage2_pbr_aces`] it pins both tone-map
+/// operators on an identical physically-based scene, isolating the tone-map
+/// stage of `disney.wgsl`.
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn golden_stage2_pbr_reinhard() {
+    check_fixture(
+        "stage2_pbr_reinhard",
+        "stage2.arrow",
+        pbr_options(Tonemap::Reinhard),
     );
 }

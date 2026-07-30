@@ -359,8 +359,12 @@ pub fn run() -> Result<(), AppError> {
         let material = PbrMaterial {
             metallic: cli.metallic,
             roughness: cli.roughness,
+            specular: cli.specular,
+            clearcoat: cli.clearcoat,
             env_intensity: cli.env_intensity,
             exposure: cli.exposure,
+            ambient: cli.ambient,
+            tonemap: cli.tonemap.into(),
             ..Default::default()
         };
         let env_map = match cli.env.as_ref() {

@@ -13,6 +13,33 @@
 use super::{create_env_bind_group_layout, Vertex};
 use crate::math::Vector3;
 
+/// Tone-mapping operator applied to the linear radiance before the sRGB color
+/// target encodes it. [`Reinhard`](Self::Reinhard) is the per-channel `x/(1+x)`
+/// curve (trd's historical default); [`Aces`](Self::Aces) is the filmic ACES fit
+/// (Narkowicz RRT+ODT, `ref/ToneMapping/tonemap.frag`), whose S-curve gives a
+/// softer highlight roll-off and retains hue/saturation on bright, strongly lit
+/// albedo — where the per-channel Reinhard curve desaturates toward grey.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Tonemap {
+    /// Per-channel Reinhard `x / (1 + x)` — the default, byte-identical to trd's
+    /// historical pipeline.
+    #[default]
+    Reinhard,
+    /// ACES filmic tone map (Narkowicz RRT+ODT fit).
+    Aces,
+}
+
+impl Tonemap {
+    /// The numeric selector packed into the PBR uniform's `mat4.x`, read by
+    /// `disney.wgsl`'s `tonemap_mode` (`0` = Reinhard, `1` = ACES).
+    pub(crate) fn to_uniform(self) -> f32 {
+        match self {
+            Tonemap::Reinhard => 0.0,
+            Tonemap::Aces => 1.0,
+        }
+    }
+}
+
 /// The Disney principled-BRDF material parameters plus trd's shading controls
 /// (a small ambient fill, light-rig scale, environment intensity, and exposure),
 /// applied globally to every [`RenderMode::Pbr`](super::RenderMode) mesh.
@@ -48,12 +75,17 @@ pub struct PbrMaterial {
     pub clearcoat_gloss: f32,
     /// Environment-map reflection gain (0 disables the probe reflection).
     pub env_intensity: f32,
-    /// Tone-map exposure applied to the linear radiance before the Reinhard curve.
+    /// Tone-map exposure applied to the linear radiance before the tone-map curve.
     pub exposure: f32,
     /// Constant ambient fill (× base color) so shadowed regions are not black.
     pub ambient: f32,
     /// Scales every virtual light's contribution (the reference used a fixed 5×).
     pub light_scale: f32,
+    /// Tone-mapping operator applied to the linear radiance (see [`Tonemap`]).
+    /// [`Tonemap::Reinhard`] (the default) keeps existing renders byte-identical;
+    /// [`Tonemap::Aces`] is the filmic curve, giving a softer highlight roll-off
+    /// and better hue retention on bright, strongly lit albedo.
+    pub tonemap: Tonemap,
 }
 
 impl Default for PbrMaterial {
@@ -74,6 +106,7 @@ impl Default for PbrMaterial {
             exposure: 1.2,
             ambient: 0.12,
             light_scale: 2.5,
+            tonemap: Tonemap::Reinhard,
         }
     }
 }
@@ -108,7 +141,7 @@ const DIR_LIGHTS: [[f32; 4]; 3] = [
 const MAX_LIGHTS: usize = 4;
 
 /// GPU byte layout matching `disney.wgsl`'s `PbrUniform` (std140-compatible: all
-/// members are 16-byte-aligned `vec4`/`mat4`). 288 bytes, uploaded per frame
+/// members are 16-byte-aligned `vec4`/`mat4`). 304 bytes, uploaded per frame
 /// (the camera terms change; the material + light rig are constant per render).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -120,6 +153,7 @@ pub(crate) struct PbrUniform {
     mat2: [f32; 4],
     mat3: [f32; 4],
     counts: [f32; 4],
+    mat4: [f32; 4],
     dir_lights: [[f32; 4]; MAX_LIGHTS],
     point_lights: [[f32; 4]; MAX_LIGHTS],
 }
@@ -169,6 +203,7 @@ impl PbrUniform {
                 if use_env { 1.0 } else { 0.0 },
                 material.light_scale,
             ],
+            mat4: [material.tonemap.to_uniform(), 0.0, 0.0, 0.0],
             dir_lights,
             point_lights: [[0.0; 4]; MAX_LIGHTS],
         }
@@ -453,8 +488,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pbr_uniform_is_288_bytes() {
-        assert_eq!(std::mem::size_of::<PbrUniform>(), 288);
+    fn pbr_uniform_is_304_bytes() {
+        assert_eq!(std::mem::size_of::<PbrUniform>(), 304);
         assert_eq!(std::mem::size_of::<PbrUniform>() % 16, 0);
     }
 
@@ -495,5 +530,22 @@ mod tests {
         assert_eq!(with.counts[2], 1.0);
         assert_eq!(without.counts[2], 0.0);
         assert_eq!(with.counts[0], DIR_LIGHTS.len() as f32);
+    }
+
+    #[test]
+    fn tonemap_packs_into_mat4_x_and_defaults_reinhard() {
+        // The default material uses Reinhard (0.0) so existing renders stay
+        // byte-identical; ACES packs 1.0 into the same lane.
+        assert_eq!(PbrMaterial::default().tonemap, Tonemap::Reinhard);
+        let reinhard = PbrUniform::new([0.0; 16], [0.0; 3], &PbrMaterial::default(), false);
+        assert_eq!(reinhard.mat4[0], 0.0);
+        let m = PbrMaterial {
+            tonemap: Tonemap::Aces,
+            ..PbrMaterial::default()
+        };
+        let u = PbrUniform::new([0.0; 16], [0.0; 3], &m, false);
+        assert_eq!(u.mat4[0], 1.0);
+        // The remaining mat4 lanes are reserved (zeroed).
+        assert_eq!([u.mat4[1], u.mat4[2], u.mat4[3]], [0.0, 0.0, 0.0]);
     }
 }

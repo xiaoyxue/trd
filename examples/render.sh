@@ -223,6 +223,7 @@ exposure="1.2"
 ambient="0.12"
 specular="0.5"
 clearcoat="0.0"
+tonemap="reinhard"
 aabb=0
 axes=0
 axes_local=0
@@ -260,6 +261,8 @@ while [ $# -gt 0 ]; do
     --specular=*) specular="${1#--specular=}" ;;
     --clearcoat) shift; clearcoat="${1:?--clearcoat requires a float}" ;;
     --clearcoat=*) clearcoat="${1#--clearcoat=}" ;;
+    --tonemap) shift; tonemap="${1:?--tonemap requires reinhard|aces}" ;;
+    --tonemap=*) tonemap="${1#--tonemap=}" ;;
     --aabb) aabb=1 ;;
     --axes) axes=1 ;;
     --axes-local) axes_local=1 ;;
@@ -494,7 +497,7 @@ textured_flag=()
 pbr_flag=()
 if [ "$pbr" -eq 1 ]; then
   textured_flag=()
-  pbr_flag=(--pbr --metallic "$metallic" --roughness "$roughness" --env-intensity "$env_intensity" --exposure "$exposure" --ambient "$ambient" --specular "$specular" --clearcoat "$clearcoat")
+  pbr_flag=(--pbr --metallic "$metallic" --roughness "$roughness" --env-intensity "$env_intensity" --exposure "$exposure" --ambient "$ambient" --specular "$specular" --clearcoat "$clearcoat" --tonemap "$tonemap")
   [ -n "$env" ] && pbr_flag+=(--env "$env")
 fi
 aabb_flag=()

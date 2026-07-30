@@ -24,7 +24,7 @@ pub use frame_params::{CameraFormError, FrameParams, Viewport};
 pub use gpu_types::{Mesh, Vertex};
 pub use mesh_renderer::MeshRenderer;
 pub use offscreen::{OffscreenError, OffscreenTarget, OFFSCREEN_FORMAT};
-pub use pbr::{EnvMapData, PbrMaterial};
+pub use pbr::{EnvMapData, PbrMaterial, Tonemap};
 pub use pipeline::create_mesh_pipeline;
 pub use scene::{build_scene, Draw, DrawableObject, FrameFit, GridPlane, RenderMode, Scene};
 pub use triangle_renderer::TriangleRenderer;

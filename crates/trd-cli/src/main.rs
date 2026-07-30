@@ -31,6 +31,25 @@ impl From<GridPlaneArg> for trd_core::GridPlane {
     }
 }
 
+/// PBR tone-map operator selector, mapped to [`trd_core::Tonemap`]. Kept in the
+/// binary so `trd-core` needn't depend on clap.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum TonemapArg {
+    /// Per-channel Reinhard `x/(1+x)` — the default.
+    Reinhard,
+    /// ACES filmic tone map (Narkowicz RRT+ODT fit).
+    Aces,
+}
+
+impl From<TonemapArg> for trd_core::Tonemap {
+    fn from(value: TonemapArg) -> Self {
+        match value {
+            TonemapArg::Reinhard => trd_core::Tonemap::Reinhard,
+            TonemapArg::Aces => trd_core::Tonemap::Aces,
+        }
+    }
+}
+
 /// Streaming Arrow renderer for trd (protocol 0.0.5).
 #[derive(Parser)]
 #[command(name = "trd", version, about)]
@@ -83,6 +102,11 @@ struct Cli {
     /// PBR constant ambient fill (× base color) so shadows are not pure black.
     #[arg(long, default_value_t = 0.12)]
     ambient: f32,
+    /// PBR tone-map operator: `reinhard` (per-channel `x/(1+x)`, the default) or
+    /// `aces` (filmic — softer highlight roll-off and better hue retention for
+    /// bright albedo).
+    #[arg(long, value_enum, default_value_t = TonemapArg::Reinhard)]
+    tonemap: TonemapArg,
     /// Overlay each drawn mesh's axis-aligned bounding box as a green
     /// wireframe box.
     #[arg(long)]
@@ -151,6 +175,7 @@ fn main() -> Result<(), trd_core::StreamError> {
             env_intensity: cli.env_intensity,
             exposure: cli.exposure,
             ambient: cli.ambient,
+            tonemap: cli.tonemap.into(),
             ..Default::default()
         };
         let env_map = match cli.env.as_ref() {

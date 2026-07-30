@@ -128,6 +128,22 @@ param(
     [switch]$PlacementQuad,
     [string]$PlacementQuadColor,
     [string]$Texture,
+    # --- Disney PBR shading (-CLI and -Native; mutually exclusive with -Wireframe/
+    # -Textured at the trd-cli/trd-app layer). Numeric values pass straight through
+    # to trd's --metallic/--roughness/… f32 flags; defaults mirror render.sh.
+    [switch]$Pbr,
+    [string]$Env,
+    [string]$Metallic = '0.0',
+    [string]$Roughness = '0.35',
+    [string]$EnvIntensity = '1.0',
+    [string]$Exposure = '1.2',
+    [string]$Ambient = '0.12',
+    [string]$Specular = '0.5',
+    [string]$Clearcoat = '0.0',
+    [ValidateSet('reinhard', 'aces')][string]$Tonemap = 'reinhard',
+    # --- Local coordinate-plane grid (#110/#114), scoped to wireframe draws.
+    [ValidateSet('xy', 'xz', 'yz')][string]$GridLocal,
+    [string]$GridMesh,
     [string]$FramesBase,
     [switch]$Help,
     # Repeatable -Mesh <obj> flags land here (PowerShell can't bind a named
@@ -177,12 +193,34 @@ CONTENT FLAGS (apply to -CLI, -Native and -Web):
   -Aabb             Overlay each mesh's axis-aligned bounding box as a green box (#42).
   -Axes             Overlay a coordinate-axes gizmo (X=red, Y=green, Z=blue) at the origin (#42).
   -AxesLocal        Overlay a coordinate-axes gizmo at EACH drawn object's own local frame (#77).
+  -GridLocal PLANE  Overlay a coordinate-plane grid lattice (PLANE = xy|xz|yz) on each
+                    WIREFRAME drawn object's own local frame (#110). Scoped to wireframe
+                    draws, so a filled/textured mesh gets no grid.
+  -GridMesh ID      Narrow -GridLocal to draws of mesh ID only (e.g. the placement quad),
+                    so a wireframe content mesh doesn't also pick up a floor grid (#114).
+                    Ignored without -GridLocal.
   -PlacementQuad    Append a canonical colored quad mesh (origin-centred, extent 2)
                     as the last -Mesh, drawn as a wireframe placement overlay (#77).
   -PlacementQuadColor "R G B"
                     Tint the placement quad (0..1 floats; default cyan). Implies -PlacementQuad.
   -FramesBase DIR   Composite each frame's 0.0.5 background still (`frame_path`,
                     relative to DIR) beneath the scene via a FramePlane (#63).
+
+PBR SHADING (-CLI and -Native; the Disney principled BRDF, #112):
+  -Pbr              Shade the bound albedo with the Disney BRDF instead of flat texturing.
+                    Replaces -Textured (mutually exclusive); still needs a -Texture for
+                    the albedo. Use -Metallic 1 -Roughness 0.3 for a shiny metal look.
+  -Env HDR          Equirectangular HDR environment map (.hdr) reflected by metallic
+                    surfaces (decoded here; downscaled to 2048px). Only used with -Pbr.
+  -Metallic N       0 = dielectric, 1 = metal          (default 0.0)
+  -Roughness N      0 = mirror, 1 = fully rough         (default 0.35)
+  -EnvIntensity N   Env-map reflection gain (0 = off)   (default 1.0)
+  -Exposure N       Tone-map exposure                   (default 1.2)
+  -Ambient N        Constant ambient fill (× base)      (default 0.12)
+  -Specular N       Dielectric specular strength        (default 0.5)
+  -Clearcoat N      Clearcoat lobe strength             (default 0.0)
+  -Tonemap OP       Tone-map operator: reinhard (default) | aces (filmic, softer highlight
+                    roll-off + better hue retention on bright albedo, #116).
 
   -Help             Show this guidance and exit.
 
@@ -194,6 +232,10 @@ Examples:
   examples\render.ps1 -CLI -Mesh assets\meshes\bunny_with_texture\bunny.obj `
     -Texture assets\meshes\bunny_with_texture\bunny_uv_map1.jpg `
     examples\frames.bunny_dolly.cv.jsonl output\bunny_textured.gif 1024 1024 24  # textured dolly (#20)
+  examples\render.ps1 -CLI -Pbr -Tonemap aces -Metallic 1.0 -Roughness 0.30 `
+    -Env assets\envmap\uffizi-large.hdr `
+    -Mesh assets\meshes\can\coke.obj -Texture assets\meshes\can\can_around.jpg `
+    examples\frames.bunny_dolly.cg.jsonl output\can_pbr_aces.gif 512 512 24  # metallic can, ACES tone-map (#116)
   examples\render.ps1 -CLI -Wireframe -Axes -Aabb -Mesh assets\meshes\bunny.obj `
     examples\frames.bunny_dolly.cg.jsonl output\bunny_dolly.gif 1024 1024 24  # dolly capstone (#49; auto-generates the frames)
   # Two-stage placement-quad pipeline (#77): extract stills once, then render:
@@ -274,6 +316,19 @@ if ($Texture) {
     }
     if ($Wireframe) {
         Write-Error 'error: -Texture and -Wireframe are mutually exclusive.'
+    }
+}
+
+# -Pbr renders the bound albedo with the Disney principled BRDF (a virtual light
+# rig + smooth normals + optional -Env HDR reflection). It needs a -Texture (the
+# albedo) and is mutually exclusive with -Wireframe/-Textured (parity with
+# render.sh's --pbr guard).
+if ($Pbr) {
+    if (-not $Texture) {
+        Write-Error 'error: -Pbr requires a -Texture (the albedo to shade).'
+    }
+    if ($Wireframe) {
+        Write-Error 'error: -Pbr and -Wireframe are mutually exclusive.'
     }
 }
 
@@ -510,10 +565,30 @@ f 1 3 4
     # --- Appearance flags (pass through to trd-cli/trd-app and config.json) ----
     $sceneArgs = @()
     if ($Wireframe) { $sceneArgs += '--wireframe' }
-    if ($Texture) { $sceneArgs += '--textured' }
+    # --pbr shades the same bound albedo with the Disney BRDF; it replaces
+    # --textured (mutually exclusive at the trd-cli/trd-app layer) and forwards the
+    # material + optional HDR env probe. The texture table is still spliced into
+    # the stream so --pbr samples it as albedo.
+    if ($Texture -and -not $Pbr) { $sceneArgs += '--textured' }
+    if ($Pbr) {
+        $sceneArgs += @(
+            '--pbr',
+            '--metallic', $Metallic,
+            '--roughness', $Roughness,
+            '--env-intensity', $EnvIntensity,
+            '--exposure', $Exposure,
+            '--ambient', $Ambient,
+            '--specular', $Specular,
+            '--clearcoat', $Clearcoat,
+            '--tonemap', $Tonemap
+        )
+        if ($Env) { $sceneArgs += @('--env', $Env) }
+    }
     if ($Aabb) { $sceneArgs += '--aabb' }
     if ($Axes) { $sceneArgs += '--axes' }
     if ($AxesLocal) { $sceneArgs += '--axes-local' }
+    if ($GridLocal) { $sceneArgs += @('--grid-local', $GridLocal) }
+    if ($GridMesh) { $sceneArgs += @('--grid-mesh', $GridMesh) }
     if ($FramesBase) { $sceneArgs += @('--frames-base', $FramesBase) }
 
     if ($Web) {
