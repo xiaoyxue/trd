@@ -101,12 +101,21 @@ pub(crate) struct Cli {
     /// PBR surface roughness (0 = mirror, 1 = fully rough).
     #[arg(long, default_value_t = 0.35)]
     pub(crate) roughness: f32,
+    /// PBR dielectric specular reflectance strength (`0.5` ≈ 4% F0).
+    #[arg(long, default_value_t = 0.5)]
+    pub(crate) specular: f32,
+    /// PBR clearcoat lobe strength (a second colorless specular layer).
+    #[arg(long, default_value_t = 0.0)]
+    pub(crate) clearcoat: f32,
     /// PBR environment-map reflection gain (0 disables the probe reflection).
     #[arg(long, default_value_t = 1.0)]
     pub(crate) env_intensity: f32,
     /// PBR tone-map exposure applied before the Reinhard curve.
     #[arg(long, default_value_t = 1.2)]
     pub(crate) exposure: f32,
+    /// PBR constant ambient fill (× base color) so shadows are not pure black.
+    #[arg(long, default_value_t = 0.12)]
+    pub(crate) ambient: f32,
     /// PBR tone-map operator: `reinhard` (per-channel `x/(1+x)`, the default) or
     /// `aces` (filmic — softer highlight roll-off and better hue retention for
     /// bright albedo).
