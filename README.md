@@ -127,15 +127,18 @@ All params columns are optional/additive and drive `clip = P · V · M · (pos, 
 Rendering appearance (filled / wireframe / textured / **PBR**) is a render-time
 choice, **not** a wire column, so the same stream renders any way.
 
-**PBR.** `--pbr` shades meshes with the **Disney principled BRDF** (`disney.wgsl`)
-— the bound albedo lit by a virtual key/fill/rim light rig plus an optional HDR
+**Full column-by-column specification:
+[`docs/protocol/0.0.5.md`](docs/protocol/0.0.5.md).**
+
+## [Material (PBR)](docs/pbr.md)
+
+`--pbr` shades meshes with the **Disney principled BRDF** (`disney.wgsl`) — the
+bound albedo lit by a virtual key/fill/rim light rig plus an optional HDR
 environment probe, with filmic tone mapping. The material + lighting are tunable
 from the CLI: `--metallic` / `--roughness` / `--specular` / `--clearcoat`,
 `--env <file.hdr>` / `--env-intensity`, `--exposure` / `--ambient`, and
-`--tonemap reinhard|aces`. Full parameter reference: **[`docs/pbr.md`](docs/pbr.md)**.
-
-**Full column-by-column specification:
-[`docs/protocol/0.0.5.md`](docs/protocol/0.0.5.md).**
+`--tonemap reinhard|aces`. Full parameter reference + material model:
+**[`docs/pbr.md`](docs/pbr.md)**.
 
 ## Documentation
 
