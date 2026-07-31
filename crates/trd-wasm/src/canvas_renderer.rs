@@ -1,6 +1,6 @@
 use trd_core::{
-    build_scene, DecodedFrame, Draw, EnvMapData, FrameFit, Matrix4, MeshRenderer, PbrMaterial,
-    RenderMode, Tonemap, Viewport, DEFAULT_PREVIEW_TARGET,
+    build_scene, DecodedFrame, Draw, EnvMapData, FrameFit, MeshRenderer, OnscreenTarget,
+    PbrMaterial, RenderMode, Tonemap,
 };
 use wasm_bindgen::prelude::*;
 
@@ -22,14 +22,10 @@ struct AcquiredFrame {
 pub struct CanvasRenderer {
     instance: wgpu::Instance,
     canvas: web_sys::HtmlCanvasElement,
-    surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    config: wgpu::SurfaceConfiguration,
-    /// The sRGB render format used for the surface view + mesh pipeline (the
-    /// sRGB variant of `config.format`), so on-screen colors are linear→sRGB
-    /// encoded to match the headless CLI's `Rgba8UnormSrgb` target.
-    render_format: wgpu::TextureFormat,
+    /// The shared on-screen render harness (surface + config + sRGB view, #103).
+    target: OnscreenTarget,
     /// Built lazily on the first rendered frame: a multi-mesh renderer over the
     /// stream's leading mesh table, or the built-in hello-triangle for a legacy
     /// params-only stream. `None` until the first frame arrives (the mesh table,
@@ -101,20 +97,17 @@ impl CanvasRenderer {
             })
             .await
             .map_err(|error| js_error(format!("request_device failed: {error}")))?;
-        let mut config = surface
+        let config = surface
             .get_default_config(&adapter, width, height)
             .ok_or_else(|| js_error("surface is unsupported by the selected adapter"))?;
         // The browser's preferred canvas format is non-sRGB (e.g. `Bgra8Unorm`),
         // so a pipeline targeting it writes *linear* fragment values with no
         // linear→sRGB encode — making colors look darker/muddier than the headless
-        // CLI, whose target is `Rgba8UnormSrgb` (hardware-encoded on store). Render
-        // the canvas through an **sRGB view** of the same surface (allowed via
-        // `view_formats`) so the browser matches the CLI byte-for-byte.
-        let render_format = config.format.add_srgb_suffix();
-        if render_format != config.format {
-            config.view_formats = vec![render_format];
-        }
-        surface.configure(&device, &config);
+        // CLI, whose target is `Rgba8UnormSrgb` (hardware-encoded on store). The
+        // shared `OnscreenTarget` renders through an **sRGB view** of the surface
+        // (registering it in `view_formats` + configuring), so the browser matches
+        // the CLI byte-for-byte; build the mesh renderer with its `view_format()`.
+        let target = OnscreenTarget::new(&device, surface, config);
 
         Ok(Self {
             renderer: None,
@@ -127,11 +120,9 @@ impl CanvasRenderer {
             env_map: None,
             instance,
             canvas,
-            surface,
             device,
             queue,
-            config,
-            render_format,
+            target,
             input: trd_core::InputSession::new(),
             frames: Vec::new(),
             state: CanvasState::Open,
@@ -471,24 +462,17 @@ impl CanvasRenderer {
 
         measure("trd.canvas.render-submit", || {
             let acquired = self.acquire_frame()?;
-            let view = self.present_view(&acquired.texture);
-            let mut encoder = self
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("trd canvas frame"),
-                });
-            let viewport = Viewport {
-                width: self.config.width,
-                height: self.config.height,
-            };
-            self.renderer
-                .as_mut()
-                .expect("renderer built above")
-                .encode(&self.queue, &mut encoder, &view, params, &scene, viewport);
-            self.queue.submit(Some(encoder.finish()));
-            self.queue.present(acquired.texture);
+            let renderer = self.renderer.as_mut().expect("renderer built above");
+            self.target.present(
+                &self.device,
+                &self.queue,
+                renderer,
+                acquired.texture,
+                params,
+                &scene,
+            );
             if acquired.reconfigure_after_present {
-                self.surface.configure(&self.device, &self.config);
+                self.target.reconfigure(&self.device);
             }
             Ok(())
         })
@@ -497,16 +481,12 @@ impl CanvasRenderer {
     /// Lazily builds the mesh renderer on first use. The protocol is mesh-first,
     /// so the session always carries a leading mesh table by the time frames are
     /// produced; builds a multi-mesh renderer with each mesh's
-    /// [`preview_transform`](trd_core::Mesh::preview_transform) base model.
+    /// [`preview_transform`](trd_core::Mesh::preview_transform) base model,
+    /// targeting the surface's sRGB view format.
     fn ensure_renderer(&mut self) -> &mut MeshRenderer {
         if self.renderer.is_none() {
             let meshes = self.input.meshes();
-            let base_models: Vec<Matrix4> = meshes
-                .iter()
-                .map(|mesh| mesh.preview_transform(DEFAULT_PREVIEW_TARGET).matrix())
-                .collect();
-            let renderer =
-                MeshRenderer::new(&self.device, self.render_format, meshes, &base_models);
+            let renderer = MeshRenderer::auto_fit(&self.device, self.target.view_format(), meshes);
             self.renderer = Some(renderer);
 
             // Bind the stream's texture (0.0.4) as the sampled albedo so
@@ -536,18 +516,8 @@ impl CanvasRenderer {
         self.renderer.as_mut().expect("renderer just built")
     }
 
-    /// Creates the surface view used for presenting a frame, through the sRGB
-    /// `render_format` view so on-screen colors are linear→sRGB encoded to match
-    /// the headless CLI's `Rgba8UnormSrgb` target.
-    fn present_view(&self, texture: &wgpu::SurfaceTexture) -> wgpu::TextureView {
-        texture.texture.create_view(&wgpu::TextureViewDescriptor {
-            format: Some(self.render_format),
-            ..Default::default()
-        })
-    }
-
     fn acquire_frame(&mut self) -> Result<AcquiredFrame, JsValue> {
-        match self.surface.get_current_texture() {
+        match self.target.acquire() {
             wgpu::CurrentSurfaceTexture::Success(texture) => Ok(AcquiredFrame {
                 texture,
                 reconfigure_after_present: false,
@@ -557,15 +527,15 @@ impl CanvasRenderer {
                 reconfigure_after_present: true,
             }),
             wgpu::CurrentSurfaceTexture::Outdated => {
-                self.surface.configure(&self.device, &self.config);
+                self.target.reconfigure(&self.device);
                 self.acquire_after_recovery("reconfiguration")
             }
             wgpu::CurrentSurfaceTexture::Lost => {
-                self.surface = self
+                let surface = self
                     .instance
                     .create_surface(wgpu::SurfaceTarget::Canvas(self.canvas.clone()))
                     .map_err(|error| js_error(format!("surface recreation failed: {error}")))?;
-                self.surface.configure(&self.device, &self.config);
+                self.target.replace_surface(&self.device, surface);
                 self.acquire_after_recovery("recreation")
             }
             wgpu::CurrentSurfaceTexture::Timeout => Err(js_error("surface acquisition timed out")),
@@ -575,7 +545,7 @@ impl CanvasRenderer {
     }
 
     fn acquire_after_recovery(&self, recovery: &str) -> Result<AcquiredFrame, JsValue> {
-        match self.surface.get_current_texture() {
+        match self.target.acquire() {
             wgpu::CurrentSurfaceTexture::Success(texture) => Ok(AcquiredFrame {
                 texture,
                 reconfigure_after_present: false,

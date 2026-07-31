@@ -26,8 +26,8 @@ pub use protocol::{
 };
 pub use render::{
     build_scene, create_mesh_pipeline, CameraFormError, Draw, DrawableObject, EnvMapData, FrameFit,
-    FrameParams, GridPlane, Mesh, MeshRenderer, OffscreenError, OffscreenTarget, PbrMaterial,
-    RenderMode, Scene, Tonemap, TriangleRenderer, Vertex, Viewport, OFFSCREEN_FORMAT,
+    FrameParams, GridPlane, Mesh, MeshRenderer, OffscreenError, OffscreenTarget, OnscreenTarget,
+    PbrMaterial, RenderMode, Scene, Tonemap, TriangleRenderer, Vertex, Viewport, OFFSCREEN_FORMAT,
 };
 pub use scene_encode::{
     encode_mesh_stream, encode_params_stream, encode_scene, encode_texture_stream, SceneEncodeError,

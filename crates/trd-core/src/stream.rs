@@ -26,6 +26,8 @@ use std::io::{Read, Write};
 #[cfg(test)]
 use arrow::datatypes::Schema;
 
+// `Matrix4` is referenced by `with_meshes_sample_count` (the base-model fit) and
+// the `#[cfg(test)]` unit tests.
 use crate::math::Matrix4;
 use crate::protocol::{ProtocolError, PROTOCOL_VERSION};
 use crate::render::{

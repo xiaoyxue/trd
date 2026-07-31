@@ -2,8 +2,8 @@ use wasm_bindgen::prelude::*;
 
 use trd_core::{
     build_scene, DecodedFrame, Draw, DrawableObject, EnvMapData, FrameBatch, FrameFit, FrameParams,
-    InputSession, Matrix4, MeshRenderer, OffscreenTarget, OutputSession, PbrMaterial, RenderMode,
-    Tonemap, DEFAULT_PREVIEW_TARGET, OFFSCREEN_FORMAT,
+    InputSession, MeshRenderer, OffscreenTarget, OutputSession, PbrMaterial, RenderMode, Tonemap,
+    OFFSCREEN_FORMAT,
 };
 
 fn error_message(context: &str, error: impl std::fmt::Display) -> String {
@@ -392,11 +392,7 @@ impl OffscreenRenderer {
     fn ensure_renderer(&mut self) -> &mut MeshRenderer {
         if self.renderer.is_none() {
             let meshes = self.input.meshes();
-            let base_models: Vec<Matrix4> = meshes
-                .iter()
-                .map(|mesh| mesh.preview_transform(DEFAULT_PREVIEW_TARGET).matrix())
-                .collect();
-            let renderer = MeshRenderer::new(&self.device, OFFSCREEN_FORMAT, meshes, &base_models);
+            let renderer = MeshRenderer::auto_fit(&self.device, OFFSCREEN_FORMAT, meshes);
             self.renderer = Some(renderer);
 
             // Bind the stream's texture (0.0.4) as the sampled albedo so

@@ -15,7 +15,7 @@
 use trd_core::{
     build_scene, decode_params_stream, encode_params_stream, read_image_stream, DrawableObject,
     EnvMapData, FrameParams, Mesh, MeshRenderer, OffscreenTarget, OutputSession, Texture,
-    DEFAULT_PREVIEW_TARGET, OFFSCREEN_FORMAT,
+    OFFSCREEN_FORMAT,
 };
 
 use crate::error::GuiError;
@@ -93,11 +93,7 @@ impl WebRenderer {
             )));
         }
 
-        let base_models: Vec<trd_core::Matrix4> = meshes
-            .iter()
-            .map(|m| m.preview_transform(DEFAULT_PREVIEW_TARGET).matrix())
-            .collect();
-        let mut renderer = MeshRenderer::new(&device, OFFSCREEN_FORMAT, meshes, &base_models);
+        let mut renderer = MeshRenderer::auto_fit(&device, OFFSCREEN_FORMAT, meshes);
         if let Some(texture) = texture {
             renderer.set_texture(texture);
         }
