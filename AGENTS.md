@@ -210,6 +210,36 @@ considered done:
 - **Handoff:** for whichever platform you cannot run yourself, leave an explicit
   note (exact commands + expected result) in **both** the issue and the PR, so the
   other platform's verification can be completed and recorded there.
+- **PR presentation — verification matrix & handoff list (required).** Present the
+  dual-platform results as a scannable, icon-led **verification matrix** plus an
+  explicit **handoff list**, so a reviewer sees at a glance what passed, where, and
+  what is still owed. Use this on **every** PR (and mirror it in the issue); never
+  report gates as bare prose. Keep to a fixed glyph set so the format stays
+  consistent and greppable — **status:** ✅ passed · ❌ failed · ⏳ not yet run · 🤝
+  handed off; **platform:** 🪟 Windows · 🐧 Linux/Nix; **gate:** 🎨 fmt · 📎 clippy ·
+  🕸️ clippy-wasm · 🧪 tests · 🔀 decoder-parity · 🖼️ golden-render · 🌐 tsc/biome.
+  One matrix row per gate, one column per platform (cells are status icons, an
+  optional count like `(173)`); the handoff list is a 🤝-headed checklist of the
+  exact commands the *other* platform still owes, closed by a one-line expected
+  result:
+  ```markdown
+  ## ✅ Verification
+
+  | Gate | 🪟 Windows | 🐧 Linux/Nix |
+  |------|:---:|:---:|
+  | 🎨 `cargo fmt --check`         | ✅ | 🤝 |
+  | 📎 clippy native `-D warnings` | ✅ | 🤝 |
+  | 🕸️ clippy wasm32 (lib)         | ✅ | 🤝 |
+  | 🧪 `cargo test --lib` (173)    | ✅ | 🤝 |
+  | 🔀 `decoder_parity` (2)        | ✅ | 🤝 |
+  | 🖼️ `golden_render` (6/6, GPU)  | ✅ | 🤝 |
+
+  ## 🤝 Handoff — 🐧 Linux/Nix
+  - [ ] `nix flake check -L`
+  - [ ] nixGL-wrapped `cargo test -p trd-core --test golden_render -- --ignored`
+
+  > Expected: all green — behaviour-preserving change.
+  ```
 
 ### Documentation
 
@@ -223,9 +253,12 @@ considered done:
 
 ### Worktrees
 
-Keep the git root checkout on `main` at all times. Do all branch/PR work in a git
-worktree under the root's `.worktree/` folder (gitignored):
+Keep the git root checkout on `main` at all times, and **update local `main`
+before creating a new worktree** so the branch starts from an up-to-date base.
+Do all branch/PR work in a git worktree under the root's `.worktree/` folder
+(gitignored):
 ```sh
+git switch main && git pull            # refresh local main first
 git worktree add .worktree/<topic> -b feat/<topic>
 cd .worktree/<topic>
 ```
