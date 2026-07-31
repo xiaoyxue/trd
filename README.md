@@ -8,6 +8,16 @@ viewer — by drawing into whatever render target each front-end provides.
 JavaScript/TypeScript is a thin bootstrap only; the WebGPU API is never called
 from JS.
 
+## Contents
+
+- [How it fits together](#how-it-fits-together)
+- [Quick start](#quick-start)
+- [Building with Nix](#building-with-nix)
+- [Stream protocol](#stream-protocol)
+- [Material (PBR)](#material-pbr)
+- [Documentation](#documentation)
+- [Tests](#tests)
+
 ## [How it fits together](docs/architecture.md)
 
 Everything shares **one render function** and **one data format** (a mesh-first
