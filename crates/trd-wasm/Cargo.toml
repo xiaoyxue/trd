@@ -13,6 +13,10 @@ crate-type = ["cdylib", "rlib"]
 # clippy, and tests skip it cleanly instead of failing on web-only wgpu APIs.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 console_error_panic_hook = "0.1"
+# HDR-only `image` decoder (no C deps ⇒ compiles for wasm32): the wasm shell
+# decodes the equirectangular `.hdr` env probe for the Disney PBR path, mirroring
+# trd-cli's `load_env_map` so trd-core does no file/codec I/O.
+image = { version = "0.25", default-features = false, features = ["hdr"] }
 js-sys = "0.3"
 trd-core.workspace = true
 wasm-bindgen = "=0.2.121"

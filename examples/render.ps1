@@ -616,8 +616,11 @@ f 1 3 4
             $rendererLabel = 'CanvasRenderer (on-screen WebGPU surface)'
         }
 
-        # Base mesh mode mirrors the -CLI precedence: textured > wireframe > filled.
-        if ($Texture) { $mode = 'textured' }
+        # Base mesh mode mirrors the -CLI precedence: pbr > textured > wireframe
+        # > filled. -Pbr shades the bound albedo with the Disney BRDF (same as
+        # trd-cli/trd-app --pbr), so it takes precedence over plain texturing.
+        if ($Pbr) { $mode = 'pbr' }
+        elseif ($Texture) { $mode = 'textured' }
         elseif ($Wireframe) { $mode = 'wireframe' }
         else { $mode = 'filled' }
 
@@ -644,7 +647,26 @@ f 1 3 4
             height        = $Height
             fps           = $Fps
         }
-        $config | ConvertTo-Json | Set-Content -Path (Join-Path $distDir 'config.json') -Encoding utf8
+        # -Pbr: forward the Disney material (byte-identical to the trd-cli/trd-app
+        # --pbr flags) and, if -Env is set, copy the .hdr probe into the served
+        # root so the browser fetches + decodes it in-wasm (trd-core does no I/O).
+        if ($Pbr) {
+            $config['pbr'] = [ordered]@{
+                metallic     = [double]$Metallic
+                roughness    = [double]$Roughness
+                specular     = [double]$Specular
+                clearcoat    = [double]$Clearcoat
+                envIntensity = [double]$EnvIntensity
+                exposure     = [double]$Exposure
+                ambient      = [double]$Ambient
+                tonemap      = $Tonemap
+            }
+            if ($Env) {
+                Copy-Item -LiteralPath $Env -Destination (Join-Path $distDir 'env.hdr') -Force
+                $config['env'] = 'env.hdr'
+            }
+        }
+        $config | ConvertTo-Json -Depth 5 | Set-Content -Path (Join-Path $distDir 'config.json') -Encoding utf8
 
         # Background stills: copy the -FramesBase tree into web/dist so each frame's
         # `frame_path` ("frames/frame_xxxxxx.jpg", relative to it) resolves under

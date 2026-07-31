@@ -1,9 +1,9 @@
 use wasm_bindgen::prelude::*;
 
 use trd_core::{
-    build_scene, DecodedFrame, Draw, DrawableObject, FrameBatch, FrameFit, FrameParams,
-    InputSession, Matrix4, MeshRenderer, OffscreenTarget, OutputSession, RenderMode,
-    DEFAULT_PREVIEW_TARGET, OFFSCREEN_FORMAT,
+    build_scene, DecodedFrame, Draw, DrawableObject, EnvMapData, FrameBatch, FrameFit, FrameParams,
+    InputSession, Matrix4, MeshRenderer, OffscreenTarget, OutputSession, PbrMaterial, RenderMode,
+    Tonemap, DEFAULT_PREVIEW_TARGET, OFFSCREEN_FORMAT,
 };
 
 fn error_message(context: &str, error: impl std::fmt::Display) -> String {
@@ -44,6 +44,14 @@ pub struct OffscreenRenderer {
     /// [`DrawableObject::FramePlane`] (#63); a no-op until a background is
     /// uploaded via [`update_frame_texture_rgba`](Self::update_frame_texture_rgba).
     composite_frame: bool,
+    /// The global Disney [`PbrMaterial`] for [`RenderMode::Pbr`] draws, set via
+    /// [`set_pbr_material`](Self::set_pbr_material) before the first frame and
+    /// applied when the renderer is built. `None` ⇒ the renderer's default.
+    pbr_material: Option<PbrMaterial>,
+    /// The decoded equirectangular HDR environment probe reflected by
+    /// [`RenderMode::Pbr`] draws, set via [`set_env_map_hdr`](Self::set_env_map_hdr).
+    /// `None` ⇒ no probe reflection.
+    env_map: Option<EnvMapData>,
     /// The shared offscreen render target + readback buffer (#103, Part B).
     target: OffscreenTarget,
     input: InputSession,
@@ -101,6 +109,8 @@ impl OffscreenRenderer {
             show_axes: false,
             show_local_axes: false,
             composite_frame: false,
+            pbr_material: None,
+            env_map: None,
             target,
             input: InputSession::new(),
             frames: Vec::new(),
@@ -165,6 +175,71 @@ impl OffscreenRenderer {
         } else {
             RenderMode::Filled
         };
+    }
+
+    /// Selects the Disney principled-BRDF (`true`) or per-vertex color (`false`)
+    /// mesh path for later frames — the browser twin of the native `--pbr` flag.
+    /// PBR shades the bound albedo (or the default 1×1 white) with the material
+    /// set by [`set_pbr_material`](Self::set_pbr_material) and the environment
+    /// probe from [`set_env_map_hdr`](Self::set_env_map_hdr).
+    #[wasm_bindgen(js_name = setPbr)]
+    pub fn set_pbr(&mut self, enabled: bool) {
+        self.mode = if enabled {
+            RenderMode::Pbr
+        } else {
+            RenderMode::Filled
+        };
+    }
+
+    /// Sets the global Disney [`PbrMaterial`] applied to every
+    /// [`RenderMode::Pbr`] draw — the browser twin of trd-cli's
+    /// `--metallic/--roughness/--specular/--clearcoat/--env-intensity/--exposure/
+    /// --ambient/--tonemap` flags. `tonemap` is `"aces"` (filmic) or anything
+    /// else for Reinhard. Non-forwarded Disney parameters keep their defaults.
+    #[wasm_bindgen(js_name = setPbrMaterial)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_pbr_material(
+        &mut self,
+        metallic: f32,
+        roughness: f32,
+        specular: f32,
+        clearcoat: f32,
+        env_intensity: f32,
+        exposure: f32,
+        ambient: f32,
+        tonemap: &str,
+    ) {
+        let material = PbrMaterial {
+            metallic,
+            roughness,
+            specular,
+            clearcoat,
+            env_intensity,
+            exposure,
+            ambient,
+            tonemap: match tonemap.to_ascii_lowercase().as_str() {
+                "aces" => Tonemap::Aces,
+                _ => Tonemap::Reinhard,
+            },
+            ..PbrMaterial::default()
+        };
+        self.pbr_material = Some(material);
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.set_pbr_material(material);
+        }
+    }
+
+    /// Decodes an equirectangular Radiance `.hdr` buffer and binds it as the
+    /// environment probe reflected by [`RenderMode::Pbr`] draws — the browser
+    /// twin of trd-cli's `--env HDR` (decoded here, downscaled to 2048px).
+    #[wasm_bindgen(js_name = setEnvMapHdr)]
+    pub fn set_env_map_hdr(&mut self, bytes: &[u8]) -> Result<(), JsValue> {
+        let env = crate::decode_env_hdr(bytes).map_err(crate::js_error)?;
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.set_env_map(env.clone());
+        }
+        self.env_map = Some(env);
+        Ok(())
     }
 
     /// Toggles the per-instance AABB overlay box for later frames.
@@ -331,6 +406,21 @@ impl OffscreenRenderer {
                     .as_mut()
                     .expect("renderer just built")
                     .set_texture(texture);
+            }
+
+            // Apply the Disney PBR material + HDR environment probe staged by the
+            // JS shell before the first frame (RenderMode::Pbr draws only).
+            if let Some(material) = self.pbr_material {
+                self.renderer
+                    .as_mut()
+                    .expect("renderer just built")
+                    .set_pbr_material(material);
+            }
+            if let Some(env) = self.env_map.clone() {
+                self.renderer
+                    .as_mut()
+                    .expect("renderer just built")
+                    .set_env_map(env);
             }
         }
         self.renderer.as_mut().expect("renderer just built")
