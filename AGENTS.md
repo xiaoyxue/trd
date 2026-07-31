@@ -174,6 +174,39 @@ Guidance for agents working in this repository.
   - Whichever platform you cannot run yourself, leave an explicit **handoff** note
     (exact commands + expected result) in the issue **and** the PR so the other
     platform's verification can be completed and recorded there.
+- **PR presentation — verification & handoff formatting (required).** Present the
+  dual-platform results as a scannable, icon-led **verification matrix** plus an
+  explicit **handoff list**, so a reviewer sees at a glance what passed, where, and
+  what is still owed. Use this on **every** PR (and mirror it in the issue); never
+  report gates as bare prose.
+  - **Status icons:** ✅ passed · ❌ failed · ⏳ not yet run · 🤝 handed off to the
+    other platform. **Platform icons:** 🪟 Windows · 🐧 Linux/Nix. **Gate glyphs
+    (for flavour):** 🎨 fmt · 📎 clippy · 🕸️ clippy-wasm · 🧪 tests · 🔀 decoder-parity
+    · 🖼️ golden-render · 🌐 tsc/biome. Keep to this set — don't invent per-PR glyphs,
+    so the format stays consistent and greppable across PRs.
+  - **Verification matrix** — one row per gate, one column per platform; every cell
+    is a status icon (with an optional count like `(173)`), under a ✅-marked heading:
+    ```markdown
+    ## ✅ Verification
+
+    | Gate | 🪟 Windows | 🐧 Linux/Nix |
+    |------|:---:|:---:|
+    | 🎨 `cargo fmt --check`         | ✅ | 🤝 |
+    | 📎 clippy native `-D warnings` | ✅ | 🤝 |
+    | 🕸️ clippy wasm32 (lib)         | ✅ | 🤝 |
+    | 🧪 `cargo test --lib` (173)    | ✅ | 🤝 |
+    | 🔀 `decoder_parity` (2)        | ✅ | 🤝 |
+    | 🖼️ `golden_render` (6/6, GPU)  | ✅ | 🤝 |
+    ```
+  - **Handoff list** — a 🤝-headed checklist of the exact commands the *other*
+    platform still owes (each an unchecked box), closed by a one-line expected result:
+    ```markdown
+    ## 🤝 Handoff — 🐧 Linux/Nix
+    - [ ] `nix flake check -L`
+    - [ ] nixGL-wrapped `cargo test -p trd-core --test golden_render -- --ignored`
+
+    > Expected: all green — behaviour-preserving change.
+    ```
 - **Worktrees:** keep the git root checkout on `main` at all times. Do all
   branch/PR work in a git worktree under the root's `.worktree/` folder, e.g.:
   ```sh
