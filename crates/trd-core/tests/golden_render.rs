@@ -54,6 +54,7 @@
 //! ```
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use arrow::array::{Array, FixedSizeListArray, UInt8Array};
 use arrow::ipc::reader::StreamReader;
@@ -213,21 +214,38 @@ fn pbr_options(tonemap: Tonemap) -> RenderOptions {
     }
 }
 
+/// Process-wide lock serializing the GPU render across the parallel golden
+/// `#[test]` threads (see [`render_fixture`]).
+static GPU_SERIAL: Mutex<()> = Mutex::new(());
+
 fn render_fixture(fixture: &str, options: RenderOptions) -> Vec<Vec<u8>> {
     let bytes = std::fs::read(golden_dir().join(fixture))
         .unwrap_or_else(|e| panic!("read fixture {fixture}: {e}"));
 
     let mut out = Vec::new();
     let resolver = resolve_background;
-    run_stream(
-        &bytes[..],
-        &mut out,
-        WIDTH,
-        HEIGHT,
-        options,
-        Some(&resolver),
-    )
-    .unwrap_or_else(|e| panic!("run_stream on {fixture}: {e:?}"));
+    {
+        // Serialize the GPU work across the (otherwise parallel) `#[test]` threads.
+        // Each test builds its own wgpu `Instance`/`Device` and submits an
+        // MSAA render + resolve + readback; concurrent multi-device MSAA
+        // submissions intermittently deadlock the NVIDIA driver (the process
+        // stays alive at 0% GPU). A process-wide lock makes this mandatory gate
+        // reliable under the default `cargo test` runner, with no need for
+        // `-- --test-threads=1`. Poison is ignored: a panicking test still
+        // releases the GPU for the rest.
+        let _serial = GPU_SERIAL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        run_stream(
+            &bytes[..],
+            &mut out,
+            WIDTH,
+            HEIGHT,
+            options,
+            Some(&resolver),
+        )
+        .unwrap_or_else(|e| panic!("run_stream on {fixture}: {e:?}"));
+    }
 
     let pixels = (WIDTH * HEIGHT) as usize;
     let reader = StreamReader::try_new(&out[..], None).expect("output arrow reader");
