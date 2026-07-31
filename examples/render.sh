@@ -544,8 +544,12 @@ if [ "$web" -eq 1 ]; then
     renderer_label="CanvasRenderer (on-screen WebGPU surface)"
   fi
 
-  # Base mesh mode mirrors the --cli precedence: textured > wireframe > filled.
-  if [ -n "$texture" ]; then
+  # Base mesh mode mirrors the --cli precedence: pbr > textured > wireframe >
+  # filled. --pbr shades the bound albedo with the Disney BRDF (same as
+  # trd-cli/trd-app --pbr), so it takes precedence over plain texturing.
+  if [ "$pbr" -eq 1 ]; then
+    mode="pbr"
+  elif [ -n "$texture" ]; then
     mode="textured"
   elif [ "$wireframe" -eq 1 ]; then
     mode="wireframe"
@@ -570,6 +574,32 @@ if [ "$web" -eq 1 ]; then
 
   echo "generating web stream.arrow + config.json (same producers as --cli)…" >&2
   stream > "$serve/stream.arrow"
+
+  # --pbr: forward the Disney material (byte-identical to the trd-cli/trd-app
+  # --pbr flags) and, if --env is set, copy the .hdr probe into the served root
+  # so the browser fetches + decodes it in-wasm (trd-core does no file/codec I/O).
+  pbr_json=""
+  if [ "$pbr" -eq 1 ]; then
+    env_json=""
+    if [ -n "$env" ]; then
+      cp -L "$env" "$serve/env.hdr"
+      chmod u+w "$serve/env.hdr"
+      env_json=",
+  \"env\": \"env.hdr\""
+    fi
+    pbr_json=",
+  \"pbr\": {
+    \"metallic\": $metallic,
+    \"roughness\": $roughness,
+    \"specular\": $specular,
+    \"clearcoat\": $clearcoat,
+    \"envIntensity\": $env_intensity,
+    \"exposure\": $exposure,
+    \"ambient\": $ambient,
+    \"tonemap\": \"$tonemap\"
+  }$env_json"
+  fi
+
   cat > "$serve/config.json" <<CFG
 {
   "target": "$target",
@@ -580,7 +610,7 @@ if [ "$web" -eq 1 ]; then
   "background": $background,
   "width": $width,
   "height": $height,
-  "fps": $fps
+  "fps": $fps$pbr_json
 }
 CFG
 

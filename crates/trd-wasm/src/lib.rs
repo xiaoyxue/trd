@@ -13,6 +13,7 @@
 
 use std::fmt::Display;
 
+use trd_core::EnvMapData;
 use wasm_bindgen::prelude::*;
 
 mod canvas_renderer;
@@ -25,4 +26,23 @@ pub use offscreen_renderer::OffscreenRenderer;
 /// thrown exception). Shared by both renderers.
 pub(crate) fn js_error(message: impl Display) -> JsValue {
     js_sys::Error::new(&message.to_string()).into()
+}
+
+/// Decodes an equirectangular Radiance `.hdr` byte buffer into a linear-RGBA f32
+/// [`EnvMapData`], downscaled (integer box filter) to the renderer's portable
+/// 2048px texture limit. The browser twin of `trd-cli`'s `load_env_map`: the
+/// wasm shell decodes the `.hdr` (trd-core does no file/codec I/O), so the
+/// Disney PBR environment probe is byte-identical to the native path. Shared by
+/// both renderers' `set_env_map_hdr`.
+pub(crate) fn decode_env_hdr(bytes: &[u8]) -> Result<EnvMapData, String> {
+    let img = image::load_from_memory_with_format(bytes, image::ImageFormat::Hdr)
+        .map_err(|error| format!("decode env HDR: {error}"))?
+        .to_rgba32f();
+    let (width, height) = img.dimensions();
+    Ok(EnvMapData::from_rgba32f(
+        width,
+        height,
+        img.into_raw(),
+        2048,
+    ))
 }

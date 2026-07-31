@@ -19,8 +19,26 @@ interface RenderConfig {
   /// `canvas` = on-screen `CanvasRenderer`; `offscreen` = `OffscreenRenderer`
   /// rendering to a texture then painted to a 2D canvas.
   target: "canvas" | "offscreen";
-  /// Base render mode for meshes without a per-draw override.
-  mode: "filled" | "wireframe" | "textured";
+  /// Base render mode for meshes without a per-draw override. `pbr` shades the
+  /// bound albedo with the Disney principled BRDF (see `pbr`/`env`).
+  mode: "filled" | "wireframe" | "textured" | "pbr";
+  /// Disney PBR material (present iff `mode === "pbr"`) — the browser twin of
+  /// trd-cli's `--metallic/--roughness/…` flags, forwarded verbatim so the web
+  /// render matches `trd-app --pbr`.
+  pbr?: {
+    metallic: number;
+    roughness: number;
+    specular: number;
+    clearcoat: number;
+    envIntensity: number;
+    exposure: number;
+    ambient: number;
+    tonemap: "reinhard" | "aces";
+  };
+  /// Equirectangular Radiance `.hdr` env probe URL (relative to the served
+  /// root), reflected by metallic PBR surfaces. Decoded in-wasm; only used when
+  /// `mode === "pbr"`.
+  env?: string;
   showAabb: boolean;
   showAxes: boolean;
   showLocalAxes: boolean;
@@ -167,7 +185,7 @@ async function runCanvas(
   fps: number,
 ): Promise<void> {
   const renderer = await CanvasRenderer.create(canvas);
-  applyMode(renderer, config);
+  await applyMode(renderer, config);
   const total = renderer.loadIpc(stream);
   if (total === 0) {
     fail("stream carried no frames");
@@ -209,7 +227,7 @@ async function runOffscreen(
     fail("failed to acquire 2D context for the offscreen display");
   }
   const renderer = await OffscreenRenderer.create(config.width, config.height);
-  applyMode(renderer, config);
+  await applyMode(renderer, config);
   const total = renderer.loadIpc(stream);
   if (total === 0) {
     fail("stream carried no frames");
@@ -251,13 +269,35 @@ async function runOffscreen(
 }
 
 /// The scene-mode + overlay flags are identical across both renderers; applied
-/// once before playback. `setTextured`/`setWireframe` are mutually exclusive; the
-/// default (filled) leaves per-vertex color.
-function applyMode(renderer: CanvasRenderer | OffscreenRenderer, config: RenderConfig): void {
+/// once before playback. `setTextured`/`setWireframe`/`setPbr` are mutually
+/// exclusive; the default (filled) leaves per-vertex color. For `pbr` this also
+/// forwards the Disney material and fetches + decodes the HDR env probe (async),
+/// so the browser matches `trd-app --pbr` byte-for-byte.
+async function applyMode(
+  renderer: CanvasRenderer | OffscreenRenderer,
+  config: RenderConfig,
+): Promise<void> {
   if (config.mode === "wireframe") {
     renderer.setWireframe(true);
   } else if (config.mode === "textured") {
     renderer.setTextured(true);
+  } else if (config.mode === "pbr" && config.pbr) {
+    const pbr = config.pbr;
+    renderer.setPbr(true);
+    renderer.setPbrMaterial(
+      pbr.metallic,
+      pbr.roughness,
+      pbr.specular,
+      pbr.clearcoat,
+      pbr.envIntensity,
+      pbr.exposure,
+      pbr.ambient,
+      pbr.tonemap,
+    );
+    if (config.env) {
+      setStatus("loading environment map…");
+      renderer.setEnvMapHdr(await fetchBytes(config.env));
+    }
   }
   renderer.setShowAabb(config.showAabb);
   renderer.setShowAxes(config.showAxes);
