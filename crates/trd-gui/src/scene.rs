@@ -14,7 +14,7 @@
 //! [`trd_core::Mesh::preview_transform`] beneath the draw model, so the scene is
 //! authored around the world origin — the camera targets the origin by default.
 
-use trd_core::{Draw, FrameParams, Point3, RenderMode, Rotation, Transform, Vector3};
+use trd_core::{Draw, FrameParams, PbrMaterial, Point3, RenderMode, Rotation, Transform, Vector3};
 
 /// The minimum orbit distance (never let the camera cross the target).
 const MIN_DISTANCE: f32 = 0.2;
@@ -135,8 +135,13 @@ pub struct SceneState {
     pub camera: OrbitCamera,
     /// The placement of the (single) drawn object.
     pub object: ObjectTransform,
-    /// How the mesh is drawn (filled / wireframe).
+    /// How the mesh is drawn (filled / wireframe / textured / PBR).
     pub mode: RenderMode,
+    /// The Disney PBR material applied when [`mode`](Self::mode) is
+    /// [`RenderMode::Pbr`]. Interactive (the UI edits metallic/roughness/etc.);
+    /// the bound HDR env probe lives on the renderer (it is not `Copy`), set once
+    /// from the native `--env` flag / browser `?env=`.
+    pub pbr: PbrMaterial,
     /// Overlay each drawn mesh instance's axis-aligned bounding box (#42).
     pub show_aabb: bool,
     /// Overlay a world-origin coordinate-axes gizmo (#42).
@@ -151,6 +156,7 @@ impl Default for SceneState {
             camera: OrbitCamera::default(),
             object: ObjectTransform::default(),
             mode: RenderMode::Filled,
+            pbr: PbrMaterial::default(),
             show_aabb: false,
             show_axes: false,
             show_local_axes: false,

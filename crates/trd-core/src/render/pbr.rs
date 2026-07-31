@@ -49,7 +49,7 @@ impl Tonemap {
 /// onto the sampled albedo), `env_intensity`, `exposure`, `ambient`, and
 /// `light_scale` (non-negative gains). [`Default`] is a neutral glossy
 /// dielectric; [`PbrMaterial::metal`] is a shiny metal preset (e.g. the coke can).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PbrMaterial {
     /// Linear-RGB tint multiplied onto the sampled albedo (identity `[1, 1, 1]`).
     pub base_color: [f32; 3],

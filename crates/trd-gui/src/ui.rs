@@ -8,7 +8,7 @@
 //! *how* to re-render — synchronously on native, asynchronously on wasm).
 
 use egui::{Color32, PointerButton, Sense, TextureHandle, Vec2};
-use trd_core::RenderMode;
+use trd_core::{RenderMode, Tonemap};
 
 use crate::interaction::{InteractionController, InteractionEvent, InteractionTarget};
 
@@ -70,8 +70,16 @@ fn controls_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
         needs_render |= ui
             .selectable_value(mode, RenderMode::Textured, "Textured")
             .changed();
+        needs_render |= ui.selectable_value(mode, RenderMode::Pbr, "PBR").changed();
     });
     ui.separator();
+
+    // The Disney PBR material controls, live only while PBR mode is selected so
+    // the user can dial in metallic/roughness/etc. against the bound env probe.
+    if view.controller.state.mode == RenderMode::Pbr {
+        needs_render |= pbr_panel(ui, view);
+        ui.separator();
+    }
 
     ui.label("Overlays");
     let state = &mut view.controller.state;
@@ -101,7 +109,41 @@ fn controls_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
     needs_render
 }
 
-/// The central image panel: shows the current frame scaled to fit and turns
+/// The Disney PBR material sub-panel (shown only in [`RenderMode::Pbr`]): live
+/// sliders for the parameters that most change the look — metallic, roughness,
+/// environment-reflection gain, and tone-map exposure — plus a Reinhard/ACES
+/// tone-map selector. Editing any of them re-renders the scene, so the material
+/// is as interactive as the camera. Returns whether the material changed.
+fn pbr_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
+    let mut changed = false;
+    let pbr = &mut view.controller.state.pbr;
+    ui.label("PBR material");
+    changed |= ui
+        .add(egui::Slider::new(&mut pbr.metallic, 0.0..=1.0).text("Metallic"))
+        .changed();
+    changed |= ui
+        .add(egui::Slider::new(&mut pbr.roughness, 0.0..=1.0).text("Roughness"))
+        .changed();
+    changed |= ui
+        .add(egui::Slider::new(&mut pbr.clearcoat, 0.0..=1.0).text("Clearcoat"))
+        .changed();
+    changed |= ui
+        .add(egui::Slider::new(&mut pbr.env_intensity, 0.0..=4.0).text("Env"))
+        .changed();
+    changed |= ui
+        .add(egui::Slider::new(&mut pbr.exposure, 0.0..=4.0).text("Exposure"))
+        .changed();
+    ui.horizontal(|ui| {
+        ui.label("Tonemap");
+        changed |= ui
+            .selectable_value(&mut pbr.tonemap, Tonemap::Reinhard, "Reinhard")
+            .changed();
+        changed |= ui
+            .selectable_value(&mut pbr.tonemap, Tonemap::Aces, "ACES")
+            .changed();
+    });
+    changed
+}
 /// pointer/scroll input over it into interaction events. Returns whether the
 /// scene changed.
 fn image_panel(ui: &mut egui::Ui, view: &mut View) -> bool {

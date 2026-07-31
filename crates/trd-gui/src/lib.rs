@@ -44,19 +44,22 @@ pub mod web_app;
 pub mod web_renderer;
 
 /// The browser entry point (Slice 4): builds the offscreen renderer and runs the
-/// eframe app on `canvas`. `mesh_obj` and `texture_bytes` are the browser
-/// equivalents of the native `--mesh` / `--texture` flags — an optional Wavefront
-/// OBJ **as text** and optional texture image **bytes** (PNG/JPEG); the thin JS
-/// bootstrap fetches them from `?mesh=` / `?texture=` URLs and passes them in.
-/// `None`/absent falls back to the built-in cube / no texture. All UI +
-/// interaction + rendering happen in Rust, per the repo's "JS is a thin bootstrap
-/// only" invariant.
+/// eframe app on `canvas`. `mesh_obj`, `texture_bytes`, and `env_bytes` are the
+/// browser equivalents of the native `--mesh` / `--texture` / `--env` flags — an
+/// optional Wavefront OBJ **as text**, optional texture image **bytes**
+/// (PNG/JPEG), and an optional Radiance HDR environment probe **bytes**; the thin
+/// JS bootstrap fetches them from `?mesh=` / `?texture=` / `?env=` URLs and passes
+/// them in. `None`/absent falls back to the built-in cube / no texture / no probe.
+/// Supplying an env probe starts the viewer in Disney **PBR** mode (the material
+/// is then editable live in the UI). All UI + interaction + rendering happen in
+/// Rust, per the repo's "JS is a thin bootstrap only" invariant.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub async fn start(
     canvas: web_sys::HtmlCanvasElement,
     mesh_obj: Option<String>,
     texture_bytes: Option<Vec<u8>>,
+    env_bytes: Option<Vec<u8>>,
     backend: Option<String>,
 ) -> Result<(), wasm_bindgen::JsValue> {
     use crate::interaction::InteractionController;
@@ -80,6 +83,20 @@ pub async fn start(
         Some(bytes) => Some(assets::decode_texture(&bytes).map_err(to_js)?),
         None => None,
     };
+    // The optional HDR env probe (browser `?env=`). Decoded in Rust so trd-core
+    // stays I/O-free; when present, the viewer starts in PBR mode.
+    let env = match env_bytes {
+        Some(bytes) => Some(assets::decode_env_hdr(&bytes).map_err(to_js)?),
+        None => None,
+    };
+    let scene = SceneState {
+        mode: if env.is_some() {
+            trd_core::RenderMode::Pbr
+        } else {
+            trd_core::RenderMode::Filled
+        },
+        ..SceneState::default()
+    };
     // `?backend=arrow` selects the Arrow wire round-trip; anything else (or
     // absent) is the direct in-process render.
     let backend = match backend.as_deref() {
@@ -89,13 +106,14 @@ pub async fn start(
     let renderer = WebRenderer::new(
         &[mesh],
         texture.as_ref().map(|t| t as &dyn trd_core::Texture),
+        env,
         512,
         512,
         backend,
     )
     .await
     .map_err(to_js)?;
-    let app = WebApp::new(InteractionController::new(SceneState::default()), renderer);
+    let app = WebApp::new(InteractionController::new(scene), renderer);
 
     eframe::WebRunner::new()
         .start(

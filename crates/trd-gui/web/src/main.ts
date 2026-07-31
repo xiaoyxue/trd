@@ -15,10 +15,11 @@ async function main(): Promise<void> {
     throw new Error("missing #trd-gui-canvas");
   }
 
-  // `?mesh=<url>` / `?texture=<url>` are the browser equivalents of the native
-  // `--mesh` / `--texture` flags: fetch the OBJ text / image bytes and hand them
-  // to Rust (`Mesh::from_obj` / `decode_texture`). Absent → built-in cube / no
-  // texture.
+  // `?mesh=<url>` / `?texture=<url>` / `?env=<url>` are the browser equivalents
+  // of the native `--mesh` / `--texture` / `--env` flags: fetch the OBJ text /
+  // image bytes / HDR probe bytes and hand them to Rust (`Mesh::from_obj` /
+  // `decode_texture` / `decode_env_hdr`). Absent → built-in cube / no texture /
+  // no env probe. Supplying `?env=` starts the viewer in PBR mode.
   const params = new URLSearchParams(location.search);
 
   const meshUrl = params.get("mesh");
@@ -41,11 +42,21 @@ async function main(): Promise<void> {
     textureBytes = new Uint8Array(await res.arrayBuffer());
   }
 
+  const envUrl = params.get("env");
+  let envBytes: Uint8Array | undefined;
+  if (envUrl) {
+    const res = await fetch(envUrl);
+    if (!res.ok) {
+      throw new Error(`failed to fetch env map "${envUrl}": ${res.status} ${res.statusText}`);
+    }
+    envBytes = new Uint8Array(await res.arrayBuffer());
+  }
+
   // `?backend=arrow` is the browser equivalent of native `--backend arrow`
   // (Arrow wire round-trip); absent → the direct in-process render.
   const backend = params.get("backend") ?? undefined;
 
-  await start(canvas, meshObj, textureBytes, backend);
+  await start(canvas, meshObj, textureBytes, envBytes, backend);
 }
 
 main().catch((err) => {

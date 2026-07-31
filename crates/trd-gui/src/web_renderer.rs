@@ -14,7 +14,7 @@
 
 use trd_core::{
     build_scene, decode_params_stream, encode_params_stream, read_image_stream, DrawableObject,
-    FrameParams, Mesh, MeshRenderer, OffscreenTarget, OutputSession, Texture,
+    EnvMapData, FrameParams, Mesh, MeshRenderer, OffscreenTarget, OutputSession, Texture,
     DEFAULT_PREVIEW_TARGET, OFFSCREEN_FORMAT,
 };
 
@@ -53,11 +53,14 @@ pub struct WebRenderer {
 
 impl WebRenderer {
     /// Builds the offscreen renderer (async: wgpu device creation) from the
-    /// static meshes and an optional bound `texture` (sampled by
-    /// [`RenderMode::Textured`](trd_core::RenderMode::Textured)).
+    /// static meshes, an optional bound `texture` (sampled by
+    /// [`RenderMode::Textured`](trd_core::RenderMode::Textured)), and an optional
+    /// `env` HDR probe (reflected by [`RenderMode::Pbr`](trd_core::RenderMode::Pbr)
+    /// metallic surfaces; the interactive material rides on the scene state).
     pub async fn new(
         meshes: &[Mesh],
         texture: Option<&dyn Texture>,
+        env: Option<EnvMapData>,
         width: u32,
         height: u32,
         backend: WebBackend,
@@ -97,6 +100,9 @@ impl WebRenderer {
         let mut renderer = MeshRenderer::new(&device, OFFSCREEN_FORMAT, meshes, &base_models);
         if let Some(texture) = texture {
             renderer.set_texture(texture);
+        }
+        if let Some(env) = env {
+            renderer.set_env_map(env);
         }
 
         // The shared offscreen harness owns the render target + readback buffer.
@@ -141,6 +147,7 @@ impl WebRenderer {
     async fn render_direct(&mut self, state: &SceneState) -> Result<Vec<u8>, GuiError> {
         let aspect = self.width as f32 / self.height.max(1) as f32;
         let params = state.frame_params(aspect);
+        self.renderer.set_pbr_material(state.pbr);
         let scene = build_scene(
             &state.draws(),
             state.mode,
@@ -188,6 +195,7 @@ impl WebRenderer {
             None,
             None,
         );
+        self.renderer.set_pbr_material(state.pbr);
         let rgba = self.render_scene(frame.params, &scene).await?;
 
         // 3. Serialize the image to an Arrow stream and decode it back — the

@@ -30,7 +30,7 @@ f 1 5 6 2
 
 fn backend(width: u32, height: u32) -> InProcRenderer {
     let mesh = trd_core::Mesh::from_obj(CUBE_OBJ).expect("cube parses");
-    InProcRenderer::new(&[mesh], None, width, height).expect("GPU backend builds")
+    InProcRenderer::new(&[mesh], None, None, width, height).expect("GPU backend builds")
 }
 
 #[test]
@@ -70,7 +70,8 @@ fn textured_mode_samples_the_bound_texture() {
         ],
     )
     .expect("texture builds");
-    let mut renderer = InProcRenderer::new(&[mesh], Some(&red), w, h).expect("GPU backend builds");
+    let mut renderer =
+        InProcRenderer::new(&[mesh], Some(&red), None, w, h).expect("GPU backend builds");
 
     let state = SceneState {
         mode: trd_core::RenderMode::Textured,
