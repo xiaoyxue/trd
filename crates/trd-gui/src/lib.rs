@@ -103,12 +103,17 @@ pub async fn start(
         Some("arrow") => WebBackend::Arrow,
         _ => WebBackend::Inproc,
     };
+    // Render at a resolution suitable for the browser: the canvas's CSS size ×
+    // the device pixel ratio, so the image is crisp on high-DPI / large displays
+    // instead of upscaling a small fixed buffer. Bounded (aspect-preserving) to
+    // keep GPU + readback cost in check.
+    let (render_w, render_h) = browser_render_size(&canvas);
     let renderer = WebRenderer::new(
         &[mesh],
         texture.as_ref().map(|t| t as &dyn trd_core::Texture),
         env,
-        512,
-        512,
+        render_w,
+        render_h,
         backend,
     )
     .await
@@ -122,4 +127,35 @@ pub async fn start(
             Box::new(|_cc| Ok(Box::new(app))),
         )
         .await
+}
+
+/// A render resolution suitable for the browser: the canvas's CSS size × the
+/// device pixel ratio (so the image is crisp on high-DPI / large displays rather
+/// than an upscaled small buffer), with the larger axis bounded to [`MAX_DIM`]
+/// aspect-preserving to keep GPU + readback cost in check. Falls back to a
+/// reasonable size if the canvas isn't laid out yet.
+#[cfg(target_arch = "wasm32")]
+fn browser_render_size(canvas: &web_sys::HtmlCanvasElement) -> (u32, u32) {
+    /// Upper bound per axis (aspect-preserving) — crisp yet safe on any GPU.
+    const MAX_DIM: f64 = 2048.0;
+    const MIN_DIM: u32 = 64;
+
+    let dpr = web_sys::window()
+        .map(|w| w.device_pixel_ratio())
+        .filter(|d| d.is_finite() && *d > 0.0)
+        .unwrap_or(1.0);
+    // CSS pixel size from layout (the canvas fills the viewport). Fall back to a
+    // reasonable default if it hasn't been laid out yet.
+    let (css_w, css_h) = match (canvas.client_width(), canvas.client_height()) {
+        (w, h) if w > 1 && h > 1 => (w as f64, h as f64),
+        _ => (1280.0, 720.0),
+    };
+    let (mut w, mut h) = (css_w * dpr, css_h * dpr);
+    // Cap the larger axis, scaling both by the same factor to preserve aspect
+    // (an off-aspect render would distort the camera and letterbox the display).
+    let scale = (MAX_DIM / w.max(h)).min(1.0);
+    w *= scale;
+    h *= scale;
+    let px = |v: f64| (v.round() as u32).max(MIN_DIM);
+    (px(w), px(h))
 }
