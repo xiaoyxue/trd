@@ -7,9 +7,10 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use trd_core::Mesh;
+use trd_core::{EnvMapData, Mesh, PbrMaterial, RenderMode};
 
 use crate::error::GuiError;
+use crate::scene::SceneState;
 
 /// Which render backend the viewer drives (design §5.2).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default, clap::ValueEnum)]
@@ -21,6 +22,26 @@ pub enum Backend {
     /// stream back. Identical output to the batch CLI; the seam for external
     /// producers. Higher latency, so it re-renders on interaction end.
     Arrow,
+}
+
+/// PBR tone-map operator selector, mapped to [`trd_core::Tonemap`]. Kept in the
+/// CLI layer so `clap`'s `ValueEnum` derive stays out of `trd-core`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum TonemapArg {
+    /// Per-channel Reinhard `x/(1+x)` (the default).
+    #[default]
+    Reinhard,
+    /// ACES filmic tone map (softer highlight roll-off).
+    Aces,
+}
+
+impl From<TonemapArg> for trd_core::Tonemap {
+    fn from(value: TonemapArg) -> Self {
+        match value {
+            TonemapArg::Reinhard => trd_core::Tonemap::Reinhard,
+            TonemapArg::Aces => trd_core::Tonemap::Aces,
+        }
+    }
 }
 
 /// `trd-gui` — an interactive egui viewer that renders a mesh with `trd-core`
@@ -50,6 +71,51 @@ pub struct Cli {
     /// samples a flat white default.
     #[arg(long)]
     pub texture: Option<PathBuf>,
+
+    /// Start in the Disney **PBR** render mode (equivalent to selecting "PBR" in
+    /// the UI dropdown). The material is then editable live via the side-panel
+    /// sliders; pair with `--env` for environment reflections.
+    #[arg(long)]
+    pub pbr: bool,
+
+    /// Equirectangular HDR environment map (Radiance `.hdr`) reflected by
+    /// metallic PBR surfaces. Decoded here (trd-core does no file I/O) and
+    /// downscaled to the renderer's 2048px limit. Bound once; used by PBR mode.
+    #[arg(long, value_name = "FILE")]
+    pub env: Option<PathBuf>,
+
+    /// Initial PBR metallic parameter (0 = dielectric, 1 = metal). Editable live.
+    #[arg(long, default_value_t = 0.0)]
+    pub metallic: f32,
+
+    /// Initial PBR surface roughness (0 = mirror, 1 = fully rough). Editable live.
+    #[arg(long, default_value_t = 0.35)]
+    pub roughness: f32,
+
+    /// Initial PBR dielectric specular reflectance strength (`0.5` ≈ 4% F0).
+    #[arg(long, default_value_t = 0.5)]
+    pub specular: f32,
+
+    /// Initial PBR clearcoat lobe strength (a second colorless specular layer).
+    #[arg(long, default_value_t = 0.0)]
+    pub clearcoat: f32,
+
+    /// Initial PBR environment-map reflection gain (0 disables the probe).
+    #[arg(long, default_value_t = 1.0)]
+    pub env_intensity: f32,
+
+    /// Initial PBR tone-map exposure applied before the tone-map curve.
+    #[arg(long, default_value_t = 1.2)]
+    pub exposure: f32,
+
+    /// Initial PBR constant ambient fill (× base color) so shadows aren't black.
+    #[arg(long, default_value_t = 0.12)]
+    pub ambient: f32,
+
+    /// PBR tone-map operator: `reinhard` (per-channel `x/(1+x)`, the default) or
+    /// `aces` (filmic — softer highlight roll-off). Editable live.
+    #[arg(long, value_enum, default_value_t = TonemapArg::Reinhard)]
+    pub tonemap: TonemapArg,
 }
 
 impl Cli {
@@ -80,6 +146,51 @@ impl Cli {
         })?;
         Ok(Some(crate::assets::decode_texture(&bytes)?))
     }
+
+    /// Loads and decodes the `--env` HDR probe (if any) into an [`EnvMapData`] via
+    /// [`crate::assets::decode_env_hdr`]. Returns `None` when no env was requested.
+    /// The probe is bound once on the renderer and reflected by PBR metals.
+    pub fn load_env(&self) -> Result<Option<EnvMapData>, GuiError> {
+        let Some(path) = &self.env else {
+            return Ok(None);
+        };
+        let bytes = std::fs::read(path).map_err(|source| GuiError::EnvIo {
+            path: path.display().to_string(),
+            source,
+        })?;
+        Ok(Some(crate::assets::decode_env_hdr(&bytes)?))
+    }
+
+    /// The initial Disney PBR material assembled from the material flags
+    /// (`--metallic`, `--roughness`, …). The UI edits a live copy from here on.
+    pub fn pbr_material(&self) -> PbrMaterial {
+        PbrMaterial {
+            metallic: self.metallic,
+            roughness: self.roughness,
+            specular: self.specular,
+            clearcoat: self.clearcoat,
+            env_intensity: self.env_intensity,
+            exposure: self.exposure,
+            ambient: self.ambient,
+            tonemap: self.tonemap.into(),
+            ..PbrMaterial::default()
+        }
+    }
+
+    /// The initial [`SceneState`]: the default camera/object with the render mode
+    /// set to [`RenderMode::Pbr`] when `--pbr` is given, carrying the material
+    /// assembled from the CLI flags (subsequently edited live in the UI).
+    pub fn scene_state(&self) -> SceneState {
+        SceneState {
+            mode: if self.pbr {
+                RenderMode::Pbr
+            } else {
+                RenderMode::Filled
+            },
+            pbr: self.pbr_material(),
+            ..SceneState::default()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -88,13 +199,7 @@ mod tests {
 
     #[test]
     fn default_mesh_parses() {
-        let cli = Cli {
-            width: 512,
-            height: 512,
-            backend: Backend::Inproc,
-            mesh: None,
-            texture: None,
-        };
+        let cli = Cli::parse_from(["trd-gui"]);
         let mesh = cli.load_mesh().expect("built-in cube parses");
         assert!(!mesh.vertices.is_empty());
         assert!(!mesh.indices.is_empty());
@@ -102,13 +207,23 @@ mod tests {
 
     #[test]
     fn no_texture_flag_loads_nothing() {
-        let cli = Cli {
-            width: 256,
-            height: 256,
-            backend: Backend::Inproc,
-            mesh: None,
-            texture: None,
-        };
+        let cli = Cli::parse_from(["trd-gui"]);
         assert!(cli.load_texture().expect("no texture is Ok").is_none());
+        assert!(cli.load_env().expect("no env is Ok").is_none());
+    }
+
+    #[test]
+    fn pbr_flag_selects_pbr_mode_and_material() {
+        let cli = Cli::parse_from(["trd-gui", "--pbr", "--metallic", "1", "--roughness", "0.3"]);
+        let state = cli.scene_state();
+        assert_eq!(state.mode, RenderMode::Pbr);
+        assert_eq!(state.pbr.metallic, 1.0);
+        assert_eq!(state.pbr.roughness, 0.3);
+    }
+
+    #[test]
+    fn no_pbr_flag_keeps_filled_mode() {
+        let cli = Cli::parse_from(["trd-gui"]);
+        assert_eq!(cli.scene_state().mode, RenderMode::Filled);
     }
 }

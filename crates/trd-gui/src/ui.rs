@@ -8,7 +8,7 @@
 //! *how* to re-render — synchronously on native, asynchronously on wasm).
 
 use egui::{Color32, PointerButton, Sense, TextureHandle, Vec2};
-use trd_core::RenderMode;
+use trd_core::{RenderMode, Tonemap};
 
 use crate::interaction::{InteractionController, InteractionEvent, InteractionTarget};
 
@@ -27,8 +27,10 @@ pub struct View<'a> {
 pub fn show(ui: &mut egui::Ui, view: &mut View) -> bool {
     let mut needs_render = false;
     egui::Panel::left("controls")
-        .resizable(false)
-        .exact_size(200.0)
+        .resizable(true)
+        .default_size(264.0)
+        .min_size(240.0)
+        .max_size(420.0)
         .show(ui, |ui| {
             needs_render |= controls_panel(ui, view);
         });
@@ -48,7 +50,7 @@ fn controls_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
 
     ui.label("Primary drag");
     let target = &mut view.controller.target;
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         needs_render |= ui
             .selectable_value(target, InteractionTarget::Camera, "Orbit camera")
             .changed();
@@ -60,7 +62,7 @@ fn controls_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
 
     ui.label("Render mode");
     let mode = &mut view.controller.state.mode;
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         needs_render |= ui
             .selectable_value(mode, RenderMode::Filled, "Filled")
             .changed();
@@ -70,8 +72,16 @@ fn controls_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
         needs_render |= ui
             .selectable_value(mode, RenderMode::Textured, "Textured")
             .changed();
+        needs_render |= ui.selectable_value(mode, RenderMode::Pbr, "PBR").changed();
     });
     ui.separator();
+
+    // The Disney PBR material controls, live only while PBR mode is selected so
+    // the user can dial in metallic/roughness/etc. against the bound env probe.
+    if view.controller.state.mode == RenderMode::Pbr {
+        needs_render |= pbr_panel(ui, view);
+        ui.separator();
+    }
 
     ui.label("Overlays");
     let state = &mut view.controller.state;
@@ -101,7 +111,48 @@ fn controls_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
     needs_render
 }
 
-/// The central image panel: shows the current frame scaled to fit and turns
+/// The Disney PBR material sub-panel (shown only in [`RenderMode::Pbr`]): live
+/// sliders for the parameters that most change the look — metallic, roughness,
+/// environment-reflection gain, and tone-map exposure — plus a Reinhard/ACES
+/// tone-map selector. Editing any of them re-renders the scene, so the material
+/// is as interactive as the camera. Returns whether the material changed.
+fn pbr_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
+    let mut changed = false;
+    let pbr = &mut view.controller.state.pbr;
+    ui.label("PBR material");
+    // Label each slider on its own line so the text never clips in a narrow
+    // panel; the slider then spans the full panel width beneath it.
+    ui.label("Metallic");
+    changed |= ui
+        .add(egui::Slider::new(&mut pbr.metallic, 0.0..=1.0))
+        .changed();
+    ui.label("Roughness");
+    changed |= ui
+        .add(egui::Slider::new(&mut pbr.roughness, 0.0..=1.0))
+        .changed();
+    ui.label("Clearcoat");
+    changed |= ui
+        .add(egui::Slider::new(&mut pbr.clearcoat, 0.0..=1.0))
+        .changed();
+    ui.label("Env intensity");
+    changed |= ui
+        .add(egui::Slider::new(&mut pbr.env_intensity, 0.0..=4.0))
+        .changed();
+    ui.label("Exposure");
+    changed |= ui
+        .add(egui::Slider::new(&mut pbr.exposure, 0.0..=4.0))
+        .changed();
+    ui.label("Tonemap");
+    ui.horizontal_wrapped(|ui| {
+        changed |= ui
+            .selectable_value(&mut pbr.tonemap, Tonemap::Reinhard, "Reinhard")
+            .changed();
+        changed |= ui
+            .selectable_value(&mut pbr.tonemap, Tonemap::Aces, "ACES")
+            .changed();
+    });
+    changed
+}
 /// pointer/scroll input over it into interaction events. Returns whether the
 /// scene changed.
 fn image_panel(ui: &mut egui::Ui, view: &mut View) -> bool {

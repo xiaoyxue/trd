@@ -44,19 +44,22 @@ pub mod web_app;
 pub mod web_renderer;
 
 /// The browser entry point (Slice 4): builds the offscreen renderer and runs the
-/// eframe app on `canvas`. `mesh_obj` and `texture_bytes` are the browser
-/// equivalents of the native `--mesh` / `--texture` flags — an optional Wavefront
-/// OBJ **as text** and optional texture image **bytes** (PNG/JPEG); the thin JS
-/// bootstrap fetches them from `?mesh=` / `?texture=` URLs and passes them in.
-/// `None`/absent falls back to the built-in cube / no texture. All UI +
-/// interaction + rendering happen in Rust, per the repo's "JS is a thin bootstrap
-/// only" invariant.
+/// eframe app on `canvas`. `mesh_obj`, `texture_bytes`, and `env_bytes` are the
+/// browser equivalents of the native `--mesh` / `--texture` / `--env` flags — an
+/// optional Wavefront OBJ **as text**, optional texture image **bytes**
+/// (PNG/JPEG), and an optional Radiance HDR environment probe **bytes**; the thin
+/// JS bootstrap fetches them from `?mesh=` / `?texture=` / `?env=` URLs and passes
+/// them in. `None`/absent falls back to the built-in cube / no texture / no probe.
+/// Supplying an env probe starts the viewer in Disney **PBR** mode (the material
+/// is then editable live in the UI). All UI + interaction + rendering happen in
+/// Rust, per the repo's "JS is a thin bootstrap only" invariant.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub async fn start(
     canvas: web_sys::HtmlCanvasElement,
     mesh_obj: Option<String>,
     texture_bytes: Option<Vec<u8>>,
+    env_bytes: Option<Vec<u8>>,
     backend: Option<String>,
 ) -> Result<(), wasm_bindgen::JsValue> {
     use crate::interaction::InteractionController;
@@ -80,22 +83,42 @@ pub async fn start(
         Some(bytes) => Some(assets::decode_texture(&bytes).map_err(to_js)?),
         None => None,
     };
+    // The optional HDR env probe (browser `?env=`). Decoded in Rust so trd-core
+    // stays I/O-free; when present, the viewer starts in PBR mode.
+    let env = match env_bytes {
+        Some(bytes) => Some(assets::decode_env_hdr(&bytes).map_err(to_js)?),
+        None => None,
+    };
+    let scene = SceneState {
+        mode: if env.is_some() {
+            trd_core::RenderMode::Pbr
+        } else {
+            trd_core::RenderMode::Filled
+        },
+        ..SceneState::default()
+    };
     // `?backend=arrow` selects the Arrow wire round-trip; anything else (or
     // absent) is the direct in-process render.
     let backend = match backend.as_deref() {
         Some("arrow") => WebBackend::Arrow,
         _ => WebBackend::Inproc,
     };
+    // Render at a resolution suitable for the browser: the canvas's CSS size ×
+    // the device pixel ratio, so the image is crisp on high-DPI / large displays
+    // instead of upscaling a small fixed buffer. Bounded (aspect-preserving) to
+    // keep GPU + readback cost in check.
+    let (render_w, render_h) = browser_render_size(&canvas);
     let renderer = WebRenderer::new(
         &[mesh],
         texture.as_ref().map(|t| t as &dyn trd_core::Texture),
-        512,
-        512,
+        env,
+        render_w,
+        render_h,
         backend,
     )
     .await
     .map_err(to_js)?;
-    let app = WebApp::new(InteractionController::new(SceneState::default()), renderer);
+    let app = WebApp::new(InteractionController::new(scene), renderer);
 
     eframe::WebRunner::new()
         .start(
@@ -104,4 +127,35 @@ pub async fn start(
             Box::new(|_cc| Ok(Box::new(app))),
         )
         .await
+}
+
+/// A render resolution suitable for the browser: the canvas's CSS size × the
+/// device pixel ratio (so the image is crisp on high-DPI / large displays rather
+/// than an upscaled small buffer), with the larger axis bounded to [`MAX_DIM`]
+/// aspect-preserving to keep GPU + readback cost in check. Falls back to a
+/// reasonable size if the canvas isn't laid out yet.
+#[cfg(target_arch = "wasm32")]
+fn browser_render_size(canvas: &web_sys::HtmlCanvasElement) -> (u32, u32) {
+    /// Upper bound per axis (aspect-preserving) — crisp yet safe on any GPU.
+    const MAX_DIM: f64 = 2048.0;
+    const MIN_DIM: u32 = 64;
+
+    let dpr = web_sys::window()
+        .map(|w| w.device_pixel_ratio())
+        .filter(|d| d.is_finite() && *d > 0.0)
+        .unwrap_or(1.0);
+    // CSS pixel size from layout (the canvas fills the viewport). Fall back to a
+    // reasonable default if it hasn't been laid out yet.
+    let (css_w, css_h) = match (canvas.client_width(), canvas.client_height()) {
+        (w, h) if w > 1 && h > 1 => (w as f64, h as f64),
+        _ => (1280.0, 720.0),
+    };
+    let (mut w, mut h) = (css_w * dpr, css_h * dpr);
+    // Cap the larger axis, scaling both by the same factor to preserve aspect
+    // (an off-aspect render would distort the camera and letterbox the display).
+    let scale = (MAX_DIM / w.max(h)).min(1.0);
+    w *= scale;
+    h *= scale;
+    let px = |v: f64| (v.round() as u32).max(MIN_DIM);
+    (px(w), px(h))
 }

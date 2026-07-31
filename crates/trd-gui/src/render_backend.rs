@@ -32,8 +32,8 @@ pub use native::*;
 mod native {
     use super::ImageRgba;
     use trd_core::{
-        decode_params_stream, encode_params_stream, read_image_stream, BatchRenderer, Mesh,
-        OutputSession, RenderOptions, Texture,
+        decode_params_stream, encode_params_stream, read_image_stream, BatchRenderer, EnvMapData,
+        Mesh, OutputSession, RenderOptions, Texture,
     };
 
     use crate::error::GuiError;
@@ -89,18 +89,25 @@ mod native {
         /// scene draws mesh `0`) at a fixed `width` × `height`. The meshes are
         /// centered + scaled to fit by their preview transform inside `trd-core`. An
         /// optional `texture` is bound as the albedo sampled by [`RenderMode::Textured`]
-        /// meshes; when `None`, Textured mode uses `trd-core`'s 1×1 white default.
+        /// meshes; when `None`, Textured mode uses `trd-core`'s 1×1 white default. An
+        /// optional `env` HDR probe is reflected by [`RenderMode::Pbr`] metallic
+        /// surfaces (bound once; the interactive material rides on the scene state).
         ///
         /// [`RenderMode::Textured`]: trd_core::RenderMode::Textured
+        /// [`RenderMode::Pbr`]: trd_core::RenderMode::Pbr
         pub fn new(
             meshes: &[Mesh],
             texture: Option<&dyn Texture>,
+            env: Option<EnvMapData>,
             width: u32,
             height: u32,
         ) -> Result<Self, GuiError> {
             let mut renderer = BatchRenderer::with_meshes(width, height, meshes)?;
             if let Some(texture) = texture {
                 renderer.set_texture(texture);
+            }
+            if let Some(env) = env {
+                renderer.set_env_map(env);
             }
             Ok(Self {
                 renderer,
@@ -114,6 +121,7 @@ mod native {
         fn render(&mut self, state: &SceneState) -> Result<ImageRgba, GuiError> {
             let aspect = self.width as f32 / self.height.max(1) as f32;
             self.renderer.set_mode(state.mode);
+            self.renderer.set_pbr_material(state.pbr);
             self.renderer.set_show_aabb(state.show_aabb);
             self.renderer.set_show_axes(state.show_axes);
             self.renderer.set_show_local_axes(state.show_local_axes);
@@ -156,19 +164,25 @@ mod native {
 
     impl ArrowRoundTripRenderer {
         /// Builds the backend, creating the GPU renderer once from the static meshes
-        /// (and optional bound `texture`). When a `texture` is bound,
-        /// [`RenderMode::Textured`] samples it (matching the in-process backend).
+        /// (and optional bound `texture` / `env` probe). When a `texture` is bound,
+        /// [`RenderMode::Textured`] samples it; an `env` HDR probe is reflected by
+        /// [`RenderMode::Pbr`] metallic surfaces (matching the in-process backend).
         ///
         /// [`RenderMode::Textured`]: trd_core::RenderMode::Textured
+        /// [`RenderMode::Pbr`]: trd_core::RenderMode::Pbr
         pub fn new(
             meshes: &[Mesh],
             texture: Option<&dyn Texture>,
+            env: Option<EnvMapData>,
             width: u32,
             height: u32,
         ) -> Result<Self, GuiError> {
             let mut renderer = BatchRenderer::with_meshes(width, height, meshes)?;
             if let Some(texture) = texture {
                 renderer.set_texture(texture);
+            }
+            if let Some(env) = env {
+                renderer.set_env_map(env);
             }
             Ok(Self {
                 renderer,
@@ -194,6 +208,7 @@ mod native {
             // 3. Render on the persistent device.
             let opts = render_options(state);
             self.renderer.set_mode(opts.mode);
+            self.renderer.set_pbr_material(state.pbr);
             self.renderer.set_show_aabb(opts.show_aabb);
             self.renderer.set_show_axes(opts.show_axes);
             self.renderer.set_show_local_axes(opts.show_local_axes);

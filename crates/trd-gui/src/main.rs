@@ -15,7 +15,6 @@ fn main() -> eframe::Result<()> {
     use trd_gui::render_backend::{
         mesh_has_uvs, ArrowRoundTripRenderer, InProcRenderer, SceneRenderer,
     };
-    use trd_gui::scene::SceneState;
 
     env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("warn,trd_gui=info,trd_core=info"),
@@ -40,6 +39,13 @@ fn main() -> eframe::Result<()> {
             std::process::exit(1);
         }
     };
+    let env = match cli.load_env() {
+        Ok(env) => env,
+        Err(err) => {
+            log::error!("{err}");
+            std::process::exit(1);
+        }
+    };
     // A texture only maps meaningfully onto a UV-mapped mesh; warn otherwise so a
     // flat/"wrong" Textured render is explained rather than mysterious.
     if texture.is_some() && !mesh_has_uvs(&mesh) {
@@ -54,6 +60,7 @@ fn main() -> eframe::Result<()> {
         Backend::Inproc => InProcRenderer::new(
             &[mesh],
             texture.as_ref().map(|t| t as &dyn trd_core::Texture),
+            env,
             cli.width,
             cli.height,
         )
@@ -61,6 +68,7 @@ fn main() -> eframe::Result<()> {
         Backend::Arrow => ArrowRoundTripRenderer::new(
             &[mesh],
             texture.as_ref().map(|t| t as &dyn trd_core::Texture),
+            env,
             cli.width,
             cli.height,
         )
@@ -74,7 +82,7 @@ fn main() -> eframe::Result<()> {
         }
     };
 
-    let controller = InteractionController::new(SceneState::default());
+    let controller = InteractionController::new(cli.scene_state());
     let app = TrdGuiApp::new(controller, renderer);
 
     let options = eframe::NativeOptions {

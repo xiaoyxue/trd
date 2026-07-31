@@ -46,6 +46,15 @@ pub enum GuiError {
         source: std::io::Error,
     },
 
+    /// The HDR environment-map file could not be read from disk (native `--env`).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error("failed to read env-map file '{path}': {source}")]
+    EnvIo {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+
     /// Authoring an Arrow scene stream failed (Arrow round-trip path, native +
     /// wasm).
     #[error("scene encode failed: {0}")]

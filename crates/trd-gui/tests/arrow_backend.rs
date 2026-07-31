@@ -36,7 +36,7 @@ fn cube() -> trd_core::Mesh {
 fn arrow_backend_renders_a_nonblank_frame() {
     let (w, h) = (128, 128);
     let mut renderer =
-        ArrowRoundTripRenderer::new(&[cube()], None, w, h).expect("arrow backend builds");
+        ArrowRoundTripRenderer::new(&[cube()], None, None, w, h).expect("arrow backend builds");
     // The persistent-device backend renders at interactive speed, so it no longer
     // defers to interaction end.
     assert!(!renderer.defer_expensive());
@@ -60,8 +60,8 @@ fn arrow_backend_matches_inproc_pixel_for_pixel() {
     let (w, h) = (128, 128);
     let state = SceneState::default();
 
-    let mut inproc = InProcRenderer::new(&[cube()], None, w, h).expect("inproc builds");
-    let mut arrow = ArrowRoundTripRenderer::new(&[cube()], None, w, h).expect("arrow builds");
+    let mut inproc = InProcRenderer::new(&[cube()], None, None, w, h).expect("inproc builds");
+    let mut arrow = ArrowRoundTripRenderer::new(&[cube()], None, None, w, h).expect("arrow builds");
 
     let a = inproc.render(&state).expect("inproc render").rgba;
     let b = arrow.render(&state).expect("arrow render").rgba;
@@ -91,8 +91,9 @@ fn arrow_textured_matches_inproc_textured() {
         ..Default::default()
     };
 
-    let mut inproc = InProcRenderer::new(&[cube()], Some(&red), w, h).expect("inproc builds");
-    let mut arrow = ArrowRoundTripRenderer::new(&[cube()], Some(&red), w, h).expect("arrow builds");
+    let mut inproc = InProcRenderer::new(&[cube()], Some(&red), None, w, h).expect("inproc builds");
+    let mut arrow =
+        ArrowRoundTripRenderer::new(&[cube()], Some(&red), None, w, h).expect("arrow builds");
 
     let a = inproc.render(&state).expect("inproc render").rgba;
     let b = arrow.render(&state).expect("arrow render").rgba;
