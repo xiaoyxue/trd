@@ -26,8 +26,10 @@ Platform-agnostic wgpu logic, shared verbatim by every target:
   `wgpu::TextureView`; that one renderer is why the same code targets an offscreen
   texture, a window swapchain, or a browser canvas. The offscreen render target +
   async pixel read-back is factored into a shared `OffscreenTarget` harness
-  (`render/offscreen.rs`), and the on-screen present path into `OnscreenTarget`
-  (`render/onscreen.rs`), each reused by every front-end of its kind.
+  (`render/offscreen.rs`), reused by every read-back front-end (`trd-cli`, the
+  browser `OffscreenRenderer`, and `trd-gui`). The live-present front-ends
+  (`trd-app`, `trd-wasm`'s `CanvasRenderer`) instead own their `wgpu::Surface`
+  swapchain directly and draw the same `Scene` into it.
 - **`DrawableObject` + `Scene` (`render/scene.rs`)** — the base interface for every
   primitive (#41). It is a small `Copy` enum — `Mesh { mesh_id, model, mode }`,
   `AabbBox { mesh_id, model }`, `CoordinateAxes { model }`, and `FramePlane { fit }`

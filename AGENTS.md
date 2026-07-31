@@ -29,6 +29,11 @@ Guidance for agents working in this repository.
   degenerate one-element scene. Add a primitive by adding a variant, not by
   bolting flags onto the renderer. Wireframe (and PBR) is a *mode* of `Mesh`, not
   a separate variant.
+- **Shared render harness.** The offscreen render-target + async pixel read-back
+  is factored into `OffscreenTarget` (`render/offscreen.rs`), reused by every
+  read-back consumer (`trd-cli`, the browser `OffscreenRenderer`, `trd-gui`).
+  Live-surface front-ends (`trd-app`, `trd-wasm`'s `CanvasRenderer`) own their
+  `wgpu::Surface` swapchain directly — there is **no** shared on-screen harness.
 - Major input data is columnar (Apache Arrow tables) with simple glue logic.
 - **The input protocol is NOT backward compatible.** Wire format is **mesh-first**
   `[mesh][texture?][params]`; only the current `PROTOCOL_VERSION`
@@ -226,3 +231,7 @@ cd .worktree/<topic>
 ```
 Never check out a feature branch in the root itself. Remove the worktree after the
 PR merges (`git worktree remove .worktree/<topic>`).
+
+There is only **one** tracked `AGENTS.md` (repo root); a worktree's `AGENTS.md` is
+just that file checked out on its branch, not a separate copy to reconcile — edit
+it here and it lands with the branch.
