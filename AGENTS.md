@@ -206,6 +206,16 @@ considered done:
   note (exact commands + expected result) in **both** the issue and the PR, so the
   other platform's verification can be completed and recorded there.
 
+### Documentation
+
+- **`README.md` is a lean entry point; the detail lives in `docs/`.** Keep them in
+  sync: whenever a change updates `README.md`, update the affected `docs/` page(s)
+  in the **same** PR — and vice-versa. In particular, `docs/architecture.md`
+  (crates/render core), `docs/rendering.md` (CLI flags, wrappers ⇄ `cargo run`,
+  demos), `docs/pbr.md` (PBR params), and `docs/protocol/0.0.5.md` (wire format)
+  mirror the README's summaries, so a behavior/flag/layout change must be reflected
+  in both. Don't let the README and `docs/` drift.
+
 ### Worktrees
 
 Keep the git root checkout on `main` at all times. Do all branch/PR work in a git

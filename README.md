@@ -127,6 +127,13 @@ All params columns are optional/additive and drive `clip = P · V · M · (pos, 
 Rendering appearance (filled / wireframe / textured / **PBR**) is a render-time
 choice, **not** a wire column, so the same stream renders any way.
 
+**PBR.** `--pbr` shades meshes with the **Disney principled BRDF** (`disney.wgsl`)
+— the bound albedo lit by a virtual key/fill/rim light rig plus an optional HDR
+environment probe, with filmic tone mapping. The material + lighting are tunable
+from the CLI: `--metallic` / `--roughness` / `--specular` / `--clearcoat`,
+`--env <file.hdr>` / `--env-intensity`, `--exposure` / `--ambient`, and
+`--tonemap reinhard|aces`. Full parameter reference: **[`docs/pbr.md`](docs/pbr.md)**.
+
 **Full column-by-column specification:
 [`docs/protocol/0.0.5.md`](docs/protocol/0.0.5.md).**
 
@@ -137,6 +144,8 @@ choice, **not** a wire column, so the same stream renders any way.
 - [`docs/rendering.md`](docs/rendering.md) — running every front-end
   (wrappers ⇄ `cargo run`), all CLI flags, PBR / tone-map / MSAA, camera forms,
   AR demos, the native window, the interactive viewer, web, and Windows setup.
+- [`docs/pbr.md`](docs/pbr.md) — the Disney principled-BRDF material model, all PBR
+  parameters + defaults, tone mapping, and the HDR environment probe.
 - [`docs/protocol/0.0.5.md`](docs/protocol/0.0.5.md) — the full stream-protocol spec.
 - [`docs/gui-design.md`](docs/gui-design.md) — the `trd-gui` interactive-viewer design.
 - [`AGENTS.md`](AGENTS.md) — contributor/agent guide: build system, GPU-adapter

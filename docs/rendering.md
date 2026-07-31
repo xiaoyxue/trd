@@ -94,7 +94,8 @@ The same stream renders four ways — pick one per render:
   `--env <file.hdr>` (equirectangular Radiance map) reflected by metallic surfaces
   (`--env-intensity`). HDR output is tone-mapped by `--tonemap reinhard|aces`
   (default `reinhard`; `aces` is the filmic curve), with `--exposure` / `--ambient`
-  controls. Requires a texture stream for the albedo.
+  controls. Requires a texture stream for the albedo. **Full parameter reference +
+  material model: [`docs/pbr.md`](pbr.md).**
 
 ```sh
 # Shiny metal bunny under an HDR environment probe, ACES tone-map:
