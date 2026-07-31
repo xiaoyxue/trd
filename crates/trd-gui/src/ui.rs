@@ -27,8 +27,10 @@ pub struct View<'a> {
 pub fn show(ui: &mut egui::Ui, view: &mut View) -> bool {
     let mut needs_render = false;
     egui::Panel::left("controls")
-        .resizable(false)
-        .exact_size(200.0)
+        .resizable(true)
+        .default_size(264.0)
+        .min_size(240.0)
+        .max_size(420.0)
         .show(ui, |ui| {
             needs_render |= controls_panel(ui, view);
         });
@@ -48,7 +50,7 @@ fn controls_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
 
     ui.label("Primary drag");
     let target = &mut view.controller.target;
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         needs_render |= ui
             .selectable_value(target, InteractionTarget::Camera, "Orbit camera")
             .changed();
@@ -60,7 +62,7 @@ fn controls_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
 
     ui.label("Render mode");
     let mode = &mut view.controller.state.mode;
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         needs_render |= ui
             .selectable_value(mode, RenderMode::Filled, "Filled")
             .changed();
@@ -118,23 +120,30 @@ fn pbr_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
     let mut changed = false;
     let pbr = &mut view.controller.state.pbr;
     ui.label("PBR material");
+    // Label each slider on its own line so the text never clips in a narrow
+    // panel; the slider then spans the full panel width beneath it.
+    ui.label("Metallic");
     changed |= ui
-        .add(egui::Slider::new(&mut pbr.metallic, 0.0..=1.0).text("Metallic"))
+        .add(egui::Slider::new(&mut pbr.metallic, 0.0..=1.0))
         .changed();
+    ui.label("Roughness");
     changed |= ui
-        .add(egui::Slider::new(&mut pbr.roughness, 0.0..=1.0).text("Roughness"))
+        .add(egui::Slider::new(&mut pbr.roughness, 0.0..=1.0))
         .changed();
+    ui.label("Clearcoat");
     changed |= ui
-        .add(egui::Slider::new(&mut pbr.clearcoat, 0.0..=1.0).text("Clearcoat"))
+        .add(egui::Slider::new(&mut pbr.clearcoat, 0.0..=1.0))
         .changed();
+    ui.label("Env intensity");
     changed |= ui
-        .add(egui::Slider::new(&mut pbr.env_intensity, 0.0..=4.0).text("Env"))
+        .add(egui::Slider::new(&mut pbr.env_intensity, 0.0..=4.0))
         .changed();
+    ui.label("Exposure");
     changed |= ui
-        .add(egui::Slider::new(&mut pbr.exposure, 0.0..=4.0).text("Exposure"))
+        .add(egui::Slider::new(&mut pbr.exposure, 0.0..=4.0))
         .changed();
-    ui.horizontal(|ui| {
-        ui.label("Tonemap");
+    ui.label("Tonemap");
+    ui.horizontal_wrapped(|ui| {
         changed |= ui
             .selectable_value(&mut pbr.tonemap, Tonemap::Reinhard, "Reinhard")
             .changed();
