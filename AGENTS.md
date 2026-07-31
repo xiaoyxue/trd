@@ -4,182 +4,234 @@ Guidance for agents working in this repository.
 
 ## Architecture
 
-- **Rust + wgpu is the single unified rendering core** (`crates/trd-core`).
-  The same core renders natively (headless CLI and an interactive window) and
-  in the browser (compiled to wasm).
-- **JS/TS is a thin bootstrap wrapper only.** Do not call the WebGPU API
-  directly from JavaScript; all rendering logic lives in Rust.
-- **Typed math lives in `crates/trd-core/src/math/`** — homogeneous linear
-  algebra (`Vector`/`Point`/`Normal`/`Matrix`/`Rotation`/`Transform`/`Aabb`) as
-  zero-cost `#[repr(transparent)]` newtypes over glam with **private** inner
-  fields that enforce affine-space rules the raw glam types can't (`point −
-  point → vector`, no `point + point`). The crate conventions — column-major,
-  right-handed, clip `z ∈ [0, 1]`, `a.then(b) == b * a`, f32 radians — live in
-  `math/mod.rs`. `render.rs`'s MVP transforms build on it; keep the GPU
-  `Uniform` byte-identical when touching them. Native SIMD (SSE2/NEON) is
-  automatic; wasm SIMD is enabled via `-C target-feature=+simd128` in
-  `.cargo/config.toml`.
+- **One rendering core: Rust + wgpu** (`crates/trd-core`). The same code renders
+  natively (headless CLI + interactive window) and in the browser (wasm).
+  **JS/TS is a thin bootstrap only** — never call the WebGPU API from JS; all
+  rendering logic lives in Rust.
+- **Typed math** (`crates/trd-core/src/math/`): homogeneous linear algebra
+  (`Vector`/`Point`/`Normal`/`Matrix`/`Rotation`/`Transform`/`Aabb`) as zero-cost
+  `#[repr(transparent)]` newtypes over glam with **private** fields that enforce
+  affine rules glam can't (`point − point → vector`, no `point + point`).
+  Conventions live in `math/mod.rs`: column-major, right-handed, clip
+  `z ∈ [0, 1]`, `a.then(b) == b * a`, f32 radians. The `render/` MVP transforms
+  build on it — keep the GPU `Uniform` byte-identical when touching them. SIMD:
+  native SSE2/NEON is automatic; wasm needs `-C target-feature=+simd128`
+  (`.cargo/config.toml`).
 - **Vertical slicing.** Each increment threads the whole stack and is
   independently end-to-end verifiable.
-- **Everything the renderer draws is a `DrawableObject`** (`render.rs`, #41): a
-  small `Copy` enum (`Mesh { mesh_id, model, mode }` | `AabbBox { mesh_id, model }`
-  | `CoordinateAxes { model }`) — the single base interface for every primitive.
-  The renderer owns geometry once (decode-once mesh store + shared gizmo buffers);
-  a drawable is just a light handle naming *which* primitive + its per-frame model.
-  `MeshRenderer::encode` always walks a `Scene` (`= Vec<DrawableObject>`, rebuilt
-  per frame) with **no per-type branching**; a single-object frame is the
-  degenerate one-element scene. Add a new primitive by adding an enum variant, not
-  by bolting flags onto the renderer. Wireframe is a *mode* of `Mesh`, not a
-  separate variant.
+- **Everything drawn is a `DrawableObject`** (`render/scene.rs`, #41): a small
+  `Copy` enum (`Mesh { mesh_id, model, mode }` | `AabbBox { mesh_id, model }` |
+  `CoordinateAxes { model }` | `FramePlane { fit }`) — the single base interface
+  for every primitive. Geometry is owned once (decode-once mesh store + shared
+  gizmo buffers); a drawable is a light handle naming *which* primitive + its
+  per-frame model. `MeshRenderer::encode` walks a `Scene` (`= Vec<DrawableObject>`,
+  rebuilt per frame) with **no per-type branching**; a single-object frame is the
+  degenerate one-element scene. Add a primitive by adding a variant, not by
+  bolting flags onto the renderer. Wireframe (and PBR) is a *mode* of `Mesh`, not
+  a separate variant.
+- **Shared render harness.** The offscreen render-target + async pixel read-back
+  is factored into `OffscreenTarget` (`render/offscreen.rs`), reused by every
+  read-back consumer (`trd-cli`, the browser `OffscreenRenderer`, `trd-gui`).
+  Live-surface front-ends (`trd-app`, `trd-wasm`'s `CanvasRenderer`) own their
+  `wgpu::Surface` swapchain directly — there is **no** shared on-screen harness.
 - Major input data is columnar (Apache Arrow tables) with simple glue logic.
-- **The input stream protocol is NOT backward compatible.** The wire format is
-  **mesh-first** `[mesh][texture?][params]` and only the current
-  `PROTOCOL_VERSION` (`trd_core::protocol::PROTOCOL_VERSION`, currently `0.0.5`)
-  is accepted — every batch's `trd.protocol.version` metadata is checked, and a
-  stream declaring any other version is **hard-rejected** (`UnsupportedVersion`),
-  never silently upgraded. When you evolve the protocol, **bump
-  `PROTOCOL_VERSION` and migrate all producers + fixtures to it in the same
-  change** (`scripts/{jsonl,obj,texture}_to_arrow.py` all stamp the version;
-  regenerate the golden `stage{1,2}.arrow` fixtures). Do **not** re-introduce
-  branches to decode retired versions or params-only (hello-triangle) streams —
-  dropping that legacy surface is a deliberate simplification (#82/#90). There is
-  no params-only fallback: every input must begin with a mesh table.
+- **The input protocol is NOT backward compatible.** Wire format is **mesh-first**
+  `[mesh][texture?][params]`; only the current `PROTOCOL_VERSION`
+  (`trd_core::protocol::PROTOCOL_VERSION`, currently `0.0.5`) is accepted — every
+  batch's `trd.protocol.version` is checked and any other version is
+  **hard-rejected** (`UnsupportedVersion`), never silently upgraded. To evolve it,
+  **bump `PROTOCOL_VERSION` and migrate all producers + fixtures in the same
+  change** (`scripts/{jsonl,obj,texture}_to_arrow.py` stamp the version;
+  regenerate the golden `stage{1,2}.arrow` fixtures). Do **not** re-add branches
+  for retired versions or params-only (hello-triangle) streams — dropping that
+  legacy is deliberate (#82/#90). Every input must begin with a mesh table.
 
 ## Toolchain
 
-- Enter the dev environment with `nix develop` (provides the pinned Rust
-  toolchain via rust-overlay, `bun`, `wasm-bindgen-cli`, `biome`, `typescript`,
-  and Vulkan) for local iteration and GPU work.
-- The flake is the build system, not just a dev shell. Prefer the real outputs:
-  - `nix build .#trd-cli` — native CLI binary (`trd`), wrapped with the Vulkan/
-    GL runtime libs. `nix run .#trd -- --width 256 --height 256` runs the Arrow
-    stream filter (frames on stdin -> images on stdout).
-  - `nix build .#trd-wasm` — the `wasm-bindgen` JS/TS library package (built with
-    `wasm-bindgen-cli` + `wasm-opt`, replacing `wasm-pack` in the nix build).
+- **Dev shell:** `nix develop` (pinned Rust via rust-overlay, `bun`,
+  `wasm-bindgen-cli`, `biome`, `typescript`, Vulkan). Local `cargo` inside it
+  works for fast iteration.
+- **The flake is the build system, not just a dev shell.** Prefer the real outputs:
+  - `nix build .#trd-cli` — native CLI (`trd`), wrapped with Vulkan/GL libs.
+    `nix run .#trd -- --width 256 --height 256` runs the Arrow stream filter
+    (frames on stdin → images on stdout).
+  - `nix build .#trd-wasm` — the `wasm-bindgen` JS/TS library (built with
+    `wasm-bindgen-cli` + `wasm-opt`, replacing `wasm-pack`).
   - `nix build .#web` (also `.#`) — the bun-bundled, HTTP-servable `dist/`.
     `nix run .#web` serves it (`PORT` overridable, defaults to 8080).
-  - `nix flake check` — every quality gate: `cargo fmt`, clippy (native + wasm32),
-    `cargo test`, `tsc --noEmit`, and Biome (format + lint). No GPU required.
+  - `nix flake check` — every non-GPU gate: `cargo fmt`, clippy (native +
+    wasm32), `cargo test`, `tsc --noEmit`, Biome.
   - `nix fmt` — formats nix files (`nixfmt`).
-- Local `cargo` inside `nix develop` still works for fast iteration.
-- The `web/` folder is bun-managed; its lint/format gate is **Biome**
-  (`web/biome.json`). Run `bun run check` / `bun run format` / `bun run typecheck`
-  from inside `nix develop`, or directly on Windows — `@biomejs/biome` and
-  `apache-arrow` are declared in `web/package.json`, so `bun install` +
-  `bun run check` / `typecheck` / `build:web` work without Nix.
-- **The Nix web build installs `web/`'s npm deps offline via
-  [bun2nix](https://github.com/nix-community/bun2nix).** `web/bun.nix` is
-  generated from `web/bun.lock` and pins every dependency by hash, so
-  `nix build .#web` and the `nix flake check` `tsc` gate run `bun install`
-  reproducibly in the sandbox. **Regenerate `web/bun.nix` whenever `web/bun.lock`
-  changes** (add/upgrade an npm dep): from `nix develop` run
-  `bun install` (updates `bun.lock`) then
+- **`web/` is bun-managed; its lint/format gate is Biome** (`web/biome.json`).
+  Run `bun run check` / `format` / `typecheck` from `nix develop`, or directly on
+  Windows — `@biomejs/biome` + `apache-arrow` are in `web/package.json`, so
+  `bun install` + `bun run check` / `typecheck` / `build:web` work without Nix.
+- **Nix web deps are installed offline via
+  [bun2nix](https://github.com/nix-community/bun2nix).** `web/bun.nix` (generated
+  from `web/bun.lock`, hash-pinned) lets `nix build .#web` and the `tsc` gate
+  `bun install` reproducibly. **Regenerate `web/bun.nix` whenever `web/bun.lock`
+  changes** (add/upgrade an npm dep): from `nix develop`, `bun install` (updates
+  `bun.lock`) then
   `nix run github:nix-community/bun2nix -- -l web/bun.lock -o web/bun.nix`, and
   **delete the autogenerated `"trd-wasm" = copyPathToStore ...;` line** — that
-  `file:` dep is supplied by the nix-built `trd-wasm` package, not fetched.
-  The Biome gate runs from nixpkgs' `biome` (version-matched to `package.json`),
-  since bun can't materialize biome's large optional platform binary in the
-  sandbox.
+  `file:` dep is supplied by the nix-built `trd-wasm`, not fetched. The Biome gate
+  runs from nixpkgs' `biome` (version-matched to `package.json`), since bun can't
+  materialize biome's large optional platform binary in the sandbox.
 - **`nix build`/`nix flake check` only see git-tracked files.** `git add` new
-  files (e.g. a new `biome.json` or source file) before building, or the sandbox
-  won't include them.
-- We always work on GPU machines. GPU-dependent tests are marked `#[ignore]`
-  and run locally; CI skips them.
-- **Always render on the most powerful GPU available.** When a box exposes more
-  than one adapter, pick the strongest discrete card and never fall back to a
-  weak display/iGPU (e.g. a Quadro P620) or software (llvmpipe). Preference order
-  (strongest first):
+  files before building, or the sandbox won't include them.
+
+### GPU
+
+- We always work on GPU machines. GPU-dependent tests are marked `#[ignore]` and
+  run locally; CI skips them.
+- **Always render on the most powerful GPU available.** With multiple adapters,
+  pick the strongest discrete card; never fall back to a weak display/iGPU (e.g. a
+  Quadro P620) or software (llvmpipe). Preference (strongest first):
   `RTX PRO 6000 > RTX 5090 > RTX 6000 Ada > RTX 4090 > RTX A6000 > RTX 3090 > others`.
-  Check what's present with `nvidia-smi --query-gpu=index,name,memory.total --format=csv`,
-  and confirm which adapter trd actually chose from its `trd_core=info` log line
-  `using Vulkan adapter "…" (DiscreteGpu)`. The native CLI render path
-  (`stream.rs`) requests `PowerPreference::HighPerformance`, so wgpu's Vulkan
-  backend prefers the discrete card (verified: picks the RTX 3090 over a P620 on
-  the dev box). If a weaker adapter is ever selected, force it: on Mesa use
-  `MESA_VK_DEVICE_SELECT=<vendorId>:<deviceId>`; on multi-GPU NVIDIA use
+  List adapters with `nvidia-smi --query-gpu=index,name,memory.total --format=csv`;
+  confirm trd's choice from its `trd_core=info` log line
+  `using Vulkan adapter "…" (DiscreteGpu)`. The native render path (`stream.rs`)
+  requests `PowerPreference::HighPerformance`, so Vulkan prefers the discrete card
+  (verified: picks the RTX 3090 over a P620). To force one: Mesa
+  `MESA_VK_DEVICE_SELECT=<vendorId>:<deviceId>`; multi-GPU NVIDIA
   `__NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia` (GL) — plain
-  `CUDA_VISIBLE_DEVICES` does not filter Vulkan physical devices.
-- **Golden / snapshot render test (#88) — the required render-regression gate.**
-  `crates/trd-core/tests/golden_render.rs`
-  feeds committed Arrow fixtures (`crates/trd-core/tests/golden/stage{1,2}.arrow`,
-  the reduced two-stage cornellbox placement demo) through the real
-  `run_stream` pipeline and pixel-diffs the frames against committed golden PNGs
-  (same dir) — the regression net for the #82 refactor. Each frame keeps its
-  `0.0.5` `frame_path`, which the test resolves against `tests/golden/frames/`
-  (committed cornellbox stills) and composites the scene over — an AR composite
-  over the cornellbox background (test-side `--frames-base`). It is GPU-gated
-  (`#[ignore]`), so run it with the nixGL wrapper below (Linux) or directly on a
-  Windows box with a discrete GPU. **It is a mandatory test:** any change that
-  touches the render path (`crates/trd-core` render code, PBR/tone-map, shaders,
-  or the golden fixtures) MUST run `golden_render -- --ignored` on a real GPU and
-  land green — on **every** platform where a GPU is available — before the task
-  is done. After changing the
-  fixtures or making an *intended* visual change, regenerate:
-  ```sh
-  # 1. rebuild the .arrow fixtures + stills (needs uv + ffmpeg on PATH)
-  python3 scripts/golden_fixtures.py
-  # 2. refresh the golden PNGs from the current renderer (GPU box)
-  TRD_UPDATE_GOLDENS=1 cargo test -p trd-core --test golden_render -- --ignored
-  ```
-  A companion **non-GPU** test, `tests/decoder_parity.rs`, decodes the same
-  fixtures through both the native (`stream.rs`) and wasm (`protocol.rs`)
-  decoders and asserts identical frames — it runs in `nix flake check` and
-  guards against decoder divergence (e.g. the `center` non-nullable bug).
-- **Native Linux GPU (non-NixOS, e.g. Ubuntu) — use nixGL.** The dev shell's
-  `nix develop` Vulkan loader can't load the host NVIDIA/Mesa driver (its ICD
-  points at host libs the nix loader won't `dlopen`), so GPU commands fail with
-  *"No suitable graphics adapter found"*. Wrap the GPU command with
-  [nixGL](https://github.com/nix-community/nixGL) to inject a matching host
-  driver:
+  `CUDA_VISIBLE_DEVICES` does **not** filter Vulkan physical devices.
+- **Linux non-NixOS (e.g. Ubuntu): use nixGL.** The `nix develop` Vulkan loader
+  can't `dlopen` the host NVIDIA/Mesa driver (fails with *"No suitable graphics
+  adapter found"*). Wrap GPU commands to inject a matching host driver:
   ```sh
   # inside `nix develop`; --impure lets nixGL detect the host driver version
   NIXPKGS_ALLOW_UNFREE=1 nix run --impure github:nix-community/nixGL#nixGLNvidia -- \
-    cargo test -p trd-core -- --ignored          # or: -- ./result/bin/trd …, render.sh, etc.
+    cargo test -p trd-core -- --ignored          # or: ./result/bin/trd …, render.sh, etc.
   ```
-  `NIXPKGS_ALLOW_UNFREE=1` is required for the NVIDIA driver; use `#nixGLIntel`
-  for Intel/Mesa. NixOS machines don't need this (the driver is on
-  `/run/opengl-driver`); WSL uses `WGPU_BACKEND=gl` instead (see below).
-- **WSL2 GPU:** NVIDIA ships no native Linux Vulkan ICD for WSL, so the Vulkan
-  backend falls back to software (llvmpipe) and Mesa's `dzn` (Vulkan-on-D3D12)
-  crashes at device creation. Use `WGPU_BACKEND=gl` for real GPU rendering via
-  Mesa's D3D12 OpenGL driver; the dev shell auto-configures this on WSL.
+  `NIXPKGS_ALLOW_UNFREE=1` is required for NVIDIA; use `#nixGLIntel` for
+  Intel/Mesa. NixOS doesn't need this (driver on `/run/opengl-driver`); WSL uses
+  `WGPU_BACKEND=gl` (below).
+- **WSL2:** NVIDIA ships no native Linux Vulkan ICD, so Vulkan falls back to
+  software (llvmpipe) and Mesa's `dzn` (Vulkan-on-D3D12) crashes at device
+  creation. Use `WGPU_BACKEND=gl` for real GPU rendering via Mesa's D3D12 GL
+  driver; the dev shell auto-configures this on WSL.
+
+### Golden render test (#88) — the render-regression gate
+
+`crates/trd-core/tests/golden_render.rs` feeds committed Arrow fixtures
+(`crates/trd-core/tests/golden/stage{1,2}.arrow`, the reduced two-stage
+cornellbox placement demo) through the real `run_stream` pipeline and pixel-diffs
+the frames against committed golden PNGs (same dir). Each frame keeps its `0.0.5`
+`frame_path`, resolved against `tests/golden/frames/` (committed cornellbox
+stills) and composited **under** the scene — an AR composite over the background
+(test-side `--frames-base`).
+
+Each fixture is rendered **twice — 4× MSAA (`Msaa::X4`, the default anti-aliased
+mesh pass) and MSAA-off (`Msaa::Off`, single-sample)** — each pinned to its own
+goldens (`stageN_*` vs `stageN_noaa_*`), so both the multisample+resolve path and
+the raw single-sample path are covered; plus PBR tone-map variants
+(`golden_stage2_pbr_{aces,reinhard}`). It is GPU-gated (`#[ignore]`); run it via
+the nixGL wrapper (Linux) or directly on a Windows box with a discrete GPU.
+
+**Mandatory:** any change touching the render path (`crates/trd-core` render code,
+PBR/tone-map, shaders, or the golden fixtures) MUST run the golden suite on a real
+GPU and land green — on **every** platform where a GPU is available — before the
+task is done. After an *intended* visual change or a fixture change, regenerate:
+```sh
+# 1. rebuild the .arrow fixtures + stills (needs uv + ffmpeg on PATH)
+python3 scripts/golden_fixtures.py
+# 2. refresh the golden PNGs from the current renderer (GPU box)
+TRD_UPDATE_GOLDENS=1 cargo test -p trd-core --test golden_render -- --ignored
+```
+The companion **non-GPU** `tests/decoder_parity.rs` decodes the same fixtures
+through both the native (`stream.rs`) and wasm (`protocol.rs`) decoders and
+asserts identical frames — it runs in `nix flake check` and guards against
+decoder divergence (e.g. the `center` non-nullable bug).
 
 ## PR Workflow
 
-- **pr_first: true** — push work on a feature branch and open a **draft PR**
-  as early as practical; use the PR as the working surface.
+- **pr_first:** push work to a feature branch and open a **draft PR** as early as
+  practical; use the PR as the working surface.
 - **auto_merge: small** — small, low-risk PRs may be squash-merged once CI is
   green. Risky PRs (public API, schemas, migrations, auth, infra) require human
   review.
-- **branch naming:** `feat/<topic>`, `fix/<topic>`, etc.
-- **merge strategy:** squash.
-- PRs that resolve an issue must include a `Closes #nn` keyword.
-- **Dual-platform verification (Windows + Linux).** Every task must be verified on
-  **both** platforms before it is considered done, because trd ships a native
-  Windows path (`trd-cli`/`trd-app`, `examples/render.ps1`) and a Linux/Nix path
-  (`nix flake check`, GPU-gated `#[ignore]` tests on the RTX box, `render.sh`):
-  - **Linux:** `nix flake check` (fmt, clippy native + wasm32, tests, tsc, biome)
-    plus the GPU-gated tests (`golden_render` etc.) via the nixGL wrapper.
-  - **Windows:** build/run the affected native path (`trd-cli`/`trd-app` with the
-    MSVC toolchain; `examples/render.ps1` for the demo) and confirm it renders.
-    On a box with a discrete GPU, the golden test is **runnable on Windows too**
-    (wgpu Vulkan — verified on a GTX 1080 Ti), so also run
-    `cargo test -p trd-core --test golden_render -- --ignored` there — don't
-    defer it entirely to Linux.
-  - **Required render gate:** for any change touching the render path, the
-    GPU-gated `golden_render` suite (incl. `golden_stage2_pbr_{aces,reinhard}`)
-    MUST pass on a real GPU (or the goldens be regenerated for an *intended*
-    visual change) and the result recorded on the PR — it is the primary
-    pixel-level regression net.
-  - Whichever platform you cannot run yourself, leave an explicit **handoff** note
-    (exact commands + expected result) in the issue **and** the PR so the other
-    platform's verification can be completed and recorded there.
-- **Worktrees:** keep the git root checkout on `main` at all times. Do all
-  branch/PR work in a git worktree under the root's `.worktree/` folder, e.g.:
-  ```sh
-  git worktree add .worktree/<topic> -b feat/<topic>
-  cd .worktree/<topic>
-  ```
-  Never check out a feature branch in the root itself. `.worktree/` is
-  gitignored. Remove the worktree after the PR merges
-  (`git worktree remove .worktree/<topic>`).
+- **branch naming:** `feat/<topic>`, `fix/<topic>`, `docs/<topic>`, etc.
+  **merge strategy:** squash. PRs that resolve an issue include a `Closes #nn`
+  keyword.
+
+### Testing — required before a task is "done"
+
+Run the smallest command that covers the change during iteration, but a task is
+not complete until these tiers pass; **record the results on the PR.**
+
+1. **Golden test — MSAA enabled *and* disabled (must).**
+   `cargo test -p trd-core --test golden_render -- --ignored` runs both the 4×
+   MSAA (`stageN_*`) and single-sample (`stageN_noaa_*`) goldens plus the PBR
+   tone-map variants. GPU-gated — see [Golden render test](#golden-render-test-88--the-render-regression-gate).
+   Mandatory for any render-path change, on every platform with a GPU.
+2. **GPU-gated tests (must).** Every `#[ignore]` test, on a real GPU:
+   `cargo test -p trd-core -- --ignored` (golden + `render::gpu_tests`) and
+   `cargo test -p trd-gui --test arrow_backend --test inproc_render -- --ignored`
+   (incl. the arrow↔inproc pixel-for-pixel parity check).
+3. **End-to-end — Linux *and* Windows:**
+   - **trd-core / trd-cli:** stream a real Arrow input through the CLI and read an
+     image stream back — `nix run .#trd -- …` / `examples/render.sh` (Linux),
+     `examples/render.ps1` (Windows).
+   - **trd-wasm (web):** build + serve the browser bundle (`nix build .#web` /
+     `bun run build:web`), load a stream, and confirm **both** the on-screen
+     `CanvasRenderer` and the offscreen `OffscreenRenderer` render with colors
+     matching the CLI.
+   - **trd-gui (wasm + web):** build the gui wasm, serve, and load a mesh
+     (`?mesh=…&texture=…`) in the browser.
+4. **Native window e2e — Windows:** the live-surface paths that need a display —
+   `trd-app` playing a stream (`examples/render.ps1 -App`) and the interactive
+   `trd-gui` window (`cargo run -p trd-gui -- --mesh …`, both `--backend inproc`
+   and `--backend arrow`). Confirm the window renders and interaction works.
+
+The non-GPU gates (`nix flake check`: `cargo fmt`, clippy native + wasm32,
+`cargo test`, `tsc`, Biome) must pass on both platforms as well.
+
+### Multiple-platform verification and handoff
+
+trd ships a **native Windows** path (`trd-cli`/`trd-app`/`trd-gui`,
+`examples/render.ps1`) **and** a **Linux/Nix** path (`nix flake check`, GPU-gated
+`#[ignore]` tests on the RTX box, `render.sh`), plus a **browser/wasm** path
+shared by both. Every task must be verified on **both** OS platforms before it is
+considered done:
+
+- **Linux:** `nix flake check` (fmt, clippy native + wasm32, tests, tsc, biome)
+  plus the GPU-gated tests (via nixGL / `WGPU_BACKEND=gl`, see [GPU](#gpu)).
+- **Windows (MSVC):** build/run the affected native path (`trd-cli`/`trd-app`/
+  `trd-gui`; `examples/render.ps1` for the demo) and confirm it renders. On a box
+  with a discrete GPU the golden test is **runnable on Windows too** (wgpu Vulkan
+  — verified on a GTX 1080 Ti), so also run
+  `cargo test -p trd-core --test golden_render -- --ignored` there; don't defer it
+  entirely to Linux.
+- **Required render gate:** for any render-path change, the golden suite (MSAA
+  on/off + PBR `{aces,reinhard}` variants) MUST pass on a real GPU — or the
+  goldens be regenerated for an *intended* visual change — and the result recorded
+  on the PR. It is the primary pixel-level regression net.
+- **Handoff:** for whichever platform you cannot run yourself, leave an explicit
+  note (exact commands + expected result) in **both** the issue and the PR, so the
+  other platform's verification can be completed and recorded there.
+
+### Documentation
+
+- **`README.md` is a lean entry point; the detail lives in `docs/`.** Keep them in
+  sync: whenever a change updates `README.md`, update the affected `docs/` page(s)
+  in the **same** PR — and vice-versa. In particular, `docs/architecture.md`
+  (crates/render core), `docs/rendering.md` (CLI flags, wrappers ⇄ `cargo run`,
+  demos), `docs/pbr.md` (PBR params), and `docs/protocol/0.0.5.md` (wire format)
+  mirror the README's summaries, so a behavior/flag/layout change must be reflected
+  in both. Don't let the README and `docs/` drift.
+
+### Worktrees
+
+Keep the git root checkout on `main` at all times. Do all branch/PR work in a git
+worktree under the root's `.worktree/` folder (gitignored):
+```sh
+git worktree add .worktree/<topic> -b feat/<topic>
+cd .worktree/<topic>
+```
+Never check out a feature branch in the root itself. Remove the worktree after the
+PR merges (`git worktree remove .worktree/<topic>`).
+
+There is only **one** tracked `AGENTS.md` (repo root); a worktree's `AGENTS.md` is
+just that file checked out on its branch, not a separate copy to reconcile — edit
+it here and it lands with the branch.
