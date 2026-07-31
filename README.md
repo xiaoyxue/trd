@@ -147,6 +147,8 @@ from the CLI: `--metallic` / `--roughness` / `--specular` / `--clearcoat`,
 - [`docs/pbr.md`](docs/pbr.md) — the Disney principled-BRDF material model, all PBR
   parameters + defaults, tone mapping, and the HDR environment probe.
 - [`docs/protocol/0.0.5.md`](docs/protocol/0.0.5.md) — the full stream-protocol spec.
+- [`docs/frame-extraction.md`](docs/frame-extraction.md) — background-frame
+  extraction + the frame-to-row mapping manifest.
 - [`docs/gui-design.md`](docs/gui-design.md) — the `trd-gui` interactive-viewer design.
 - [`AGENTS.md`](AGENTS.md) — contributor/agent guide: build system, GPU-adapter
   selection, testing policy, PR workflow.
