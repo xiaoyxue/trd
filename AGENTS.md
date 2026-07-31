@@ -154,6 +154,21 @@ decoder divergence (e.g. the `center` non-nullable bug).
 - **branch naming:** `feat/<topic>`, `fix/<topic>`, `docs/<topic>`, etc.
   **merge strategy:** squash. PRs that resolve an issue include a `Closes #nn`
   keyword.
+- **issue titles:** every issue title **starts with a bracketed category tag**
+  naming the kind of work — it is the first token of the title, before the short
+  description (`[Tag] <concise summary>`). Use the canonical set:
+  - `[Epic]` — umbrella / tracking issue spanning multiple slices.
+  - `[Design]` — a spec/design settled *before* implementation.
+  - `[Plan]` — a roadmap / sequencing plan across issues.
+  - `[Slice]` — one vertical slice increment (independently end-to-end verifiable).
+  - `[Investigation]` — a research spike / open question to resolve.
+  - `[Refactoring]` — a behaviour-preserving restructure (regression net must stay green).
+  - `[Risk]` — a risk-register item or hardening task (things likely to break/slip).
+  - `[Eval]` — an evaluation / benchmark / quality-measurement task.
+  - `[Test]` — a test-only slice (fixtures, goldens, regression nets; no product behaviour change).
+
+  Others in use as needed: `[Ops]`, `[Demo]`, `[Prep]`, `[Integration]`, `[Docs]`.
+  Pick the single tag that best fits the issue's primary intent.
 
 ### Testing — required before a task is "done"
 
