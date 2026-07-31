@@ -253,9 +253,12 @@ considered done:
 
 ### Worktrees
 
-Keep the git root checkout on `main` at all times. Do all branch/PR work in a git
-worktree under the root's `.worktree/` folder (gitignored):
+Keep the git root checkout on `main` at all times, and **update local `main`
+before creating a new worktree** so the branch starts from an up-to-date base.
+Do all branch/PR work in a git worktree under the root's `.worktree/` folder
+(gitignored):
 ```sh
+git switch main && git pull            # refresh local main first
 git worktree add .worktree/<topic> -b feat/<topic>
 cd .worktree/<topic>
 ```
