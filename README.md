@@ -8,7 +8,7 @@ viewer — by drawing into whatever render target each front-end provides.
 JavaScript/TypeScript is a thin bootstrap only; the WebGPU API is never called
 from JS.
 
-## How it fits together
+## [How it fits together](docs/architecture.md)
 
 Everything shares **one render function** and **one data format** (a mesh-first
 Arrow stream):
@@ -33,7 +33,7 @@ Each front-end is a *thin shell* that only supplies a render target and calls th
 core — no per-front-end rendering logic. See
 **[`docs/architecture.md`](docs/architecture.md)** for the internals.
 
-## Quick start
+## [Quick start](docs/rendering.md)
 
 **1. Get a dev environment.**
 
@@ -108,7 +108,7 @@ nix flake check       # every gate: fmt, clippy (native+wasm32), test, tsc, biom
 > before building. For fast iteration use plain `cargo` / `bun` inside `nix develop`
 > (or, on Windows, after `. .\scripts\dev-env.ps1`).
 
-## Stream protocol
+## [Stream protocol](docs/protocol/0.0.5.md)
 
 Frame parameters are plain columnar data, so **any** tool that emits the input
 columns as an Arrow IPC stream can drive the renderer. The current — and **only
@@ -153,7 +153,7 @@ from the CLI: `--metallic` / `--roughness` / `--specular` / `--clearcoat`,
 - [`AGENTS.md`](AGENTS.md) — contributor/agent guide: build system, GPU-adapter
   selection, testing policy, PR workflow.
 
-## Tests
+## [Tests](AGENTS.md#testing--required-before-a-task-is-done)
 
 ```sh
 cargo fmt --all --check
