@@ -47,7 +47,7 @@ impl From<TonemapArg> for trd_core::Tonemap {
 /// `trd-gui` — an interactive egui viewer that renders a mesh with `trd-core`
 /// and turns orbit/zoom/move gestures into an updated camera/model matrix.
 #[derive(Parser, Debug)]
-#[command(name = "trd-gui", about, version)]
+#[command(name = "trd-gui", bin_name = "trd-gui", about, version)]
 pub struct Cli {
     /// Render width in pixels (the display scales this to the window).
     #[arg(long, default_value_t = 512)]

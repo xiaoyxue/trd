@@ -255,6 +255,12 @@ considered done:
 
   > Expected: all green — behaviour-preserving change.
   ```
+- **Re-post the completed matrix after a handoff.** When you finish the
+  verification a PR handed off to your platform, don't report it as bare prose —
+  **re-post the full verification matrix as a new comment** on the PR (and mirror
+  it on the issue) with that platform's column flipped from 🤝 to ✅ (with counts),
+  and tick the corresponding items in the 🤝 handoff checklist. The completed
+  matrix must be visible as a comment, not only described.
 
 ### Documentation
 

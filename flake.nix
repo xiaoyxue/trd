@@ -118,7 +118,7 @@
             buildInputs = runtimeLibs;
             nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ pkgs.makeWrapper ];
             postInstall = ''
-              wrapProgram $out/bin/trd-gui \
+              wrapProgram $out/bin/trd-gui-app \
                 --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath runtimeLibs}
             '';
           }
@@ -288,7 +288,7 @@
           };
           trd-gui = {
             type = "app";
-            program = "${trd-gui}/bin/trd-gui";
+            program = "${trd-gui}/bin/trd-gui-app";
           };
           web = {
             type = "app";
