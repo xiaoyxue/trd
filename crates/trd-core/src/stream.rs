@@ -344,33 +344,21 @@ impl BatchRenderer {
         // Guard against zero / overflow before allocating (device limits below).
         check_dimensions(width, height)?;
 
-        let instance =
-            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                ..Default::default()
-            })
-            .await
-            .map_err(|e| StreamError::Render(e.to_string()))?;
-        let info = adapter.get_info();
-        log::info!(
-            "using {:?} adapter \"{}\" ({:?})",
-            info.backend,
-            info.name,
-            info.device_type
-        );
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: Some("trd device"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::downlevel_defaults(),
-                experimental_features: wgpu::ExperimentalFeatures::disabled(),
+        let instance = crate::create_instance();
+        // The headless CLI keeps its historical conservative limits + memory hint
+        // (Downlevel 2048 cap, MemoryUsage) so the golden render stays
+        // byte-identical; power preference is HighPerformance (the default).
+        let gpu = crate::GpuContext::request(
+            &instance,
+            &crate::GpuRequest {
+                limits: crate::LimitsPreset::Downlevel,
                 memory_hints: wgpu::MemoryHints::MemoryUsage,
-                trace: wgpu::Trace::Off,
-            })
-            .await
-            .map_err(|e| StreamError::Render(e.to_string()))?;
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|e| StreamError::Render(e.to_string()))?;
+        let crate::GpuContext { device, queue, .. } = gpu;
 
         let format = OFFSCREEN_FORMAT;
         let renderer =

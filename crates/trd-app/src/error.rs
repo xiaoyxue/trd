@@ -9,12 +9,10 @@ pub enum AppError {
     /// A wgpu surface could not be created from the window.
     #[error("failed to create a GPU surface: {0}")]
     CreateSurface(#[from] wgpu::CreateSurfaceError),
-    /// No GPU adapter could satisfy the request.
-    #[error("no suitable GPU adapter found: {0}")]
-    RequestAdapter(#[from] wgpu::RequestAdapterError),
-    /// The GPU device could not be created.
-    #[error("failed to create GPU device: {0}")]
-    RequestDevice(#[from] wgpu::RequestDeviceError),
+    /// The shared `trd-core` device/adapter helper failed (no adapter or the
+    /// device could not be created).
+    #[error(transparent)]
+    Gpu(#[from] trd_core::GpuInitError),
     /// The adapter does not support the window surface.
     #[error("the GPU adapter does not support the window surface")]
     SurfaceUnsupported,

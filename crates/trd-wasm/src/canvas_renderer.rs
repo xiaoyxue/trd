@@ -74,29 +74,24 @@ impl CanvasRenderer {
             return Err(js_error("canvas width and height must be non-zero"));
         }
 
-        let instance = wgpu::Instance::default();
+        let instance = trd_core::create_instance();
         let surface = instance
             .create_surface(wgpu::SurfaceTarget::Canvas(canvas.clone()))
             .map_err(|error| js_error(format!("create_surface failed: {error}")))?;
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::default(),
+        let trd_core::GpuContext {
+            adapter,
+            device,
+            queue,
+        } = trd_core::GpuContext::request(
+            &instance,
+            &trd_core::GpuRequest {
+                label: "trd canvas device",
                 compatible_surface: Some(&surface),
                 ..Default::default()
-            })
-            .await
-            .map_err(|error| js_error(format!("request_adapter failed: {error}")))?;
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: Some("trd canvas device"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default().using_resolution(adapter.limits()),
-                experimental_features: wgpu::ExperimentalFeatures::disabled(),
-                memory_hints: wgpu::MemoryHints::default(),
-                trace: wgpu::Trace::Off,
-            })
-            .await
-            .map_err(|error| js_error(format!("request_device failed: {error}")))?;
+            },
+        )
+        .await
+        .map_err(|error| js_error(format!("GPU init failed: {error}")))?;
         let config = surface
             .get_default_config(&adapter, width, height)
             .ok_or_else(|| js_error("surface is unsupported by the selected adapter"))?;

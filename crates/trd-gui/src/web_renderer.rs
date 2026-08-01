@@ -65,26 +65,16 @@ impl WebRenderer {
         height: u32,
         backend: WebBackend,
     ) -> Result<Self, GuiError> {
-        let instance = wgpu::Instance::default();
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::default(),
-                compatible_surface: None,
+        let instance = trd_core::create_instance();
+        let trd_core::GpuContext { device, queue, .. } = trd_core::GpuContext::request(
+            &instance,
+            &trd_core::GpuRequest {
+                label: "trd-gui wasm device",
                 ..Default::default()
-            })
-            .await
-            .map_err(|e| GuiError::WasmRender(format!("request_adapter failed: {e}")))?;
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: Some("trd-gui wasm device"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default().using_resolution(adapter.limits()),
-                experimental_features: wgpu::ExperimentalFeatures::disabled(),
-                memory_hints: wgpu::MemoryHints::default(),
-                trace: wgpu::Trace::Off,
-            })
-            .await
-            .map_err(|e| GuiError::WasmRender(format!("request_device failed: {e}")))?;
+            },
+        )
+        .await
+        .map_err(|e| GuiError::WasmRender(format!("GPU init failed: {e}")))?;
 
         let max_dim = device.limits().max_texture_dimension_2d;
         if width == 0 || height == 0 || width > max_dim || height > max_dim {
