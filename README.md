@@ -13,10 +13,12 @@ from JS.
 - [How it fits together](#how-it-fits-together)
 - [Quick start](#quick-start)
 - [Building with Nix](#building-with-nix)
+- [Building directly (no Nix)](#building-directly-linux--windows-no-nix)
 - [Stream protocol](#stream-protocol)
 - [Material (PBR)](#material-pbr)
 - [Documentation](#documentation)
 - [Tests](#tests)
+- [Verification icons](#verification-icons)
 
 ## [How it fits together](docs/architecture.md)
 
@@ -117,6 +119,39 @@ nix flake check       # every gate: fmt, clippy (native+wasm32), test, tsc, biom
 > `nix build` / `nix flake check` only see git-tracked files — `git add` new files
 > before building. For fast iteration use plain `cargo` / `bun` inside `nix develop`
 > (or, on Windows, after `. .\scripts\dev-env.ps1`).
+
+## Building directly (Linux & Windows, no Nix)
+
+Every front-end also builds with a plain **Rust + bun** toolchain — no Nix
+required. You need a Rust toolchain (`rustup`; the **MSVC** host on Windows) and,
+for the browser bundle, `bun` + `wasm-pack`; the `render.*` demos additionally need
+`uv` + `ffmpeg`. The CLI/GUI dlopen the GPU driver at run time (system Vulkan/GL on
+Linux, the vendor driver on Windows).
+
+**🐧 Linux** (a host toolchain, or inside `nix develop`):
+
+```sh
+cargo build --workspace                                # trd-cli + trd-app + trd-gui
+cargo run -p trd-cli -- --width 256 --height 256       # headless Arrow filter (stdin → stdout)
+cargo run -p trd-gui -- --mesh assets/meshes/bunny.obj # interactive viewer window
+examples/render.sh --cli                               # end-to-end demo → output/out.gif
+( cd web && bun run dev )                               # build wasm + serve on :8080
+```
+
+**🪟 Windows** (PowerShell 7; `. .\scripts\dev-env.ps1` puts cargo / MSVC / ffmpeg / uv on PATH):
+
+```powershell
+. .\scripts\dev-env.ps1                                # once per shell (must be dot-sourced)
+cargo build --workspace
+cargo run -p trd-cli -- --width 256 --height 256       # headless Arrow filter (stdin → stdout)
+cargo run -p trd-gui -- --mesh assets\meshes\bunny.obj # interactive viewer window
+examples\render.ps1 -CLI                               # end-to-end demo → output\out.gif
+cd web; bun run dev                                    # build wasm + serve on :8080
+```
+
+Full setup — Windows `dev-env.ps1`, GPU-driver notes (nixGL / `WGPU_BACKEND=gl`),
+and the `wrappers ⇄ cargo run` mapping — is in
+[`docs/rendering.md`](docs/rendering.md).
 
 ## [Stream protocol](docs/protocol/0.0.5.md)
 
