@@ -35,39 +35,28 @@ impl WindowRenderer {
         // WSL2), matching the headless CLI. An `Arc<Window>` supplies both the
         // window and display handles at surface creation, so the surface outlives
         // borrows and is `'static`.
-        let instance =
-            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        let instance = trd_core::create_instance();
         let surface = instance.create_surface(window.clone())?;
 
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::default(),
+        // Route through the shared device/adapter helper: `HighPerformance` (the
+        // default) — fixing the prior `PowerPreference::default()` that could bind
+        // a weak iGPU/display GPU on a multi-GPU box, against the AGENTS.md rule —
+        // plus the adapter's real limits (so a large / high-DPI surface fits;
+        // downlevel_defaults caps textures at 2048) and the mandated adapter log
+        // line. Only the surface creation above stays shell-specific.
+        let trd_core::GpuContext {
+            adapter,
+            device,
+            queue,
+        } = trd_core::GpuContext::request(
+            &instance,
+            &trd_core::GpuRequest {
+                label: "trd app device",
                 compatible_surface: Some(&surface),
                 ..Default::default()
-            })
-            .await?;
-
-        let info = adapter.get_info();
-        log::info!(
-            "using {:?} adapter \"{}\" ({:?}), driver: {}",
-            info.backend,
-            info.name,
-            info.device_type,
-            info.driver_info
-        );
-
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: Some("trd app device"),
-                required_features: wgpu::Features::empty(),
-                // Use the adapter's real limits so a large / high-DPI window
-                // surface fits (downlevel_defaults caps textures at 2048).
-                required_limits: wgpu::Limits::default().using_resolution(adapter.limits()),
-                experimental_features: wgpu::ExperimentalFeatures::disabled(),
-                memory_hints: wgpu::MemoryHints::default(),
-                trace: wgpu::Trace::Off,
-            })
-            .await?;
+            },
+        )
+        .await?;
 
         let mut config = surface
             .get_default_config(&adapter, width, height)

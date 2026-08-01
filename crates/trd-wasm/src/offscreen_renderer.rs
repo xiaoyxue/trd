@@ -73,27 +73,16 @@ impl OffscreenRenderer {
             crate::js_error(error_message("invalid OffscreenRenderer dimensions", error))
         })?;
 
-        let instance = wgpu::Instance::default();
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::default(),
-                compatible_surface: None,
+        let instance = trd_core::create_instance();
+        let trd_core::GpuContext { device, queue, .. } = trd_core::GpuContext::request(
+            &instance,
+            &trd_core::GpuRequest {
+                label: "trd OffscreenRenderer device",
                 ..Default::default()
-            })
-            .await
-            .map_err(|error| crate::js_error(error_message("request_adapter failed", error)))?;
-
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: Some("trd OffscreenRenderer device"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default().using_resolution(adapter.limits()),
-                experimental_features: wgpu::ExperimentalFeatures::disabled(),
-                memory_hints: wgpu::MemoryHints::default(),
-                trace: wgpu::Trace::Off,
-            })
-            .await
-            .map_err(|error| crate::js_error(error_message("request_device failed", error)))?;
+            },
+        )
+        .await
+        .map_err(|error| crate::js_error(error_message("GPU init failed", error)))?;
 
         // The shared offscreen harness owns the render target + readback buffer
         // and re-validates the size against the adapter's max dimension.

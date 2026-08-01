@@ -8,6 +8,7 @@ mod color;
 mod frame_params;
 mod frame_plane;
 mod gizmo;
+mod gpu_context;
 mod gpu_types;
 mod mesh_renderer;
 mod offscreen;
@@ -22,6 +23,7 @@ mod gpu_tests;
 
 // Public API surface (re-exported unchanged by `crate::lib`).
 pub use frame_params::{CameraFormError, FrameParams, Viewport};
+pub use gpu_context::{create_instance, GpuContext, GpuInitError, GpuRequest, LimitsPreset};
 pub use gpu_types::{Mesh, Vertex};
 pub use mesh_renderer::MeshRenderer;
 pub use offscreen::{OffscreenError, OffscreenTarget, OFFSCREEN_FORMAT};
