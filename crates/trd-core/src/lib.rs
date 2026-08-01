@@ -30,6 +30,10 @@ pub use render::{
     LimitsPreset, Mesh, MeshRenderer, OffscreenError, OffscreenTarget, OnscreenTarget, PbrMaterial,
     RenderMode, Scene, Tonemap, TriangleRenderer, Vertex, Viewport, OFFSCREEN_FORMAT,
 };
+// The native-only headless batch harness, relocated from `stream` into `render`
+// (#134); the crate-root re-export path (`trd_core::BatchRenderer`) is unchanged.
+#[cfg(not(target_arch = "wasm32"))]
+pub use render::BatchRenderer;
 pub use scene_encode::{
     encode_mesh_stream, encode_params_stream, encode_scene, encode_texture_stream, SceneEncodeError,
 };
@@ -41,8 +45,8 @@ pub use texture::{
 mod stream;
 #[cfg(not(target_arch = "wasm32"))]
 pub use stream::{
-    decode_frames, read_scene_stream_with_meta, run_stream, BatchRenderer, FrameResolver, Msaa,
-    PbrConfig, RenderOptions, StreamError,
+    decode_frames, read_scene_stream_with_meta, run_stream, FrameResolver, Msaa, PbrConfig,
+    RenderOptions, StreamError,
 };
 
 /// Returns the project greeting used by the CLI and web entry points.
