@@ -78,7 +78,7 @@ Options:
 
 Per-can presets (metallic / roughness); shared ACES lighting is
 env-intensity 0.90, exposure 0.45, ambient 0.03, specular 0.6, tonemap aces:
-  heineken  0.7 / 0.25      coca  1.0 / 0.30      qd  0.0 / 0.30
+  heineken  0.7 / 0.25      coca  0.0 / 0.35      qd  0.0 / 0.30
 EOF
 }
 
@@ -118,7 +118,7 @@ case "$(printf '%s' "$CAN" | tr '[:upper:]' '[:lower:]')" in
     NAME=coca
     MESH=assets/meshes/can/coke.obj
     TEX=assets/meshes/can/can_around.jpg
-    DEF_METAL=1.0; DEF_ROUGH=0.30 ;;
+    DEF_METAL=0.0; DEF_ROUGH=0.35 ;;
   qd|qd_beer|qingdao)
     NAME=qd
     MESH=assets/meshes/qd_beer/source/3d66.com_JDH5455878326.obj

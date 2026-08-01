@@ -83,7 +83,7 @@ Options:
 
 Per-can presets (metallic / roughness); shared ACES lighting is
 env-intensity 0.90, exposure 0.45, ambient 0.03, specular 0.6, tonemap aces:
-  heineken  0.7 / 0.25      coca  1.0 / 0.30      qd  0.0 / 0.30
+  heineken  0.7 / 0.25      coca  0.0 / 0.35      qd  0.0 / 0.30
 '@
 }
 
@@ -117,7 +117,7 @@ switch ($Can) {
         $Name = 'coca'
         $Mesh = 'assets/meshes/can/coke.obj'
         $Tex = 'assets/meshes/can/can_around.jpg'
-        $DefMetal = '1.0'; $DefRough = '0.30'
+        $DefMetal = '0.0'; $DefRough = '0.35'
     }
     'qd' {
         $Name = 'qd'
