@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [[bin]]
-name = "trd"
+name = "trd-cli"
 path = "src/main.rs"
 
 [dependencies]

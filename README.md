@@ -111,7 +111,7 @@ The Nix flake is the build system — reproducible outputs, no manual toolchain:
 nix build .#trd-cli   # native CLI (Arrow stream filter) + Vulkan/GL runtime libs
 nix build .#trd-wasm  # wasm-bindgen JS/TS library package
 nix build .#web       # bun-bundled, HTTP-servable dist/  (also plain `nix build`)
-nix run   .#trd -- --width 256 --height 256   # stream on stdin → images on stdout
+nix run   .#trd-cli -- --width 256 --height 256   # stream on stdin → images on stdout
 nix run   .#web                               # serve dist/  (PORT, default 8080)
 nix flake check       # every gate: fmt, clippy (native+wasm32), test, tsc, biome
 ```

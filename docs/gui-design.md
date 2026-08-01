@@ -67,7 +67,7 @@ record — the locked decisions and the full plan live in issue #97.
 | Crate | Role | Render path |
 |-------|------|-------------|
 | `trd-core` | **single** wgpu rendering core (`wgpu = "30"`) | headless `BatchRenderer::render_frame` → RGBA bytes; live `MeshRenderer::encode` → surface view |
-| `trd-cli` (`trd`) | headless filter | Arrow scene stream **in** → Arrow image stream **out** |
+| `trd-cli` | headless filter | Arrow scene stream **in** → Arrow image stream **out** |
 | `trd-app` | native winit viewer | plays a stream (resize/close only — **no scene interaction**) |
 | `trd-wasm` | browser | `canvas_renderer` (live) + `arrow_renderer` (offscreen), driven by thin TS |
 

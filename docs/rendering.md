@@ -20,7 +20,7 @@ Windows use `render.ps1` with `-CLI` / `-Native` / `-Web` and `-InputPath` /
 
 ## Native CLI (headless)
 
-`trd` (package `trd-cli`) is a pure Arrow filter: mesh-first stream on stdin →
+`trd-cli` (package `trd-cli`) is a pure Arrow filter: mesh-first stream on stdin →
 image stream on stdout. It does not encode video — pipe the output to
 [`scripts/encode.py`](../scripts/encode.py), which picks the codec from the `-o`
 extension (`.mp4`/`.mov` → H.264, `.webp` → animated WebP, else GIF). Use `.mp4`

@@ -97,7 +97,7 @@
             nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ pkgs.makeWrapper ];
             # The wgpu backend dlopens Vulkan/GL/X11 at run time; expose them.
             postInstall = ''
-              wrapProgram $out/bin/trd \
+              wrapProgram $out/bin/trd-cli \
                 --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath runtimeLibs}
             '';
           }
@@ -282,9 +282,9 @@
         };
 
         apps = {
-          trd = {
+          trd-cli = {
             type = "app";
-            program = "${trd-cli}/bin/trd";
+            program = "${trd-cli}/bin/trd-cli";
           };
           trd-gui = {
             type = "app";

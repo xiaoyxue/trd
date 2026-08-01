@@ -52,8 +52,8 @@ Guidance for agents working in this repository.
   `wasm-bindgen-cli`, `biome`, `typescript`, Vulkan). Local `cargo` inside it
   works for fast iteration.
 - **The flake is the build system, not just a dev shell.** Prefer the real outputs:
-  - `nix build .#trd-cli` — native CLI (`trd`), wrapped with Vulkan/GL libs.
-    `nix run .#trd -- --width 256 --height 256` runs the Arrow stream filter
+  - `nix build .#trd-cli` — native CLI (`trd-cli`), wrapped with Vulkan/GL libs.
+    `nix run .#trd-cli -- --width 256 --height 256` runs the Arrow stream filter
     (frames on stdin → images on stdout).
   - `nix build .#trd-wasm` — the `wasm-bindgen` JS/TS library (built with
     `wasm-bindgen-cli` + `wasm-opt`, replacing `wasm-pack`).
@@ -102,7 +102,7 @@ Guidance for agents working in this repository.
   ```sh
   # inside `nix develop`; --impure lets nixGL detect the host driver version
   NIXPKGS_ALLOW_UNFREE=1 nix run --impure github:nix-community/nixGL#nixGLNvidia -- \
-    cargo test -p trd-core -- --ignored          # or: ./result/bin/trd …, render.sh, etc.
+    cargo test -p trd-core -- --ignored          # or: ./result/bin/trd-cli …, render.sh, etc.
   ```
   `NIXPKGS_ALLOW_UNFREE=1` is required for NVIDIA; use `#nixGLIntel` for
   Intel/Mesa. NixOS doesn't need this (driver on `/run/opengl-driver`); WSL uses
@@ -186,7 +186,7 @@ not complete until these tiers pass; **record the results on the PR.**
    (incl. the arrow↔inproc pixel-for-pixel parity check).
 3. **End-to-end — Linux *and* Windows:**
    - **trd-core / trd-cli:** stream a real Arrow input through the CLI and read an
-     image stream back — `nix run .#trd -- …` / `examples/render.sh` (Linux),
+     image stream back — `nix run .#trd-cli -- …` / `examples/render.sh` (Linux),
      `examples/render.ps1` (Windows).
    - **trd-wasm (web):** build + serve the browser bundle (`nix build .#web` /
      `bun run build:web`), load a stream, and confirm **both** the on-screen
