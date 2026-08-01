@@ -3,6 +3,8 @@
 //! [`MeshRenderer`] rasterizes a [`Scene`] of [`DrawableObject`]s through the
 //! vertex/index-buffer path used by the native batch renderer and the browser.
 
+#[cfg(not(target_arch = "wasm32"))]
+mod batch_renderer;
 mod bound_texture;
 mod color;
 mod frame_params;
@@ -22,6 +24,10 @@ mod triangle_renderer;
 mod gpu_tests;
 
 // Public API surface (re-exported unchanged by `crate::lib`).
+// The headless batch harness is native-only (drives wgpu under
+// `pollster::block_on`), so it and its re-export are gated off wasm.
+#[cfg(not(target_arch = "wasm32"))]
+pub use batch_renderer::BatchRenderer;
 pub use frame_params::{CameraFormError, FrameParams, Viewport};
 pub use gpu_context::{create_instance, GpuContext, GpuInitError, GpuRequest, LimitsPreset};
 pub use gpu_types::{Mesh, Vertex};

@@ -1,0 +1,251 @@
+//! Headless GPU batch render harness (#134).
+//!
+//! [`BatchRenderer`] is trd-core's persistent offscreen render context: it owns
+//! the wgpu `device`/`queue`, a [`MeshRenderer`], and the shared
+//! [`OffscreenTarget`] readback plumbing, plus the CLI overlay toggles
+//! (`show_aabb`/`show_axes`/`show_local_axes`/`show_local_grid`) and the mesh-pass
+//! MSAA sample count, rendering one [`FrameParams`] to tightly-packed row-major
+//! RGBA bytes per call. Relocated out of `stream.rs` (which keeps only the
+//! decode->render->encode orchestration) so it sits beside its siblings
+//! [`OffscreenTarget`] and [`MeshRenderer`] under `render/` (#134, #82).
+
+use super::{
+    Draw, DrawableObject, FrameFit, FrameParams, GridPlane, Mesh, MeshRenderer, OffscreenTarget,
+    RenderMode, OFFSCREEN_FORMAT,
+};
+use crate::math::Matrix4;
+use crate::stream::{check_dimensions, StreamError};
+
+/// A persistent GPU context that renders one [`FrameParams`] to tightly-packed
+/// row-major RGBA bytes (`width*height*4`) per call.
+pub struct BatchRenderer {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    renderer: MeshRenderer,
+    /// The shared offscreen render target + readback buffer (#103, Part B).
+    target: OffscreenTarget,
+    /// Render mode (filled/wireframe) applied to every mesh drawable this
+    /// renderer builds into its per-frame [`Scene`](crate::Scene).
+    mode: RenderMode,
+    /// Whether to add a [`DrawableObject::AabbBox`] gizmo per drawn instance.
+    show_aabb: bool,
+    /// Whether to add a single origin [`DrawableObject::CoordinateAxes`] gizmo.
+    show_axes: bool,
+    /// Whether to add a [`DrawableObject::CoordinateAxes`] at *each* drawn
+    /// instance's own `model` — the object's local coordinate frame.
+    show_local_axes: bool,
+    /// If `Some(plane)`, add a [`DrawableObject::PlaneGrid`] on that coordinate
+    /// plane at *each* drawn instance's own `model` — a grid lattice in the
+    /// object's local frame (e.g. an `xy` grid tiling a placement quad).
+    show_local_grid: Option<GridPlane>,
+    /// If `Some(id)`, narrow the [`show_local_grid`](Self::show_local_grid)
+    /// overlay to draws of that `mesh_id` only (the placement quad), so a
+    /// wireframe *content* mesh doesn't also pick up a floor grid (#114).
+    show_local_grid_mesh: Option<u32>,
+}
+
+impl BatchRenderer {
+    /// Builds the GPU context (instance/adapter/device/pipeline/target/readback)
+    /// once for a fixed `width` x `height`, rendering the `meshes` of the stream's
+    /// leading mesh table, applying each mesh's [`Mesh::preview_transform`]
+    /// (center + uniform scale-to-fit) beneath its per-frame model so an
+    /// arbitrary-unit asset renders centered and at a reasonable size. Per-frame
+    /// draw lists place instances of these meshes by index. The mesh pass renders
+    /// at 4× MSAA; use [`with_meshes_sample_count`](Self::with_meshes_sample_count)
+    /// to override (e.g. `1` = no MSAA).
+    pub fn with_meshes(width: u32, height: u32, meshes: &[Mesh]) -> Result<Self, StreamError> {
+        Self::with_meshes_sample_count(width, height, meshes, crate::render::MSAA_SAMPLE_COUNT)
+    }
+
+    /// Like [`with_meshes`](Self::with_meshes) but with an explicit mesh-pass MSAA
+    /// `sample_count` (`4` = anti-aliased, `1` = single-sampled / no MSAA).
+    pub fn with_meshes_sample_count(
+        width: u32,
+        height: u32,
+        meshes: &[Mesh],
+        sample_count: u32,
+    ) -> Result<Self, StreamError> {
+        let base_models: Vec<Matrix4> = meshes
+            .iter()
+            .map(|mesh| {
+                mesh.preview_transform(crate::DEFAULT_PREVIEW_TARGET)
+                    .matrix()
+            })
+            .collect();
+        pollster::block_on(Self::new_async(
+            width,
+            height,
+            meshes,
+            &base_models,
+            sample_count,
+        ))
+    }
+
+    async fn new_async(
+        width: u32,
+        height: u32,
+        meshes: &[Mesh],
+        base_models: &[Matrix4],
+        sample_count: u32,
+    ) -> Result<Self, StreamError> {
+        // Guard against zero / overflow before allocating (device limits below).
+        check_dimensions(width, height)?;
+
+        let instance = crate::create_instance();
+        // The headless CLI keeps its historical conservative limits + memory hint
+        // (Downlevel 2048 cap, MemoryUsage) so the golden render stays
+        // byte-identical; power preference is HighPerformance (the default).
+        let gpu = crate::GpuContext::request(
+            &instance,
+            &crate::GpuRequest {
+                limits: crate::LimitsPreset::Downlevel,
+                memory_hints: wgpu::MemoryHints::MemoryUsage,
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|e| StreamError::Render(e.to_string()))?;
+        let crate::GpuContext { device, queue, .. } = gpu;
+
+        let format = OFFSCREEN_FORMAT;
+        let renderer =
+            MeshRenderer::with_sample_count(&device, format, meshes, base_models, sample_count);
+
+        // The shared offscreen harness owns the render target + readback buffer
+        // and re-validates the size against the adapter's max dimension.
+        let target = OffscreenTarget::new(&device, width, height)?;
+
+        Ok(Self {
+            device,
+            queue,
+            renderer,
+            target,
+            mode: RenderMode::Filled,
+            show_aabb: false,
+            show_axes: false,
+            show_local_axes: false,
+            show_local_grid: None,
+            show_local_grid_mesh: None,
+        })
+    }
+
+    /// The number of loaded meshes; valid [`Draw::mesh_id`]s are `0..mesh_count`.
+    pub fn mesh_count(&self) -> usize {
+        self.renderer.mesh_count()
+    }
+
+    /// Sets the [`RenderMode`] (filled or wireframe) applied to later `render`s.
+    pub fn set_mode(&mut self, mode: RenderMode) {
+        self.mode = mode;
+    }
+
+    /// Binds `texture` as the source sampled by [`RenderMode::Textured`] meshes
+    /// (`0.0.4`). Delegates to [`MeshRenderer::set_texture`]; the image is
+    /// (re)uploaded on the next `render`.
+    pub fn set_texture(&mut self, texture: &dyn crate::texture::Texture) {
+        self.renderer.set_texture(texture);
+    }
+
+    /// Sets the Disney [`PbrMaterial`](crate::PbrMaterial) applied globally to
+    /// [`RenderMode::Pbr`] meshes. Delegates to [`MeshRenderer::set_pbr_material`].
+    pub fn set_pbr_material(&mut self, material: crate::PbrMaterial) {
+        self.renderer.set_pbr_material(material);
+    }
+
+    /// Binds `env` as the equirectangular HDR environment map reflected by
+    /// [`RenderMode::Pbr`] meshes. Delegates to [`MeshRenderer::set_env_map`]; the
+    /// probe is (re)uploaded on the next `render`.
+    pub fn set_env_map(&mut self, env: crate::EnvMapData) {
+        self.renderer.set_env_map(env);
+    }
+
+    /// Enables/disables the per-instance AABB overlay box: when on, each drawn
+    /// instance also contributes a [`DrawableObject::AabbBox`] to the scene.
+    pub fn set_show_aabb(&mut self, show: bool) {
+        self.show_aabb = show;
+    }
+
+    /// Enables/disables the origin coordinate-axes overlay gizmo: when on, the
+    /// scene gains a single [`DrawableObject::CoordinateAxes`] at the world
+    /// origin.
+    pub fn set_show_axes(&mut self, show: bool) {
+        self.show_axes = show;
+    }
+
+    /// Enables/disables the per-instance *local* coordinate-axes overlay: when
+    /// on, each drawn instance also gains a [`DrawableObject::CoordinateAxes`]
+    /// placed by its own `model`, visualizing that object's local frame (e.g.
+    /// #77's `(e1,e2,e3)` quad placement).
+    pub fn set_show_local_axes(&mut self, show: bool) {
+        self.show_local_axes = show;
+    }
+
+    /// Selects the per-instance *local* coordinate-plane grid overlay: when
+    /// `Some(plane)`, each drawn instance also gains a
+    /// [`DrawableObject::PlaneGrid`] on that plane placed by its own `model`,
+    /// laying a grid lattice across the object's local frame (e.g. an `xy` grid
+    /// tiling a placement quad's floor). `None` disables it.
+    pub fn set_show_local_grid(&mut self, plane: Option<GridPlane>) {
+        self.show_local_grid = plane;
+    }
+
+    /// Narrows the [`set_show_local_grid`](Self::set_show_local_grid) overlay to
+    /// draws of a single `mesh_id` (the placement quad). `Some(id)` lays the grid
+    /// only under that mesh — so a *content* mesh drawn wireframe (e.g. a
+    /// wireframe-reveal intro) doesn't also pick up a floor grid; `None` keeps the
+    /// grid on every wireframe draw (#114).
+    pub fn set_show_local_grid_mesh(&mut self, mesh: Option<u32>) {
+        self.show_local_grid_mesh = mesh;
+    }
+
+    /// Uploads `image` as the **background frame texture** (#63) sampled by a
+    /// [`DrawableObject::FramePlane`]. The GPU texture is reused across frames
+    /// (grown only on a resolution change). Call before a
+    /// [`render_frame`](Self::render_frame) with a `Some(fit)` to composite the
+    /// image beneath the mesh scene.
+    pub fn update_frame_texture(&mut self, image: &crate::texture::ImageData) {
+        self.renderer.update_frame_texture_rgba(
+            &self.queue,
+            &image.rgba,
+            image.width,
+            image.height,
+        );
+    }
+
+    /// Builds the per-frame [`Scene`](crate::Scene) from a wire `draws` list and
+    /// this renderer's mode/overlay flags (delegates to [`build_scene`]). A
+    /// `Some(fit)` prepends a background [`DrawableObject::FramePlane`] (#63).
+    fn build_scene(&self, draws: &[Draw], frame: Option<FrameFit>) -> Vec<DrawableObject> {
+        crate::render::build_scene(
+            draws,
+            self.mode,
+            self.show_aabb,
+            self.show_axes,
+            self.show_local_axes,
+            self.show_local_grid,
+            self.show_local_grid_mesh,
+            frame,
+        )
+    }
+
+    /// Renders `params` with the given per-frame instance `draws`, compositing a
+    /// background [`DrawableObject::FramePlane`] (#63) beneath the scene when
+    /// `frame` is `Some(fit)` and a frame texture has been uploaded via
+    /// [`update_frame_texture`](Self::update_frame_texture). Returns
+    /// tightly-packed row-major RGBA bytes (`width*height*4`).
+    pub fn render_frame(
+        &mut self,
+        params: FrameParams,
+        draws: &[Draw],
+        frame: Option<FrameFit>,
+    ) -> Result<Vec<u8>, StreamError> {
+        let scene = self.build_scene(draws, frame);
+        Ok(pollster::block_on(self.target.render(
+            &self.device,
+            &self.queue,
+            &mut self.renderer,
+            params,
+            &scene,
+        ))?)
+    }
+}
