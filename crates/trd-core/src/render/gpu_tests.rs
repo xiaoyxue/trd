@@ -101,12 +101,35 @@ fn render_with_readback(
     pixels
 }
 
+/// One wgpu device + queue, created once and shared by **every** GPU test in
+/// this binary.
+///
+/// Each test used to build its own `Instance` + adapter + device. Under the
+/// NVIDIA proprietary Vulkan driver (e.g. via nixGL on Linux), many threads
+/// creating/destroying devices at once deadlock in the driver's internal
+/// (priority-inheritance) locks, so the default parallel `cargo test` run hung
+/// at 0% GPU — it only completed at `--test-threads=1`/`2`. wgpu's `Device` and
+/// `Queue` are cheap `Send + Sync + Clone` handles, so we create a single device
+/// once (serialized by `OnceLock`) and hand out clones. Concurrent rendering on
+/// one device is fully supported, so the tests run at the default parallelism
+/// again without tripping the driver's device-creation deadlock.
 #[cfg(not(target_arch = "wasm32"))]
-async fn test_device() -> (wgpu::Device, wgpu::Queue) {
+fn test_device() -> (wgpu::Device, wgpu::Queue) {
+    static SHARED: std::sync::OnceLock<(wgpu::Device, wgpu::Queue)> = std::sync::OnceLock::new();
+    SHARED
+        .get_or_init(|| pollster::block_on(create_test_device()))
+        .clone()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn create_test_device() -> (wgpu::Device, wgpu::Queue) {
     let instance =
         wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let adapter = instance
-        .request_adapter(&wgpu::RequestAdapterOptions::default())
+        .request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            ..Default::default()
+        })
         .await
         .expect("GPU adapter required");
     adapter
@@ -126,7 +149,7 @@ async fn test_device() -> (wgpu::Device, wgpu::Queue) {
 #[ignore = "requires a GPU adapter"]
 #[cfg(not(target_arch = "wasm32"))]
 fn mesh_renderer_draws_multiple_instances() {
-    let (device, queue) = pollster::block_on(test_device());
+    let (device, queue) = test_device();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (64, 64);
     let mut mesh = single(&device, format, &Mesh::hello_triangle());
@@ -204,7 +227,7 @@ fn mesh_renderer_depth_buffer_occludes_far_behind_near() {
     // painter's algorithm). With the depth buffer the nearer RED must win —
     // proving solid meshes z-occlude instead of last-draw-wins (the bug that
     // let textured meshes sample back faces over the front, #20).
-    let (device, queue) = pollster::block_on(test_device());
+    let (device, queue) = test_device();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (64, 64);
 
@@ -275,7 +298,7 @@ fn mesh_renderer_depth_buffer_occludes_far_behind_near() {
 #[ignore = "requires a GPU adapter"]
 #[cfg(not(target_arch = "wasm32"))]
 fn mesh_renderer_wireframe_lights_edges_only() {
-    let (device, queue) = pollster::block_on(test_device());
+    let (device, queue) = test_device();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (64, 64);
     let mut mesh = single(&device, format, &Mesh::hello_triangle());
@@ -360,7 +383,7 @@ fn mesh_renderer_textured_samples_bound_texture() {
     // red / green, blue (top-left origin). Each screen quadrant must show the
     // matching texel color, proving the textured pipeline samples the bound
     // texture at the interpolated vertex UVs with the correct orientation.
-    let (device, queue) = pollster::block_on(test_device());
+    let (device, queue) = test_device();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (64, 64);
 
@@ -456,7 +479,7 @@ fn mesh_renderer_textured_samples_bound_texture() {
 #[ignore = "requires a GPU adapter"]
 #[cfg(not(target_arch = "wasm32"))]
 fn mesh_renderer_aabb_overlay_draws_green_box() {
-    let (device, queue) = pollster::block_on(test_device());
+    let (device, queue) = test_device();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (64, 64);
     let mut mesh = single(&device, format, &Mesh::hello_triangle());
@@ -524,7 +547,7 @@ fn mesh_renderer_aabb_overlay_draws_green_box() {
 #[ignore = "requires a GPU adapter"]
 #[cfg(not(target_arch = "wasm32"))]
 fn mesh_renderer_axes_overlay_draws_rgb_gizmo() {
-    let (device, queue) = pollster::block_on(test_device());
+    let (device, queue) = test_device();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (64, 64);
     let mut mesh = single(&device, format, &Mesh::hello_triangle());
@@ -602,7 +625,7 @@ fn scene_composes_all_drawable_kinds_together() {
     // a filled mesh, a wireframe mesh, an AABB box, and the axes gizmo must
     // render all of them at once — the filled mesh alone lights fewer pixels
     // than the full composed scene, and the green box + RGB axes appear.
-    let (device, queue) = pollster::block_on(test_device());
+    let (device, queue) = test_device();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (64, 64);
     let mut mesh = single(&device, format, &Mesh::hello_triangle());
@@ -716,7 +739,7 @@ fn mesh_renderer_renders_loaded_quad_filled_with_correct_coverage() {
     // via `draw_indexed` as a `DrawableObject::Mesh`. Under the identity camera
     // the unit quad spans NDC [-0.5, 0.5]², i.e. the central quarter of the
     // frame — so the center is lit, the corners are dark, and coverage ≈ 25%.
-    let (device, queue) = pollster::block_on(test_device());
+    let (device, queue) = test_device();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (64, 64);
     let quad = Mesh::from_obj(QUAD_OBJ).expect("quad OBJ parses");
@@ -778,7 +801,7 @@ fn cg_and_cv_cameras_render_matching_output() {
     // #43/#49: a CG-authored camera (eye/target/up/fovy) and its CV-lowered
     // equivalent (pose = world-from-camera, K = intrinsics) describe the *same*
     // camera, so rendering the same `Scene` under each yields matching pixels.
-    let (device, queue) = pollster::block_on(test_device());
+    let (device, queue) = test_device();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (96, 96);
     let viewport = Viewport { width, height };
@@ -870,7 +893,7 @@ fn dolly_turntable_bird_eye_cg_cv_wireframe_stays_framed() {
     // (A cube stands in for the bunny for a fast, deterministic GPU test; the
     // same scenario is exercised on the real bunny by examples/bunny_dolly.py
     // + `render.sh --wireframe`.)
-    let (device, queue) = pollster::block_on(test_device());
+    let (device, queue) = test_device();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (128, 128);
     let viewport = Viewport { width, height };
@@ -1008,7 +1031,7 @@ fn frame_plane_composites_background_under_scene() {
     // A FramePlane fills the background from a reused 2×2 texture (upload +
     // fullscreen sample + top-left `v=0` orientation), and a solid mesh drawn
     // in the same scene z-composites ON TOP of it (depth-write-off plane).
-    let (device, queue) = pollster::block_on(test_device());
+    let (device, queue) = test_device();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (64, 64);
 
@@ -1135,7 +1158,7 @@ fn frame_plane_composites_background_under_scene() {
 #[ignore = "requires a GPU adapter"]
 #[cfg(not(target_arch = "wasm32"))]
 fn triangle_renderer_draws_gradient_triangle() {
-    let (device, queue) = pollster::block_on(test_device());
+    let (device, queue) = test_device();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (64, 64);
     let renderer = TriangleRenderer::new(&device, format);
