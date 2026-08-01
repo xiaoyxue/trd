@@ -182,3 +182,20 @@ the pixel-level regression net: it runs committed Arrow fixtures through the rea
 testing policy (required tiers, per-crate e2e, multi-platform verification +
 handoff, golden regeneration) lives in
 **[`AGENTS.md`](AGENTS.md#testing--required-before-a-task-is-done)**.
+
+## Verification icons
+
+PRs and issues report their dual-platform checks as a compact, icon-led
+**verification matrix** (one row per gate, one column per platform) plus a handoff
+checklist — see
+[`AGENTS.md`](AGENTS.md#multiple-platform-verification-and-handoff). The fixed
+glyph set:
+
+| Kind | Icons |
+|------|-------|
+| **Status** | ✅ passed · ❌ failed · ⏳ not yet run · 🤝 handed off |
+| **Platform** | 🪟 Windows · 🐧 Linux/Nix |
+| **Gate** | 🎨 fmt · 📎 clippy · 🕸️ clippy-wasm · 🧪 tests · 🔀 decoder-parity · 🖼️ golden-render · 🌐 tsc/biome |
+
+A reproducible cross-front-end smoke (the coca-cola can PBR scene) is in
+[`AGENTS.md`](AGENTS.md#cross-mode-e2e-recipe--coca-cola-can-pbr--aabb--axes).

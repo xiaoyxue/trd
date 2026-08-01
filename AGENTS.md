@@ -202,6 +202,83 @@ not complete until these tiers pass; **record the results on the PR.**
 The non-GPU gates (`nix flake check`: `cargo fmt`, clippy native + wasm32,
 `cargo test`, `tsc`, Biome) must pass on both platforms as well.
 
+#### Cross-mode e2e recipe — coca-cola can (PBR + AABB + axes)
+
+A concrete, reproducible pass that drives **every** front-end with one scene: the
+Coca-Cola can (`assets/meshes/can/coke.obj` + `can_around.jpg`) shaded PBR with the
+dielectric printed-can preset (**metallic 0.0 / roughness 0.35**, ACES lighting)
+over the `qd_beer` dolly camera, with the AABB + world-axes overlays. The **same
+params** apply on both platforms; only the wrapper syntax differs.
+`render.ps1`/`render.sh` need `uv` + `ffmpeg` on PATH; the web modes need a WebGPU
+browser (Chrome/Edge). Shared scene:
+
+```
+mesh=assets/meshes/can/coke.obj   texture=assets/meshes/can/can_around.jpg
+pbr  metallic=0.0 roughness=0.35 env-intensity=0.90 exposure=0.45 ambient=0.03
+specular=0.6 tonemap=aces   env=assets/envmap/uffizi-large.hdr   aabb  axes
+input=examples/frames.qd_beer_dolly.cg.jsonl   size=512x768
+```
+
+**🪟 Windows** (`examples\render.ps1`; in `trd-gui` the overlays are the side-panel
+**"Bounding box"** / **"World axes"** checkboxes):
+
+```powershell
+# trd-cli — headless → GIF
+examples\render.ps1 -CLI -Mesh assets\meshes\can\coke.obj -Texture assets\meshes\can\can_around.jpg `
+  -Pbr -Metallic 0.0 -Roughness 0.35 -EnvIntensity 0.90 -Exposure 0.45 -Ambient 0.03 -Specular 0.6 `
+  -Tonemap aces -Env assets\envmap\uffizi-large.hdr -Aabb -Axes `
+  -InputPath examples\frames.qd_beer_dolly.cg.jsonl -Output output\coca.gif -Width 512 -Height 768
+# trd-app — native window (same flags, -Native, no -Output)
+examples\render.ps1 -Native -Mesh assets\meshes\can\coke.obj -Texture assets\meshes\can\can_around.jpg `
+  -Pbr -Metallic 0.0 -Roughness 0.35 -EnvIntensity 0.90 -Exposure 0.45 -Ambient 0.03 -Specular 0.6 `
+  -Tonemap aces -Env assets\envmap\uffizi-large.hdr -Aabb -Axes `
+  -InputPath examples\frames.qd_beer_dolly.cg.jsonl -Width 512 -Height 768
+# trd-gui native — run twice: --backend inproc and --backend arrow
+cargo run -p trd-gui -- --backend inproc --mesh assets\meshes\can\coke.obj `
+  --texture assets\meshes\can\can_around.jpg --pbr --env assets\envmap\uffizi-large.hdr `
+  --metallic 0.0 --roughness 0.35 --env-intensity 0.90 --exposure 0.45 --ambient 0.03 `
+  --specular 0.6 --tonemap aces
+# trd-wasm web — build+serve, open http://localhost:8080 (swap -CanvasRenderer ⇄ -OffscreenRenderer)
+examples\render.ps1 -Web -CanvasRenderer -Mesh assets\meshes\can\coke.obj -Texture assets\meshes\can\can_around.jpg `
+  -Pbr -Metallic 0.0 -Roughness 0.35 -EnvIntensity 0.90 -Exposure 0.45 -Ambient 0.03 -Specular 0.6 `
+  -Tonemap aces -Env assets\envmap\uffizi-large.hdr -Aabb -Axes `
+  -InputPath examples\frames.qd_beer_dolly.cg.jsonl -Width 512 -Height 768
+# trd-gui web — build+serve, then open the ?mesh/?texture/?env URL below
+cd crates\trd-gui\web; $env:BUN_PORT='8082'; bun install; bun run build:wasm; bun run serve.ts
+#   http://localhost:8082/?mesh=/assets/meshes/can/coke.obj&texture=/assets/meshes/can/can_around.jpg&env=/assets/envmap/uffizi-large.hdr
+```
+
+**🐧 Linux/Nix** (inside `nix develop`; on non-NixOS wrap the GPU commands
+—`render.sh`, `cargo run -p trd-gui`— with nixGL, see [GPU](#gpu); the web URLs are
+identical). Same params for **trd-cli**, **trd-wasm/web**, **trd-gui-native** and
+**trd-gui-web**:
+
+```sh
+# trd-cli — headless → GIF
+examples/render.sh --cli --mesh assets/meshes/can/coke.obj --texture assets/meshes/can/can_around.jpg \
+  --pbr --metallic 0.0 --roughness 0.35 --env-intensity 0.90 --exposure 0.45 --ambient 0.03 --specular 0.6 \
+  --tonemap aces --env assets/envmap/uffizi-large.hdr --aabb --axes \
+  examples/frames.qd_beer_dolly.cg.jsonl output/coca.gif 512 768
+# trd-wasm web — build+serve, open http://localhost:8080 (swap --canvas-renderer ⇄ --offscreen-renderer)
+examples/render.sh --web --canvas-renderer --mesh assets/meshes/can/coke.obj \
+  --texture assets/meshes/can/can_around.jpg --pbr --metallic 0.0 --roughness 0.35 --env-intensity 0.90 \
+  --exposure 0.45 --ambient 0.03 --specular 0.6 --tonemap aces --env assets/envmap/uffizi-large.hdr \
+  --aabb --axes examples/frames.qd_beer_dolly.cg.jsonl 512 768
+# trd-gui native — run twice: --backend inproc and --backend arrow
+cargo run -p trd-gui -- --backend inproc --mesh assets/meshes/can/coke.obj \
+  --texture assets/meshes/can/can_around.jpg --pbr --env assets/envmap/uffizi-large.hdr \
+  --metallic 0.0 --roughness 0.35 --env-intensity 0.90 --exposure 0.45 --ambient 0.03 \
+  --specular 0.6 --tonemap aces
+# trd-gui web — build+serve (build:wasm + serve.ts), then open the ?mesh/?texture/?env URL below
+cd crates/trd-gui/web && BUN_PORT=8082 bun run dev
+#   http://localhost:8082/?mesh=/assets/meshes/can/coke.obj&texture=/assets/meshes/can/can_around.jpg&env=/assets/envmap/uffizi-large.hdr
+```
+
+Expect a deep-red, crisp-label can (**not** a washed-out metal) with a green AABB
+box and the R/G/B world axes. The `trd-gui` viewers start in PBR from `--env` /
+`?env=` (tick the overlay checkboxes; nudge roughness → 0.35). Colors must match
+across trd-cli, trd-app, and both web renderers.
+
 ### Multiple-platform verification and handoff
 
 trd ships a **native Windows** path (`trd-cli`/`trd-app`/`trd-gui`,
