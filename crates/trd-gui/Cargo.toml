@@ -5,15 +5,21 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+# The native binary target is `trd-gui-app` (not `trd-gui`) so its Rust crate
+# name (`trd_gui_app`) differs from the `trd_gui` lib. On Windows the lib's
+# `cdylib` emits `trd_gui.pdb`, which a `trd-gui` bin's own `trd_gui.pdb`
+# (dashes → underscores) would collide with — Cargo's "output filename collision"
+# warning. Renaming the bin sidesteps it. The package still has a single bin, so
+# `cargo run -p trd-gui` runs it unchanged; only the produced exe filename differs.
 [[bin]]
-name = "trd-gui"
+name = "trd-gui-app"
 path = "src/main.rs"
 
 [lib]
 name = "trd_gui"
 path = "src/lib.rs"
 # `cdylib` so wasm-bindgen can emit the browser module (the `start` entry, Slice
-# 4); `rlib` so the native `trd-gui` bin can link the same library.
+# 4); `rlib` so the native `trd-gui-app` bin can link the same library.
 crate-type = ["cdylib", "rlib"]
 
 # trd-gui is the interactive egui front-end (issue #97). It displays trd-core's
