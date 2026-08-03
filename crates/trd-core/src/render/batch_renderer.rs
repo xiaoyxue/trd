@@ -164,6 +164,13 @@ impl BatchRenderer {
         self.renderer.set_texture(texture);
     }
 
+    /// Binds `texture` as the albedo of mesh `mesh_id` — a **per-object** diffuse
+    /// for multi-object scenes (#141). Delegates to
+    /// [`MeshRenderer::set_mesh_texture`]; out-of-range ids are ignored.
+    pub fn set_mesh_texture(&mut self, mesh_id: usize, texture: &dyn crate::texture::Texture) {
+        self.renderer.set_mesh_texture(mesh_id, texture);
+    }
+
     /// Sets the Disney [`PbrMaterial`](crate::PbrMaterial) applied globally to
     /// [`RenderMode::Pbr`] meshes. Delegates to [`MeshRenderer::set_pbr_material`].
     pub fn set_pbr_material(&mut self, material: crate::PbrMaterial) {

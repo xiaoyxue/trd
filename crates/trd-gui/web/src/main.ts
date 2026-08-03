@@ -34,15 +34,23 @@ async function main(): Promise<void> {
     }),
   );
 
-  const textureUrl = params.get("texture");
-  let textureBytes: Uint8Array | undefined;
-  if (textureUrl) {
-    const res = await fetch(textureUrl);
-    if (!res.ok) {
-      throw new Error(`failed to fetch texture "${textureUrl}": ${res.status} ${res.statusText}`);
-    }
-    textureBytes = new Uint8Array(await res.arrayBuffer());
-  }
+  // `?texture=<url>` is **positional**: the i-th `?texture=` skins the i-th
+  // `?mesh=` (each object its own diffuse). A missing slot → an empty array →
+  // untextured (1×1 white). An empty string entry also means "no texture".
+  const textureUrls = params.getAll("texture");
+  const textureBytes: Uint8Array[] = await Promise.all(
+    meshUrls.map(async (_mesh, i) => {
+      const url = textureUrls[i];
+      if (!url) {
+        return new Uint8Array();
+      }
+      const res = await fetch(url);
+      if (!res.ok) {
+        throw new Error(`failed to fetch texture "${url}": ${res.status} ${res.statusText}`);
+      }
+      return new Uint8Array(await res.arrayBuffer());
+    }),
+  );
 
   const envUrl = params.get("env");
   let envBytes: Uint8Array | undefined;

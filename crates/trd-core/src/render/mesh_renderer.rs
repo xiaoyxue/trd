@@ -64,9 +64,18 @@ struct MeshGpu {
     edges: IndexBuf,
     aabb: IndexedGeometry,
     base_model: Matrix4,
+    /// This mesh's **own** albedo texture (group 1), so a multi-object scene skins
+    /// each object with its own diffuse (#141). Defaults to 1×1 white (identity
+    /// albedo) until [`set`](BoundTexture::set) via `set_mesh_texture`.
+    texture: BoundTexture,
 }
 
-fn upload_mesh(device: &wgpu::Device, mesh: &Mesh, base_model: Matrix4) -> MeshGpu {
+fn upload_mesh(
+    device: &wgpu::Device,
+    mesh: &Mesh,
+    base_model: Matrix4,
+    texture_layout: &wgpu::BindGroupLayout,
+) -> MeshGpu {
     use wgpu::util::DeviceExt;
 
     let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -128,6 +137,7 @@ fn upload_mesh(device: &wgpu::Device, mesh: &Mesh, base_model: Matrix4) -> MeshG
             index: aabb_edges,
         },
         base_model,
+        texture: BoundTexture::with_layout(texture_layout.clone()),
     }
 }
 
@@ -395,13 +405,18 @@ struct MeshStore {
 impl MeshStore {
     /// Constructs a `MeshStore`, uploading each mesh with its base (preview)
     /// model and sizing the instance buffer to at least one instance.
-    fn new(device: &wgpu::Device, meshes: &[Mesh], base_models: &[Matrix4]) -> Self {
+    fn new(
+        device: &wgpu::Device,
+        meshes: &[Mesh],
+        base_models: &[Matrix4],
+        texture_layout: &wgpu::BindGroupLayout,
+    ) -> Self {
         use wgpu::util::DeviceExt;
 
         let gpu_meshes = meshes
             .iter()
             .zip(base_models)
-            .map(|(mesh, &base)| upload_mesh(device, mesh, base))
+            .map(|(mesh, &base)| upload_mesh(device, mesh, base, texture_layout))
             .collect();
         let instance_capacity = (meshes.len() as u32).max(1);
         let instance_buffer = create_instance_buffer(device, instance_capacity);
@@ -600,7 +615,6 @@ impl MeshStore {
 /// state; what to draw is entirely the scene.
 pub struct MeshRenderer {
     pass: MeshPass,
-    texture: BoundTexture,
     /// The bound HDR environment map reflected by [`RenderMode::Pbr`] draws.
     env: BoundEnv,
     /// The Disney material applied globally to every [`RenderMode::Pbr`] draw.
@@ -701,10 +715,12 @@ impl MeshRenderer {
         );
         assert!(sample_count >= 1, "sample_count must be >= 1");
 
-        let texture = BoundTexture::new(device);
+        // One shared group-1 albedo layout for the textured/PBR pipelines and
+        // every per-mesh [`BoundTexture`] (each object skins with its own diffuse).
+        let texture_layout = create_texture_bind_group_layout(device);
         let env = BoundEnv::new(device);
-        let pass = MeshPass::new(device, format, texture.layout(), env.layout(), sample_count);
-        let store = MeshStore::new(device, meshes, base_models);
+        let pass = MeshPass::new(device, format, &texture_layout, env.layout(), sample_count);
+        let store = MeshStore::new(device, meshes, base_models, &texture_layout);
         let frame_plane = FramePlane::new(device, format, sample_count);
 
         // The picking pipeline: a group-0 camera uniform (structurally identical
@@ -726,7 +742,6 @@ impl MeshRenderer {
 
         Self {
             pass,
-            texture,
             env,
             pbr_material: PbrMaterial::default(),
             store,
@@ -749,11 +764,22 @@ impl MeshRenderer {
         self.store.len()
     }
 
-    /// Binds `texture` as the albedo sampled by [`RenderMode::Textured`] meshes
-    /// (#20). The image is (re)uploaded lazily on the next
-    /// [`encode`](Self::encode). Until set, the bound texture is 1×1 white.
+    /// Binds `texture` as the albedo of **mesh 0** — the single-mesh /
+    /// wire-protocol default sampled by [`RenderMode::Textured`]/[`RenderMode::Pbr`]
+    /// draws (#20). For a multi-object scene, skin each object with
+    /// [`set_mesh_texture`](Self::set_mesh_texture). The image is (re)uploaded
+    /// lazily on the next [`encode`](Self::encode); until set it is 1×1 white.
     pub fn set_texture(&mut self, texture: &dyn Texture) {
-        self.texture.set(texture);
+        self.set_mesh_texture(0, texture);
+    }
+
+    /// Binds `texture` as the albedo of mesh `mesh_id` — so a multi-object scene
+    /// skins each object with its **own** diffuse (#141). Out-of-range ids are
+    /// ignored. The image uploads lazily on the next [`encode`](Self::encode).
+    pub fn set_mesh_texture(&mut self, mesh_id: usize, texture: &dyn Texture) {
+        if let Some(mesh) = self.store.meshes.get_mut(mesh_id) {
+            mesh.texture.set(texture);
+        }
     }
 
     /// Sets the Disney [`PbrMaterial`] applied to every [`RenderMode::Pbr`] draw
@@ -844,10 +870,13 @@ impl MeshRenderer {
             self.frame_plane.write_fit(queue, fit, viewport);
         }
 
-        // 5. (Re)upload the bound albedo texture on first use / after set_texture
-        //    (#20) and the HDR environment map (after set_env_map): encode is where
-        //    a GPU queue is available.
-        let texture_bind_group = self.texture.ensure_uploaded(&self.device, queue);
+        // 5. (Re)upload each mesh's **own** albedo texture (#141: per-object
+        //    diffuse) + the HDR environment map, on first use / after a set —
+        //    encode is where a GPU queue is available. Uploads happen up front so
+        //    the render loop below only *reads* each mesh's group-1 bind group.
+        for mesh in &mut self.store.meshes {
+            mesh.texture.ensure_uploaded(&self.device, queue);
+        }
         let env_bind_group = self.env.ensure_uploaded(&self.device, queue);
 
         // 6. Record the pass. With MSAA (`sample_count > 1`) the mesh pass renders
@@ -916,16 +945,16 @@ impl MeshRenderer {
                 DrawKind::Textured(id) => {
                     let mesh = &self.store.meshes[id];
                     pass.set_pipeline(&self.pass.textured);
-                    pass.set_bind_group(1, texture_bind_group, &[]);
+                    pass.set_bind_group(1, mesh.texture.bind_group(), &[]);
                     draw_indexed(&mut pass, &mesh.vertex_buffer, &mesh.triangles, range);
                 }
                 DrawKind::Pbr(id) => {
                     let mesh = &self.store.meshes[id];
                     pass.set_pipeline(&self.pass.pbr);
                     // group 0 = PbrUniform (differs from the camera layout),
-                    // group 1 = albedo, group 2 = HDR environment map.
+                    // group 1 = this mesh's albedo, group 2 = HDR environment map.
                     pass.set_bind_group(0, &self.pass.pbr_bind_group, &[]);
-                    pass.set_bind_group(1, texture_bind_group, &[]);
+                    pass.set_bind_group(1, mesh.texture.bind_group(), &[]);
                     pass.set_bind_group(2, env_bind_group, &[]);
                     draw_indexed(&mut pass, &mesh.pbr_vertex_buffer, &mesh.triangles, range);
                     // Restore group 0 = camera for the following non-PBR draws

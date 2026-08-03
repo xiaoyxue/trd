@@ -14,8 +14,8 @@
 
 use trd_core::{
     build_scene, decode_params_stream, encode_params_stream, plane_grid_overlays,
-    read_image_stream, DrawableObject, EnvMapData, FrameParams, GridPlane, Mesh, MeshRenderer,
-    OffscreenTarget, OutputSession, PickTarget, Texture, OFFSCREEN_FORMAT,
+    read_image_stream, DrawableObject, EnvMapData, FrameParams, GridPlane, ImageTexture, Mesh,
+    MeshRenderer, OffscreenTarget, OutputSession, PickTarget, OFFSCREEN_FORMAT,
 };
 
 use crate::error::GuiError;
@@ -73,7 +73,7 @@ impl WebRenderer {
     /// metallic surfaces; the interactive material rides on the scene state).
     pub async fn new(
         meshes: &[Mesh],
-        texture: Option<&dyn Texture>,
+        textures: &[Option<ImageTexture>],
         env: Option<EnvMapData>,
         width: u32,
         height: u32,
@@ -98,8 +98,11 @@ impl WebRenderer {
         }
 
         let mut renderer = MeshRenderer::auto_fit(&device, OFFSCREEN_FORMAT, meshes);
-        if let Some(texture) = texture {
-            renderer.set_texture(texture);
+        // Skin each object with its **own** albedo (#141): texture `i` → mesh `i`.
+        for (i, texture) in textures.iter().enumerate() {
+            if let Some(texture) = texture {
+                renderer.set_mesh_texture(i, texture);
+            }
         }
         if let Some(env) = env {
             renderer.set_env_map(env);
