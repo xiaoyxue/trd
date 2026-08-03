@@ -160,7 +160,8 @@ exit; neither `uv` nor `ffmpeg` is needed.
 
 ## Interactive viewer — `trd-gui`
 
-Orbit/zoom/pan a single mesh (native window or browser). No stream needed:
+Orbit/zoom/pan and **edit objects** in a native window or the browser — no stream
+needed:
 
 ```sh
 # Native (eframe): defaults to a built-in cube; pass a mesh + texture to view it.
@@ -173,6 +174,66 @@ cargo run -p trd-gui -- --backend arrow --mesh assets/meshes/bunny.obj
 # Browser: build + serve, then load ?mesh=…&texture=… (WebGPU browser).
 cd crates/trd-gui/web && bun run dev
 ```
+
+### Controls & operations
+
+The central image is the interaction surface; the left panel holds grouped
+controls. Everything is **per-object**: click an object to select it, then edit
+*that* object.
+
+- **Select (click-to-select).** A left **click** (press+release, no drag) picks the
+  object under the cursor via a color-index (ID-buffer) pass and **highlights its
+  AABB**; clicking the background **deselects**. The *Selection* panel shows the
+  current object and a **Deselect** button. Object edits (transform / render mode /
+  material) act on the selected object and are **disabled when nothing is
+  selected**.
+- **Camera vs. object drag.** *Primary drag* targets either **Orbit camera**
+  (default) or **Object**. Left-drag orbits the camera; right/middle-drag always
+  **moves the selected object**; scroll **zooms** (dollies the camera).
+- **Transform the selected object.** With *Primary drag → Object*, pick a
+  **Manipulate** mode — **Rotate / Move / Scale** — and an optional **Axis lock**
+  (**Free / X / Y / Z**): a locked drag rotates **about** or translates **along**
+  that one axis (scroll scales in Scale mode). The **Transform** panel mirrors this
+  with numeric **Translation** (x/y/z), **Rotation** (X/Y/Z°), and **Scale**
+  (uniform + per-axis) — the widgets and the mouse stay in sync (dragging updates
+  the numbers and vice-versa).
+- **Render mode (per object).** The **Render mode** selector sets the selected
+  object's mode — **Filled / Wireframe / Textured / PBR** — so objects can mix modes
+  in one scene.
+- **PBR material (per object).** When the selected object is in **PBR** mode, the
+  **PBR material** panel edits *its* material live — **Metallic / Roughness /
+  Clearcoat / Env intensity / Exposure** and the **Reinhard/ACES** tone-map.
+- **Overlays.** Toggle the **Bounding box** (all objects), **World axes**, **Local
+  axes**, and the **XZ plane grid** (**World** floor / **Local** per-object).
+- **Reset view** restores the camera + every object's transform.
+
+### Multi-object scenes & URL params (browser)
+
+Load several objects and pick between them. The browser reads scene inputs from
+query params — the equivalents of the native `--mesh`/`--texture`/`--env`/
+`--backend` flags:
+
+| Param | Meaning |
+|-------|---------|
+| `?mesh=<url>` | An object's OBJ. **Repeatable** — each `?mesh=` adds an object laid out side-by-side. |
+| `?texture=<url>` | **Positional** albedo: the *i*-th `?texture=` skins the *i*-th `?mesh=` (each object its own diffuse). |
+| `?env=<url>` | An equirectangular HDR probe; supplying it **starts every object in PBR** mode. |
+| `?backend=arrow` | Route frames through the Arrow wire round-trip (vs. the default in-process render). |
+
+```
+# Three objects (coke can, textured bunny, beer can), each with its own diffuse,
+# lit by an HDR env (PBR). Click one to select + edit it independently.
+http://localhost:8080/?mesh=/assets/meshes/can/coke.obj&texture=/assets/meshes/can/can_around.jpg\
+&mesh=/assets/meshes/bunny_with_texture/bunny.obj&texture=/assets/meshes/bunny_with_texture/bunny_uv_map1.jpg\
+&env=/assets/envmap/uffizi-large.hdr
+```
+
+> Each object carries its own **transform, render mode, PBR material, and albedo
+> texture**. The renderer binds one albedo texture + one material *per mesh* (via a
+> per-mesh bind group + a dynamic-offset PBR uniform), so per-object appearance is
+> real, not shared. On the headless RTX Linux box, reach the browser viewer over an
+> SSH port-forward (see [AGENTS.md](../AGENTS.md)).
+
 
 ## Web (wasm)
 
