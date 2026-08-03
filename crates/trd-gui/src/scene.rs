@@ -190,6 +190,11 @@ pub struct SceneState {
     /// Overlay an XZ **plane grid** at the object's own (model) frame — a grid
     /// that follows the object as it is translated / rotated / scaled.
     pub show_local_grid: bool,
+    /// The currently **selected** object as a 0-based index into [`Self::draws`]
+    /// (#141), set by click-to-select picking; `None` when nothing is selected.
+    /// The selected object always shows its AABB (regardless of
+    /// [`show_aabb`](Self::show_aabb)).
+    pub selected: Option<u32>,
 }
 
 impl Default for SceneState {
@@ -204,6 +209,7 @@ impl Default for SceneState {
             show_local_axes: false,
             show_world_grid: false,
             show_local_grid: false,
+            selected: None,
         }
     }
 }
@@ -233,6 +239,15 @@ impl SceneState {
             model: self.object.model_matrix(),
             mode: None,
         }]
+    }
+
+    /// Whether the object's axis-aligned bounding box should be drawn: the global
+    /// [`show_aabb`](Self::show_aabb) toggle **or** an active selection (#141). The
+    /// gui authors a single object, so a `Some(_)` selection is that object — its
+    /// AABB is shown to highlight it. (Per-object selection AABB for multi-object
+    /// scenes is a follow-up.)
+    pub fn aabb_visible(&self) -> bool {
+        self.show_aabb || self.selected.is_some()
     }
 
     /// Whether the scene carries a **placement quad** — a given rectangle in E³

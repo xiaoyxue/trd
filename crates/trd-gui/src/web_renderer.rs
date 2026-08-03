@@ -15,7 +15,7 @@
 use trd_core::{
     build_scene, decode_params_stream, encode_params_stream, plane_grid_overlays,
     read_image_stream, DrawableObject, EnvMapData, FrameParams, GridPlane, Mesh, MeshRenderer,
-    OffscreenTarget, OutputSession, Texture, OFFSCREEN_FORMAT,
+    OffscreenTarget, OutputSession, PickTarget, Texture, OFFSCREEN_FORMAT,
 };
 
 use crate::error::GuiError;
@@ -54,6 +54,8 @@ pub struct WebRenderer {
     renderer: MeshRenderer,
     /// The shared offscreen render target + readback buffer (#103, Part B).
     target: OffscreenTarget,
+    /// The object-id picking target (#141), created lazily on first pick.
+    pick_target: Option<PickTarget>,
     width: u32,
     height: u32,
     backend: WebBackend,
@@ -111,6 +113,7 @@ impl WebRenderer {
             queue,
             renderer,
             target,
+            pick_target: None,
             width,
             height,
             backend,
@@ -120,6 +123,29 @@ impl WebRenderer {
     /// The fixed render dimensions.
     pub fn size(&self) -> (u32, u32) {
         (self.width, self.height)
+    }
+
+    /// Resolves the object under render-target pixel `(x, y)` via the id-color
+    /// picking pass (#141), returning its 0-based index into `state.draws()`, or
+    /// `None` for the background. `async` (the read-back can't block the browser
+    /// event loop). Lazily creates the pick target sized to the render surface.
+    pub async fn pick(&mut self, state: &SceneState, x: u32, y: u32) -> Option<u32> {
+        let aspect = self.width as f32 / self.height.max(1) as f32;
+        if self.pick_target.is_none() {
+            self.pick_target = Some(PickTarget::new(&self.device, self.width, self.height));
+        }
+        let target = self.pick_target.as_ref()?;
+        target
+            .pick(
+                &self.device,
+                &self.queue,
+                &mut self.renderer,
+                state.frame_params(aspect),
+                &state.draws(),
+                x,
+                y,
+            )
+            .await
     }
 
     /// Renders the current scene state to an RGBA image (async GPU readback),
@@ -145,7 +171,7 @@ impl WebRenderer {
         let mut scene = build_scene(
             &state.draws(),
             state.mode,
-            state.show_aabb,
+            state.aabb_visible(),
             state.show_axes,
             state.show_local_axes,
             None,
@@ -183,7 +209,7 @@ impl WebRenderer {
         let scene = build_scene(
             &draws,
             state.mode,
-            state.show_aabb,
+            state.aabb_visible(),
             state.show_axes,
             state.show_local_axes,
             None,

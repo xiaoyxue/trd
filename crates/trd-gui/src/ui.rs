@@ -23,6 +23,11 @@ pub struct View<'a> {
     pub texture: Option<&'a TextureHandle>,
     pub render_size: (u32, u32),
     pub last_render_ms: Option<f32>,
+    /// Set by [`show`] to `Some((x, y))` (render-target pixel coords) when the
+    /// user **clicks** the image, requesting a pick (#141). The host app consumes
+    /// it after `show`: runs the id pass, sets `controller.state.selected`, and
+    /// re-renders. `None` when there was no click this frame.
+    pub pick_request: &'a mut Option<(u32, u32)>,
 }
 
 /// Lays out the side controls + central image and maps input to interaction
@@ -138,6 +143,24 @@ fn controls_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
             ui.label("Plane grid (XZ)");
             c |= ui.checkbox(&mut state.show_world_grid, "World grid").changed();
             c |= ui.checkbox(&mut state.show_local_grid, "Local grid").changed();
+            c
+        });
+
+        // ── Selection ────────────────────────────────────────────────────
+        needs_render |= section(ui, "Selection", |ui| {
+            let mut c = false;
+            match view.controller.state.selected {
+                Some(idx) => {
+                    ui.label(format!("Object #{idx} selected"));
+                    if ui.button("Deselect").clicked() {
+                        view.controller.state.selected = None;
+                        c = true;
+                    }
+                }
+                None => {
+                    ui.weak("Click an object to select it");
+                }
+            }
             c
         });
 
@@ -320,7 +343,7 @@ fn image_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
             ui.add(
                 egui::Image::new(egui::load::SizedTexture::from_handle(texture))
                     .fit_to_exact_size(disp)
-                    .sense(Sense::drag()),
+                    .sense(Sense::click_and_drag()),
             )
         })
         .inner;
@@ -339,6 +362,21 @@ fn image_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
         || response.dragged_by(PointerButton::Middle)
     {
         changed |= view.controller.apply(InteractionEvent::Pan { dx, dy });
+    }
+
+    // A primary click (press + release without dragging) requests a pick: map the
+    // pointer position within the letterboxed image to render-target pixel coords
+    // for the host app to resolve into a selection (#141).
+    if response.clicked() {
+        if let Some(pos) = response.interact_pointer_pos() {
+            let (rw, rh) = view.render_size;
+            let u = ((pos.x - response.rect.min.x) / size.x).clamp(0.0, 1.0);
+            let v = ((pos.y - response.rect.min.y) / size.y).clamp(0.0, 1.0);
+            let px = ((u * rw as f32) as u32).min(rw.saturating_sub(1));
+            let py = ((v * rh as f32) as u32).min(rh.saturating_sub(1));
+            *view.pick_request = Some((px, py));
+            changed = true;
+        }
     }
 
     if response.hovered() {
