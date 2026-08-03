@@ -50,6 +50,37 @@ pub enum TransformMode {
     Scale,
 }
 
+/// Constrains an object [`TransformMode::Rotate`] / [`TransformMode::Move`] drag
+/// to a single axis, locking the other two. In [`AxisConstraint::Free`] the drag
+/// keeps its natural two-degree-of-freedom mapping (orbit-style rotate / screen-
+/// plane move); when locked to an axis, a drag maps to **that axis only** — rotate
+/// **about** it, or translate **along** it — using a single scalar from the drag
+/// (`dx − dy`, so dragging right/up increases, left/down decreases).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AxisConstraint {
+    /// No constraint — the drag uses its natural mapping (the default).
+    #[default]
+    Free,
+    /// Lock to the object's X axis (rotate = pitch; translate = world X).
+    X,
+    /// Lock to the object's Y axis (rotate = yaw; translate = world Y).
+    Y,
+    /// Lock to the object's Z axis (rotate = roll; translate = world Z).
+    Z,
+}
+
+impl AxisConstraint {
+    /// The `[x, y, z]` index this axis locks to, or `None` for [`Self::Free`].
+    fn index(self) -> Option<usize> {
+        match self {
+            AxisConstraint::Free => None,
+            AxisConstraint::X => Some(0),
+            AxisConstraint::Y => Some(1),
+            AxisConstraint::Z => Some(2),
+        }
+    }
+}
+
 /// A normalized interaction gesture. Drag/pan deltas are **fractions of the
 /// image size** (`dx`/`dy` in roughly `[-1, 1]` for an edge-to-edge sweep) with
 /// `+y` pointing down (egui screen convention); the controller flips `y` where a
@@ -80,6 +111,8 @@ pub struct InteractionController {
     pub target: InteractionTarget,
     /// Which object transform a primary drag edits when targeting the object.
     pub mode: TransformMode,
+    /// Locks an object rotate/move drag to a single axis (the other two frozen).
+    pub axis: AxisConstraint,
     /// The state to restore on [`InteractionEvent::Reset`].
     initial: SceneState,
 }
@@ -91,6 +124,7 @@ impl InteractionController {
             state,
             target: InteractionTarget::default(),
             mode: TransformMode::default(),
+            axis: AxisConstraint::default(),
             initial: state,
         }
     }
@@ -150,16 +184,39 @@ impl InteractionController {
         }
     }
 
-    /// Applies a primary drag to the object per the active [`TransformMode`]:
-    /// rotate (yaw/pitch), move (screen plane), or uniformly scale.
+    /// Applies a primary drag to the object per the active [`TransformMode`] and
+    /// [`AxisConstraint`]: rotate (about a locked axis, or free yaw/pitch), move
+    /// (along a locked axis, or in the screen plane), or uniformly scale.
     fn apply_object_drag(&mut self, dx: f32, dy: f32) {
         match self.mode {
-            TransformMode::Rotate => {
-                self.state
+            TransformMode::Rotate => match self.axis.index() {
+                // Locked: rotate about the single axis (X=pitch, Y=yaw, Z=roll).
+                Some(i) => {
+                    let a = (dx - dy) * ROTATE_SPEED;
+                    let o = &mut self.state.object;
+                    match i {
+                        0 => o.pitch += a,
+                        1 => o.yaw += a,
+                        _ => o.roll += a,
+                    }
+                }
+                // Free: yaw follows horizontal, pitch follows vertical drag.
+                None => self
+                    .state
                     .object
-                    .rotate(dx * ROTATE_SPEED, -dy * ROTATE_SPEED);
-            }
-            TransformMode::Move => self.translate_object_screen(dx, dy),
+                    .rotate(dx * ROTATE_SPEED, -dy * ROTATE_SPEED),
+            },
+            TransformMode::Move => match self.axis.index() {
+                // Locked: translate along the single world axis only.
+                Some(i) => {
+                    let a = (dx - dy) * PAN_SPEED * self.state.camera.distance;
+                    let mut delta = [0.0, 0.0, 0.0];
+                    delta[i] = a;
+                    self.state.object.translate(delta);
+                }
+                // Free: translate in the screen (world XY) plane.
+                None => self.translate_object_screen(dx, dy),
+            },
             TransformMode::Scale => {
                 // Drag up (dy < 0) grows, drag down shrinks; exponential so the
                 // gesture is symmetric and never crosses zero.
@@ -241,6 +298,45 @@ mod tests {
         }
         // Scaling the object never dollies the camera.
         assert_eq!(c.state.camera.distance, dist0);
+    }
+
+    #[test]
+    fn axis_locked_rotate_x_changes_only_pitch() {
+        let mut c = InteractionController::new(SceneState::default());
+        c.target = InteractionTarget::Object;
+        c.mode = TransformMode::Rotate;
+        c.axis = AxisConstraint::X;
+        assert!(c.apply(InteractionEvent::Primary { dx: 0.3, dy: 0.1 }));
+        assert_ne!(c.state.object.pitch, 0.0);
+        // Yaw and roll stay locked.
+        assert_eq!(c.state.object.yaw, 0.0);
+        assert_eq!(c.state.object.roll, 0.0);
+    }
+
+    #[test]
+    fn axis_locked_rotate_z_changes_only_roll() {
+        let mut c = InteractionController::new(SceneState::default());
+        c.target = InteractionTarget::Object;
+        c.mode = TransformMode::Rotate;
+        c.axis = AxisConstraint::Z;
+        assert!(c.apply(InteractionEvent::Primary { dx: 0.4, dy: 0.0 }));
+        assert_ne!(c.state.object.roll, 0.0);
+        assert_eq!(c.state.object.yaw, 0.0);
+        assert_eq!(c.state.object.pitch, 0.0);
+    }
+
+    #[test]
+    fn axis_locked_move_z_translates_only_z() {
+        let mut c = InteractionController::new(SceneState::default());
+        c.target = InteractionTarget::Object;
+        c.mode = TransformMode::Move;
+        c.axis = AxisConstraint::Z;
+        assert!(c.apply(InteractionEvent::Primary { dx: 0.2, dy: -0.4 }));
+        let t = c.state.object.translation;
+        // Only world Z moves; X and Y stay locked.
+        assert_eq!(t[0], 0.0);
+        assert_eq!(t[1], 0.0);
+        assert_ne!(t[2], 0.0);
     }
 
     #[test]

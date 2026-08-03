@@ -11,7 +11,7 @@ use egui::{Color32, PointerButton, Sense, TextureHandle, Vec2};
 use trd_core::{RenderMode, Tonemap};
 
 use crate::interaction::{
-    InteractionController, InteractionEvent, InteractionTarget, TransformMode,
+    AxisConstraint, InteractionController, InteractionEvent, InteractionTarget, TransformMode,
 };
 use crate::scene::{MAX_SCALE, MIN_SCALE};
 
@@ -70,6 +70,21 @@ fn controls_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
             ui.selectable_value(mode, TransformMode::Move, "Move");
             ui.selectable_value(mode, TransformMode::Scale, "Scale");
         });
+        // For rotate/move, optionally lock the drag to one axis (freeze the
+        // other two): rotate *about* X/Y/Z, or translate *along* X/Y/Z.
+        if matches!(
+            view.controller.mode,
+            TransformMode::Rotate | TransformMode::Move
+        ) {
+            ui.label("Axis lock");
+            let axis = &mut view.controller.axis;
+            ui.horizontal_wrapped(|ui| {
+                ui.selectable_value(axis, AxisConstraint::Free, "Free");
+                ui.selectable_value(axis, AxisConstraint::X, "X");
+                ui.selectable_value(axis, AxisConstraint::Y, "Y");
+                ui.selectable_value(axis, AxisConstraint::Z, "Z");
+            });
+        }
     }
     ui.separator();
 
@@ -123,7 +138,7 @@ fn controls_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
     ui.add_space(8.0);
     ui.label(
         egui::RichText::new(
-            "Left-drag: orbit / rotate / move / scale\nRight-drag: move object\nScroll: zoom (or scale)",
+            "Left-drag: orbit / rotate / move / scale\nAxis lock: drag rotates/moves on one axis\nRight-drag: move object\nScroll: zoom (or scale)",
         )
         .small()
         .color(Color32::GRAY),
@@ -153,9 +168,9 @@ fn transform_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
     });
 
     ui.label("Rotation (°)");
-    changed |= angle_row(ui, "Yaw", &mut obj.yaw);
-    changed |= angle_row(ui, "Pitch", &mut obj.pitch);
-    changed |= angle_row(ui, "Roll", &mut obj.roll);
+    changed |= angle_row(ui, "X (pitch)", &mut obj.pitch);
+    changed |= angle_row(ui, "Y (yaw)", &mut obj.yaw);
+    changed |= angle_row(ui, "Z (roll)", &mut obj.roll);
 
     ui.label("Scale");
     // Uniform scale drives all three axes together; per-axis rows allow a
