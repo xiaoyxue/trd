@@ -68,7 +68,7 @@ mod native {
     /// so they stay in agreement.
     fn render_options(state: &SceneState) -> RenderOptions {
         RenderOptions {
-            mode: state.mode,
+            mode: trd_core::RenderMode::Filled, // per-draw Some(mode) overrides; this is only a fallback
             show_aabb: state.show_aabb,
             show_axes: state.show_axes,
             show_local_axes: state.show_local_axes,
@@ -135,7 +135,7 @@ mod native {
     impl SceneRenderer for InProcRenderer {
         fn render(&mut self, state: &SceneState) -> Result<ImageRgba, GuiError> {
             let aspect = self.width as f32 / self.height.max(1) as f32;
-            self.renderer.set_mode(state.mode);
+            self.renderer.set_mode(trd_core::RenderMode::Filled); // per-draw modes override
             for (i, m) in state.materials.iter().enumerate() {
                 self.renderer.set_mesh_pbr_material(i, *m);
             }

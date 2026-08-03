@@ -112,15 +112,19 @@ pub async fn start(
         Some(bytes) => Some(assets::decode_env_hdr(&bytes).map_err(to_js)?),
         None => None,
     };
+    // Per-object mode: start every object in PBR when an env probe is supplied
+    // (`?env=`), else Filled — each object's mode is then editable when selected.
+    let initial_mode = if env.is_some() {
+        trd_core::RenderMode::Pbr
+    } else {
+        trd_core::RenderMode::Filled
+    };
     let scene = SceneState {
-        mode: if env.is_some() {
-            trd_core::RenderMode::Pbr
-        } else {
-            trd_core::RenderMode::Filled
-        },
-        // One transform + one material per loaded mesh, so `draws()` lays them out
-        // side-by-side and each object has its **own** editable PBR material (#141).
+        // One transform + mode + material per loaded mesh, so `draws()` lays them
+        // out side-by-side and each object has its **own** editable render mode +
+        // PBR material (#141).
         objects: vec![ObjectTransform::default(); meshes.len()],
+        modes: vec![initial_mode; meshes.len()],
         materials: vec![trd_core::PbrMaterial::default(); meshes.len()],
         ..SceneState::default()
     };

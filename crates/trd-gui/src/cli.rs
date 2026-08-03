@@ -182,13 +182,13 @@ impl Cli {
     /// assembled from the CLI flags (subsequently edited live in the UI).
     pub fn scene_state(&self) -> SceneState {
         SceneState {
-            mode: if self.pbr {
+            // The native CLI authors a single object; its mode + material seed the
+            // one-element per-object lists.
+            modes: vec![if self.pbr {
                 RenderMode::Pbr
             } else {
                 RenderMode::Filled
-            },
-            // The native CLI authors a single object; its material seeds the
-            // one-element per-object materials list.
+            }],
             materials: vec![self.pbr_material()],
             ..SceneState::default()
         }
@@ -218,7 +218,7 @@ mod tests {
     fn pbr_flag_selects_pbr_mode_and_material() {
         let cli = Cli::parse_from(["trd-gui", "--pbr", "--metallic", "1", "--roughness", "0.3"]);
         let state = cli.scene_state();
-        assert_eq!(state.mode, RenderMode::Pbr);
+        assert_eq!(state.modes[0], RenderMode::Pbr);
         assert_eq!(state.materials[0].metallic, 1.0);
         assert_eq!(state.materials[0].roughness, 0.3);
     }
@@ -226,6 +226,6 @@ mod tests {
     #[test]
     fn no_pbr_flag_keeps_filled_mode() {
         let cli = Cli::parse_from(["trd-gui"]);
-        assert_eq!(cli.scene_state().mode, RenderMode::Filled);
+        assert_eq!(cli.scene_state().modes[0], RenderMode::Filled);
     }
 }

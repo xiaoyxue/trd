@@ -179,7 +179,7 @@ impl WebRenderer {
         }
         let mut scene = build_scene(
             &state.draws(),
-            state.mode,
+            trd_core::RenderMode::Filled, // per-draw Some(mode) overrides; fallback only
             state.show_aabb,
             state.show_axes,
             state.show_local_axes,
@@ -217,7 +217,7 @@ impl WebRenderer {
         };
         let scene = build_scene(
             &draws,
-            state.mode,
+            trd_core::RenderMode::Filled, // per-draw Some(mode) overrides; fallback only
             state.show_aabb,
             state.show_axes,
             state.show_local_axes,

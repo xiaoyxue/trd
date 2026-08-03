@@ -87,7 +87,7 @@ fn arrow_textured_matches_inproc_textured() {
     )
     .expect("texture builds");
     let state = SceneState {
-        mode: trd_core::RenderMode::Textured,
+        modes: vec![trd_core::RenderMode::Textured],
         ..Default::default()
     };
 

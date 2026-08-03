@@ -107,27 +107,40 @@ fn controls_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
         // ── Transform (numeric widgets, in sync with the mouse) ───────────
         needs_render |= section(ui, "Transform", |ui| transform_panel(ui, view));
 
-        // ── Render mode ──────────────────────────────────────────────────
+        // ── Render mode (per selected object) ────────────────────────────
         needs_render |= section(ui, "Render mode", |ui| {
             let mut c = false;
-            let mode = &mut view.controller.state.mode;
-            ui.horizontal_wrapped(|ui| {
-                c |= ui
-                    .selectable_value(mode, RenderMode::Filled, "Filled")
-                    .changed();
-                c |= ui
-                    .selectable_value(mode, RenderMode::Wireframe, "Wireframe")
-                    .changed();
-                c |= ui
-                    .selectable_value(mode, RenderMode::Textured, "Textured")
-                    .changed();
-                c |= ui.selectable_value(mode, RenderMode::Pbr, "PBR").changed();
-            });
+            match view.controller.state.selected_mode_mut() {
+                Some(mode) => {
+                    ui.horizontal_wrapped(|ui| {
+                        c |= ui
+                            .selectable_value(mode, RenderMode::Filled, "Filled")
+                            .changed();
+                        c |= ui
+                            .selectable_value(mode, RenderMode::Wireframe, "Wireframe")
+                            .changed();
+                        c |= ui
+                            .selectable_value(mode, RenderMode::Textured, "Textured")
+                            .changed();
+                        c |= ui.selectable_value(mode, RenderMode::Pbr, "PBR").changed();
+                    });
+                }
+                None => {
+                    ui.weak("Select an object to set its render mode");
+                }
+            }
             c
         });
 
-        // The Disney PBR material controls, only while PBR mode is selected.
-        if view.controller.state.mode == RenderMode::Pbr {
+        // The Disney PBR material controls, only while the *selected* object is in
+        // PBR mode.
+        let selected_is_pbr = view
+            .controller
+            .state
+            .selected
+            .map(|i| view.controller.state.mode_of(i as usize) == RenderMode::Pbr)
+            .unwrap_or(false);
+        if selected_is_pbr {
             needs_render |= section(ui, "PBR material", |ui| pbr_panel(ui, view));
         }
 

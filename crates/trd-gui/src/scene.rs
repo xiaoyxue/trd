@@ -186,12 +186,15 @@ pub struct SceneState {
     /// side-by-side by [`Self::draws`]. A single-object scene is the degenerate
     /// one-element case. Transforms edit the [`selected`](Self::selected) object.
     pub objects: Vec<ObjectTransform>,
-    /// How the mesh is drawn (filled / wireframe / textured / PBR).
-    pub mode: RenderMode,
+    /// How **each** object is drawn (parallel to [`objects`](Self::objects)):
+    /// filled / wireframe / textured / PBR — per-object, so each object can use a
+    /// different render mode. The UI edits the **selected** object's mode.
+    pub modes: Vec<RenderMode>,
     /// The Disney PBR material of **each** object (parallel to [`objects`](Self::objects)),
-    /// applied when [`mode`](Self::mode) is [`RenderMode::Pbr`]. Interactive: the UI
-    /// edits the **selected** object's material (metallic/roughness/etc.); the bound
-    /// HDR env probe lives on the renderer, set once from `--env` / `?env=`.
+    /// applied to objects whose [`mode`](Self::modes) is [`RenderMode::Pbr`].
+    /// Interactive: the UI edits the **selected** object's material
+    /// (metallic/roughness/etc.); the bound HDR env probe lives on the renderer,
+    /// set once from `--env` / `?env=`.
     pub materials: Vec<PbrMaterial>,
     /// Overlay each drawn mesh instance's axis-aligned bounding box (#42).
     pub show_aabb: bool,
@@ -217,7 +220,7 @@ impl Default for SceneState {
         Self {
             camera: OrbitCamera::default(),
             objects: vec![ObjectTransform::default()],
-            mode: RenderMode::Filled,
+            modes: vec![RenderMode::Filled],
             materials: vec![PbrMaterial::default()],
             show_aabb: false,
             show_axes: false,
@@ -250,7 +253,8 @@ impl SceneState {
     /// [`objects`](Self::objects), drawn as mesh `i` (row index) placed by that
     /// object's model matrix **shifted by a per-object layout offset** so multiple
     /// objects spread side-by-side along world `X` (a single object stays at the
-    /// origin). Inherits the renderer's global render mode.
+    /// origin). Each draw carries its **own** render mode (`Some(modes[i])`), so
+    /// objects can mix filled / wireframe / textured / PBR.
     pub fn draws(&self) -> Vec<Draw> {
         let n = self.objects.len();
         self.objects
@@ -259,9 +263,22 @@ impl SceneState {
             .map(|(i, obj)| Draw {
                 mesh_id: i as u32,
                 model: obj.model_matrix_offset(layout_offset(i, n)),
-                mode: None,
+                mode: Some(self.mode_of(i)),
             })
             .collect()
+    }
+
+    /// The render mode of object `i` (defaults to [`RenderMode::Filled`] if the
+    /// index is out of range — should not happen, `modes` parallels `objects`).
+    pub fn mode_of(&self, i: usize) -> RenderMode {
+        self.modes.get(i).copied().unwrap_or(RenderMode::Filled)
+    }
+
+    /// A mutable reference to the selected object's render **mode**, or `None`
+    /// when nothing is selected — so the Render-mode panel edits the selected
+    /// object's mode and is disabled otherwise (#141).
+    pub fn selected_mode_mut(&mut self) -> Option<&mut RenderMode> {
+        self.selected.and_then(|i| self.modes.get_mut(i as usize))
     }
 
     /// A shared reference to the selected object's transform, or `None` when

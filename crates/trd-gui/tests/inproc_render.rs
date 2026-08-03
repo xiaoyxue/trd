@@ -74,7 +74,7 @@ fn textured_mode_samples_the_bound_texture() {
         InProcRenderer::new(&[mesh], Some(&red), None, w, h).expect("GPU backend builds");
 
     let state = SceneState {
-        mode: trd_core::RenderMode::Textured,
+        modes: vec![trd_core::RenderMode::Textured],
         ..Default::default()
     };
     let image = renderer.render(&state).expect("render succeeds");
