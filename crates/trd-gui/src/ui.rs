@@ -10,7 +10,10 @@
 use egui::{Color32, PointerButton, Sense, TextureHandle, Vec2};
 use trd_core::{RenderMode, Tonemap};
 
-use crate::interaction::{InteractionController, InteractionEvent, InteractionTarget};
+use crate::interaction::{
+    InteractionController, InteractionEvent, InteractionTarget, TransformMode,
+};
+use crate::scene::{MAX_SCALE, MIN_SCALE};
 
 /// The per-frame view the shared UI draws: the interaction state, the current
 /// display texture (if a frame has been rendered), the render resolution, and an
@@ -55,9 +58,24 @@ fn controls_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
             .selectable_value(target, InteractionTarget::Camera, "Orbit camera")
             .changed();
         needs_render |= ui
-            .selectable_value(target, InteractionTarget::Object, "Rotate object")
+            .selectable_value(target, InteractionTarget::Object, "Object")
             .changed();
     });
+    // When a primary drag targets the object, pick which transform it edits.
+    if view.controller.target == InteractionTarget::Object {
+        ui.label("Manipulate");
+        let mode = &mut view.controller.mode;
+        ui.horizontal_wrapped(|ui| {
+            ui.selectable_value(mode, TransformMode::Rotate, "Rotate");
+            ui.selectable_value(mode, TransformMode::Move, "Move");
+            ui.selectable_value(mode, TransformMode::Scale, "Scale");
+        });
+    }
+    ui.separator();
+
+    // Numeric transform widgets — the same `ObjectTransform` the mouse edits, so
+    // gestures and widgets stay in sync (editing either moves the object).
+    needs_render |= transform_panel(ui, view);
     ui.separator();
 
     ui.label("Render mode");
@@ -104,11 +122,90 @@ fn controls_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
     ui.label(format!("Render size: {w}×{h}"));
     ui.add_space(8.0);
     ui.label(
-        egui::RichText::new("Left-drag: orbit / rotate\nRight-drag: move object\nScroll: zoom")
-            .small()
-            .color(Color32::GRAY),
+        egui::RichText::new(
+            "Left-drag: orbit / rotate / move / scale\nRight-drag: move object\nScroll: zoom (or scale)",
+        )
+        .small()
+        .color(Color32::GRAY),
     );
     needs_render
+}
+
+/// The object **transform** widgets: numeric translation (x/y/z), rotation
+/// (yaw/pitch/roll in degrees), and scale (uniform + per-axis). These edit the
+/// exact same [`ObjectTransform`](crate::scene::ObjectTransform) the mouse
+/// gestures mutate, so the two input paths stay numerically in sync — dragging in
+/// the image updates these fields, and editing a field moves the object. Returns
+/// whether the transform changed.
+fn transform_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
+    let mut changed = false;
+    let obj = &mut view.controller.state.object;
+    ui.label("Transform");
+
+    ui.label("Translation");
+    ui.horizontal(|ui| {
+        for (i, axis) in ["X", "Y", "Z"].iter().enumerate() {
+            ui.label(*axis);
+            changed |= ui
+                .add(egui::DragValue::new(&mut obj.translation[i]).speed(0.01))
+                .changed();
+        }
+    });
+
+    ui.label("Rotation (°)");
+    changed |= angle_row(ui, "Yaw", &mut obj.yaw);
+    changed |= angle_row(ui, "Pitch", &mut obj.pitch);
+    changed |= angle_row(ui, "Roll", &mut obj.roll);
+
+    ui.label("Scale");
+    // Uniform scale drives all three axes together; per-axis rows allow a
+    // non-uniform scale. Both clamp to the object's working range.
+    let mut uniform = (obj.scale[0] + obj.scale[1] + obj.scale[2]) / 3.0;
+    ui.horizontal(|ui| {
+        ui.label("Uniform");
+        if ui
+            .add(
+                egui::DragValue::new(&mut uniform)
+                    .speed(0.01)
+                    .range(MIN_SCALE..=MAX_SCALE),
+            )
+            .changed()
+        {
+            obj.scale = [uniform, uniform, uniform];
+            changed = true;
+        }
+    });
+    ui.horizontal(|ui| {
+        for (i, axis) in ["X", "Y", "Z"].iter().enumerate() {
+            ui.label(*axis);
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut obj.scale[i])
+                        .speed(0.01)
+                        .range(MIN_SCALE..=MAX_SCALE),
+                )
+                .changed();
+        }
+    });
+    changed
+}
+
+/// A single labeled angle row that displays/edits `radians` in **degrees** (the
+/// natural unit for the widget), storing back radians. Returns whether it changed.
+fn angle_row(ui: &mut egui::Ui, label: &str, radians: &mut f32) -> bool {
+    let mut deg = radians.to_degrees();
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(label);
+        if ui
+            .add(egui::DragValue::new(&mut deg).speed(1.0).suffix("°"))
+            .changed()
+        {
+            *radians = deg.to_radians();
+            changed = true;
+        }
+    });
+    changed
 }
 
 /// The Disney PBR material sub-panel (shown only in [`RenderMode::Pbr`]): live
@@ -202,9 +299,17 @@ fn image_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
     if response.hovered() {
         let scroll = ui.input(|i| i.smooth_scroll_delta.y);
         if scroll != 0.0 {
-            changed |= view.controller.apply(InteractionEvent::Zoom {
-                delta: scroll / 100.0,
-            });
+            let delta = scroll / 100.0;
+            // In object Scale mode the wheel scales the object; otherwise it
+            // dollies the camera (the default zoom).
+            let event = if view.controller.target == InteractionTarget::Object
+                && view.controller.mode == TransformMode::Scale
+            {
+                InteractionEvent::Scale { delta }
+            } else {
+                InteractionEvent::Zoom { delta }
+            };
+            changed |= view.controller.apply(event);
         }
     }
 
