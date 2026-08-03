@@ -363,3 +363,39 @@ fn image_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
     }
     changed
 }
+
+#[cfg(test)]
+mod tests {
+    use super::section;
+
+    /// Runs `body` inside one headless egui frame (CPU layout only — no window /
+    /// GPU) and returns its result, so panel helpers can be unit-tested.
+    fn in_frame<R>(body: impl FnOnce(&mut egui::Ui) -> R) -> R {
+        let mut out = None;
+        let mut body = Some(body);
+        // A default-open `CollapsingHeader` runs its body on the first frame, so a
+        // single test-ui pass is enough to exercise `section`.
+        egui::__run_test_ui(|ui| {
+            if let Some(body) = body.take() {
+                out = Some(body(ui));
+            }
+        });
+        out.expect("test ui body ran")
+    }
+
+    #[test]
+    fn section_folds_out_its_body_changed_flag() {
+        // Regression: the panel-polish refactor dropped `section`'s returned
+        // "changed" flag, so control edits (e.g. PBR sliders) didn't re-render
+        // until the next image drag. `section` must propagate its body's bool so
+        // the caller's `needs_render` accounting still fires.
+        assert!(
+            in_frame(|ui| section(ui, "changed", |_| true)),
+            "a section whose body reports a change must return true"
+        );
+        assert!(
+            !in_frame(|ui| section(ui, "unchanged", |_| false)),
+            "a section whose body reports no change must return false"
+        );
+    }
+}
