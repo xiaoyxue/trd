@@ -272,6 +272,8 @@ cargo run -p trd-gui -- --backend inproc --mesh assets/meshes/can/coke.obj \
   --metallic 0.0 --roughness 0.35 --env-intensity 0.90 --exposure 0.45 --ambient 0.03 \
   --specular 0.6 --tonemap aces
 # trd-gui web — build+serve (build:wasm + serve.ts), then open the ?mesh/?texture/?env URL below
+# on Linux the RTX box is headless — ALWAYS reach the web viewer via an SSH port-forward:
+#   ssh -L 8082:localhost:8082 <host>   then open the localhost URL on your workstation
 cd crates/trd-gui/web && BUN_PORT=8082 bun run dev
 #   http://localhost:8082/?mesh=/assets/meshes/can/coke.obj&texture=/assets/meshes/can/can_around.jpg&env=/assets/envmap/uffizi-large.hdr
 ```
@@ -280,6 +282,14 @@ Expect a deep-red, crisp-label can (**not** a washed-out metal) with a green AAB
 box and the R/G/B world axes. The `trd-gui` viewers start in PBR from `--env` /
 `?env=` (tick the overlay checkboxes; nudge roughness → 0.35). Colors must match
 across trd-cli, trd-app, and both web renderers.
+
+> **Linux web access — always SSH port-forward, always the PBR coca-can.** The RTX
+> Linux box is headless (no local display), so the browser viewers (`trd-wasm` and
+> `trd-gui` web) are **always** reached over an **SSH port-forward**: tunnel the bun
+> dev-server port from your workstation (`ssh -L 8082:localhost:8082 <host>`, add
+> `-N` to forward only) and open the `http://localhost:8082/?mesh=…&texture=…&env=…`
+> URL locally. The **PBR coca-cola can** (`coke.obj` + `can_around.jpg` +
+> `uffizi-large.hdr`) is the standard demo scene for these launches.
 
 ### Multiple-platform verification and handoff
 
