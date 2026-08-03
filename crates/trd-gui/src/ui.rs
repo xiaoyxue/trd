@@ -58,7 +58,7 @@ fn controls_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
 
     egui::ScrollArea::vertical().show(ui, |ui| {
         // ── Interaction ──────────────────────────────────────────────────
-        section(ui, "Interaction", |ui| {
+        needs_render |= section(ui, "Interaction", |ui| {
             let mut c = false;
             ui.label("Primary drag");
             let target = &mut view.controller.target;
@@ -100,10 +100,10 @@ fn controls_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
         });
 
         // ── Transform (numeric widgets, in sync with the mouse) ───────────
-        section(ui, "Transform", |ui| transform_panel(ui, view));
+        needs_render |= section(ui, "Transform", |ui| transform_panel(ui, view));
 
         // ── Render mode ──────────────────────────────────────────────────
-        section(ui, "Render mode", |ui| {
+        needs_render |= section(ui, "Render mode", |ui| {
             let mut c = false;
             let mode = &mut view.controller.state.mode;
             ui.horizontal_wrapped(|ui| {
@@ -123,11 +123,11 @@ fn controls_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
 
         // The Disney PBR material controls, only while PBR mode is selected.
         if view.controller.state.mode == RenderMode::Pbr {
-            section(ui, "PBR material", |ui| pbr_panel(ui, view));
+            needs_render |= section(ui, "PBR material", |ui| pbr_panel(ui, view));
         }
 
         // ── Overlays ─────────────────────────────────────────────────────
-        section(ui, "Overlays", |ui| {
+        needs_render |= section(ui, "Overlays", |ui| {
             let mut c = false;
             let state = &mut view.controller.state;
             ui.label("Gizmos");
