@@ -39,7 +39,8 @@ pub use pbr::{EnvMapData, PbrMaterial, Tonemap};
 pub use picking::PickTarget;
 pub use pipeline::create_mesh_pipeline;
 pub use scene::{
-    build_scene, plane_grid_overlays, Draw, DrawableObject, FrameFit, GridPlane, RenderMode, Scene,
+    build_scene, plane_grid_overlays, selection_aabb_overlay, Draw, DrawableObject, FrameFit,
+    GridPlane, RenderMode, Scene,
 };
 pub use triangle_renderer::TriangleRenderer;
 

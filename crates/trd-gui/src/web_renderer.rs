@@ -22,12 +22,16 @@ use crate::error::GuiError;
 use crate::render_backend::ImageRgba;
 use crate::scene::SceneState;
 
-/// The world / local XZ plane-grid overlay drawables for `state` (browser twin of
-/// the native `apply_grid_overlays`): `Some(Xz)` per enabled toggle, appended to
-/// the scene so a filled/PBR object still gets a floor / local grid.
-fn grid_overlays(draws: &[trd_core::Draw], state: &SceneState) -> Vec<DrawableObject> {
+/// The world / local XZ plane-grid overlay drawables **plus** the selection AABB
+/// for `state` (browser twin of the native `apply_grid_overlays` +
+/// `set_selected_aabb`): appended to the scene so a filled/PBR object still gets
+/// its floor / local grid and the selected object's bounding box (#140/#141).
+fn scene_overlays(draws: &[trd_core::Draw], state: &SceneState) -> Vec<DrawableObject> {
     let xz = |on: bool| on.then_some(GridPlane::Xz);
-    plane_grid_overlays(draws, xz(state.show_world_grid), xz(state.show_local_grid))
+    let mut overlays =
+        plane_grid_overlays(draws, xz(state.show_world_grid), xz(state.show_local_grid));
+    overlays.extend(trd_core::selection_aabb_overlay(draws, state.selected));
+    overlays
 }
 
 /// How the browser renderer produces each frame.
@@ -171,14 +175,14 @@ impl WebRenderer {
         let mut scene = build_scene(
             &state.draws(),
             state.mode,
-            state.aabb_visible(),
+            state.show_aabb,
             state.show_axes,
             state.show_local_axes,
             None,
             None,
             None,
         );
-        scene.extend(grid_overlays(&state.draws(), state));
+        scene.extend(scene_overlays(&state.draws(), state));
         self.render_scene(params, &scene).await
     }
 
@@ -209,7 +213,7 @@ impl WebRenderer {
         let scene = build_scene(
             &draws,
             state.mode,
-            state.aabb_visible(),
+            state.show_aabb,
             state.show_axes,
             state.show_local_axes,
             None,
@@ -217,7 +221,7 @@ impl WebRenderer {
             None,
         );
         let mut scene = scene;
-        scene.extend(grid_overlays(&draws, state));
+        scene.extend(scene_overlays(&draws, state));
         self.renderer.set_pbr_material(state.pbr);
         let rgba = self.render_scene(frame.params, &scene).await?;
 

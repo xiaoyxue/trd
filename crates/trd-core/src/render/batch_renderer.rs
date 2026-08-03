@@ -49,6 +49,9 @@ pub struct BatchRenderer {
     /// *each* drawn instance's own `model`, ungated by render mode (unlike
     /// [`show_local_grid`](Self::show_local_grid), which is wireframe-scoped).
     show_object_grid: Option<GridPlane>,
+    /// If `Some(index)`, highlight that draw's [`DrawableObject::AabbBox`] — the
+    /// **selected** object (#141) — regardless of the global `show_aabb` toggle.
+    selected_aabb: Option<u32>,
     /// The object-id picking target (#141), created lazily on the first
     /// [`pick`](Self::pick) call and resized to track the render size. `None`
     /// until a front-end actually picks, so the headless CLI never allocates it.
@@ -139,6 +142,7 @@ impl BatchRenderer {
             show_local_grid_mesh: None,
             show_world_grid: None,
             show_object_grid: None,
+            selected_aabb: None,
             pick_target: None,
         })
     }
@@ -228,6 +232,13 @@ impl BatchRenderer {
         self.show_object_grid = plane;
     }
 
+    /// Highlights the **selected** object's [`DrawableObject::AabbBox`] (#141):
+    /// `Some(index)` boxes the draw at that 0-based index (regardless of the
+    /// global [`set_show_aabb`](Self::set_show_aabb) toggle); `None` clears it.
+    pub fn set_selected_aabb(&mut self, index: Option<u32>) {
+        self.selected_aabb = index;
+    }
+
     /// Uploads `image` as the **background frame texture** (#63) sampled by a
     /// [`DrawableObject::FramePlane`]. The GPU texture is reused across frames
     /// (grown only on a resolution change). Call before a
@@ -263,6 +274,12 @@ impl BatchRenderer {
             draws,
             self.show_world_grid,
             self.show_object_grid,
+        ));
+        // Selection highlight (#141): the selected object's AABB, drawn even when
+        // the global show-all-AABBs toggle is off.
+        scene.extend(crate::render::selection_aabb_overlay(
+            draws,
+            self.selected_aabb,
         ));
         scene
     }

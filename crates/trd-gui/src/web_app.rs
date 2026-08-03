@@ -92,7 +92,7 @@ impl WebApp {
         let renderer = self.renderer.clone();
         let latest = self.latest.clone();
         let in_flight = self.render_in_flight.clone();
-        let state = self.controller.state;
+        let state = self.controller.state.clone();
         let ctx = ctx.clone();
         wasm_bindgen_futures::spawn_local(async move {
             // Take the renderer out of the cell so no borrow is held across the
@@ -130,7 +130,7 @@ impl WebApp {
         let result_cell = self.pick_result.clone();
         let in_flight = self.pick_in_flight.clone();
         let pending = self.pending_pick.clone();
-        let state = self.controller.state;
+        let state = self.controller.state.clone();
         let ctx = ctx.clone();
         wasm_bindgen_futures::spawn_local(async move {
             // If the renderer is momentarily unavailable, requeue the click.

@@ -374,6 +374,25 @@ pub fn plane_grid_overlays(
     grids
 }
 
+/// A **selection-highlight** overlay (#141): the [`DrawableObject::AabbBox`] of a
+/// single object — the `selected` 0-based index into `draws` — so *only* that
+/// object's bounding box is drawn (unlike the global "show all AABBs" toggle).
+/// `None`, an out-of-range index, or a `Shadow` draw yields an empty list, so a
+/// caller that doesn't opt in is byte-identical. Appended to the scene by
+/// front-ends that highlight a clicked object.
+pub fn selection_aabb_overlay(draws: &[Draw], selected: Option<u32>) -> Vec<DrawableObject> {
+    let Some(draw) = selected.and_then(|i| draws.get(i as usize)) else {
+        return Vec::new();
+    };
+    if draw.mode == Some(RenderMode::Shadow) {
+        return Vec::new();
+    }
+    vec![DrawableObject::AabbBox {
+        mesh_id: draw.mesh_id,
+        model: draw.model,
+    }]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

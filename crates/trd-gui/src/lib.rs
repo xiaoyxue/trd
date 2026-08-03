@@ -57,13 +57,13 @@ pub mod web_renderer;
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub async fn start(
     canvas: web_sys::HtmlCanvasElement,
-    mesh_obj: Option<String>,
+    mesh_objs: Vec<String>,
     texture_bytes: Option<Vec<u8>>,
     env_bytes: Option<Vec<u8>>,
     backend: Option<String>,
 ) -> Result<(), wasm_bindgen::JsValue> {
     use crate::interaction::InteractionController;
-    use crate::scene::SceneState;
+    use crate::scene::{ObjectTransform, SceneState};
     use crate::web_app::WebApp;
     use crate::web_renderer::{WebBackend, WebRenderer};
 
@@ -71,13 +71,21 @@ pub async fn start(
     let _ = eframe::WebLogger::init(log::LevelFilter::Warn);
 
     let to_js = |e: crate::error::GuiError| wasm_bindgen::JsValue::from_str(&e.to_string());
-    let mesh = match mesh_obj {
-        Some(text) => trd_core::Mesh::from_obj(&text)
+    // One or more meshes (repeated `?mesh=`), each an object in the scene; an
+    // empty list falls back to the built-in cube.
+    let meshes: Vec<trd_core::Mesh> = if mesh_objs.is_empty() {
+        vec![assets::default_mesh()
             .map_err(crate::error::GuiError::from)
-            .map_err(to_js)?,
-        None => assets::default_mesh()
-            .map_err(crate::error::GuiError::from)
-            .map_err(to_js)?,
+            .map_err(to_js)?]
+    } else {
+        mesh_objs
+            .iter()
+            .map(|text| {
+                trd_core::Mesh::from_obj(text)
+                    .map_err(crate::error::GuiError::from)
+                    .map_err(to_js)
+            })
+            .collect::<Result<_, _>>()?
     };
     let texture = match texture_bytes {
         Some(bytes) => Some(assets::decode_texture(&bytes).map_err(to_js)?),
@@ -95,6 +103,8 @@ pub async fn start(
         } else {
             trd_core::RenderMode::Filled
         },
+        // One transform per loaded mesh, so `draws()` lays them out side-by-side.
+        objects: vec![ObjectTransform::default(); meshes.len()],
         ..SceneState::default()
     };
     // `?backend=arrow` selects the Arrow wire round-trip; anything else (or
@@ -109,7 +119,7 @@ pub async fn start(
     // keep GPU + readback cost in check.
     let (render_w, render_h) = browser_render_size(&canvas);
     let renderer = WebRenderer::new(
-        &[mesh],
+        &meshes,
         texture.as_ref().map(|t| t as &dyn trd_core::Texture),
         env,
         render_w,

@@ -69,7 +69,7 @@ mod native {
     fn render_options(state: &SceneState) -> RenderOptions {
         RenderOptions {
             mode: state.mode,
-            show_aabb: state.aabb_visible(),
+            show_aabb: state.show_aabb,
             show_axes: state.show_axes,
             show_local_axes: state.show_local_axes,
             show_local_grid: None,
@@ -137,7 +137,8 @@ mod native {
             let aspect = self.width as f32 / self.height.max(1) as f32;
             self.renderer.set_mode(state.mode);
             self.renderer.set_pbr_material(state.pbr);
-            self.renderer.set_show_aabb(state.aabb_visible());
+            self.renderer.set_show_aabb(state.show_aabb);
+            self.renderer.set_selected_aabb(state.selected);
             self.renderer.set_show_axes(state.show_axes);
             self.renderer.set_show_local_axes(state.show_local_axes);
             apply_grid_overlays(&mut self.renderer, state);
@@ -232,6 +233,7 @@ mod native {
             self.renderer.set_mode(opts.mode);
             self.renderer.set_pbr_material(state.pbr);
             self.renderer.set_show_aabb(opts.show_aabb);
+            self.renderer.set_selected_aabb(state.selected);
             self.renderer.set_show_axes(opts.show_axes);
             self.renderer.set_show_local_axes(opts.show_local_axes);
             apply_grid_overlays(&mut self.renderer, state);

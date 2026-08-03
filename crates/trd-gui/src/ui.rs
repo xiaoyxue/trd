@@ -207,9 +207,12 @@ fn section(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui) -> b
 /// whether the transform changed.
 fn transform_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
     let mut changed = false;
-    let obj = &mut view.controller.state.object;
-    ui.label("Transform");
-
+    // Transforms edit the *selected* object; with nothing selected there is
+    // nothing to transform, so the widgets are hidden behind a hint (#141).
+    let Some(obj) = view.controller.state.selected_object_mut() else {
+        ui.weak("Select an object to transform it");
+        return false;
+    };
     ui.label("Translation");
     ui.horizontal(|ui| {
         for (i, axis) in ["X", "Y", "Z"].iter().enumerate() {
