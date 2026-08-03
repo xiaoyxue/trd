@@ -627,6 +627,15 @@ pub struct MeshRenderer {
     /// Retained so `encode` can grow GPU resources on demand without the caller
     /// threading a `&Device` through every call (`wgpu::Device` is a cheap `Arc`).
     device: wgpu::Device,
+    /// The object-id **picking** pipeline (`picking.wgsl`): renders each drawn
+    /// object in a flat id color into a single-sample linear target, reused by
+    /// [`encode_picking`](Self::encode_picking). Built once (its own bind-group
+    /// layout is structurally the camera layout, so `camera_bind_group` binds it).
+    pick_pipeline: wgpu::RenderPipeline,
+    /// Per-instance [`PickInstanceRaw`] buffer for the picking pass (model +
+    /// id color), grown on demand like the mesh instance buffer.
+    pick_instances: wgpu::Buffer,
+    pick_instance_capacity: u32,
 }
 
 impl MeshRenderer {
@@ -698,6 +707,23 @@ impl MeshRenderer {
         let store = MeshStore::new(device, meshes, base_models);
         let frame_plane = FramePlane::new(device, format, sample_count);
 
+        // The picking pipeline: a group-0 camera uniform (structurally identical
+        // to the mesh camera layout, so `pass.camera_bind_group` binds it) + the
+        // per-instance id color, single-sampled into PICK_FORMAT.
+        let pick_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("trd picking pipeline layout"),
+            bind_group_layouts: &[Some(&create_mesh_bind_group_layout(device))],
+            immediate_size: 0,
+        });
+        let pick_pipeline = create_picking_pipeline(device, &pick_layout);
+        let pick_instance_capacity = (meshes.len() as u32).max(1);
+        let pick_instances = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("trd pick instance buffer"),
+            size: pick_instance_capacity as u64 * std::mem::size_of::<PickInstanceRaw>() as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         Self {
             pass,
             texture,
@@ -710,6 +736,9 @@ impl MeshRenderer {
             sample_count,
             format,
             device: device.clone(),
+            pick_pipeline,
+            pick_instances,
+            pick_instance_capacity,
         }
     }
 
@@ -929,6 +958,105 @@ impl MeshRenderer {
                     pass.draw(0..AXES_VERTEX_COUNT, range);
                 }
             }
+        }
+    }
+
+    /// Encodes the **object-id picking pass** (#141): renders each `draws` entry's
+    /// mesh in a flat color encoding its **index** (the same 0-based order the
+    /// caller placed them), single-sampled and depth-tested into `color_view`
+    /// (cleared to id `0` = background) with `depth_view`. No lighting, no
+    /// texture, no MSAA — so the pixel under the cursor reads back to an exact id
+    /// via [`PickInstanceRaw::decode`]. `color_view` must be a [`PICK_FORMAT`]
+    /// (linear) target and `depth_view` a [`DEPTH_FORMAT`] attachment of the same
+    /// size. Out-of-range mesh ids and `Shadow` draws are skipped, but the index
+    /// mapping is preserved (a skipped draw's index simply never appears).
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_picking(
+        &mut self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        color_view: &wgpu::TextureView,
+        depth_view: &wgpu::TextureView,
+        params: FrameParams,
+        draws: &[Draw],
+        viewport: Viewport,
+    ) {
+        // Camera P·V for this frame (writes the shared camera uniform bound by
+        // `camera_bind_group`, which is layout-compatible with the pick pipeline).
+        self.pass.write_camera(queue, params, viewport);
+
+        // Build one pick instance per drawable object, carrying its index color.
+        // Keep the draw index as the id even when an entry is skipped, so a decoded
+        // id maps straight back to `draws[index]`.
+        let mut instances: Vec<PickInstanceRaw> = Vec::with_capacity(draws.len());
+        let mut records: Vec<(usize, u32)> = Vec::with_capacity(draws.len());
+        for (index, draw) in draws.iter().enumerate() {
+            if draw.mode == Some(RenderMode::Shadow) {
+                continue;
+            }
+            let Some(mesh) = self.store.meshes.get(draw.mesh_id as usize) else {
+                continue;
+            };
+            let effective = Matrix4::from_cols_array(&draw.model) * mesh.base_model;
+            let slot = instances.len() as u32;
+            instances.push(PickInstanceRaw::new(
+                effective.to_cols_array(),
+                index as u32,
+            ));
+            records.push((draw.mesh_id as usize, slot));
+        }
+
+        // Grow + upload the pick instance buffer.
+        if instances.len() as u32 > self.pick_instance_capacity {
+            self.pick_instance_capacity = (instances.len() as u32).next_power_of_two();
+            self.pick_instances = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("trd pick instance buffer"),
+                size: self.pick_instance_capacity as u64
+                    * std::mem::size_of::<PickInstanceRaw>() as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+        if !instances.is_empty() {
+            queue.write_buffer(&self.pick_instances, 0, bytemuck::cast_slice(&instances));
+        }
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("trd picking pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: color_view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    // Clear to id 0 (background).
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: depth_view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+
+        pass.set_pipeline(&self.pick_pipeline);
+        pass.set_bind_group(0, &self.pass.camera_bind_group, &[]);
+        pass.set_vertex_buffer(1, self.pick_instances.slice(..));
+        for (mesh_id, slot) in records {
+            let mesh = &self.store.meshes[mesh_id];
+            draw_indexed(
+                &mut pass,
+                &mesh.vertex_buffer,
+                &mesh.triangles,
+                slot..slot + 1,
+            );
         }
     }
 

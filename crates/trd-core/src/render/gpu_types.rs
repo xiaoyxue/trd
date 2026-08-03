@@ -144,6 +144,78 @@ impl InstanceRaw {
     }
 }
 
+/// Per-instance data for the object-id picking pass (`picking.wgsl`): a model
+/// matrix (four `vec4` attributes, locations 3-6) plus a flat `id_color` (the
+/// object id encoded as RGBA, location 7). Rendered single-sampled so each id
+/// color reads back exactly.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct PickInstanceRaw {
+    pub(crate) model: [f32; 16],
+    pub(crate) id_color: [f32; 4],
+}
+
+impl PickInstanceRaw {
+    const ATTRIBUTES: [wgpu::VertexAttribute; 5] = [
+        wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Float32x4,
+            offset: 0,
+            shader_location: 3,
+        },
+        wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Float32x4,
+            offset: 16,
+            shader_location: 4,
+        },
+        wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Float32x4,
+            offset: 32,
+            shader_location: 5,
+        },
+        wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Float32x4,
+            offset: 48,
+            shader_location: 6,
+        },
+        wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Float32x4,
+            offset: 64,
+            shader_location: 7,
+        },
+    ];
+
+    /// Encodes a 0-based object index into a `PickInstanceRaw` id color. The
+    /// stored id is `index + 1` so `0` is reserved for the cleared background;
+    /// the 24-bit RGB packing round-trips through the linear `Rgba8Unorm` pick
+    /// target (each byte `/ 255.0`).
+    pub(crate) fn new(model: [f32; 16], index: u32) -> Self {
+        let id = index + 1;
+        let id_color = [
+            (id & 0xFF) as f32 / 255.0,
+            ((id >> 8) & 0xFF) as f32 / 255.0,
+            ((id >> 16) & 0xFF) as f32 / 255.0,
+            1.0,
+        ];
+        Self { model, id_color }
+    }
+
+    /// Decodes a read-back RGBA pixel from the pick target into a 0-based object
+    /// index, or `None` for the background (id `0`). Inverse of [`Self::new`].
+    pub(crate) fn decode(rgba: [u8; 4]) -> Option<u32> {
+        let id = rgba[0] as u32 | ((rgba[1] as u32) << 8) | ((rgba[2] as u32) << 16);
+        id.checked_sub(1)
+    }
+
+    /// Returns the per-instance buffer layout expected by `picking.wgsl`.
+    pub(crate) const fn layout() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &Self::ATTRIBUTES,
+        }
+    }
+}
+
 /// Canonical indexed mesh container.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Mesh {
@@ -181,6 +253,38 @@ impl Mesh {
 mod tests {
     use super::*;
     use crate::math::Matrix4;
+
+    #[test]
+    fn pick_instance_id_round_trips_through_rgba() {
+        // index 0 -> id 1, encoded low byte, decodes back to 0.
+        for index in [0u32, 1, 2, 42, 255, 256, 300, 65_535, 70_000] {
+            let inst = PickInstanceRaw::new(Matrix4::IDENTITY.to_cols_array(), index);
+            // The id color bytes are the pick target's stored RGBA (× 255, exact).
+            let rgba = [
+                (inst.id_color[0] * 255.0).round() as u8,
+                (inst.id_color[1] * 255.0).round() as u8,
+                (inst.id_color[2] * 255.0).round() as u8,
+                (inst.id_color[3] * 255.0).round() as u8,
+            ];
+            assert_eq!(PickInstanceRaw::decode(rgba), Some(index), "index {index}");
+        }
+    }
+
+    #[test]
+    fn pick_decode_treats_zero_as_background() {
+        // A cleared (black) pixel is id 0 → no object.
+        assert_eq!(PickInstanceRaw::decode([0, 0, 0, 255]), None);
+        assert_eq!(PickInstanceRaw::decode([0, 0, 0, 0]), None);
+    }
+
+    #[test]
+    fn pick_instance_layout_stride_and_id_offset() {
+        // model (64) + id_color (16) = 80 bytes; id color attribute at offset 64.
+        assert_eq!(std::mem::size_of::<PickInstanceRaw>(), 80);
+        let attrs = PickInstanceRaw::ATTRIBUTES;
+        assert_eq!(attrs[4].shader_location, 7);
+        assert_eq!(attrs[4].offset, 64);
+    }
 
     #[test]
     fn uniform_layout_matches_wgsl_params() {
