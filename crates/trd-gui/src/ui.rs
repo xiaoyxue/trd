@@ -10,7 +10,10 @@
 use egui::{Color32, PointerButton, Sense, TextureHandle, Vec2};
 use trd_core::{RenderMode, Tonemap};
 
-use crate::interaction::{InteractionController, InteractionEvent, InteractionTarget};
+use crate::interaction::{
+    AxisConstraint, InteractionController, InteractionEvent, InteractionTarget, TransformMode,
+};
+use crate::scene::{MAX_SCALE, MIN_SCALE};
 
 /// The per-frame view the shared UI draws: the interaction state, the current
 /// display texture (if a frame has been rendered), the render resolution, and an
@@ -41,74 +44,213 @@ pub fn show(ui: &mut egui::Ui, view: &mut View) -> bool {
 }
 
 /// The left control panel: primary-drag target, render mode, overlays, reset, and
-/// a status readout. Returns whether the scene changed.
+/// a status readout. Grouped into collapsible sections inside a scroll area so the
+/// (now taller) panel stays usable. Returns whether the scene changed.
 fn controls_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
     let mut needs_render = false;
-    ui.heading("trd-gui");
-    ui.label(format!("trd-core protocol {}", trd_core::PROTOCOL_VERSION));
-    ui.separator();
-
-    ui.label("Primary drag");
-    let target = &mut view.controller.target;
-    ui.horizontal_wrapped(|ui| {
-        needs_render |= ui
-            .selectable_value(target, InteractionTarget::Camera, "Orbit camera")
-            .changed();
-        needs_render |= ui
-            .selectable_value(target, InteractionTarget::Object, "Rotate object")
-            .changed();
+    ui.horizontal(|ui| {
+        ui.heading("trd-gui");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.weak(format!("proto {}", trd_core::PROTOCOL_VERSION));
+        });
     });
     ui.separator();
 
-    ui.label("Render mode");
-    let mode = &mut view.controller.state.mode;
-    ui.horizontal_wrapped(|ui| {
-        needs_render |= ui
-            .selectable_value(mode, RenderMode::Filled, "Filled")
-            .changed();
-        needs_render |= ui
-            .selectable_value(mode, RenderMode::Wireframe, "Wireframe")
-            .changed();
-        needs_render |= ui
-            .selectable_value(mode, RenderMode::Textured, "Textured")
-            .changed();
-        needs_render |= ui.selectable_value(mode, RenderMode::Pbr, "PBR").changed();
-    });
-    ui.separator();
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        // ── Interaction ──────────────────────────────────────────────────
+        needs_render |= section(ui, "Interaction", |ui| {
+            let mut c = false;
+            ui.label("Primary drag");
+            let target = &mut view.controller.target;
+            ui.horizontal_wrapped(|ui| {
+                c |= ui
+                    .selectable_value(target, InteractionTarget::Camera, "Orbit camera")
+                    .changed();
+                c |= ui
+                    .selectable_value(target, InteractionTarget::Object, "Object")
+                    .changed();
+            });
+            // When a primary drag targets the object, pick which transform it
+            // edits, and (for rotate/move) optionally lock it to one axis.
+            if view.controller.target == InteractionTarget::Object {
+                ui.add_space(4.0);
+                ui.label("Manipulate");
+                let mode = &mut view.controller.mode;
+                ui.horizontal_wrapped(|ui| {
+                    ui.selectable_value(mode, TransformMode::Rotate, "Rotate");
+                    ui.selectable_value(mode, TransformMode::Move, "Move");
+                    ui.selectable_value(mode, TransformMode::Scale, "Scale");
+                });
+                if matches!(
+                    view.controller.mode,
+                    TransformMode::Rotate | TransformMode::Move
+                ) {
+                    ui.add_space(4.0);
+                    ui.label("Axis lock");
+                    let axis = &mut view.controller.axis;
+                    ui.horizontal_wrapped(|ui| {
+                        ui.selectable_value(axis, AxisConstraint::Free, "Free");
+                        ui.selectable_value(axis, AxisConstraint::X, "X");
+                        ui.selectable_value(axis, AxisConstraint::Y, "Y");
+                        ui.selectable_value(axis, AxisConstraint::Z, "Z");
+                    });
+                }
+            }
+            c
+        });
 
-    // The Disney PBR material controls, live only while PBR mode is selected so
-    // the user can dial in metallic/roughness/etc. against the bound env probe.
-    if view.controller.state.mode == RenderMode::Pbr {
-        needs_render |= pbr_panel(ui, view);
+        // ── Transform (numeric widgets, in sync with the mouse) ───────────
+        needs_render |= section(ui, "Transform", |ui| transform_panel(ui, view));
+
+        // ── Render mode ──────────────────────────────────────────────────
+        needs_render |= section(ui, "Render mode", |ui| {
+            let mut c = false;
+            let mode = &mut view.controller.state.mode;
+            ui.horizontal_wrapped(|ui| {
+                c |= ui
+                    .selectable_value(mode, RenderMode::Filled, "Filled")
+                    .changed();
+                c |= ui
+                    .selectable_value(mode, RenderMode::Wireframe, "Wireframe")
+                    .changed();
+                c |= ui
+                    .selectable_value(mode, RenderMode::Textured, "Textured")
+                    .changed();
+                c |= ui.selectable_value(mode, RenderMode::Pbr, "PBR").changed();
+            });
+            c
+        });
+
+        // The Disney PBR material controls, only while PBR mode is selected.
+        if view.controller.state.mode == RenderMode::Pbr {
+            needs_render |= section(ui, "PBR material", |ui| pbr_panel(ui, view));
+        }
+
+        // ── Overlays ─────────────────────────────────────────────────────
+        needs_render |= section(ui, "Overlays", |ui| {
+            let mut c = false;
+            let state = &mut view.controller.state;
+            ui.label("Gizmos");
+            c |= ui.checkbox(&mut state.show_aabb, "Bounding box").changed();
+            c |= ui.checkbox(&mut state.show_axes, "World axes").changed();
+            c |= ui.checkbox(&mut state.show_local_axes, "Local axes").changed();
+            ui.add_space(4.0);
+            ui.label("Plane grid (XZ)");
+            c |= ui.checkbox(&mut state.show_world_grid, "World grid").changed();
+            c |= ui.checkbox(&mut state.show_local_grid, "Local grid").changed();
+            c
+        });
+
+        ui.add_space(4.0);
+        if ui.button("Reset view").clicked() {
+            needs_render |= view.controller.apply(InteractionEvent::Reset);
+        }
         ui.separator();
-    }
 
-    ui.label("Overlays");
-    let state = &mut view.controller.state;
-    needs_render |= ui.checkbox(&mut state.show_aabb, "Bounding box").changed();
-    needs_render |= ui.checkbox(&mut state.show_axes, "World axes").changed();
-    needs_render |= ui
-        .checkbox(&mut state.show_local_axes, "Local axes")
-        .changed();
-    ui.separator();
-
-    if ui.button("Reset view").clicked() {
-        needs_render |= view.controller.apply(InteractionEvent::Reset);
-    }
-    ui.separator();
-
-    if let Some(ms) = view.last_render_ms {
-        ui.label(format!("Last render: {:.1} ms", ms * 1000.0));
-    }
-    let (w, h) = view.render_size;
-    ui.label(format!("Render size: {w}×{h}"));
-    ui.add_space(8.0);
-    ui.label(
-        egui::RichText::new("Left-drag: orbit / rotate\nRight-drag: move object\nScroll: zoom")
+        // ── Status ───────────────────────────────────────────────────────
+        if let Some(ms) = view.last_render_ms {
+            ui.weak(format!("Last render: {:.1} ms", ms * 1000.0));
+        }
+        let (w, h) = view.render_size;
+        ui.weak(format!("Render size: {w}×{h}"));
+        ui.add_space(8.0);
+        ui.label(
+            egui::RichText::new(
+                "Left-drag: orbit / rotate / move / scale\nAxis lock: drag rotates/moves on one axis\nRight-drag: move object\nScroll: zoom (or scale)",
+            )
             .small()
             .color(Color32::GRAY),
-    );
+        );
+    });
     needs_render
+}
+
+/// A collapsible, default-open control section with a bold header. Runs `body`
+/// (which reports whether the scene changed) and folds its result back out, so
+/// the caller's `needs_render` accounting is unchanged by the grouping.
+fn section(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui) -> bool) -> bool {
+    egui::CollapsingHeader::new(egui::RichText::new(title).strong())
+        .default_open(true)
+        .show(ui, body)
+        .body_returned
+        .unwrap_or(false)
+}
+
+/// The object **transform** widgets: numeric translation (x/y/z), rotation
+/// (yaw/pitch/roll in degrees), and scale (uniform + per-axis). These edit the
+/// exact same [`ObjectTransform`](crate::scene::ObjectTransform) the mouse
+/// gestures mutate, so the two input paths stay numerically in sync — dragging in
+/// the image updates these fields, and editing a field moves the object. Returns
+/// whether the transform changed.
+fn transform_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
+    let mut changed = false;
+    let obj = &mut view.controller.state.object;
+    ui.label("Transform");
+
+    ui.label("Translation");
+    ui.horizontal(|ui| {
+        for (i, axis) in ["X", "Y", "Z"].iter().enumerate() {
+            ui.label(*axis);
+            changed |= ui
+                .add(egui::DragValue::new(&mut obj.translation[i]).speed(0.01))
+                .changed();
+        }
+    });
+
+    ui.label("Rotation (°)");
+    changed |= angle_row(ui, "X (pitch)", &mut obj.pitch);
+    changed |= angle_row(ui, "Y (yaw)", &mut obj.yaw);
+    changed |= angle_row(ui, "Z (roll)", &mut obj.roll);
+
+    ui.label("Scale");
+    // Uniform scale drives all three axes together; per-axis rows allow a
+    // non-uniform scale. Both clamp to the object's working range.
+    let mut uniform = (obj.scale[0] + obj.scale[1] + obj.scale[2]) / 3.0;
+    ui.horizontal(|ui| {
+        ui.label("Uniform");
+        if ui
+            .add(
+                egui::DragValue::new(&mut uniform)
+                    .speed(0.01)
+                    .range(MIN_SCALE..=MAX_SCALE),
+            )
+            .changed()
+        {
+            obj.scale = [uniform, uniform, uniform];
+            changed = true;
+        }
+    });
+    ui.horizontal(|ui| {
+        for (i, axis) in ["X", "Y", "Z"].iter().enumerate() {
+            ui.label(*axis);
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut obj.scale[i])
+                        .speed(0.01)
+                        .range(MIN_SCALE..=MAX_SCALE),
+                )
+                .changed();
+        }
+    });
+    changed
+}
+
+/// A single labeled angle row that displays/edits `radians` in **degrees** (the
+/// natural unit for the widget), storing back radians. Returns whether it changed.
+fn angle_row(ui: &mut egui::Ui, label: &str, radians: &mut f32) -> bool {
+    let mut deg = radians.to_degrees();
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(label);
+        if ui
+            .add(egui::DragValue::new(&mut deg).speed(1.0).suffix("°"))
+            .changed()
+        {
+            *radians = deg.to_radians();
+            changed = true;
+        }
+    });
+    changed
 }
 
 /// The Disney PBR material sub-panel (shown only in [`RenderMode::Pbr`]): live
@@ -202,9 +344,17 @@ fn image_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
     if response.hovered() {
         let scroll = ui.input(|i| i.smooth_scroll_delta.y);
         if scroll != 0.0 {
-            changed |= view.controller.apply(InteractionEvent::Zoom {
-                delta: scroll / 100.0,
-            });
+            let delta = scroll / 100.0;
+            // In object Scale mode the wheel scales the object; otherwise it
+            // dollies the camera (the default zoom).
+            let event = if view.controller.target == InteractionTarget::Object
+                && view.controller.mode == TransformMode::Scale
+            {
+                InteractionEvent::Scale { delta }
+            } else {
+                InteractionEvent::Zoom { delta }
+            };
+            changed |= view.controller.apply(event);
         }
     }
 
@@ -212,4 +362,40 @@ fn image_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
         ui.ctx().request_repaint();
     }
     changed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::section;
+
+    /// Runs `body` inside one headless egui frame (CPU layout only — no window /
+    /// GPU) and returns its result, so panel helpers can be unit-tested.
+    fn in_frame<R>(body: impl FnOnce(&mut egui::Ui) -> R) -> R {
+        let mut out = None;
+        let mut body = Some(body);
+        // A default-open `CollapsingHeader` runs its body on the first frame, so a
+        // single test-ui pass is enough to exercise `section`.
+        egui::__run_test_ui(|ui| {
+            if let Some(body) = body.take() {
+                out = Some(body(ui));
+            }
+        });
+        out.expect("test ui body ran")
+    }
+
+    #[test]
+    fn section_folds_out_its_body_changed_flag() {
+        // Regression: the panel-polish refactor dropped `section`'s returned
+        // "changed" flag, so control edits (e.g. PBR sliders) didn't re-render
+        // until the next image drag. `section` must propagate its body's bool so
+        // the caller's `needs_render` accounting still fires.
+        assert!(
+            in_frame(|ui| section(ui, "changed", |_| true)),
+            "a section whose body reports a change must return true"
+        );
+        assert!(
+            !in_frame(|ui| section(ui, "unchanged", |_| false)),
+            "a section whose body reports no change must return false"
+        );
+    }
 }

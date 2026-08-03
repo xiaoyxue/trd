@@ -73,6 +73,15 @@ mod native {
         }
     }
 
+    /// Maps the scene's XZ grid overlay toggles to the `GridPlane` the
+    /// `BatchRenderer` grid setters expect (`Some(Xz)` when on, `None` when off).
+    /// Shared by both native backends so the grids appear identically.
+    fn apply_grid_overlays(renderer: &mut BatchRenderer, state: &SceneState) {
+        let xz = |on: bool| on.then_some(trd_core::GridPlane::Xz);
+        renderer.set_show_world_grid(xz(state.show_world_grid));
+        renderer.set_show_object_grid(xz(state.show_local_grid));
+    }
+
     /// The native in-process backend: builds a `trd-core` [`BatchRenderer`] once at a
     /// fixed resolution and re-renders the scene on demand. The GUI displays the
     /// output scaled to the panel, so the render resolution is stable (no GPU
@@ -125,6 +134,7 @@ mod native {
             self.renderer.set_show_aabb(state.show_aabb);
             self.renderer.set_show_axes(state.show_axes);
             self.renderer.set_show_local_axes(state.show_local_axes);
+            apply_grid_overlays(&mut self.renderer, state);
             let rgba =
                 self.renderer
                     .render_frame(state.frame_params(aspect), &state.draws(), None)?;
@@ -212,6 +222,7 @@ mod native {
             self.renderer.set_show_aabb(opts.show_aabb);
             self.renderer.set_show_axes(opts.show_axes);
             self.renderer.set_show_local_axes(opts.show_local_axes);
+            apply_grid_overlays(&mut self.renderer, state);
             let rgba = self
                 .renderer
                 .render_frame(frame.params, &frame.resolved_draws(), None)?;

@@ -13,14 +13,22 @@
 //! `async fn`; the app schedules it with `wasm_bindgen_futures::spawn_local`.
 
 use trd_core::{
-    build_scene, decode_params_stream, encode_params_stream, read_image_stream, DrawableObject,
-    EnvMapData, FrameParams, Mesh, MeshRenderer, OffscreenTarget, OutputSession, Texture,
-    OFFSCREEN_FORMAT,
+    build_scene, decode_params_stream, encode_params_stream, plane_grid_overlays,
+    read_image_stream, DrawableObject, EnvMapData, FrameParams, GridPlane, Mesh, MeshRenderer,
+    OffscreenTarget, OutputSession, Texture, OFFSCREEN_FORMAT,
 };
 
 use crate::error::GuiError;
 use crate::render_backend::ImageRgba;
 use crate::scene::SceneState;
+
+/// The world / local XZ plane-grid overlay drawables for `state` (browser twin of
+/// the native `apply_grid_overlays`): `Some(Xz)` per enabled toggle, appended to
+/// the scene so a filled/PBR object still gets a floor / local grid.
+fn grid_overlays(draws: &[trd_core::Draw], state: &SceneState) -> Vec<DrawableObject> {
+    let xz = |on: bool| on.then_some(GridPlane::Xz);
+    plane_grid_overlays(draws, xz(state.show_world_grid), xz(state.show_local_grid))
+}
 
 /// How the browser renderer produces each frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -134,7 +142,7 @@ impl WebRenderer {
         let aspect = self.width as f32 / self.height.max(1) as f32;
         let params = state.frame_params(aspect);
         self.renderer.set_pbr_material(state.pbr);
-        let scene = build_scene(
+        let mut scene = build_scene(
             &state.draws(),
             state.mode,
             state.show_aabb,
@@ -144,6 +152,7 @@ impl WebRenderer {
             None,
             None,
         );
+        scene.extend(grid_overlays(&state.draws(), state));
         self.render_scene(params, &scene).await
     }
 
@@ -181,6 +190,8 @@ impl WebRenderer {
             None,
             None,
         );
+        let mut scene = scene;
+        scene.extend(grid_overlays(&draws, state));
         self.renderer.set_pbr_material(state.pbr);
         let rgba = self.render_scene(frame.params, &scene).await?;
 

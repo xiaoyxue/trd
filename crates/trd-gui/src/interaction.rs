@@ -21,6 +21,11 @@ const ZOOM_SPEED: f32 = 0.1;
 /// A full-width pan translates the object by this fraction of the camera
 /// distance, so panning feels consistent as you dolly in and out.
 const PAN_SPEED: f32 = 1.0;
+/// One notch of scroll scales the object by this fraction (in Scale mode).
+const SCALE_WHEEL_SPEED: f32 = 0.1;
+/// A full-height Scale-mode drag scales the object by this fraction per unit of
+/// vertical travel (drag **up** grows, drag **down** shrinks).
+const SCALE_DRAG_SPEED: f32 = 1.5;
 
 /// What a **primary** (left-button) drag manipulates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -28,8 +33,52 @@ pub enum InteractionTarget {
     /// Primary drag orbits the camera around the object (the default).
     #[default]
     Camera,
-    /// Primary drag rotates the object in place.
+    /// Primary drag manipulates the object per the active [`TransformMode`].
     Object,
+}
+
+/// When [`InteractionTarget::Object`] is active, which object transform a
+/// **primary** drag (and the scroll wheel) edits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TransformMode {
+    /// Primary drag rotates the object (yaw/pitch); the default.
+    #[default]
+    Rotate,
+    /// Primary drag translates the object in the screen plane.
+    Move,
+    /// Primary drag (and the scroll wheel) uniformly scales the object.
+    Scale,
+}
+
+/// Constrains an object [`TransformMode::Rotate`] / [`TransformMode::Move`] drag
+/// to a single axis, locking the other two. In [`AxisConstraint::Free`] the drag
+/// keeps its natural two-degree-of-freedom mapping (orbit-style rotate / screen-
+/// plane move); when locked to an axis, a drag maps to **that axis only** — rotate
+/// **about** it, or translate **along** it — using a single scalar from the drag
+/// (`dx − dy`, so dragging right/up increases, left/down decreases).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AxisConstraint {
+    /// No constraint — the drag uses its natural mapping (the default).
+    #[default]
+    Free,
+    /// Lock to the object's X axis (rotate = pitch; translate = world X).
+    X,
+    /// Lock to the object's Y axis (rotate = yaw; translate = world Y).
+    Y,
+    /// Lock to the object's Z axis (rotate = roll; translate = world Z).
+    Z,
+}
+
+impl AxisConstraint {
+    /// The `[x, y, z]` index this axis locks to, or `None` for [`Self::Free`].
+    fn index(self) -> Option<usize> {
+        match self {
+            AxisConstraint::Free => None,
+            AxisConstraint::X => Some(0),
+            AxisConstraint::Y => Some(1),
+            AxisConstraint::Z => Some(2),
+        }
+    }
 }
 
 /// A normalized interaction gesture. Drag/pan deltas are **fractions of the
@@ -39,12 +88,15 @@ pub enum InteractionTarget {
 /// (`+` = zoom in / dolly closer).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum InteractionEvent {
-    /// Primary drag: orbit the camera or rotate the object (per [`InteractionTarget`]).
+    /// Primary drag: orbit the camera, or rotate / move / scale the object
+    /// (per [`InteractionTarget`] and [`TransformMode`]).
     Primary { dx: f32, dy: f32 },
     /// Secondary/middle drag: translate the object in the screen plane.
     Pan { dx: f32, dy: f32 },
     /// Scroll wheel: dolly the camera (`delta > 0` moves closer).
     Zoom { delta: f32 },
+    /// Scroll wheel while scaling: uniformly scale the object (`delta > 0` grows).
+    Scale { delta: f32 },
     /// Restore the scene to its initial state.
     Reset,
 }
@@ -55,8 +107,12 @@ pub enum InteractionEvent {
 pub struct InteractionController {
     /// The scene being edited (read by the render backend each frame).
     pub state: SceneState,
-    /// What a primary drag currently manipulates.
+    /// What a primary drag currently manipulates (camera vs. object).
     pub target: InteractionTarget,
+    /// Which object transform a primary drag edits when targeting the object.
+    pub mode: TransformMode,
+    /// Locks an object rotate/move drag to a single axis (the other two frozen).
+    pub axis: AxisConstraint,
     /// The state to restore on [`InteractionEvent::Reset`].
     initial: SceneState,
 }
@@ -67,6 +123,8 @@ impl InteractionController {
         Self {
             state,
             target: InteractionTarget::default(),
+            mode: TransformMode::default(),
+            axis: AxisConstraint::default(),
             initial: state,
         }
     }
@@ -87,11 +145,7 @@ impl InteractionController {
                             .camera
                             .orbit(dx * ROTATE_SPEED, -dy * ROTATE_SPEED);
                     }
-                    InteractionTarget::Object => {
-                        self.state
-                            .object
-                            .rotate(dx * ROTATE_SPEED, -dy * ROTATE_SPEED);
-                    }
+                    InteractionTarget::Object => self.apply_object_drag(dx, dy),
                 }
                 true
             }
@@ -99,11 +153,7 @@ impl InteractionController {
                 if dx == 0.0 && dy == 0.0 {
                     return false;
                 }
-                // Translate in the world XY plane, scaled by distance so the
-                // object tracks the pointer regardless of zoom. Screen-up
-                // (dy < 0) maps to world +Y.
-                let scale = PAN_SPEED * self.state.camera.distance;
-                self.state.object.translate([dx * scale, -dy * scale, 0.0]);
+                self.translate_object_screen(dx, dy);
                 true
             }
             InteractionEvent::Zoom { delta } => {
@@ -114,6 +164,16 @@ impl InteractionController {
                 self.state.camera.dolly(1.0 - delta * ZOOM_SPEED);
                 true
             }
+            InteractionEvent::Scale { delta } => {
+                if delta == 0.0 {
+                    return false;
+                }
+                // delta > 0 ⇒ grow (factor > 1).
+                self.state
+                    .object
+                    .scale_uniform(1.0 + delta * SCALE_WHEEL_SPEED);
+                true
+            }
             InteractionEvent::Reset => {
                 if self.state == self.initial {
                     return false;
@@ -122,6 +182,57 @@ impl InteractionController {
                 true
             }
         }
+    }
+
+    /// Applies a primary drag to the object per the active [`TransformMode`] and
+    /// [`AxisConstraint`]: rotate (about a locked axis, or free yaw/pitch), move
+    /// (along a locked axis, or in the screen plane), or uniformly scale.
+    fn apply_object_drag(&mut self, dx: f32, dy: f32) {
+        match self.mode {
+            TransformMode::Rotate => match self.axis.index() {
+                // Locked: rotate about the single axis (X=pitch, Y=yaw, Z=roll).
+                Some(i) => {
+                    let a = (dx - dy) * ROTATE_SPEED;
+                    let o = &mut self.state.object;
+                    match i {
+                        0 => o.pitch += a,
+                        1 => o.yaw += a,
+                        _ => o.roll += a,
+                    }
+                }
+                // Free: yaw follows horizontal, pitch follows vertical drag.
+                None => self
+                    .state
+                    .object
+                    .rotate(dx * ROTATE_SPEED, -dy * ROTATE_SPEED),
+            },
+            TransformMode::Move => match self.axis.index() {
+                // Locked: translate along the single world axis only.
+                Some(i) => {
+                    let a = (dx - dy) * PAN_SPEED * self.state.camera.distance;
+                    let mut delta = [0.0, 0.0, 0.0];
+                    delta[i] = a;
+                    self.state.object.translate(delta);
+                }
+                // Free: translate in the screen (world XY) plane.
+                None => self.translate_object_screen(dx, dy),
+            },
+            TransformMode::Scale => {
+                // Drag up (dy < 0) grows, drag down shrinks; exponential so the
+                // gesture is symmetric and never crosses zero.
+                self.state
+                    .object
+                    .scale_uniform((-dy * SCALE_DRAG_SPEED).exp());
+            }
+        }
+    }
+
+    /// Translates the object in the world XY plane, scaled by camera distance so
+    /// it tracks the pointer regardless of zoom. Screen-up (`dy < 0`) maps to
+    /// world `+Y`. Shared by [`InteractionEvent::Pan`] and the Move drag mode.
+    fn translate_object_screen(&mut self, dx: f32, dy: f32) {
+        let scale = PAN_SPEED * self.state.camera.distance;
+        self.state.object.translate([dx * scale, -dy * scale, 0.0]);
     }
 }
 
@@ -153,6 +264,82 @@ mod tests {
     }
 
     #[test]
+    fn object_move_mode_drag_translates() {
+        let mut c = InteractionController::new(SceneState::default());
+        c.target = InteractionTarget::Object;
+        c.mode = TransformMode::Move;
+        let rot0 = (c.state.object.yaw, c.state.object.pitch);
+        assert!(c.apply(InteractionEvent::Primary { dx: 0.25, dy: -0.5 }));
+        let t = c.state.object.translation;
+        assert!(t[0] > 0.0 && t[1] > 0.0 && t[2] == 0.0);
+        // Rotation untouched in Move mode.
+        assert_eq!((c.state.object.yaw, c.state.object.pitch), rot0);
+    }
+
+    #[test]
+    fn object_scale_mode_drag_up_grows() {
+        let mut c = InteractionController::new(SceneState::default());
+        c.target = InteractionTarget::Object;
+        c.mode = TransformMode::Scale;
+        // Drag up (dy < 0) grows uniformly above unit scale.
+        assert!(c.apply(InteractionEvent::Primary { dx: 0.0, dy: -0.3 }));
+        for s in c.state.object.scale {
+            assert!(s > 1.0);
+        }
+    }
+
+    #[test]
+    fn scale_event_scales_object_not_camera() {
+        let mut c = InteractionController::new(SceneState::default());
+        let dist0 = c.state.camera.distance;
+        assert!(c.apply(InteractionEvent::Scale { delta: 1.0 }));
+        for s in c.state.object.scale {
+            assert!(s > 1.0);
+        }
+        // Scaling the object never dollies the camera.
+        assert_eq!(c.state.camera.distance, dist0);
+    }
+
+    #[test]
+    fn axis_locked_rotate_x_changes_only_pitch() {
+        let mut c = InteractionController::new(SceneState::default());
+        c.target = InteractionTarget::Object;
+        c.mode = TransformMode::Rotate;
+        c.axis = AxisConstraint::X;
+        assert!(c.apply(InteractionEvent::Primary { dx: 0.3, dy: 0.1 }));
+        assert_ne!(c.state.object.pitch, 0.0);
+        // Yaw and roll stay locked.
+        assert_eq!(c.state.object.yaw, 0.0);
+        assert_eq!(c.state.object.roll, 0.0);
+    }
+
+    #[test]
+    fn axis_locked_rotate_z_changes_only_roll() {
+        let mut c = InteractionController::new(SceneState::default());
+        c.target = InteractionTarget::Object;
+        c.mode = TransformMode::Rotate;
+        c.axis = AxisConstraint::Z;
+        assert!(c.apply(InteractionEvent::Primary { dx: 0.4, dy: 0.0 }));
+        assert_ne!(c.state.object.roll, 0.0);
+        assert_eq!(c.state.object.yaw, 0.0);
+        assert_eq!(c.state.object.pitch, 0.0);
+    }
+
+    #[test]
+    fn axis_locked_move_z_translates_only_z() {
+        let mut c = InteractionController::new(SceneState::default());
+        c.target = InteractionTarget::Object;
+        c.mode = TransformMode::Move;
+        c.axis = AxisConstraint::Z;
+        assert!(c.apply(InteractionEvent::Primary { dx: 0.2, dy: -0.4 }));
+        let t = c.state.object.translation;
+        // Only world Z moves; X and Y stay locked.
+        assert_eq!(t[0], 0.0);
+        assert_eq!(t[1], 0.0);
+        assert_ne!(t[2], 0.0);
+    }
+
+    #[test]
     fn pan_translates_object_scaled_by_distance() {
         let mut c = InteractionController::new(SceneState::default());
         let dist = c.state.camera.distance;
@@ -177,9 +364,12 @@ mod tests {
         let mut c = InteractionController::new(SceneState::default());
         c.apply(InteractionEvent::Primary { dx: 0.7, dy: 0.3 });
         c.apply(InteractionEvent::Zoom { delta: 2.0 });
+        c.apply(InteractionEvent::Scale { delta: 3.0 });
         assert_ne!(c.state, c.initial);
         assert!(c.apply(InteractionEvent::Reset));
         assert_eq!(c.state, c.initial);
+        // Reset also restored the object scale to unit.
+        assert_eq!(c.state.object.scale, [1.0, 1.0, 1.0]);
         // A second reset is a no-op (nothing changed).
         assert!(!c.apply(InteractionEvent::Reset));
     }
@@ -190,5 +380,6 @@ mod tests {
         assert!(!c.apply(InteractionEvent::Primary { dx: 0.0, dy: 0.0 }));
         assert!(!c.apply(InteractionEvent::Pan { dx: 0.0, dy: 0.0 }));
         assert!(!c.apply(InteractionEvent::Zoom { delta: 0.0 }));
+        assert!(!c.apply(InteractionEvent::Scale { delta: 0.0 }));
     }
 }

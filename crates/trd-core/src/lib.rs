@@ -25,10 +25,10 @@ pub use protocol::{
     ProtocolError, DEFAULT_FRAME_RATE, FRAME_RATE_KEY, PROTOCOL_VERSION, PROTOCOL_VERSION_KEY,
 };
 pub use render::{
-    build_scene, create_instance, create_mesh_pipeline, CameraFormError, Draw, DrawableObject,
-    EnvMapData, FrameFit, FrameParams, GpuContext, GpuInitError, GpuRequest, GridPlane,
-    LimitsPreset, Mesh, MeshRenderer, OffscreenError, OffscreenTarget, OnscreenTarget, PbrMaterial,
-    RenderMode, Scene, Tonemap, TriangleRenderer, Vertex, Viewport, OFFSCREEN_FORMAT,
+    build_scene, create_instance, create_mesh_pipeline, plane_grid_overlays, CameraFormError, Draw,
+    DrawableObject, EnvMapData, FrameFit, FrameParams, GpuContext, GpuInitError, GpuRequest,
+    GridPlane, LimitsPreset, Mesh, MeshRenderer, OffscreenError, OffscreenTarget, OnscreenTarget,
+    PbrMaterial, RenderMode, Scene, Tonemap, TriangleRenderer, Vertex, Viewport, OFFSCREEN_FORMAT,
 };
 // The native-only headless batch harness, relocated from `stream` into `render`
 // (#134); the crate-root re-export path (`trd_core::BatchRenderer`) is unchanged.

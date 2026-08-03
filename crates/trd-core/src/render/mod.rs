@@ -36,7 +36,9 @@ pub use offscreen::{OffscreenError, OffscreenTarget, OFFSCREEN_FORMAT};
 pub use onscreen::OnscreenTarget;
 pub use pbr::{EnvMapData, PbrMaterial, Tonemap};
 pub use pipeline::create_mesh_pipeline;
-pub use scene::{build_scene, Draw, DrawableObject, FrameFit, GridPlane, RenderMode, Scene};
+pub use scene::{
+    build_scene, plane_grid_overlays, Draw, DrawableObject, FrameFit, GridPlane, RenderMode, Scene,
+};
 pub use triangle_renderer::TriangleRenderer;
 
 // Crate-internal items shared across render submodules and sibling modules.
