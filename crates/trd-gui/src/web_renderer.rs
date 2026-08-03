@@ -174,7 +174,9 @@ impl WebRenderer {
     async fn render_direct(&mut self, state: &SceneState) -> Result<Vec<u8>, GuiError> {
         let aspect = self.width as f32 / self.height.max(1) as f32;
         let params = state.frame_params(aspect);
-        self.renderer.set_pbr_material(state.pbr);
+        for (i, m) in state.materials.iter().enumerate() {
+            self.renderer.set_mesh_pbr_material(i, *m);
+        }
         let mut scene = build_scene(
             &state.draws(),
             state.mode,
@@ -225,7 +227,9 @@ impl WebRenderer {
         );
         let mut scene = scene;
         scene.extend(scene_overlays(&draws, state));
-        self.renderer.set_pbr_material(state.pbr);
+        for (i, m) in state.materials.iter().enumerate() {
+            self.renderer.set_mesh_pbr_material(i, *m);
+        }
         let rgba = self.render_scene(frame.params, &scene).await?;
 
         // 3. Serialize the image to an Arrow stream and decode it back — the

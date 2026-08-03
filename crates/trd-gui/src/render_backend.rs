@@ -136,7 +136,9 @@ mod native {
         fn render(&mut self, state: &SceneState) -> Result<ImageRgba, GuiError> {
             let aspect = self.width as f32 / self.height.max(1) as f32;
             self.renderer.set_mode(state.mode);
-            self.renderer.set_pbr_material(state.pbr);
+            for (i, m) in state.materials.iter().enumerate() {
+                self.renderer.set_mesh_pbr_material(i, *m);
+            }
             self.renderer.set_show_aabb(state.show_aabb);
             self.renderer.set_selected_aabb(state.selected);
             self.renderer.set_show_axes(state.show_axes);
@@ -231,7 +233,9 @@ mod native {
             // 3. Render on the persistent device.
             let opts = render_options(state);
             self.renderer.set_mode(opts.mode);
-            self.renderer.set_pbr_material(state.pbr);
+            for (i, m) in state.materials.iter().enumerate() {
+                self.renderer.set_mesh_pbr_material(i, *m);
+            }
             self.renderer.set_show_aabb(opts.show_aabb);
             self.renderer.set_selected_aabb(state.selected);
             self.renderer.set_show_axes(opts.show_axes);

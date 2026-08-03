@@ -503,8 +503,12 @@ pub(crate) fn create_pbr_bind_group_layout(device: &wgpu::Device) -> wgpu::BindG
             visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: None,
+                // Per-object material (#141): one `PbrUniform` slot per draw,
+                // selected at draw time by a dynamic offset into the shared buffer.
+                has_dynamic_offset: true,
+                min_binding_size: wgpu::BufferSize::new(
+                    std::mem::size_of::<super::PbrUniform>() as u64
+                ),
             },
             count: None,
         }],

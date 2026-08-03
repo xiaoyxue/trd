@@ -244,10 +244,15 @@ struct MeshPass {
     /// The Disney PBR pipeline (`disney.wgsl`): group 0 = [`pbr_uniform`], group 1
     /// = the bound albedo texture, group 2 = the HDR environment map.
     pbr: wgpu::RenderPipeline,
-    /// The per-frame `PbrUniform` (camera `P·V` + world pos, material, lights),
-    /// rewritten each `encode`; bound as group 0 by the PBR pipeline.
+    /// The per-object `PbrUniform` buffer: `mesh_count` [`pbr_stride`]-spaced
+    /// slots (each carries the shared camera/lights + that mesh's material),
+    /// rewritten each `encode`; a draw binds its slot via a dynamic offset.
     pbr_uniform: wgpu::Buffer,
     pbr_bind_group: wgpu::BindGroup,
+    /// The 256-aligned byte stride between adjacent `PbrUniform` slots (the
+    /// `min_uniform_buffer_offset_alignment`-rounded `size_of::<PbrUniform>()`),
+    /// so `slot i` lives at `i * pbr_stride`.
+    pbr_stride: u64,
     camera_uniform: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
 }
@@ -265,6 +270,7 @@ impl MeshPass {
         texture_layout: &wgpu::BindGroupLayout,
         env_layout: &wgpu::BindGroupLayout,
         sample_count: u32,
+        mesh_count: usize,
     ) -> Self {
         // One explicit bind-group layout shared by both untextured pipelines, so
         // the single camera bind group is valid whichever RenderMode is active.
@@ -314,11 +320,14 @@ impl MeshPass {
             immediate_size: 0,
         });
         let pbr = create_pbr_pipeline(device, format, &pbr_pipeline_layout, sample_count);
-        // The PbrUniform buffer is (re)written every frame; seed it with a neutral
-        // material so an unconfigured PBR draw still renders something sane.
+        // The per-object PbrUniform buffer: one 256-aligned slot per mesh, each
+        // rewritten every frame with the shared camera/lights + that mesh's
+        // material; a PBR draw selects its slot via a dynamic offset.
+        let align = device.limits().min_uniform_buffer_offset_alignment as u64;
+        let pbr_stride = (std::mem::size_of::<PbrUniform>() as u64).next_multiple_of(align);
         let pbr_uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("trd pbr uniform"),
-            size: std::mem::size_of::<PbrUniform>() as u64,
+            size: pbr_stride * mesh_count.max(1) as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -327,7 +336,12 @@ impl MeshPass {
             layout: &pbr_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
-                resource: pbr_uniform.as_entire_binding(),
+                // A single-slot window; the dynamic offset picks which slot.
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &pbr_uniform,
+                    offset: 0,
+                    size: wgpu::BufferSize::new(std::mem::size_of::<PbrUniform>() as u64),
+                }),
             }],
         });
         // Identity params ignore the viewport (no intrinsics); each frame's
@@ -349,6 +363,7 @@ impl MeshPass {
             pbr,
             pbr_uniform,
             pbr_bind_group,
+            pbr_stride,
             camera_uniform,
             camera_bind_group,
         }
@@ -359,23 +374,29 @@ impl MeshPass {
         write_view_proj(queue, &self.camera_uniform, params, viewport);
     }
 
-    /// Rewrites the Disney PBR uniform (camera `P·V` + world position, material,
-    /// light rig, env gate) for this frame.
+    /// Rewrites the Disney PBR uniform **slots** for this frame: one slot per
+    /// mesh (`materials[i]` → slot `i` at `i * pbr_stride`), each carrying the
+    /// shared camera `P·V` + world position + light rig, this mesh's material, and
+    /// the env gate. A PBR draw then binds its object's material via a dynamic
+    /// offset. `materials` is indexed by mesh id.
     fn write_pbr(
         &self,
         queue: &wgpu::Queue,
         params: FrameParams,
         viewport: Viewport,
-        material: &PbrMaterial,
+        materials: &[PbrMaterial],
         use_env: bool,
     ) {
-        let uniform = PbrUniform::new(
-            params.view_proj_matrix(viewport).to_cols_array(),
-            params.camera_position(),
-            material,
-            use_env,
-        );
-        queue.write_buffer(&self.pbr_uniform, 0, bytemuck::bytes_of(&uniform));
+        let view_proj = params.view_proj_matrix(viewport).to_cols_array();
+        let camera_pos = params.camera_position();
+        for (i, material) in materials.iter().enumerate() {
+            let uniform = PbrUniform::new(view_proj, camera_pos, material, use_env);
+            queue.write_buffer(
+                &self.pbr_uniform,
+                i as u64 * self.pbr_stride,
+                bytemuck::bytes_of(&uniform),
+            );
+        }
     }
 }
 
@@ -617,8 +638,11 @@ pub struct MeshRenderer {
     pass: MeshPass,
     /// The bound HDR environment map reflected by [`RenderMode::Pbr`] draws.
     env: BoundEnv,
-    /// The Disney material applied globally to every [`RenderMode::Pbr`] draw.
-    pbr_material: PbrMaterial,
+    /// The Disney material of **each** mesh (indexed by mesh id) applied to its
+    /// [`RenderMode::Pbr`] draws (#141) — so a multi-object scene can give every
+    /// object its own metallic/roughness/base_color. [`set_pbr_material`] sets all
+    /// (the single-mesh / global default); [`set_mesh_pbr_material`] sets one.
+    pbr_materials: Vec<PbrMaterial>,
     store: MeshStore,
     frame_plane: FramePlane,
     /// The mesh pass's depth attachment, (re)created lazily in `encode` to match
@@ -719,7 +743,14 @@ impl MeshRenderer {
         // every per-mesh [`BoundTexture`] (each object skins with its own diffuse).
         let texture_layout = create_texture_bind_group_layout(device);
         let env = BoundEnv::new(device);
-        let pass = MeshPass::new(device, format, &texture_layout, env.layout(), sample_count);
+        let pass = MeshPass::new(
+            device,
+            format,
+            &texture_layout,
+            env.layout(),
+            sample_count,
+            meshes.len(),
+        );
         let store = MeshStore::new(device, meshes, base_models, &texture_layout);
         let frame_plane = FramePlane::new(device, format, sample_count);
 
@@ -743,7 +774,7 @@ impl MeshRenderer {
         Self {
             pass,
             env,
-            pbr_material: PbrMaterial::default(),
+            pbr_materials: vec![PbrMaterial::default(); meshes.len()],
             store,
             frame_plane,
             depth: None,
@@ -782,11 +813,24 @@ impl MeshRenderer {
         }
     }
 
-    /// Sets the Disney [`PbrMaterial`] applied to every [`RenderMode::Pbr`] draw
-    /// (the material is global — one per render invocation). Takes effect on the
+    /// Sets the Disney [`PbrMaterial`] of **every** mesh — the single-mesh / global
+    /// default. For a multi-object scene, give each object its own material with
+    /// [`set_mesh_pbr_material`](Self::set_mesh_pbr_material). Takes effect on the
     /// next [`encode`](Self::encode).
     pub fn set_pbr_material(&mut self, material: PbrMaterial) {
-        self.pbr_material = material;
+        for m in &mut self.pbr_materials {
+            *m = material;
+        }
+    }
+
+    /// Sets the Disney [`PbrMaterial`] of mesh `mesh_id` only (#141) — so each
+    /// object in a multi-object scene has its own metallic/roughness/base_color.
+    /// Out-of-range ids are ignored. Takes effect on the next
+    /// [`encode`](Self::encode).
+    pub fn set_mesh_pbr_material(&mut self, mesh_id: usize, material: PbrMaterial) {
+        if let Some(m) = self.pbr_materials.get_mut(mesh_id) {
+            *m = material;
+        }
     }
 
     /// Binds `env` as the equirectangular HDR environment map reflected by
@@ -841,14 +885,14 @@ impl MeshRenderer {
     ) {
         // 1. Camera P·V for this frame.
         self.pass.write_camera(queue, params, viewport);
-        // 1b. Disney PBR uniform for this frame (camera P·V + world pos, the
-        //     global material, and whether an HDR probe is bound). Cheap; written
-        //     unconditionally so a PBR draw always has a current uniform.
+        // 1b. Disney PBR uniform slots for this frame — one per mesh (each carries
+        //     the shared camera/lights + that mesh's material, #141). Written
+        //     unconditionally so a PBR draw always has a current material slot.
         self.pass.write_pbr(
             queue,
             params,
             viewport,
-            &self.pbr_material,
+            &self.pbr_materials,
             self.env.has_env(),
         );
 
@@ -951,9 +995,10 @@ impl MeshRenderer {
                 DrawKind::Pbr(id) => {
                     let mesh = &self.store.meshes[id];
                     pass.set_pipeline(&self.pass.pbr);
-                    // group 0 = PbrUniform (differs from the camera layout),
-                    // group 1 = this mesh's albedo, group 2 = HDR environment map.
-                    pass.set_bind_group(0, &self.pass.pbr_bind_group, &[]);
+                    // group 0 = this mesh's PbrUniform slot (selected by a dynamic
+                    // offset), group 1 = this mesh's albedo, group 2 = HDR env map.
+                    let offset = (id as u64 * self.pass.pbr_stride) as u32;
+                    pass.set_bind_group(0, &self.pass.pbr_bind_group, &[offset]);
                     pass.set_bind_group(1, mesh.texture.bind_group(), &[]);
                     pass.set_bind_group(2, env_bind_group, &[]);
                     draw_indexed(&mut pass, &mesh.pbr_vertex_buffer, &mesh.triangles, range);

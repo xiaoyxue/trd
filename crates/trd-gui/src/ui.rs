@@ -286,8 +286,12 @@ fn angle_row(ui: &mut egui::Ui, label: &str, radians: &mut f32) -> bool {
 /// is as interactive as the camera. Returns whether the material changed.
 fn pbr_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
     let mut changed = false;
-    let pbr = &mut view.controller.state.pbr;
-    ui.label("PBR material");
+    // The PBR material is per-object (#141): edit the *selected* object's
+    // material; with nothing selected there is no material to edit.
+    let Some(pbr) = view.controller.state.selected_material_mut() else {
+        ui.weak("Select an object to edit its material");
+        return false;
+    };
     // Label each slider on its own line so the text never clips in a narrow
     // panel; the slider then spans the full panel width beneath it.
     ui.label("Metallic");

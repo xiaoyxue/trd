@@ -187,7 +187,9 @@ impl Cli {
             } else {
                 RenderMode::Filled
             },
-            pbr: self.pbr_material(),
+            // The native CLI authors a single object; its material seeds the
+            // one-element per-object materials list.
+            materials: vec![self.pbr_material()],
             ..SceneState::default()
         }
     }
@@ -217,8 +219,8 @@ mod tests {
         let cli = Cli::parse_from(["trd-gui", "--pbr", "--metallic", "1", "--roughness", "0.3"]);
         let state = cli.scene_state();
         assert_eq!(state.mode, RenderMode::Pbr);
-        assert_eq!(state.pbr.metallic, 1.0);
-        assert_eq!(state.pbr.roughness, 0.3);
+        assert_eq!(state.materials[0].metallic, 1.0);
+        assert_eq!(state.materials[0].roughness, 0.3);
     }
 
     #[test]

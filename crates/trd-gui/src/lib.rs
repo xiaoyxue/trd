@@ -118,8 +118,10 @@ pub async fn start(
         } else {
             trd_core::RenderMode::Filled
         },
-        // One transform per loaded mesh, so `draws()` lays them out side-by-side.
+        // One transform + one material per loaded mesh, so `draws()` lays them out
+        // side-by-side and each object has its **own** editable PBR material (#141).
         objects: vec![ObjectTransform::default(); meshes.len()],
+        materials: vec![trd_core::PbrMaterial::default(); meshes.len()],
         ..SceneState::default()
     };
     // `?backend=arrow` selects the Arrow wire round-trip; anything else (or

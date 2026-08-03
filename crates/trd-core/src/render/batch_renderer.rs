@@ -177,6 +177,13 @@ impl BatchRenderer {
         self.renderer.set_pbr_material(material);
     }
 
+    /// Sets the Disney [`PbrMaterial`](crate::PbrMaterial) of mesh `mesh_id` only —
+    /// a **per-object** material for multi-object scenes (#141). Delegates to
+    /// [`MeshRenderer::set_mesh_pbr_material`]; out-of-range ids are ignored.
+    pub fn set_mesh_pbr_material(&mut self, mesh_id: usize, material: crate::PbrMaterial) {
+        self.renderer.set_mesh_pbr_material(mesh_id, material);
+    }
+
     /// Binds `env` as the equirectangular HDR environment map reflected by
     /// [`RenderMode::Pbr`] meshes. Delegates to [`MeshRenderer::set_env_map`]; the
     /// probe is (re)uploaded on the next `render`.

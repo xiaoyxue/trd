@@ -188,11 +188,11 @@ pub struct SceneState {
     pub objects: Vec<ObjectTransform>,
     /// How the mesh is drawn (filled / wireframe / textured / PBR).
     pub mode: RenderMode,
-    /// The Disney PBR material applied when [`mode`](Self::mode) is
-    /// [`RenderMode::Pbr`]. Interactive (the UI edits metallic/roughness/etc.);
-    /// the bound HDR env probe lives on the renderer (it is not `Copy`), set once
-    /// from the native `--env` flag / browser `?env=`.
-    pub pbr: PbrMaterial,
+    /// The Disney PBR material of **each** object (parallel to [`objects`](Self::objects)),
+    /// applied when [`mode`](Self::mode) is [`RenderMode::Pbr`]. Interactive: the UI
+    /// edits the **selected** object's material (metallic/roughness/etc.); the bound
+    /// HDR env probe lives on the renderer, set once from `--env` / `?env=`.
+    pub materials: Vec<PbrMaterial>,
     /// Overlay each drawn mesh instance's axis-aligned bounding box (#42).
     pub show_aabb: bool,
     /// Overlay a world-origin coordinate-axes gizmo (#42).
@@ -218,7 +218,7 @@ impl Default for SceneState {
             camera: OrbitCamera::default(),
             objects: vec![ObjectTransform::default()],
             mode: RenderMode::Filled,
-            pbr: PbrMaterial::default(),
+            materials: vec![PbrMaterial::default()],
             show_aabb: false,
             show_axes: false,
             show_local_axes: false,
@@ -275,6 +275,14 @@ impl SceneState {
     /// selection**: with no selection there is nothing to edit.
     pub fn selected_object_mut(&mut self) -> Option<&mut ObjectTransform> {
         self.selected.and_then(|i| self.objects.get_mut(i as usize))
+    }
+
+    /// A mutable reference to the selected object's PBR **material**, or `None`
+    /// when nothing is selected — so the PBR panel edits the selected object's
+    /// material and is disabled otherwise (#141).
+    pub fn selected_material_mut(&mut self) -> Option<&mut PbrMaterial> {
+        self.selected
+            .and_then(|i| self.materials.get_mut(i as usize))
     }
 
     /// Whether the scene carries a **placement quad** — a given rectangle in E³
