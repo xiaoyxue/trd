@@ -338,9 +338,86 @@ pub fn build_scene(
     scene
 }
 
+/// Builds **plane-grid overlay** drawables independent of [`build_scene`]'s
+/// wireframe-scoped `local_grid` (#114): a `world_grid` lays one
+/// [`DrawableObject::PlaneGrid`] at the **world origin** (identity model — the
+/// world floor, analogous to `show_axes`), and an `object_grid` lays a
+/// `PlaneGrid` at **each drawn object's own model** frame (analogous to
+/// `show_local_axes`), ungated by render mode. Shadow draws are skipped (a blob
+/// decal has no frame to grid). Appended to a scene by front-ends that want a
+/// grid under a *filled/textured/PBR* object (e.g. the interactive `trd-gui`
+/// overlays) without the #77 wireframe-quad gating; `None`/`None` yields an empty
+/// list, so callers that don't opt in are byte-identical.
+pub fn plane_grid_overlays(
+    draws: &[Draw],
+    world_grid: Option<GridPlane>,
+    object_grid: Option<GridPlane>,
+) -> Vec<DrawableObject> {
+    let mut grids = Vec::new();
+    if let Some(plane) = world_grid {
+        grids.push(DrawableObject::PlaneGrid {
+            plane,
+            model: Matrix4::IDENTITY.to_cols_array(),
+        });
+    }
+    if let Some(plane) = object_grid {
+        for draw in draws {
+            if draw.mode == Some(RenderMode::Shadow) {
+                continue;
+            }
+            grids.push(DrawableObject::PlaneGrid {
+                plane,
+                model: draw.model,
+            });
+        }
+    }
+    grids
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plane_grid_overlays_place_world_and_object_grids() {
+        let draws = [
+            Draw {
+                mesh_id: 0,
+                model: Matrix4::from_translation(crate::math::Vector3::new(1.0, 0.0, 0.0))
+                    .to_cols_array(),
+                mode: None,
+            },
+            Draw {
+                mesh_id: 1,
+                model: Matrix4::IDENTITY.to_cols_array(),
+                mode: Some(RenderMode::Shadow),
+            },
+        ];
+        // Neither grid ⇒ empty (opt-in only, byte-identical for non-users).
+        assert!(plane_grid_overlays(&draws, None, None).is_empty());
+
+        // World grid ⇒ exactly one identity-model grid on the requested plane.
+        let world = plane_grid_overlays(&draws, Some(GridPlane::Xz), None);
+        assert_eq!(world.len(), 1);
+        assert!(matches!(
+            world[0],
+            DrawableObject::PlaneGrid {
+                plane: GridPlane::Xz,
+                model,
+            } if model == Matrix4::IDENTITY.to_cols_array()
+        ));
+
+        // Object grid ⇒ one grid per *non-shadow* draw, at that draw's model.
+        let object = plane_grid_overlays(&draws, None, Some(GridPlane::Xz));
+        assert_eq!(object.len(), 1);
+        assert!(matches!(
+            object[0],
+            DrawableObject::PlaneGrid {
+                plane: GridPlane::Xz,
+                model,
+            } if model == draws[0].model
+        ));
+    }
 
     #[test]
     fn build_scene_prepends_frame_plane_first() {

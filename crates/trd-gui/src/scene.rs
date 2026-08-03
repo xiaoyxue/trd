@@ -185,6 +185,11 @@ pub struct SceneState {
     pub show_axes: bool,
     /// Overlay a coordinate-axes gizmo at the object's own (model) frame (#77).
     pub show_local_axes: bool,
+    /// Overlay a world-origin XZ **plane grid** (a floor at the world origin).
+    pub show_world_grid: bool,
+    /// Overlay an XZ **plane grid** at the object's own (model) frame — a grid
+    /// that follows the object as it is translated / rotated / scaled.
+    pub show_local_grid: bool,
 }
 
 impl Default for SceneState {
@@ -197,6 +202,8 @@ impl Default for SceneState {
             show_aabb: false,
             show_axes: false,
             show_local_axes: false,
+            show_world_grid: false,
+            show_local_grid: false,
         }
     }
 }

@@ -42,6 +42,13 @@ pub struct BatchRenderer {
     /// overlay to draws of that `mesh_id` only (the placement quad), so a
     /// wireframe *content* mesh doesn't also pick up a floor grid (#114).
     show_local_grid_mesh: Option<u32>,
+    /// If `Some(plane)`, add one world-origin [`DrawableObject::PlaneGrid`] on
+    /// that plane (identity model — a world floor), ungated by render mode.
+    show_world_grid: Option<GridPlane>,
+    /// If `Some(plane)`, add a [`DrawableObject::PlaneGrid`] on that plane at
+    /// *each* drawn instance's own `model`, ungated by render mode (unlike
+    /// [`show_local_grid`](Self::show_local_grid), which is wireframe-scoped).
+    show_object_grid: Option<GridPlane>,
 }
 
 impl BatchRenderer {
@@ -126,6 +133,8 @@ impl BatchRenderer {
             show_local_axes: false,
             show_local_grid: None,
             show_local_grid_mesh: None,
+            show_world_grid: None,
+            show_object_grid: None,
         })
     }
 
@@ -198,6 +207,22 @@ impl BatchRenderer {
         self.show_local_grid_mesh = mesh;
     }
 
+    /// Overlays a single **world-origin** [`DrawableObject::PlaneGrid`] on the
+    /// given plane (identity model — a world floor), ungated by render mode.
+    /// `None` disables it. Analogous to [`set_show_axes`](Self::set_show_axes).
+    pub fn set_show_world_grid(&mut self, plane: Option<GridPlane>) {
+        self.show_world_grid = plane;
+    }
+
+    /// Overlays a [`DrawableObject::PlaneGrid`] on the given plane at *each* drawn
+    /// object's own `model` frame, ungated by render mode (unlike
+    /// [`set_show_local_grid`](Self::set_show_local_grid), which is scoped to
+    /// wireframe placement quads). `None` disables it. Analogous to
+    /// [`set_show_local_axes`](Self::set_show_local_axes).
+    pub fn set_show_object_grid(&mut self, plane: Option<GridPlane>) {
+        self.show_object_grid = plane;
+    }
+
     /// Uploads `image` as the **background frame texture** (#63) sampled by a
     /// [`DrawableObject::FramePlane`]. The GPU texture is reused across frames
     /// (grown only on a resolution change). Call before a
@@ -216,7 +241,7 @@ impl BatchRenderer {
     /// this renderer's mode/overlay flags (delegates to [`build_scene`]). A
     /// `Some(fit)` prepends a background [`DrawableObject::FramePlane`] (#63).
     fn build_scene(&self, draws: &[Draw], frame: Option<FrameFit>) -> Vec<DrawableObject> {
-        crate::render::build_scene(
+        let mut scene = crate::render::build_scene(
             draws,
             self.mode,
             self.show_aabb,
@@ -225,7 +250,16 @@ impl BatchRenderer {
             self.show_local_grid,
             self.show_local_grid_mesh,
             frame,
-        )
+        );
+        // World / object plane-grid overlays (#140) — ungated by render mode, so a
+        // filled/PBR object still gets a floor grid. `encode` buckets by primitive
+        // type, so appending here draws them in the grid pass regardless of order.
+        scene.extend(crate::render::plane_grid_overlays(
+            draws,
+            self.show_world_grid,
+            self.show_object_grid,
+        ));
+        scene
     }
 
     /// Renders `params` with the given per-frame instance `draws`, compositing a
