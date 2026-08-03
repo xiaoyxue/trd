@@ -158,6 +158,8 @@ decoder divergence (e.g. the `center` non-nullable bug).
   naming the kind of work — it is the first token of the title, before the short
   description (`[Tag] <concise summary>`). Use the canonical set:
   - `[Epic]` — umbrella / tracking issue spanning multiple slices.
+  - `[Feature]` — a shippable user-facing capability grouping several slices
+    (narrower than an `[Epic]`, broader than one `[Slice]`); tracks its slices.
   - `[Design]` — a spec/design settled *before* implementation.
   - `[Plan]` — a roadmap / sequencing plan across issues.
   - `[Slice]` — one vertical slice increment (independently end-to-end verifiable).
