@@ -23,6 +23,11 @@ pub struct View<'a> {
     pub texture: Option<&'a TextureHandle>,
     pub render_size: (u32, u32),
     pub last_render_ms: Option<f32>,
+    /// Set by [`show`] to `Some((x, y))` (render-target pixel coords) when the
+    /// user **clicks** the image, requesting a pick (#141). The host app consumes
+    /// it after `show`: runs the id pass, sets `controller.state.selected`, and
+    /// re-renders. `None` when there was no click this frame.
+    pub pick_request: &'a mut Option<(u32, u32)>,
 }
 
 /// Lays out the side controls + central image and maps input to interaction
@@ -102,27 +107,40 @@ fn controls_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
         // ── Transform (numeric widgets, in sync with the mouse) ───────────
         needs_render |= section(ui, "Transform", |ui| transform_panel(ui, view));
 
-        // ── Render mode ──────────────────────────────────────────────────
+        // ── Render mode (per selected object) ────────────────────────────
         needs_render |= section(ui, "Render mode", |ui| {
             let mut c = false;
-            let mode = &mut view.controller.state.mode;
-            ui.horizontal_wrapped(|ui| {
-                c |= ui
-                    .selectable_value(mode, RenderMode::Filled, "Filled")
-                    .changed();
-                c |= ui
-                    .selectable_value(mode, RenderMode::Wireframe, "Wireframe")
-                    .changed();
-                c |= ui
-                    .selectable_value(mode, RenderMode::Textured, "Textured")
-                    .changed();
-                c |= ui.selectable_value(mode, RenderMode::Pbr, "PBR").changed();
-            });
+            match view.controller.state.selected_mode_mut() {
+                Some(mode) => {
+                    ui.horizontal_wrapped(|ui| {
+                        c |= ui
+                            .selectable_value(mode, RenderMode::Filled, "Filled")
+                            .changed();
+                        c |= ui
+                            .selectable_value(mode, RenderMode::Wireframe, "Wireframe")
+                            .changed();
+                        c |= ui
+                            .selectable_value(mode, RenderMode::Textured, "Textured")
+                            .changed();
+                        c |= ui.selectable_value(mode, RenderMode::Pbr, "PBR").changed();
+                    });
+                }
+                None => {
+                    ui.weak("Select an object to set its render mode");
+                }
+            }
             c
         });
 
-        // The Disney PBR material controls, only while PBR mode is selected.
-        if view.controller.state.mode == RenderMode::Pbr {
+        // The Disney PBR material controls, only while the *selected* object is in
+        // PBR mode.
+        let selected_is_pbr = view
+            .controller
+            .state
+            .selected
+            .map(|i| view.controller.state.mode_of(i as usize) == RenderMode::Pbr)
+            .unwrap_or(false);
+        if selected_is_pbr {
             needs_render |= section(ui, "PBR material", |ui| pbr_panel(ui, view));
         }
 
@@ -138,6 +156,24 @@ fn controls_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
             ui.label("Plane grid (XZ)");
             c |= ui.checkbox(&mut state.show_world_grid, "World grid").changed();
             c |= ui.checkbox(&mut state.show_local_grid, "Local grid").changed();
+            c
+        });
+
+        // ── Selection ────────────────────────────────────────────────────
+        needs_render |= section(ui, "Selection", |ui| {
+            let mut c = false;
+            match view.controller.state.selected {
+                Some(idx) => {
+                    ui.label(format!("Object #{idx} selected"));
+                    if ui.button("Deselect").clicked() {
+                        view.controller.state.selected = None;
+                        c = true;
+                    }
+                }
+                None => {
+                    ui.weak("Click an object to select it");
+                }
+            }
             c
         });
 
@@ -184,9 +220,12 @@ fn section(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui) -> b
 /// whether the transform changed.
 fn transform_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
     let mut changed = false;
-    let obj = &mut view.controller.state.object;
-    ui.label("Transform");
-
+    // Transforms edit the *selected* object; with nothing selected there is
+    // nothing to transform, so the widgets are hidden behind a hint (#141).
+    let Some(obj) = view.controller.state.selected_object_mut() else {
+        ui.weak("Select an object to transform it");
+        return false;
+    };
     ui.label("Translation");
     ui.horizontal(|ui| {
         for (i, axis) in ["X", "Y", "Z"].iter().enumerate() {
@@ -260,8 +299,12 @@ fn angle_row(ui: &mut egui::Ui, label: &str, radians: &mut f32) -> bool {
 /// is as interactive as the camera. Returns whether the material changed.
 fn pbr_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
     let mut changed = false;
-    let pbr = &mut view.controller.state.pbr;
-    ui.label("PBR material");
+    // The PBR material is per-object (#141): edit the *selected* object's
+    // material; with nothing selected there is no material to edit.
+    let Some(pbr) = view.controller.state.selected_material_mut() else {
+        ui.weak("Select an object to edit its material");
+        return false;
+    };
     // Label each slider on its own line so the text never clips in a narrow
     // panel; the slider then spans the full panel width beneath it.
     ui.label("Metallic");
@@ -320,7 +363,7 @@ fn image_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
             ui.add(
                 egui::Image::new(egui::load::SizedTexture::from_handle(texture))
                     .fit_to_exact_size(disp)
-                    .sense(Sense::drag()),
+                    .sense(Sense::click_and_drag()),
             )
         })
         .inner;
@@ -339,6 +382,21 @@ fn image_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
         || response.dragged_by(PointerButton::Middle)
     {
         changed |= view.controller.apply(InteractionEvent::Pan { dx, dy });
+    }
+
+    // A primary click (press + release without dragging) requests a pick: map the
+    // pointer position within the letterboxed image to render-target pixel coords
+    // for the host app to resolve into a selection (#141).
+    if response.clicked() {
+        if let Some(pos) = response.interact_pointer_pos() {
+            let (rw, rh) = view.render_size;
+            let u = ((pos.x - response.rect.min.x) / size.x).clamp(0.0, 1.0);
+            let v = ((pos.y - response.rect.min.y) / size.y).clamp(0.0, 1.0);
+            let px = ((u * rw as f32) as u32).min(rw.saturating_sub(1));
+            let py = ((v * rh as f32) as u32).min(rh.saturating_sub(1));
+            *view.pick_request = Some((px, py));
+            changed = true;
+        }
     }
 
     if response.hovered() {

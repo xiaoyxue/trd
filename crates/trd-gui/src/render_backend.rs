@@ -48,6 +48,12 @@ mod native {
         /// The fixed pixel dimensions this backend renders at (`width`, `height`).
         fn size(&self) -> (u32, u32);
 
+        /// Resolves the object under render-target pixel `(x, y)` via the id-color
+        /// picking pass (#141), returning its 0-based index into
+        /// [`SceneState::draws`](crate::scene::SceneState::draws), or `None` for
+        /// the background. Used by click-to-select.
+        fn pick(&mut self, state: &SceneState, x: u32, y: u32) -> Option<u32>;
+
         /// Whether a render is costly enough that the UI should re-render only when
         /// an interaction *ends* (on pointer release) rather than every drag frame.
         /// The [`ArrowRoundTripRenderer`] serializes + re-runs the whole pipeline per
@@ -62,7 +68,7 @@ mod native {
     /// so they stay in agreement.
     fn render_options(state: &SceneState) -> RenderOptions {
         RenderOptions {
-            mode: state.mode,
+            mode: trd_core::RenderMode::Filled, // per-draw Some(mode) overrides; this is only a fallback
             show_aabb: state.show_aabb,
             show_axes: state.show_axes,
             show_local_axes: state.show_local_axes,
@@ -129,9 +135,12 @@ mod native {
     impl SceneRenderer for InProcRenderer {
         fn render(&mut self, state: &SceneState) -> Result<ImageRgba, GuiError> {
             let aspect = self.width as f32 / self.height.max(1) as f32;
-            self.renderer.set_mode(state.mode);
-            self.renderer.set_pbr_material(state.pbr);
+            self.renderer.set_mode(trd_core::RenderMode::Filled); // per-draw modes override
+            for (i, m) in state.materials.iter().enumerate() {
+                self.renderer.set_mesh_pbr_material(i, *m);
+            }
             self.renderer.set_show_aabb(state.show_aabb);
+            self.renderer.set_selected_aabb(state.selected);
             self.renderer.set_show_axes(state.show_axes);
             self.renderer.set_show_local_axes(state.show_local_axes);
             apply_grid_overlays(&mut self.renderer, state);
@@ -147,6 +156,12 @@ mod native {
 
         fn size(&self) -> (u32, u32) {
             (self.width, self.height)
+        }
+
+        fn pick(&mut self, state: &SceneState, x: u32, y: u32) -> Option<u32> {
+            let aspect = self.width as f32 / self.height.max(1) as f32;
+            self.renderer
+                .pick(state.frame_params(aspect), &state.draws(), x, y)
         }
     }
 
@@ -218,8 +233,11 @@ mod native {
             // 3. Render on the persistent device.
             let opts = render_options(state);
             self.renderer.set_mode(opts.mode);
-            self.renderer.set_pbr_material(state.pbr);
+            for (i, m) in state.materials.iter().enumerate() {
+                self.renderer.set_mesh_pbr_material(i, *m);
+            }
             self.renderer.set_show_aabb(opts.show_aabb);
+            self.renderer.set_selected_aabb(state.selected);
             self.renderer.set_show_axes(opts.show_axes);
             self.renderer.set_show_local_axes(opts.show_local_axes);
             apply_grid_overlays(&mut self.renderer, state);
@@ -248,6 +266,12 @@ mod native {
 
         fn size(&self) -> (u32, u32) {
             (self.width, self.height)
+        }
+
+        fn pick(&mut self, state: &SceneState, x: u32, y: u32) -> Option<u32> {
+            let aspect = self.width as f32 / self.height.max(1) as f32;
+            self.renderer
+                .pick(state.frame_params(aspect), &state.draws(), x, y)
         }
     }
 

@@ -1193,3 +1193,60 @@ fn triangle_renderer_draws_gradient_triangle() {
         "gradient expected: near-apex {near_apex:?} redder, near-blue {near_blue:?} bluer",
     );
 }
+
+/// #141: the object-id ("color index") picking pass resolves *which* object a
+/// pixel hit. Two quads are placed side by side (a gap between them) under the
+/// identity camera; clicking the left one returns object index 0, the right one
+/// index 1, and the gap / a corner returns `None` (background). Exercises
+/// `MeshRenderer::encode_picking` + `PickTarget` end-to-end on a real GPU.
+#[test]
+#[ignore = "requires a GPU adapter"]
+#[cfg(not(target_arch = "wasm32"))]
+fn picking_resolves_object_ids_and_background() {
+    let (device, queue) = test_device();
+    let quad = Mesh::from_obj(QUAD_OBJ).expect("quad OBJ parses");
+    // The main-pass format is irrelevant to picking (its pipeline is PICK_FORMAT).
+    let mut renderer = single(&device, wgpu::TextureFormat::Rgba8UnormSrgb, &quad);
+
+    let (width, height) = (64u32, 64u32);
+    let target = PickTarget::new(&device, width, height);
+
+    // Two objects: a 0.35-scaled quad at NDC x = -0.5 (object 0) and +0.5
+    // (object 1), leaving the center a background gap.
+    let model = |x: f32| {
+        (Mat4::from_translation(Vec3::new(x, 0.0, 0.0)) * Mat4::from_scale(Vec3::splat(0.35)))
+            .to_cols_array()
+    };
+    let draws = [
+        Draw {
+            mesh_id: 0,
+            model: model(-0.5),
+            mode: None,
+        },
+        Draw {
+            mesh_id: 0,
+            model: model(0.5),
+            mode: None,
+        },
+    ];
+
+    let mut pick = |x: u32, y: u32| {
+        pollster::block_on(target.pick(
+            &device,
+            &queue,
+            &mut renderer,
+            FrameParams::IDENTITY,
+            &draws,
+            x,
+            y,
+        ))
+    };
+
+    // NDC x=-0.5 → pixel ≈ 16; x=+0.5 → ≈ 48; center gap at 32; corner at (2,2).
+    assert_eq!(pick(16, 32), Some(0), "left object → index 0");
+    assert_eq!(pick(48, 32), Some(1), "right object → index 1");
+    assert_eq!(pick(32, 32), None, "center gap → background");
+    assert_eq!(pick(2, 2), None, "corner → background");
+    // Out-of-bounds coordinates are safely rejected.
+    assert_eq!(pick(width, 0), None, "x == width is out of bounds");
+}

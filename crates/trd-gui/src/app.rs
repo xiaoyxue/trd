@@ -91,13 +91,25 @@ impl eframe::App for TrdGuiApp {
             self.render_scene(&ctx);
         }
 
+        let mut pick_request = None;
         let mut view = ui::View {
             controller: &mut self.controller,
             texture: self.texture.as_ref(),
             render_size: self.renderer.size(),
             last_render_ms: self.last_render,
+            pick_request: &mut pick_request,
         };
         self.needs_render |= ui::show(ui, &mut view);
+
+        // A click requested a pick: resolve the object under the cursor via the
+        // id pass, update the selection, and re-render so its AABB shows (#141).
+        if let Some((x, y)) = pick_request {
+            let hit = self.renderer.pick(&self.controller.state, x, y);
+            if hit != self.controller.state.selected {
+                self.controller.state.selected = hit;
+                self.needs_render = true;
+            }
+        }
 
         // While deferring, keep requesting repaints so the pending render fires as
         // soon as the interaction ends.

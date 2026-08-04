@@ -14,20 +14,24 @@
 
 use trd_core::{
     build_scene, decode_params_stream, encode_params_stream, plane_grid_overlays,
-    read_image_stream, DrawableObject, EnvMapData, FrameParams, GridPlane, Mesh, MeshRenderer,
-    OffscreenTarget, OutputSession, Texture, OFFSCREEN_FORMAT,
+    read_image_stream, DrawableObject, EnvMapData, FrameParams, GridPlane, ImageTexture, Mesh,
+    MeshRenderer, OffscreenTarget, OutputSession, PickTarget, OFFSCREEN_FORMAT,
 };
 
 use crate::error::GuiError;
 use crate::render_backend::ImageRgba;
 use crate::scene::SceneState;
 
-/// The world / local XZ plane-grid overlay drawables for `state` (browser twin of
-/// the native `apply_grid_overlays`): `Some(Xz)` per enabled toggle, appended to
-/// the scene so a filled/PBR object still gets a floor / local grid.
-fn grid_overlays(draws: &[trd_core::Draw], state: &SceneState) -> Vec<DrawableObject> {
+/// The world / local XZ plane-grid overlay drawables **plus** the selection AABB
+/// for `state` (browser twin of the native `apply_grid_overlays` +
+/// `set_selected_aabb`): appended to the scene so a filled/PBR object still gets
+/// its floor / local grid and the selected object's bounding box (#140/#141).
+fn scene_overlays(draws: &[trd_core::Draw], state: &SceneState) -> Vec<DrawableObject> {
     let xz = |on: bool| on.then_some(GridPlane::Xz);
-    plane_grid_overlays(draws, xz(state.show_world_grid), xz(state.show_local_grid))
+    let mut overlays =
+        plane_grid_overlays(draws, xz(state.show_world_grid), xz(state.show_local_grid));
+    overlays.extend(trd_core::selection_aabb_overlay(draws, state.selected));
+    overlays
 }
 
 /// How the browser renderer produces each frame.
@@ -54,6 +58,8 @@ pub struct WebRenderer {
     renderer: MeshRenderer,
     /// The shared offscreen render target + readback buffer (#103, Part B).
     target: OffscreenTarget,
+    /// The object-id picking target (#141), created lazily on first pick.
+    pick_target: Option<PickTarget>,
     width: u32,
     height: u32,
     backend: WebBackend,
@@ -67,7 +73,7 @@ impl WebRenderer {
     /// metallic surfaces; the interactive material rides on the scene state).
     pub async fn new(
         meshes: &[Mesh],
-        texture: Option<&dyn Texture>,
+        textures: &[Option<ImageTexture>],
         env: Option<EnvMapData>,
         width: u32,
         height: u32,
@@ -92,8 +98,11 @@ impl WebRenderer {
         }
 
         let mut renderer = MeshRenderer::auto_fit(&device, OFFSCREEN_FORMAT, meshes);
-        if let Some(texture) = texture {
-            renderer.set_texture(texture);
+        // Skin each object with its **own** albedo (#141): texture `i` → mesh `i`.
+        for (i, texture) in textures.iter().enumerate() {
+            if let Some(texture) = texture {
+                renderer.set_mesh_texture(i, texture);
+            }
         }
         if let Some(env) = env {
             renderer.set_env_map(env);
@@ -111,6 +120,7 @@ impl WebRenderer {
             queue,
             renderer,
             target,
+            pick_target: None,
             width,
             height,
             backend,
@@ -120,6 +130,29 @@ impl WebRenderer {
     /// The fixed render dimensions.
     pub fn size(&self) -> (u32, u32) {
         (self.width, self.height)
+    }
+
+    /// Resolves the object under render-target pixel `(x, y)` via the id-color
+    /// picking pass (#141), returning its 0-based index into `state.draws()`, or
+    /// `None` for the background. `async` (the read-back can't block the browser
+    /// event loop). Lazily creates the pick target sized to the render surface.
+    pub async fn pick(&mut self, state: &SceneState, x: u32, y: u32) -> Option<u32> {
+        let aspect = self.width as f32 / self.height.max(1) as f32;
+        if self.pick_target.is_none() {
+            self.pick_target = Some(PickTarget::new(&self.device, self.width, self.height));
+        }
+        let target = self.pick_target.as_ref()?;
+        target
+            .pick(
+                &self.device,
+                &self.queue,
+                &mut self.renderer,
+                state.frame_params(aspect),
+                &state.draws(),
+                x,
+                y,
+            )
+            .await
     }
 
     /// Renders the current scene state to an RGBA image (async GPU readback),
@@ -141,10 +174,12 @@ impl WebRenderer {
     async fn render_direct(&mut self, state: &SceneState) -> Result<Vec<u8>, GuiError> {
         let aspect = self.width as f32 / self.height.max(1) as f32;
         let params = state.frame_params(aspect);
-        self.renderer.set_pbr_material(state.pbr);
+        for (i, m) in state.materials.iter().enumerate() {
+            self.renderer.set_mesh_pbr_material(i, *m);
+        }
         let mut scene = build_scene(
             &state.draws(),
-            state.mode,
+            trd_core::RenderMode::Filled, // per-draw Some(mode) overrides; fallback only
             state.show_aabb,
             state.show_axes,
             state.show_local_axes,
@@ -152,7 +187,7 @@ impl WebRenderer {
             None,
             None,
         );
-        scene.extend(grid_overlays(&state.draws(), state));
+        scene.extend(scene_overlays(&state.draws(), state));
         self.render_scene(params, &scene).await
     }
 
@@ -182,7 +217,7 @@ impl WebRenderer {
         };
         let scene = build_scene(
             &draws,
-            state.mode,
+            trd_core::RenderMode::Filled, // per-draw Some(mode) overrides; fallback only
             state.show_aabb,
             state.show_axes,
             state.show_local_axes,
@@ -191,8 +226,10 @@ impl WebRenderer {
             None,
         );
         let mut scene = scene;
-        scene.extend(grid_overlays(&draws, state));
-        self.renderer.set_pbr_material(state.pbr);
+        scene.extend(scene_overlays(&draws, state));
+        for (i, m) in state.materials.iter().enumerate() {
+            self.renderer.set_mesh_pbr_material(i, *m);
+        }
         let rgba = self.render_scene(frame.params, &scene).await?;
 
         // 3. Serialize the image to an Arrow stream and decode it back — the

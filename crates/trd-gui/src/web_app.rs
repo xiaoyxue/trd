@@ -36,6 +36,15 @@ pub struct WebApp {
     render_in_flight: Rc<Cell<bool>>,
     /// The most recent completed frame, handed back from the async task.
     latest: Rc<RefCell<Option<ImageRgba>>>,
+    /// A pending click-to-pick at render-target pixel coords (#141), set on click
+    /// and retried each frame until the renderer is free to run the id pass.
+    pending_pick: Rc<Cell<Option<(u32, u32)>>>,
+    /// `true` while an async pick is running (shares the renderer, so it is
+    /// mutually exclusive with a render via the two guards).
+    pick_in_flight: Rc<Cell<bool>>,
+    /// The most recent completed pick result (`Some(hit)` where `hit` is the
+    /// selected object index or `None` for background), applied on the next pass.
+    pick_result: Rc<RefCell<Option<Option<u32>>>>,
 }
 
 impl WebApp {
@@ -51,6 +60,9 @@ impl WebApp {
             needs_render: true,
             render_in_flight: Rc::new(Cell::new(false)),
             latest: Rc::new(RefCell::new(None)),
+            pending_pick: Rc::new(Cell::new(None)),
+            pick_in_flight: Rc::new(Cell::new(false)),
+            pick_result: Rc::new(RefCell::new(None)),
         }
     }
 
@@ -80,7 +92,7 @@ impl WebApp {
         let renderer = self.renderer.clone();
         let latest = self.latest.clone();
         let in_flight = self.render_in_flight.clone();
-        let state = self.controller.state;
+        let state = self.controller.state.clone();
         let ctx = ctx.clone();
         wasm_bindgen_futures::spawn_local(async move {
             // Take the renderer out of the cell so no borrow is held across the
@@ -99,6 +111,41 @@ impl WebApp {
             ctx.request_repaint();
         });
     }
+
+    /// Spawns an async **pick** for the pending click, if any, when the renderer
+    /// is free (no render or pick in flight — both take the shared renderer). The
+    /// result is stashed for the next `ui` pass to apply as the selection (#141).
+    /// A click made while busy stays pending and is retried next frame.
+    fn schedule_pick(&mut self, ctx: &egui::Context) {
+        if self.render_in_flight.get() || self.pick_in_flight.get() {
+            return;
+        }
+        let Some((x, y)) = self.pending_pick.get() else {
+            return;
+        };
+        self.pending_pick.set(None);
+        self.pick_in_flight.set(true);
+
+        let renderer = self.renderer.clone();
+        let result_cell = self.pick_result.clone();
+        let in_flight = self.pick_in_flight.clone();
+        let pending = self.pending_pick.clone();
+        let state = self.controller.state.clone();
+        let ctx = ctx.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            // If the renderer is momentarily unavailable, requeue the click.
+            let Some(mut owned) = renderer.borrow_mut().take() else {
+                pending.set(Some((x, y)));
+                in_flight.set(false);
+                return;
+            };
+            let hit = owned.pick(&state, x, y).await;
+            renderer.borrow_mut().replace(owned);
+            *result_cell.borrow_mut() = Some(hit);
+            in_flight.set(false);
+            ctx.request_repaint();
+        });
+    }
 }
 
 impl eframe::App for WebApp {
@@ -112,17 +159,37 @@ impl eframe::App for WebApp {
             self.upload(&ctx, &image);
         }
 
+        // Apply a completed pick as the new selection, re-rendering if it changed
+        // (so the selected object's AABB appears / clears).
+        let picked = self.pick_result.borrow_mut().take();
+        if let Some(hit) = picked {
+            if hit != self.controller.state.selected {
+                self.controller.state.selected = hit;
+                self.needs_render = true;
+            }
+        }
+
         // Schedule a render when the scene changed (or on the first pass).
         if self.needs_render || self.texture.is_none() {
             self.schedule_render(&ctx);
         }
 
+        let mut pick_request = None;
         let mut view = ui::View {
             controller: &mut self.controller,
             texture: self.texture.as_ref(),
             render_size: self.render_size,
             last_render_ms: None,
+            pick_request: &mut pick_request,
         };
         self.needs_render |= ui::show(ui, &mut view);
+
+        // A click queued a pick; run it when the renderer is free (retried while busy).
+        if let Some(xy) = pick_request {
+            self.pending_pick.set(Some(xy));
+        }
+        if self.pending_pick.get().is_some() {
+            self.schedule_pick(&ctx);
+        }
     }
 }

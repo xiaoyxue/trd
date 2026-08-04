@@ -15,32 +15,42 @@ async function main(): Promise<void> {
     throw new Error("missing #trd-gui-canvas");
   }
 
-  // `?mesh=<url>` / `?texture=<url>` / `?env=<url>` are the browser equivalents
-  // of the native `--mesh` / `--texture` / `--env` flags: fetch the OBJ text /
-  // image bytes / HDR probe bytes and hand them to Rust (`Mesh::from_obj` /
-  // `decode_texture` / `decode_env_hdr`). Absent → built-in cube / no texture /
-  // no env probe. Supplying `?env=` starts the viewer in PBR mode.
+  // `?mesh=<url>` (repeatable) / `?texture=<url>` / `?env=<url>` are the browser
+  // equivalents of the native `--mesh` / `--texture` / `--env` flags: fetch the
+  // OBJ text(s) / image bytes / HDR probe bytes and hand them to Rust
+  // (`Mesh::from_obj` / `decode_texture` / `decode_env_hdr`). Multiple `?mesh=`
+  // params load multiple objects (laid out side-by-side; click to select one).
+  // Absent → built-in cube / no texture / no env probe. `?env=` starts PBR mode.
   const params = new URLSearchParams(location.search);
 
-  const meshUrl = params.get("mesh");
-  let meshObj: string | undefined;
-  if (meshUrl) {
-    const res = await fetch(meshUrl);
-    if (!res.ok) {
-      throw new Error(`failed to fetch mesh "${meshUrl}": ${res.status} ${res.statusText}`);
-    }
-    meshObj = await res.text();
-  }
+  const meshUrls = params.getAll("mesh");
+  const meshObjs: string[] = await Promise.all(
+    meshUrls.map(async (url) => {
+      const res = await fetch(url);
+      if (!res.ok) {
+        throw new Error(`failed to fetch mesh "${url}": ${res.status} ${res.statusText}`);
+      }
+      return res.text();
+    }),
+  );
 
-  const textureUrl = params.get("texture");
-  let textureBytes: Uint8Array | undefined;
-  if (textureUrl) {
-    const res = await fetch(textureUrl);
-    if (!res.ok) {
-      throw new Error(`failed to fetch texture "${textureUrl}": ${res.status} ${res.statusText}`);
-    }
-    textureBytes = new Uint8Array(await res.arrayBuffer());
-  }
+  // `?texture=<url>` is **positional**: the i-th `?texture=` skins the i-th
+  // `?mesh=` (each object its own diffuse). A missing slot → an empty array →
+  // untextured (1×1 white). An empty string entry also means "no texture".
+  const textureUrls = params.getAll("texture");
+  const textureBytes: Uint8Array[] = await Promise.all(
+    meshUrls.map(async (_mesh, i) => {
+      const url = textureUrls[i];
+      if (!url) {
+        return new Uint8Array();
+      }
+      const res = await fetch(url);
+      if (!res.ok) {
+        throw new Error(`failed to fetch texture "${url}": ${res.status} ${res.statusText}`);
+      }
+      return new Uint8Array(await res.arrayBuffer());
+    }),
+  );
 
   const envUrl = params.get("env");
   let envBytes: Uint8Array | undefined;
@@ -56,7 +66,7 @@ async function main(): Promise<void> {
   // (Arrow wire round-trip); absent → the direct in-process render.
   const backend = params.get("backend") ?? undefined;
 
-  await start(canvas, meshObj, textureBytes, envBytes, backend);
+  await start(canvas, meshObjs, textureBytes, envBytes, backend);
 }
 
 main().catch((err) => {

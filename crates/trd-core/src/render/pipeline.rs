@@ -1,7 +1,7 @@
 //! wgpu render-pipeline, bind-group-layout, depth-target, and camera
 //! uniform construction helpers.
 
-use super::{FrameParams, InstanceRaw, PbrVertex, Uniform, Vertex, Viewport};
+use super::{FrameParams, InstanceRaw, PbrVertex, PickInstanceRaw, Uniform, Vertex, Viewport};
 
 /// The mesh pass's MSAA sample count. 4× multisampling is the WebGPU-guaranteed
 /// level for renderable formats (native Vulkan/Metal/DX + the WebGL2 downlevel
@@ -97,6 +97,47 @@ pub(crate) fn overlay_depth_stencil() -> wgpu::DepthStencilState {
         stencil: wgpu::StencilState::default(),
         bias: wgpu::DepthBiasState::default(),
     }
+}
+
+/// The color format of the object-id **picking** target: a **linear** (non-sRGB)
+/// `Rgba8Unorm` so each fragment's flat id color is stored byte-exact and reads
+/// back without an sRGB transfer (unlike the sRGB display [`OFFSCREEN_FORMAT`]).
+pub(crate) const PICK_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+
+/// Builds the object-id picking pipeline: the mesh vertex transform (`clip =
+/// P·V·M·p`) over the camera bind-group layout (group 0), a per-instance
+/// [`PickInstanceRaw`] carrying the flat id color, single-sampled into
+/// [`PICK_FORMAT`] with solid depth testing (so the nearest object wins the
+/// pixel). No MSAA — ids must not be averaged at edges.
+pub(crate) fn create_picking_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::include_wgsl!("../picking.wgsl"));
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("trd picking pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            compilation_options: Default::default(),
+            buffers: &[Some(Vertex::layout()), Some(PickInstanceRaw::layout())],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            compilation_options: Default::default(),
+            targets: &[Some(PICK_FORMAT.into())],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            ..Default::default()
+        },
+        depth_stencil: Some(solid_depth_stencil()),
+        multisample: multisample_state(1),
+        multiview_mask: None,
+        cache: None,
+    })
 }
 
 /// A depth attachment sized to a render target. The [`MeshRenderer`] owns one
@@ -462,8 +503,12 @@ pub(crate) fn create_pbr_bind_group_layout(device: &wgpu::Device) -> wgpu::BindG
             visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: None,
+                // Per-object material (#141): one `PbrUniform` slot per draw,
+                // selected at draw time by a dynamic offset into the shared buffer.
+                has_dynamic_offset: true,
+                min_binding_size: wgpu::BufferSize::new(
+                    std::mem::size_of::<super::PbrUniform>() as u64
+                ),
             },
             count: None,
         }],

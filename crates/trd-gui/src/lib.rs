@@ -57,13 +57,13 @@ pub mod web_renderer;
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub async fn start(
     canvas: web_sys::HtmlCanvasElement,
-    mesh_obj: Option<String>,
-    texture_bytes: Option<Vec<u8>>,
+    mesh_objs: Vec<String>,
+    texture_bytes: js_sys::Array,
     env_bytes: Option<Vec<u8>>,
     backend: Option<String>,
 ) -> Result<(), wasm_bindgen::JsValue> {
     use crate::interaction::InteractionController;
-    use crate::scene::SceneState;
+    use crate::scene::{ObjectTransform, SceneState};
     use crate::web_app::WebApp;
     use crate::web_renderer::{WebBackend, WebRenderer};
 
@@ -71,30 +71,61 @@ pub async fn start(
     let _ = eframe::WebLogger::init(log::LevelFilter::Warn);
 
     let to_js = |e: crate::error::GuiError| wasm_bindgen::JsValue::from_str(&e.to_string());
-    let mesh = match mesh_obj {
-        Some(text) => trd_core::Mesh::from_obj(&text)
+    // One or more meshes (repeated `?mesh=`), each an object in the scene; an
+    // empty list falls back to the built-in cube.
+    let meshes: Vec<trd_core::Mesh> = if mesh_objs.is_empty() {
+        vec![assets::default_mesh()
             .map_err(crate::error::GuiError::from)
-            .map_err(to_js)?,
-        None => assets::default_mesh()
-            .map_err(crate::error::GuiError::from)
-            .map_err(to_js)?,
+            .map_err(to_js)?]
+    } else {
+        mesh_objs
+            .iter()
+            .map(|text| {
+                trd_core::Mesh::from_obj(text)
+                    .map_err(crate::error::GuiError::from)
+                    .map_err(to_js)
+            })
+            .collect::<Result<_, _>>()?
     };
-    let texture = match texture_bytes {
-        Some(bytes) => Some(assets::decode_texture(&bytes).map_err(to_js)?),
-        None => None,
-    };
+    // One optional albedo texture per mesh (positional: entry `i` skins mesh `i`);
+    // an empty/absent entry leaves that object untextured (1×1 white). The JS
+    // bootstrap passes an array of `Uint8Array` (one per mesh). Decoded in Rust so
+    // trd-core stays I/O-free.
+    let mut textures: Vec<Option<trd_core::ImageTexture>> = Vec::with_capacity(meshes.len());
+    for i in 0..meshes.len() {
+        let entry = texture_bytes.get(i as u32);
+        let bytes: Vec<u8> = if entry.is_undefined() || entry.is_null() {
+            Vec::new()
+        } else {
+            js_sys::Uint8Array::new(&entry).to_vec()
+        };
+        let decoded = if bytes.is_empty() {
+            None
+        } else {
+            Some(assets::decode_texture(&bytes).map_err(to_js)?)
+        };
+        textures.push(decoded);
+    }
     // The optional HDR env probe (browser `?env=`). Decoded in Rust so trd-core
     // stays I/O-free; when present, the viewer starts in PBR mode.
     let env = match env_bytes {
         Some(bytes) => Some(assets::decode_env_hdr(&bytes).map_err(to_js)?),
         None => None,
     };
+    // Per-object mode: start every object in PBR when an env probe is supplied
+    // (`?env=`), else Filled — each object's mode is then editable when selected.
+    let initial_mode = if env.is_some() {
+        trd_core::RenderMode::Pbr
+    } else {
+        trd_core::RenderMode::Filled
+    };
     let scene = SceneState {
-        mode: if env.is_some() {
-            trd_core::RenderMode::Pbr
-        } else {
-            trd_core::RenderMode::Filled
-        },
+        // One transform + mode + material per loaded mesh, so `draws()` lays them
+        // out side-by-side and each object has its **own** editable render mode +
+        // PBR material (#141).
+        objects: vec![ObjectTransform::default(); meshes.len()],
+        modes: vec![initial_mode; meshes.len()],
+        materials: vec![trd_core::PbrMaterial::default(); meshes.len()],
         ..SceneState::default()
     };
     // `?backend=arrow` selects the Arrow wire round-trip; anything else (or
@@ -108,16 +139,9 @@ pub async fn start(
     // instead of upscaling a small fixed buffer. Bounded (aspect-preserving) to
     // keep GPU + readback cost in check.
     let (render_w, render_h) = browser_render_size(&canvas);
-    let renderer = WebRenderer::new(
-        &[mesh],
-        texture.as_ref().map(|t| t as &dyn trd_core::Texture),
-        env,
-        render_w,
-        render_h,
-        backend,
-    )
-    .await
-    .map_err(to_js)?;
+    let renderer = WebRenderer::new(&meshes, &textures, env, render_w, render_h, backend)
+        .await
+        .map_err(to_js)?;
     let app = WebApp::new(InteractionController::new(scene), renderer);
 
     eframe::WebRunner::new()

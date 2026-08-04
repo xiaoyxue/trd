@@ -64,9 +64,18 @@ struct MeshGpu {
     edges: IndexBuf,
     aabb: IndexedGeometry,
     base_model: Matrix4,
+    /// This mesh's **own** albedo texture (group 1), so a multi-object scene skins
+    /// each object with its own diffuse (#141). Defaults to 1×1 white (identity
+    /// albedo) until [`set`](BoundTexture::set) via `set_mesh_texture`.
+    texture: BoundTexture,
 }
 
-fn upload_mesh(device: &wgpu::Device, mesh: &Mesh, base_model: Matrix4) -> MeshGpu {
+fn upload_mesh(
+    device: &wgpu::Device,
+    mesh: &Mesh,
+    base_model: Matrix4,
+    texture_layout: &wgpu::BindGroupLayout,
+) -> MeshGpu {
     use wgpu::util::DeviceExt;
 
     let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -128,6 +137,7 @@ fn upload_mesh(device: &wgpu::Device, mesh: &Mesh, base_model: Matrix4) -> MeshG
             index: aabb_edges,
         },
         base_model,
+        texture: BoundTexture::with_layout(texture_layout.clone()),
     }
 }
 
@@ -234,10 +244,15 @@ struct MeshPass {
     /// The Disney PBR pipeline (`disney.wgsl`): group 0 = [`pbr_uniform`], group 1
     /// = the bound albedo texture, group 2 = the HDR environment map.
     pbr: wgpu::RenderPipeline,
-    /// The per-frame `PbrUniform` (camera `P·V` + world pos, material, lights),
-    /// rewritten each `encode`; bound as group 0 by the PBR pipeline.
+    /// The per-object `PbrUniform` buffer: `mesh_count` [`pbr_stride`]-spaced
+    /// slots (each carries the shared camera/lights + that mesh's material),
+    /// rewritten each `encode`; a draw binds its slot via a dynamic offset.
     pbr_uniform: wgpu::Buffer,
     pbr_bind_group: wgpu::BindGroup,
+    /// The 256-aligned byte stride between adjacent `PbrUniform` slots (the
+    /// `min_uniform_buffer_offset_alignment`-rounded `size_of::<PbrUniform>()`),
+    /// so `slot i` lives at `i * pbr_stride`.
+    pbr_stride: u64,
     camera_uniform: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
 }
@@ -255,6 +270,7 @@ impl MeshPass {
         texture_layout: &wgpu::BindGroupLayout,
         env_layout: &wgpu::BindGroupLayout,
         sample_count: u32,
+        mesh_count: usize,
     ) -> Self {
         // One explicit bind-group layout shared by both untextured pipelines, so
         // the single camera bind group is valid whichever RenderMode is active.
@@ -304,11 +320,14 @@ impl MeshPass {
             immediate_size: 0,
         });
         let pbr = create_pbr_pipeline(device, format, &pbr_pipeline_layout, sample_count);
-        // The PbrUniform buffer is (re)written every frame; seed it with a neutral
-        // material so an unconfigured PBR draw still renders something sane.
+        // The per-object PbrUniform buffer: one 256-aligned slot per mesh, each
+        // rewritten every frame with the shared camera/lights + that mesh's
+        // material; a PBR draw selects its slot via a dynamic offset.
+        let align = device.limits().min_uniform_buffer_offset_alignment as u64;
+        let pbr_stride = (std::mem::size_of::<PbrUniform>() as u64).next_multiple_of(align);
         let pbr_uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("trd pbr uniform"),
-            size: std::mem::size_of::<PbrUniform>() as u64,
+            size: pbr_stride * mesh_count.max(1) as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -317,7 +336,12 @@ impl MeshPass {
             layout: &pbr_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
-                resource: pbr_uniform.as_entire_binding(),
+                // A single-slot window; the dynamic offset picks which slot.
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &pbr_uniform,
+                    offset: 0,
+                    size: wgpu::BufferSize::new(std::mem::size_of::<PbrUniform>() as u64),
+                }),
             }],
         });
         // Identity params ignore the viewport (no intrinsics); each frame's
@@ -339,6 +363,7 @@ impl MeshPass {
             pbr,
             pbr_uniform,
             pbr_bind_group,
+            pbr_stride,
             camera_uniform,
             camera_bind_group,
         }
@@ -349,23 +374,29 @@ impl MeshPass {
         write_view_proj(queue, &self.camera_uniform, params, viewport);
     }
 
-    /// Rewrites the Disney PBR uniform (camera `P·V` + world position, material,
-    /// light rig, env gate) for this frame.
+    /// Rewrites the Disney PBR uniform **slots** for this frame: one slot per
+    /// mesh (`materials[i]` → slot `i` at `i * pbr_stride`), each carrying the
+    /// shared camera `P·V` + world position + light rig, this mesh's material, and
+    /// the env gate. A PBR draw then binds its object's material via a dynamic
+    /// offset. `materials` is indexed by mesh id.
     fn write_pbr(
         &self,
         queue: &wgpu::Queue,
         params: FrameParams,
         viewport: Viewport,
-        material: &PbrMaterial,
+        materials: &[PbrMaterial],
         use_env: bool,
     ) {
-        let uniform = PbrUniform::new(
-            params.view_proj_matrix(viewport).to_cols_array(),
-            params.camera_position(),
-            material,
-            use_env,
-        );
-        queue.write_buffer(&self.pbr_uniform, 0, bytemuck::bytes_of(&uniform));
+        let view_proj = params.view_proj_matrix(viewport).to_cols_array();
+        let camera_pos = params.camera_position();
+        for (i, material) in materials.iter().enumerate() {
+            let uniform = PbrUniform::new(view_proj, camera_pos, material, use_env);
+            queue.write_buffer(
+                &self.pbr_uniform,
+                i as u64 * self.pbr_stride,
+                bytemuck::bytes_of(&uniform),
+            );
+        }
     }
 }
 
@@ -395,13 +426,18 @@ struct MeshStore {
 impl MeshStore {
     /// Constructs a `MeshStore`, uploading each mesh with its base (preview)
     /// model and sizing the instance buffer to at least one instance.
-    fn new(device: &wgpu::Device, meshes: &[Mesh], base_models: &[Matrix4]) -> Self {
+    fn new(
+        device: &wgpu::Device,
+        meshes: &[Mesh],
+        base_models: &[Matrix4],
+        texture_layout: &wgpu::BindGroupLayout,
+    ) -> Self {
         use wgpu::util::DeviceExt;
 
         let gpu_meshes = meshes
             .iter()
             .zip(base_models)
-            .map(|(mesh, &base)| upload_mesh(device, mesh, base))
+            .map(|(mesh, &base)| upload_mesh(device, mesh, base, texture_layout))
             .collect();
         let instance_capacity = (meshes.len() as u32).max(1);
         let instance_buffer = create_instance_buffer(device, instance_capacity);
@@ -600,11 +636,13 @@ impl MeshStore {
 /// state; what to draw is entirely the scene.
 pub struct MeshRenderer {
     pass: MeshPass,
-    texture: BoundTexture,
     /// The bound HDR environment map reflected by [`RenderMode::Pbr`] draws.
     env: BoundEnv,
-    /// The Disney material applied globally to every [`RenderMode::Pbr`] draw.
-    pbr_material: PbrMaterial,
+    /// The Disney material of **each** mesh (indexed by mesh id) applied to its
+    /// [`RenderMode::Pbr`] draws (#141) — so a multi-object scene can give every
+    /// object its own metallic/roughness/base_color. [`set_pbr_material`] sets all
+    /// (the single-mesh / global default); [`set_mesh_pbr_material`] sets one.
+    pbr_materials: Vec<PbrMaterial>,
     store: MeshStore,
     frame_plane: FramePlane,
     /// The mesh pass's depth attachment, (re)created lazily in `encode` to match
@@ -627,6 +665,15 @@ pub struct MeshRenderer {
     /// Retained so `encode` can grow GPU resources on demand without the caller
     /// threading a `&Device` through every call (`wgpu::Device` is a cheap `Arc`).
     device: wgpu::Device,
+    /// The object-id **picking** pipeline (`picking.wgsl`): renders each drawn
+    /// object in a flat id color into a single-sample linear target, reused by
+    /// [`encode_picking`](Self::encode_picking). Built once (its own bind-group
+    /// layout is structurally the camera layout, so `camera_bind_group` binds it).
+    pick_pipeline: wgpu::RenderPipeline,
+    /// Per-instance [`PickInstanceRaw`] buffer for the picking pass (model +
+    /// id color), grown on demand like the mesh instance buffer.
+    pick_instances: wgpu::Buffer,
+    pick_instance_capacity: u32,
 }
 
 impl MeshRenderer {
@@ -692,17 +739,42 @@ impl MeshRenderer {
         );
         assert!(sample_count >= 1, "sample_count must be >= 1");
 
-        let texture = BoundTexture::new(device);
+        // One shared group-1 albedo layout for the textured/PBR pipelines and
+        // every per-mesh [`BoundTexture`] (each object skins with its own diffuse).
+        let texture_layout = create_texture_bind_group_layout(device);
         let env = BoundEnv::new(device);
-        let pass = MeshPass::new(device, format, texture.layout(), env.layout(), sample_count);
-        let store = MeshStore::new(device, meshes, base_models);
+        let pass = MeshPass::new(
+            device,
+            format,
+            &texture_layout,
+            env.layout(),
+            sample_count,
+            meshes.len(),
+        );
+        let store = MeshStore::new(device, meshes, base_models, &texture_layout);
         let frame_plane = FramePlane::new(device, format, sample_count);
+
+        // The picking pipeline: a group-0 camera uniform (structurally identical
+        // to the mesh camera layout, so `pass.camera_bind_group` binds it) + the
+        // per-instance id color, single-sampled into PICK_FORMAT.
+        let pick_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("trd picking pipeline layout"),
+            bind_group_layouts: &[Some(&create_mesh_bind_group_layout(device))],
+            immediate_size: 0,
+        });
+        let pick_pipeline = create_picking_pipeline(device, &pick_layout);
+        let pick_instance_capacity = (meshes.len() as u32).max(1);
+        let pick_instances = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("trd pick instance buffer"),
+            size: pick_instance_capacity as u64 * std::mem::size_of::<PickInstanceRaw>() as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         Self {
             pass,
-            texture,
             env,
-            pbr_material: PbrMaterial::default(),
+            pbr_materials: vec![PbrMaterial::default(); meshes.len()],
             store,
             frame_plane,
             depth: None,
@@ -710,6 +782,9 @@ impl MeshRenderer {
             sample_count,
             format,
             device: device.clone(),
+            pick_pipeline,
+            pick_instances,
+            pick_instance_capacity,
         }
     }
 
@@ -720,18 +795,42 @@ impl MeshRenderer {
         self.store.len()
     }
 
-    /// Binds `texture` as the albedo sampled by [`RenderMode::Textured`] meshes
-    /// (#20). The image is (re)uploaded lazily on the next
-    /// [`encode`](Self::encode). Until set, the bound texture is 1×1 white.
+    /// Binds `texture` as the albedo of **mesh 0** — the single-mesh /
+    /// wire-protocol default sampled by [`RenderMode::Textured`]/[`RenderMode::Pbr`]
+    /// draws (#20). For a multi-object scene, skin each object with
+    /// [`set_mesh_texture`](Self::set_mesh_texture). The image is (re)uploaded
+    /// lazily on the next [`encode`](Self::encode); until set it is 1×1 white.
     pub fn set_texture(&mut self, texture: &dyn Texture) {
-        self.texture.set(texture);
+        self.set_mesh_texture(0, texture);
     }
 
-    /// Sets the Disney [`PbrMaterial`] applied to every [`RenderMode::Pbr`] draw
-    /// (the material is global — one per render invocation). Takes effect on the
+    /// Binds `texture` as the albedo of mesh `mesh_id` — so a multi-object scene
+    /// skins each object with its **own** diffuse (#141). Out-of-range ids are
+    /// ignored. The image uploads lazily on the next [`encode`](Self::encode).
+    pub fn set_mesh_texture(&mut self, mesh_id: usize, texture: &dyn Texture) {
+        if let Some(mesh) = self.store.meshes.get_mut(mesh_id) {
+            mesh.texture.set(texture);
+        }
+    }
+
+    /// Sets the Disney [`PbrMaterial`] of **every** mesh — the single-mesh / global
+    /// default. For a multi-object scene, give each object its own material with
+    /// [`set_mesh_pbr_material`](Self::set_mesh_pbr_material). Takes effect on the
     /// next [`encode`](Self::encode).
     pub fn set_pbr_material(&mut self, material: PbrMaterial) {
-        self.pbr_material = material;
+        for m in &mut self.pbr_materials {
+            *m = material;
+        }
+    }
+
+    /// Sets the Disney [`PbrMaterial`] of mesh `mesh_id` only (#141) — so each
+    /// object in a multi-object scene has its own metallic/roughness/base_color.
+    /// Out-of-range ids are ignored. Takes effect on the next
+    /// [`encode`](Self::encode).
+    pub fn set_mesh_pbr_material(&mut self, mesh_id: usize, material: PbrMaterial) {
+        if let Some(m) = self.pbr_materials.get_mut(mesh_id) {
+            *m = material;
+        }
     }
 
     /// Binds `env` as the equirectangular HDR environment map reflected by
@@ -786,14 +885,14 @@ impl MeshRenderer {
     ) {
         // 1. Camera P·V for this frame.
         self.pass.write_camera(queue, params, viewport);
-        // 1b. Disney PBR uniform for this frame (camera P·V + world pos, the
-        //     global material, and whether an HDR probe is bound). Cheap; written
-        //     unconditionally so a PBR draw always has a current uniform.
+        // 1b. Disney PBR uniform slots for this frame — one per mesh (each carries
+        //     the shared camera/lights + that mesh's material, #141). Written
+        //     unconditionally so a PBR draw always has a current material slot.
         self.pass.write_pbr(
             queue,
             params,
             viewport,
-            &self.pbr_material,
+            &self.pbr_materials,
             self.env.has_env(),
         );
 
@@ -815,10 +914,13 @@ impl MeshRenderer {
             self.frame_plane.write_fit(queue, fit, viewport);
         }
 
-        // 5. (Re)upload the bound albedo texture on first use / after set_texture
-        //    (#20) and the HDR environment map (after set_env_map): encode is where
-        //    a GPU queue is available.
-        let texture_bind_group = self.texture.ensure_uploaded(&self.device, queue);
+        // 5. (Re)upload each mesh's **own** albedo texture (#141: per-object
+        //    diffuse) + the HDR environment map, on first use / after a set —
+        //    encode is where a GPU queue is available. Uploads happen up front so
+        //    the render loop below only *reads* each mesh's group-1 bind group.
+        for mesh in &mut self.store.meshes {
+            mesh.texture.ensure_uploaded(&self.device, queue);
+        }
         let env_bind_group = self.env.ensure_uploaded(&self.device, queue);
 
         // 6. Record the pass. With MSAA (`sample_count > 1`) the mesh pass renders
@@ -887,16 +989,17 @@ impl MeshRenderer {
                 DrawKind::Textured(id) => {
                     let mesh = &self.store.meshes[id];
                     pass.set_pipeline(&self.pass.textured);
-                    pass.set_bind_group(1, texture_bind_group, &[]);
+                    pass.set_bind_group(1, mesh.texture.bind_group(), &[]);
                     draw_indexed(&mut pass, &mesh.vertex_buffer, &mesh.triangles, range);
                 }
                 DrawKind::Pbr(id) => {
                     let mesh = &self.store.meshes[id];
                     pass.set_pipeline(&self.pass.pbr);
-                    // group 0 = PbrUniform (differs from the camera layout),
-                    // group 1 = albedo, group 2 = HDR environment map.
-                    pass.set_bind_group(0, &self.pass.pbr_bind_group, &[]);
-                    pass.set_bind_group(1, texture_bind_group, &[]);
+                    // group 0 = this mesh's PbrUniform slot (selected by a dynamic
+                    // offset), group 1 = this mesh's albedo, group 2 = HDR env map.
+                    let offset = (id as u64 * self.pass.pbr_stride) as u32;
+                    pass.set_bind_group(0, &self.pass.pbr_bind_group, &[offset]);
+                    pass.set_bind_group(1, mesh.texture.bind_group(), &[]);
                     pass.set_bind_group(2, env_bind_group, &[]);
                     draw_indexed(&mut pass, &mesh.pbr_vertex_buffer, &mesh.triangles, range);
                     // Restore group 0 = camera for the following non-PBR draws
@@ -929,6 +1032,105 @@ impl MeshRenderer {
                     pass.draw(0..AXES_VERTEX_COUNT, range);
                 }
             }
+        }
+    }
+
+    /// Encodes the **object-id picking pass** (#141): renders each `draws` entry's
+    /// mesh in a flat color encoding its **index** (the same 0-based order the
+    /// caller placed them), single-sampled and depth-tested into `color_view`
+    /// (cleared to id `0` = background) with `depth_view`. No lighting, no
+    /// texture, no MSAA — so the pixel under the cursor reads back to an exact id
+    /// via [`PickInstanceRaw::decode`]. `color_view` must be a [`PICK_FORMAT`]
+    /// (linear) target and `depth_view` a [`DEPTH_FORMAT`] attachment of the same
+    /// size. Out-of-range mesh ids and `Shadow` draws are skipped, but the index
+    /// mapping is preserved (a skipped draw's index simply never appears).
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_picking(
+        &mut self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        color_view: &wgpu::TextureView,
+        depth_view: &wgpu::TextureView,
+        params: FrameParams,
+        draws: &[Draw],
+        viewport: Viewport,
+    ) {
+        // Camera P·V for this frame (writes the shared camera uniform bound by
+        // `camera_bind_group`, which is layout-compatible with the pick pipeline).
+        self.pass.write_camera(queue, params, viewport);
+
+        // Build one pick instance per drawable object, carrying its index color.
+        // Keep the draw index as the id even when an entry is skipped, so a decoded
+        // id maps straight back to `draws[index]`.
+        let mut instances: Vec<PickInstanceRaw> = Vec::with_capacity(draws.len());
+        let mut records: Vec<(usize, u32)> = Vec::with_capacity(draws.len());
+        for (index, draw) in draws.iter().enumerate() {
+            if draw.mode == Some(RenderMode::Shadow) {
+                continue;
+            }
+            let Some(mesh) = self.store.meshes.get(draw.mesh_id as usize) else {
+                continue;
+            };
+            let effective = Matrix4::from_cols_array(&draw.model) * mesh.base_model;
+            let slot = instances.len() as u32;
+            instances.push(PickInstanceRaw::new(
+                effective.to_cols_array(),
+                index as u32,
+            ));
+            records.push((draw.mesh_id as usize, slot));
+        }
+
+        // Grow + upload the pick instance buffer.
+        if instances.len() as u32 > self.pick_instance_capacity {
+            self.pick_instance_capacity = (instances.len() as u32).next_power_of_two();
+            self.pick_instances = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("trd pick instance buffer"),
+                size: self.pick_instance_capacity as u64
+                    * std::mem::size_of::<PickInstanceRaw>() as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+        if !instances.is_empty() {
+            queue.write_buffer(&self.pick_instances, 0, bytemuck::cast_slice(&instances));
+        }
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("trd picking pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: color_view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    // Clear to id 0 (background).
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: depth_view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+
+        pass.set_pipeline(&self.pick_pipeline);
+        pass.set_bind_group(0, &self.pass.camera_bind_group, &[]);
+        pass.set_vertex_buffer(1, self.pick_instances.slice(..));
+        for (mesh_id, slot) in records {
+            let mesh = &self.store.meshes[mesh_id];
+            draw_indexed(
+                &mut pass,
+                &mesh.vertex_buffer,
+                &mesh.triangles,
+                slot..slot + 1,
+            );
         }
     }
 

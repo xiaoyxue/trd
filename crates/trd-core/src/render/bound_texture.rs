@@ -6,7 +6,7 @@
 //! same texture+sampler bind pattern but update at different rates, so keeping
 //! them as separate types makes which-is-which obvious at a glance.
 
-use super::{create_texture_bind_group_layout, upload_texture};
+use super::upload_texture;
 use crate::texture::{ImageData, Texture};
 
 /// The albedo texture bound as group 1 by the textured mesh pipeline (#20).
@@ -23,12 +23,14 @@ pub(super) struct BoundTexture {
 }
 
 impl BoundTexture {
-    /// Constructs a `BoundTexture` seeded with the 1×1 white identity albedo. No
-    /// GPU upload happens yet; the first [`ensure_uploaded`](Self::ensure_uploaded)
-    /// builds the bind group.
-    pub(super) fn new(device: &wgpu::Device) -> Self {
+    /// Constructs a `BoundTexture` (seeded with the 1×1 white identity albedo)
+    /// reusing a **shared** group-1 layout (cheap wgpu handle clone), so many
+    /// per-mesh albedo textures stay compatible with the one textured/PBR
+    /// pipeline layout. No GPU upload happens yet; the first
+    /// [`ensure_uploaded`](Self::ensure_uploaded) builds the bind group.
+    pub(super) fn with_layout(layout: wgpu::BindGroupLayout) -> Self {
         Self {
-            layout: create_texture_bind_group_layout(device),
+            layout,
             bind_group: None,
             image: ImageData {
                 width: 1,
@@ -36,12 +38,6 @@ impl BoundTexture {
                 rgba: vec![255, 255, 255, 255],
             },
         }
-    }
-
-    /// The group-1 bind-group layout (also fed to the textured pipeline layout so
-    /// the pipeline and this bind group agree).
-    pub(super) fn layout(&self) -> &wgpu::BindGroupLayout {
-        &self.layout
     }
 
     /// Replaces the source image; the bind group is rebuilt on the next
@@ -62,5 +58,14 @@ impl BoundTexture {
             self.bind_group = Some(upload_texture(device, queue, &self.layout, &self.image));
         }
         self.bind_group.as_ref().expect("uploaded above")
+    }
+
+    /// The uploaded group-1 bind group. Call after [`ensure_uploaded`](Self::ensure_uploaded)
+    /// (which must run while a GPU queue is available, i.e. before the render
+    /// pass); panics if the texture was never uploaded.
+    pub(super) fn bind_group(&self) -> &wgpu::BindGroup {
+        self.bind_group
+            .as_ref()
+            .expect("BoundTexture::ensure_uploaded must run before bind_group")
     }
 }

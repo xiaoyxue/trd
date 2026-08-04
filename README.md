@@ -185,6 +185,25 @@ from the CLI: `--metallic` / `--roughness` / `--specular` / `--clearcoat`,
 `--tonemap reinhard|aces`. Full parameter reference + material model:
 **[`docs/pbr.md`](docs/pbr.md)**.
 
+## [Interactive viewer](docs/rendering.md#interactive-viewer--trd-gui)
+
+`trd-gui` is a live **object editor** — a native window or a WebGPU browser tab.
+**Click** an object to select it (its bounding box highlights); the left panel
+then edits *that* object. Everything is **per-object**:
+
+- **Transform** — left-drag rotates / right-drag moves / scroll scales the selected
+  object (or orbit the camera), with an optional **axis lock** (X/Y/Z) and numeric
+  widgets kept in sync with the mouse;
+- **Render mode** — Filled / Wireframe / Textured / **PBR**, chosen per object;
+- **PBR material** — metallic / roughness / tone-map, edited live per object;
+- **Diffuse texture** — each object skins its own albedo;
+- **Overlays** — bounding box, world/local axes, XZ plane grid.
+
+The browser loads multiple objects from **repeatable `?mesh=`** (+ positional
+`?texture=`, and `?env=` for PBR):
+`?mesh=a.obj&texture=a.jpg&mesh=b.obj&env=probe.hdr`. Full control reference + URL
+params: **[`docs/rendering.md`](docs/rendering.md#interactive-viewer--trd-gui)**.
+
 ## Documentation
 
 - [`docs/architecture.md`](docs/architecture.md) — the render core + front-ends,

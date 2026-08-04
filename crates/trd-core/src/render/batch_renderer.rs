@@ -11,7 +11,7 @@
 
 use super::{
     Draw, DrawableObject, FrameFit, FrameParams, GridPlane, Mesh, MeshRenderer, OffscreenTarget,
-    RenderMode, OFFSCREEN_FORMAT,
+    PickTarget, RenderMode, OFFSCREEN_FORMAT,
 };
 use crate::math::Matrix4;
 use crate::stream::{check_dimensions, StreamError};
@@ -49,6 +49,13 @@ pub struct BatchRenderer {
     /// *each* drawn instance's own `model`, ungated by render mode (unlike
     /// [`show_local_grid`](Self::show_local_grid), which is wireframe-scoped).
     show_object_grid: Option<GridPlane>,
+    /// If `Some(index)`, highlight that draw's [`DrawableObject::AabbBox`] — the
+    /// **selected** object (#141) — regardless of the global `show_aabb` toggle.
+    selected_aabb: Option<u32>,
+    /// The object-id picking target (#141), created lazily on the first
+    /// [`pick`](Self::pick) call and resized to track the render size. `None`
+    /// until a front-end actually picks, so the headless CLI never allocates it.
+    pick_target: Option<PickTarget>,
 }
 
 impl BatchRenderer {
@@ -135,6 +142,8 @@ impl BatchRenderer {
             show_local_grid_mesh: None,
             show_world_grid: None,
             show_object_grid: None,
+            selected_aabb: None,
+            pick_target: None,
         })
     }
 
@@ -155,10 +164,24 @@ impl BatchRenderer {
         self.renderer.set_texture(texture);
     }
 
+    /// Binds `texture` as the albedo of mesh `mesh_id` — a **per-object** diffuse
+    /// for multi-object scenes (#141). Delegates to
+    /// [`MeshRenderer::set_mesh_texture`]; out-of-range ids are ignored.
+    pub fn set_mesh_texture(&mut self, mesh_id: usize, texture: &dyn crate::texture::Texture) {
+        self.renderer.set_mesh_texture(mesh_id, texture);
+    }
+
     /// Sets the Disney [`PbrMaterial`](crate::PbrMaterial) applied globally to
     /// [`RenderMode::Pbr`] meshes. Delegates to [`MeshRenderer::set_pbr_material`].
     pub fn set_pbr_material(&mut self, material: crate::PbrMaterial) {
         self.renderer.set_pbr_material(material);
+    }
+
+    /// Sets the Disney [`PbrMaterial`](crate::PbrMaterial) of mesh `mesh_id` only —
+    /// a **per-object** material for multi-object scenes (#141). Delegates to
+    /// [`MeshRenderer::set_mesh_pbr_material`]; out-of-range ids are ignored.
+    pub fn set_mesh_pbr_material(&mut self, mesh_id: usize, material: crate::PbrMaterial) {
+        self.renderer.set_mesh_pbr_material(mesh_id, material);
     }
 
     /// Binds `env` as the equirectangular HDR environment map reflected by
@@ -223,6 +246,13 @@ impl BatchRenderer {
         self.show_object_grid = plane;
     }
 
+    /// Highlights the **selected** object's [`DrawableObject::AabbBox`] (#141):
+    /// `Some(index)` boxes the draw at that 0-based index (regardless of the
+    /// global [`set_show_aabb`](Self::set_show_aabb) toggle); `None` clears it.
+    pub fn set_selected_aabb(&mut self, index: Option<u32>) {
+        self.selected_aabb = index;
+    }
+
     /// Uploads `image` as the **background frame texture** (#63) sampled by a
     /// [`DrawableObject::FramePlane`]. The GPU texture is reused across frames
     /// (grown only on a resolution change). Call before a
@@ -259,6 +289,12 @@ impl BatchRenderer {
             self.show_world_grid,
             self.show_object_grid,
         ));
+        // Selection highlight (#141): the selected object's AABB, drawn even when
+        // the global show-all-AABBs toggle is off.
+        scene.extend(crate::render::selection_aabb_overlay(
+            draws,
+            self.selected_aabb,
+        ));
         scene
     }
 
@@ -281,5 +317,30 @@ impl BatchRenderer {
             params,
             &scene,
         ))?)
+    }
+
+    /// **Object-id picking** (#141): renders `draws` through the flat id-color
+    /// pass at the current render size and returns the **0-based index into
+    /// `draws`** of the object under pixel `(x, y)`, or `None` for the background
+    /// (or an out-of-bounds coordinate). The pass is single-sampled and
+    /// depth-tested, so the nearest object wins and ids are never blended — the
+    /// "color index" method, no ray-marching. The lazily-created pick target
+    /// tracks the display size ([`resize`](Self::resize) keeps it in sync).
+    pub fn pick(&mut self, params: FrameParams, draws: &[Draw], x: u32, y: u32) -> Option<u32> {
+        let (w, h) = (self.target.width(), self.target.height());
+        match self.pick_target.as_mut() {
+            Some(target) => target.resize(&self.device, w, h),
+            None => self.pick_target = Some(PickTarget::new(&self.device, w, h)),
+        }
+        let target = self.pick_target.as_ref()?;
+        pollster::block_on(target.pick(
+            &self.device,
+            &self.queue,
+            &mut self.renderer,
+            params,
+            draws,
+            x,
+            y,
+        ))
     }
 }
