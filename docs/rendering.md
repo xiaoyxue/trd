@@ -136,10 +136,10 @@ read-back); `--no-msaa` renders single-sampled.
 
   ```sh
   uv run --with pyarrow scripts/frames_to_arrow.py --storage bytes \
-    output/backgrounds/frames/*.png -o /tmp/frames.arrow
+    crates/trd-core/tests/golden/frames/*.jpg -o /tmp/frames.arrow
   { scripts/obj_to_arrow.py assets/meshes/bunny.obj
     cat /tmp/frames.arrow
-    scripts/jsonl_to_arrow.py params-with-frame_id.jsonl
+    scripts/jsonl_to_arrow.py examples/frames.inline_background.jsonl
   } | cargo run -q -p trd-cli -- --width 512 --height 512
   ```
 - **Single-view AR placement (real broadcast clips)** — the perception pipeline
