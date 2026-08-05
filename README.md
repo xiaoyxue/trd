@@ -42,7 +42,8 @@ input-stream ─┬─ trd-cli  → trd-core → offscreen readback → image-st
 | **`trd-gui`** | a mesh + live gestures | offscreen → egui image | an interactive orbit/zoom viewer |
 
 Each front-end is a *thin shell* that only supplies a render target and calls the
-core — no per-front-end rendering logic. See
+core — no per-front-end rendering logic. Primitive dispatch and draw-kind
+batching stay in the shared Rust core. See
 **[`docs/architecture.md`](docs/architecture.md)** for the internals.
 
 ## [Quick start](docs/rendering.md)

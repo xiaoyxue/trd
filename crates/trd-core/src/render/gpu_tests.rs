@@ -620,9 +620,9 @@ fn mesh_renderer_axes_overlay_draws_rgb_gizmo() {
 #[ignore = "requires a GPU adapter"]
 #[cfg(not(target_arch = "wasm32"))]
 fn scene_composes_all_drawable_kinds_together() {
-    // #41: every primitive is a `DrawableObject`, and the renderer walks a
-    // single heterogeneous `Scene` with no per-type branching. A scene mixing
-    // a filled mesh, a wireframe mesh, an AABB box, and the axes gizmo must
+    // #41: every primitive is a `DrawableObject`, and every front-end submits
+    // the same heterogeneous `Scene` for draw-kind batching. A scene mixing a
+    // filled mesh, a wireframe mesh, an AABB box, and the axes gizmo must
     // render all of them at once — the filled mesh alone lights fewer pixels
     // than the full composed scene, and the green box + RGB axes appear.
     let (device, queue) = test_device();

@@ -36,9 +36,11 @@ Platform-agnostic wgpu logic, shared verbatim by every target:
   (a background still). Geometry is owned once (decode-once mesh store + shared
   gizmo buffers); a drawable is a light handle naming *which* primitive + its
   per-frame model. A `Scene = Vec<DrawableObject>` is rebuilt each frame;
-  `MeshRenderer::encode` walks it once, binds the shared `P·V` camera uniform, and
-  records the draws with **no per-type branching**. Appearance (filled / wireframe
-  / textured / **PBR**) is a *mode* of the mesh drawable, not a separate primitive.
+  every front-end hands it to `MeshRenderer::encode` without per-type branching.
+  The render core walks it into a flat list, batches by draw kind, binds the
+  shared `P·V` camera uniform, and records the draws. Appearance (filled /
+  wireframe / textured / **PBR**) is a *mode* of the mesh drawable, not a
+  separate primitive.
 - **`stream.rs` + `protocol.rs`** — the Arrow input layer. `protocol.rs`'s
   `InputSession` is the **single framing driver** (native + wasm): it feeds byte
   chunks through `arrow`'s `StreamDecoder`, validates the schema once (`0.0.5`
