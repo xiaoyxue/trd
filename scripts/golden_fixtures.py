@@ -4,8 +4,7 @@ render test (issue #88).
 
 Both fixtures are *derived from* the committed two-stage cornellbox placement
 demo (``examples/frames.cornellbox.stage{1,2}.jsonl``, #77) but reduced to be
-tiny, deterministic, and self-contained (their only sidecar assets are the three
-committed background stills, generated here from the demo video):
+tiny, deterministic, and self-contained:
 
 * **stage1** — the reconstructed placement quad only: mesh table ``[quad]`` +
   a few frames of the authored CV ``k`` + per-draw ``model`` (a wireframe quad).
@@ -18,18 +17,17 @@ Reductions vs. the full 125-frame demo:
 * the CV intrinsics ``k`` (baked for the 960x540 demo) are **rescaled** to the
   small golden resolution ``WIDTH x HEIGHT`` (``k`` is resolution-specific: fx,
   fy, cx, cy scale linearly with the render size);
-* the ``0.0.5`` ``frame_path`` **background reference is kept** — each kept row
-  still names its cornellbox video still (``frames/frame_NNNNNN.jpg``). This
-  script decodes exactly those referenced frames out of the demo video
+* each params row uses protocol ``0.0.6`` ``frame_id`` to select its cornellbox
+  still from an inline frames table. Stage 1 stores encoded ``frame_bytes`` and
+  stage 2 stores raw ``frame_pixels``, covering both wire forms. This script
+  decodes exactly those frames out of the demo video
   (``assets/videos/cornellbox/CameraMovement.mp4``), downscaled to the golden
-  ``WIDTH x HEIGHT``, and writes them next to the fixtures under ``golden/``.
-  The golden render test resolves ``frame_path`` against ``golden/`` and
-  composites the scene over the still (an AR composite over cornellbox), exactly
-  like the CLI with ``--frames-base``;
+  ``WIDTH x HEIGHT``, packs them into each fixture, and composites the scene over
+  the still (an AR composite over cornellbox);
 * the bound texture is downscaled (``TEXTURE_MAX_SIZE``).
 
-The fixtures embed the mesh + texture + params in one byte stream; the only file
-I/O the test does is resolving each frame's ``frame_path`` still. Regenerate
+The fixtures embed mesh + texture + background frames + params in one byte
+stream; the render test needs no background sidecar I/O. Regenerate
 with::
 
     python3 scripts/golden_fixtures.py
@@ -105,15 +103,17 @@ def rescale_k(k: list[float]) -> list[float]:
 
 
 def reduced_jsonl(src: Path) -> str:
-    """Subset to FRAME_INDICES, rescale `k`, keep the `frame_path` background ref
-    (its still is decoded from the demo video by `extract_backgrounds`)."""
+    """Subset to FRAME_INDICES, rescale `k`, and select the corresponding inline
+    frames-table row."""
     lines = src.read_text().splitlines()
     out = []
-    for i in FRAME_INDICES:
+    for frame_id, i in enumerate(FRAME_INDICES):
         row = json.loads(lines[i])
         if "k" in row:
             row["k"] = rescale_k(row["k"])
-        row.pop("frame_url", None)  # native fixtures resolve `frame_path`
+        row.pop("frame_path", None)
+        row.pop("frame_url", None)
+        row["frame_id"] = frame_id
         out.append(json.dumps(row))
     return "\n".join(out) + "\n"
 
@@ -175,6 +175,20 @@ def texture_stream(img: Path) -> bytes:
     )
 
 
+def frames_stream(paths: list[str], storage: str) -> bytes:
+    deps = ["--with", "pyarrow"]
+    if storage == "pixels":
+        deps += ["--with", "pillow", "--with", "numpy"]
+    return run(
+        [
+            "uv", "run", *deps,
+            str(ROOT / "scripts" / "frames_to_arrow.py"),
+            "--storage", storage,
+        ]
+        + [str(OUT_DIR / path) for path in paths]
+    )
+
+
 def params_stream(jsonl_text: str) -> bytes:
     with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as tmp:
         tmp.write(jsonl_text)
@@ -189,18 +203,20 @@ def params_stream(jsonl_text: str) -> bytes:
 
 
 def build_stage1(quad_obj: Path) -> bytes:
-    # mesh table [quad] ++ params (a single wireframe quad draw per frame).
+    # mesh [quad] ++ encoded frames ++ params.
     mesh = obj_stream([quad_obj])
+    frames = frames_stream(frame_paths(STAGE1_JSONL), "bytes")
     params = params_stream(reduced_jsonl(STAGE1_JSONL))
-    return mesh + params
+    return mesh + frames + params
 
 
 def build_stage2(quad_obj: Path) -> bytes:
-    # mesh table [bunny, quad] ++ texture ++ params (bunny draw + wireframe quad).
+    # mesh [bunny, quad] ++ texture ++ raw-pixel frames ++ params.
     mesh = obj_stream([BUNNY_OBJ, quad_obj])
     texture = texture_stream(BUNNY_TEX)
+    frames = frames_stream(frame_paths(STAGE2_JSONL), "pixels")
     params = params_stream(reduced_jsonl(STAGE2_JSONL))
-    return mesh + texture + params
+    return mesh + texture + frames + params
 
 
 def main() -> None:

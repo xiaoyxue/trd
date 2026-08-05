@@ -6,7 +6,9 @@
 #
 # Usage:
 #   examples/render.sh [--cli | --native | --web [--canvas-renderer|--offscreen-renderer]] \
-#                      [--mesh OBJ]... [--texture IMG] [--wireframe] [--aabb] [--axes] [--frames-base DIR] [INPUT.jsonl] [OUTPUT.gif|.webp] [WIDTH] [HEIGHT] [FPS]
+#                      [--mesh OBJ]... [--texture IMG] [--frames-table FILE]
+#                      [--wireframe] [--aabb] [--axes] [--frames-base DIR]
+#                      [INPUT.jsonl] [OUTPUT.gif|.webp] [WIDTH] [HEIGHT] [FPS]
 # Defaults: examples/frames.bunny_dolly.cg.jsonl (rendering assets/meshes/bunny.obj)  output/out.gif  256 256 30
 # Run with no arguments (or -h/--help) to print the flag guidance and exit; pass
 # --cli to render the default demo (the bunny dolly camera capstone).
@@ -15,7 +17,7 @@
 # GIF/WebP via the headless trd-cli.
 # With --native (alias --app) it is played live in the interactive trd-app window
 # (trd-native); OUTPUT is then ignored and neither uv nor ffmpeg are needed.
-# The stream protocol is 0.0.5-only and mesh-first: every stream begins with a
+# The stream protocol is 0.0.6-only and mesh-first: every stream begins with a
 # mesh table (scripts/obj_to_arrow.py encodes the OBJ) concatenated with the
 # params stream, so trd renders the loaded mesh (centered + uniformly scaled to
 # fit) driven by INPUT.jsonl. When no --mesh (and no --placement-quad) is given,
@@ -64,7 +66,7 @@
 # browser. It builds the config-driven web bundle via nix (.#web), copies it to a
 # writable serve dir, and drops in the runtime inputs the generic viewer
 # (web/src/viewer.ts) fetches at load: `stream.arrow` (the identical
-# mesh++texture++params bytes trd-cli reads on stdin, from the same producers),
+# mesh++texture++frames++params bytes trd-cli reads on stdin, from the same producers),
 # `config.json` (the chosen renderer target + scene flags + baked resolution +
 # default fps), and — when --frames-base is set — the background stills, so the
 # browser replays exactly what --cli would render. static-web-server then serves
@@ -74,7 +76,7 @@
 # renderer) draws to an offscreen ArrowRenderer texture read back to a 2D canvas
 # (the browser twin of the CLI output stream). All the content flags below
 # (--mesh/--texture/--wireframe/--aabb/--axes/--axes-local/--placement-quad/
-# --frames-base) and the positional WIDTH/HEIGHT apply to --web exactly as to
+# --frames-base/--frames-table) and the positional WIDTH/HEIGHT apply to --web exactly as to
 # --cli; only the playback rate is a live URL param:
 #   ?fps=N    playback frame rate (1..240; default = the FPS positional arg)
 # e.g. examples/render.sh --web --canvas-renderer --placement-quad --axes-local \
@@ -142,11 +144,15 @@ CONTENT FLAGS (--cli and --native):
   --placement-quad-color "R G B"
                       Placement-quad outline color, 0..1 floats (default: "0 1 1" cyan).
                       Implies --placement-quad's mesh.
-  --frames-base DIR   Composite each frame's 0.0.5 background still (its `frame_path`,
+  --frames-base DIR   Resolve each external background still (`frame_path`,
                       resolved relative to DIR) *beneath* the scene via a FramePlane (#63).
                       Stills are decoded at full resolution; extract them with
                       scripts/extract_frames.py <video> --format jpg (add --height H to
                       extract smaller stills and save memory).
+  --frames-table FILE Splice a protocol 0.0.6 inline frames resource table between
+                      texture and params. Params rows select resources by `frame_id`;
+                      author FILE with scripts/frames_to_arrow.py or
+                      scripts/extract_frames.py --embed bytes|pixels.
 
   -h, --help          Show this guidance and exit.
 
@@ -206,7 +212,7 @@ fi
 
 # Extract the optional mode flags (--cli/--native/--web), the --web renderer
 # sub-flags (--canvas-renderer/--offscreen-renderer), and repeatable --mesh <obj>
-# flags that prepend a mesh Arrow stream (0.0.5 [mesh][params]); the rest are
+# flags that prepend a mesh Arrow stream (0.0.6 [mesh][...][params]); the rest are
 # positional.
 cli=0
 native=0
@@ -234,6 +240,7 @@ quad_color="0 1 1"
 meshes=()
 texture=""
 frames_base=""
+frames_table=""
 positional=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -279,6 +286,8 @@ while [ $# -gt 0 ]; do
     --texture=*) texture="${1#--texture=}" ;;
     --frames-base) shift; frames_base="${1:?--frames-base requires a directory}" ;;
     --frames-base=*) frames_base="${1#--frames-base=}" ;;
+    --frames-table) shift; frames_table="${1:?--frames-table requires an Arrow file}" ;;
+    --frames-table=*) frames_table="${1#--frames-table=}" ;;
     *) positional+=("$1") ;;
   esac
   shift
@@ -335,6 +344,11 @@ width="${3:-256}"
 height="${4:-256}"
 fps="${5:-30}"
 
+if [ -n "$frames_table" ] && [ ! -f "$frames_table" ]; then
+  echo "error: --frames-table not found: $frames_table" >&2
+  exit 1
+fi
+
 # --placement-quad appends a canonical colored quad mesh (an origin-centred,
 # extent-2 unit square, corners ±1) as the LAST --mesh, so a stream can draw the
 # reconstructed placement quad as a wireframe overlay (a debug check that it
@@ -364,7 +378,7 @@ QUAD
   meshes+=("$quad_obj")
 fi
 
-# The stream protocol is mesh-first (0.0.5 requires a leading [mesh] table; there
+# The stream protocol is mesh-first (0.0.6 requires a leading [mesh] table; there
 # is no params-only fallback). When neither --mesh nor --placement-quad supplied a
 # mesh, load the bunny as the default demo object so the stream is a valid
 # [mesh][params] and the default INPUT (frames.bunny_dolly.cg.jsonl) has something
@@ -413,8 +427,8 @@ for tool in $tools; do
 done
 
 # Choose a frame producer for the params stream: scripts/jsonl_to_arrow.py via
-# uv (or python3 with pyarrow). The stream protocol is 0.0.5-only and mesh-first,
-# so the params batch carries the `model`/camera/`draws`/`frame_path` columns the
+# uv (or python3 with pyarrow). The stream protocol is 0.0.6-only and mesh-first,
+# so the params batch carries the `model`/camera/`draws`/frame-source columns the
 # pyarrow producer emits (the old DuckDB `arrow` path only understood the retired
 # 0.0.1/0.0.2 center/size/theta/model columns and is gone).
 if command -v uv >/dev/null 2>&1; then
@@ -438,7 +452,7 @@ frames() {
 # Python to encode the OBJ(s) into the leading mesh Arrow stream.
 # scripts/obj_to_arrow.py emits a mesh table with **one row per --mesh** (in the
 # order given); it is concatenated *before* the params stream so trd reads
-# [mesh][params]. A frame's `draws` list references these meshes by 0-based index
+# [mesh][...][params]. A frame's `draws` list references these meshes by 0-based index
 # (mesh 0 = first --mesh).
 mesh_producer=""
 if [ ${#meshes[@]} -gt 0 ]; then
@@ -454,8 +468,8 @@ fi
 
 # The optional texture table (0.0.4): scripts/texture_to_arrow.py encodes the
 # image into a one-row `rgba` fixed_shape_tensor<u8>[H,W,4] Arrow stream,
-# concatenated *between* the mesh table and the params so trd reads
-# [mesh][texture][params] and binds it as the sampled albedo. Downscaled to
+# concatenated *between* the mesh table and later frames/params so trd reads
+# [mesh][texture][frames?][params] and binds it as the sampled albedo. Downscaled to
 # --max-size 2048 to stay within the renderer's portable (downlevel/WebGL2)
 # 2048² texture limit. Needs pyarrow + pillow + numpy.
 texture_producer=""
@@ -471,8 +485,7 @@ if [ -n "$texture" ]; then
   fi
 fi
 
-# The full trd input stream: the optional leading mesh table, the optional
-# texture table, then the params.
+# The full trd input stream: mesh, optional texture, optional inline frames, params.
 stream() {
   case "$mesh_producer" in
     uv) uv run --with pyarrow "$root/scripts/obj_to_arrow.py" "${meshes[@]}" ;;
@@ -482,6 +495,9 @@ stream() {
     uv) uv run --with pyarrow --with pillow --with numpy "$root/scripts/texture_to_arrow.py" "$texture" --max-size 2048 ;;
     python3) python3 "$root/scripts/texture_to_arrow.py" "$texture" --max-size 2048 ;;
   esac
+  if [ -n "$frames_table" ]; then
+    cat "$frames_table"
+  fi
   frames
 }
 
@@ -510,7 +526,7 @@ grid_local_flag=()
 [ -n "$grid_local" ] && grid_local_flag=(--grid-local "$grid_local")
 grid_mesh_flag=()
 [ -n "$grid_mesh" ] && grid_mesh_flag=(--grid-mesh "$grid_mesh")
-# --frames-base resolves each frame's 0.0.5 `frame_path` (relative to this dir)
+# --frames-base resolves each external `frame_path` (relative to this dir)
 # to the still image trd composites *beneath* the scene via a FramePlane (#63).
 frames_base_flag=()
 [ -n "$frames_base" ] && frames_base_flag=(--frames-base "$frames_base")
@@ -519,9 +535,9 @@ frames_base_flag=()
 # Build the config-driven web bundle (nix .#web) once, copy it to a writable serve
 # dir, then drop in the runtime inputs the generic viewer (web/src/viewer.ts)
 # fetches at load:
-#   stream.arrow  — mesh++texture++params, the identical bytes trd-cli reads on stdin
+#   stream.arrow  — mesh++texture++frames++params, identical to trd-cli stdin
 #   config.json   — target renderer + scene flags + baked resolution + default fps
-#   frames/…      — the 0.0.5 background stills (copied from --frames-base) so each
+#   frames/…      — external background stills (copied from --frames-base) so each
 #                   frame's `frame_path` resolves under the served root
 # static-web-server serves the directory; only ?fps is a live URL override (the
 # render resolution is baked into the CV `k`, so it is a render.sh positional arg).

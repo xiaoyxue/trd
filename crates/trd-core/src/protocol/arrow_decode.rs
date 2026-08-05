@@ -38,7 +38,7 @@ pub(crate) fn check_version(schema: &Schema) -> Result<(), ProtocolError> {
     Ok(())
 }
 
-/// Decodes the optional per-frame **background frame reference** column (`0.0.5`)
+/// Decodes the optional per-frame external **background frame reference** columns
 /// into one `Option<String>` per row, preferring `frame_path` (native filesystem
 /// path) then `frame_url` (browser URL). Returns `None` when neither column is
 /// present; per-row nulls or empty strings decode to `None`. The core performs

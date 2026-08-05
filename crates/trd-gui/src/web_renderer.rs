@@ -42,7 +42,7 @@ pub enum WebBackend {
     #[default]
     Inproc,
     /// Round-trip the frame through the Arrow wire format: encode the scene to a
-    /// `[mesh][texture?][params]` stream, decode it back through the **wasm**
+    /// `[mesh][texture?][frames?][params]` stream, decode it back through the **wasm**
     /// decoder (`InputSession`), render on the persistent device, then encode the
     /// image to an Arrow stream and decode it back (`OutputSession` /
     /// `read_image_stream`) — the web twin of the native `ArrowRoundTripRenderer`

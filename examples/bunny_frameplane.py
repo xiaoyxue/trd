@@ -8,7 +8,7 @@ frame carries
     {"model": [16 floats],            # column-major rotate_y(2π·i/N)
      "frame_path": "frames/frame_000000.png"}
 
-so ``scripts/jsonl_to_arrow.py`` emits a protocol **0.0.5** stream whose per-frame
+so ``scripts/jsonl_to_arrow.py`` emits a protocol **0.0.6** stream whose per-frame
 ``frame_path`` column names a still image. ``trd --frames-base <dir>`` loads each
 still at the boundary and composites it *beneath* the spinning bunny via a
 ``FramePlane`` (the mesh + axes/AABB gizmos draw on top). The backgrounds are an

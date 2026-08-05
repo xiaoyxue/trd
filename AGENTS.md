@@ -37,9 +37,10 @@ Guidance for agents working in this repository.
   `wgpu::Surface` swapchain directly — there is **no** shared on-screen harness.
 - Major input data is columnar (Apache Arrow tables) with simple glue logic.
 - **The input protocol is NOT backward compatible.** Wire format is **mesh-first**
-  `[mesh][texture?][params]`; only the current `PROTOCOL_VERSION`
-  (`trd_core::protocol::PROTOCOL_VERSION`, currently `0.0.5`) is accepted — every
-  batch's `trd.protocol.version` is checked and any other version is
+  `[mesh][texture?][frames?][params]`; only the current `PROTOCOL_VERSION`
+  (`trd_core::protocol::PROTOCOL_VERSION`, currently `0.0.6`) is accepted — every
+  table's `trd.protocol.version` and `trd.table.kind` are checked and any other
+  version is
   **hard-rejected** (`UnsupportedVersion`), never silently upgraded. To evolve it,
   **bump `PROTOCOL_VERSION` and migrate all producers + fixtures in the same
   change** (`scripts/{jsonl,obj,texture}_to_arrow.py` stamp the version;
@@ -118,10 +119,9 @@ Guidance for agents working in this repository.
 `crates/trd-core/tests/golden_render.rs` feeds committed Arrow fixtures
 (`crates/trd-core/tests/golden/stage{1,2}.arrow`, the reduced two-stage
 cornellbox placement demo) through the real `run_stream` pipeline and pixel-diffs
-the frames against committed golden PNGs (same dir). Each frame keeps its `0.0.5`
-`frame_path`, resolved against `tests/golden/frames/` (committed cornellbox
-stills) and composited **under** the scene — an AR composite over the background
-(test-side `--frames-base`).
+the frames against committed golden PNGs (same dir). Each params row selects an
+inline `0.0.6` frames-table resource by `frame_id` (stage 1 encoded Binary,
+stage 2 raw tensor), composited **under** the scene.
 
 Each fixture is rendered **twice — 4× MSAA (`Msaa::X4`, the default anti-aliased
 mesh pass) and MSAA-off (`Msaa::Off`, single-sample)** — each pinned to its own
@@ -358,7 +358,7 @@ considered done:
   sync: whenever a change updates `README.md`, update the affected `docs/` page(s)
   in the **same** PR — and vice-versa. In particular, `docs/architecture.md`
   (crates/render core), `docs/rendering.md` (CLI flags, wrappers ⇄ `cargo run`,
-  demos), `docs/pbr.md` (PBR params), and `docs/protocol/0.0.5.md` (wire format)
+  demos), `docs/pbr.md` (PBR params), and `docs/protocol/0.0.6.md` (wire format)
   mirror the README's summaries, so a behavior/flag/layout change must be reflected
   in both. Don't let the README and `docs/` drift.
 

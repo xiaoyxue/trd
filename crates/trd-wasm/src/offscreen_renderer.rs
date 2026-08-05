@@ -334,7 +334,7 @@ impl OffscreenRenderer {
         u32::try_from(self.frames.len()).unwrap_or(u32::MAX)
     }
 
-    /// The buffered frame's optional `0.0.5` background reference
+    /// The buffered frame's optional external background reference
     /// (`frame_path`/`frame_url`) the JS shell resolves + uploads before
     /// [`render_index`](Self::render_index). `None` when out of range or absent.
     #[wasm_bindgen(js_name = frameRef)]
@@ -476,12 +476,12 @@ impl OffscreenRenderer {
             .ok_or_else(|| format!("frame_id {frame_id} is out of range"))?
             .decode()
             .map_err(|error| format!("decode frame_id {frame_id}: {error}"))?;
-        self.ensure_renderer().update_frame_texture_rgba(
-            &self.queue,
-            &image.rgba,
-            image.width,
-            image.height,
-        );
+        self.ensure_renderer();
+        let queue = &self.queue;
+        self.renderer
+            .as_mut()
+            .expect("renderer built above")
+            .update_frame_texture_rgba(queue, &image.rgba, image.width, image.height);
         self.last_inline_frame_id = Some(frame_id);
         Ok(true)
     }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert an image (JPEG/PNG/...) to a trd **texture** Arrow IPC stream (0.0.5).
+"""Convert an image (JPEG/PNG/...) to a trd **texture** Arrow IPC stream (0.0.6).
 
 A trd texture table is **one row = one image**, carried in a single column
 (matching ``trd_core::texture::ImageTexture::from_arrow``):
@@ -34,7 +34,8 @@ from pyarrow import ipc
 from PIL import Image
 
 PROTOCOL_VERSION_KEY = b"trd.protocol.version"
-PROTOCOL_VERSION = b"0.0.5"
+PROTOCOL_VERSION = b"0.0.6"
+TABLE_KIND_KEY = b"trd.table.kind"
 
 # The single image column of a trd texture table (see `trd_core::texture`).
 TEXTURE_COLUMN = "rgba"
@@ -79,13 +80,19 @@ def texture_batch(height, width, flat):
     storage = pa.FixedSizeListArray.from_arrays(pa.array(flat, type=pa.uint8()), n)
     array = pa.ExtensionArray.from_storage(tensor_type, storage)
     field = pa.field(TEXTURE_COLUMN, tensor_type, nullable=False)
-    schema = pa.schema([field], metadata={PROTOCOL_VERSION_KEY: PROTOCOL_VERSION})
+    schema = pa.schema(
+        [field],
+        metadata={
+            PROTOCOL_VERSION_KEY: PROTOCOL_VERSION,
+            TABLE_KIND_KEY: b"texture",
+        },
+    )
     return schema, pa.record_batch([array], schema=schema)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Convert an image to a trd texture Arrow IPC stream (0.0.5)."
+        description="Convert an image to a trd texture Arrow IPC stream (0.0.6)."
     )
     ap.add_argument("input", help="input image file (JPEG/PNG/...)")
     ap.add_argument("-o", "--output", default="-", help="output path ('-' = stdout)")

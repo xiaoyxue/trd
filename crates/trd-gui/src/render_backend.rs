@@ -168,7 +168,7 @@ mod native {
     /// The **Arrow round-trip** backend (design §5.2): the seam where an **external**
     /// producer (Python/ML/CV that consumes the interaction and computes the next
     /// matrix) could sit. Each render serializes the per-frame **params** (the
-    /// computed camera/model matrix + draw list) to a `0.0.5` Arrow stream, decodes
+    /// computed camera/model matrix + draw list) to a `0.0.6` Arrow stream, decodes
     /// it back through the real wire decoders ([`decode_params_stream`]), renders it,
     /// then serializes the resulting image to an Arrow stream ([`OutputSession`]) and
     /// decodes it back to RGBA ([`read_image_stream`]) — the exact round-trip an

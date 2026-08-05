@@ -22,7 +22,7 @@
 #   examples/render.ps1 [-CLI | -Native | -Web [-CanvasRenderer|-OffscreenRenderer]] `
 #                       [-Mesh OBJ]... [-Texture IMG] [-Wireframe] [-Aabb] [-Axes] `
 #                       [-AxesLocal] [-PlacementQuad] [-PlacementQuadColor "R G B"] `
-#                       [-FramesBase DIR] [-InputPath INPUT.jsonl] `
+#                       [-FramesBase DIR] [-FramesTable FILE] [-InputPath INPUT.jsonl] `
 #                       [-Output OUTPUT.gif|.webp] [-Width 256] [-Height 256] [-Fps 30]
 #   examples/render.ps1 INPUT.jsonl OUTPUT.gif 256 256 30   # positional
 # Defaults: examples/frames.bunny_dolly.cg.jsonl (renders assets/meshes/bunny.obj)  output/out.gif  256 256 30
@@ -43,7 +43,7 @@
 # modes (trd-cli, trd-app and the web renderer share trd-core). Only the playback
 # rate is a live URL param for -Web: append ?fps=N.
 #
-# The stream protocol is 0.0.5-only and mesh-first: every stream begins with a
+# The stream protocol is 0.0.6-only and mesh-first: every stream begins with a
 # mesh table (scripts\obj_to_arrow.py encodes the OBJ) concatenated with the
 # params stream, so trd renders the loaded mesh (centered + uniformly scaled to
 # fit) driven by InputPath. When no -Mesh (and no -PlacementQuad) is given, the
@@ -74,7 +74,7 @@
 # -PlacementQuadColor "R G B" (0..1 floats) tints it (default cyan) and implies
 # -PlacementQuad. The quad rides the mesh table, so it needs the same pyarrow
 # producer as -Mesh.
-# With -FramesBase DIR trd composites each frame's 0.0.5 background still (its
+# With -FramesBase DIR trd composites each external background still (its
 # `frame_path`, relative to DIR) BENEATH the scene via a FramePlane (#63), decoded
 # at full resolution and sampled down to the surface. Extract the stills first:
 #   uv run --with pyarrow scripts\extract_frames.py `
@@ -145,6 +145,7 @@ param(
     [ValidateSet('xy', 'xz', 'yz')][string]$GridLocal,
     [string]$GridMesh,
     [string]$FramesBase,
+    [string]$FramesTable,
     [switch]$Help,
     # Repeatable -Mesh <obj> flags land here (PowerShell can't bind a named
     # parameter more than once); they are extracted into $meshes below. Leaving
@@ -203,8 +204,11 @@ CONTENT FLAGS (apply to -CLI, -Native and -Web):
                     as the last -Mesh, drawn as a wireframe placement overlay (#77).
   -PlacementQuadColor "R G B"
                     Tint the placement quad (0..1 floats; default cyan). Implies -PlacementQuad.
-  -FramesBase DIR   Composite each frame's 0.0.5 background still (`frame_path`,
+  -FramesBase DIR   Resolve each external background still (`frame_path`,
                     relative to DIR) beneath the scene via a FramePlane (#63).
+  -FramesTable FILE Splice a 0.0.6 inline frames table before params. Params rows
+                    select resources by `frame_id`; author FILE with
+                    scripts\frames_to_arrow.py or extract_frames.py --embed.
 
 PBR SHADING (-CLI and -Native; the Disney principled BRDF, #112):
   -Pbr              Shade the bound albedo with the Disney BRDF instead of flat texturing.
@@ -339,9 +343,9 @@ if ((Test-Path $devEnv) -and -not $env:TRD_SKIP_DEV_ENV) {
 }
 
 # Binary-safe concatenation of Arrow IPC files into one stream. render.sh pipes
-# the mesh/texture/params producers into a single trd stdin; on Windows (no
+# the mesh/texture/frames/params producers into a single trd stdin; on Windows (no
 # binary-safe pipes) we stage each stage to a temp file and concatenate the bytes
-# here, reproducing the exact [mesh][texture][params] byte order trd reads.
+# here, reproducing the exact [mesh][texture?][frames?][params] byte order trd reads.
 function Join-Files([string[]]$Parts, [string]$Dest) {
     $out = [System.IO.File]::Create($Dest)
     try {
@@ -386,7 +390,7 @@ f 1 3 4
         $meshes += $quadObj
     }
 
-    # The stream protocol is mesh-first (0.0.5 requires a leading [mesh] table;
+    # The stream protocol is mesh-first (0.0.6 requires a leading [mesh] table;
     # there is no params-only fallback). When neither -Mesh nor -PlacementQuad
     # supplied a mesh, load the bunny as the default demo object so the stream is a
     # valid [mesh][params].
@@ -446,8 +450,8 @@ f 1 3 4
     }
 
     # Choose a frame producer for the params stream: scripts\jsonl_to_arrow.py via
-    # uv/python. The stream protocol is 0.0.5-only and mesh-first, so the params
-    # batch carries the model/camera/draws/frame_path columns the pyarrow producer
+    # uv/python. The stream protocol is 0.0.6-only and mesh-first, so the params
+    # batch carries the model/camera/draws/frame-source columns the pyarrow producer
     # emits (the old DuckDB 'arrow' path only understood the retired 0.0.1/0.0.2
     # center/size/theta/model columns and is gone).
     $jsonlToArrow = Join-Path $root 'scripts/jsonl_to_arrow.py'
@@ -472,7 +476,7 @@ f 1 3 4
 
     # -Texture encodes the image into a texture table via
     # scripts\texture_to_arrow.py, concatenated between the mesh table and the
-    # params ([mesh][texture][params]). Needs pyarrow + pillow + numpy; downscaled
+    # params ([mesh][texture][frames?][params]). Needs pyarrow + pillow + numpy; downscaled
     # to --max-size 2048 to stay within the portable (downlevel/WebGL2) limit.
     $textureToArrow = Join-Path $root 'scripts/texture_to_arrow.py'
     $textureProducer = $null
@@ -505,12 +509,16 @@ f 1 3 4
         }
     }
 
-    # --- Build the trd input stream: [mesh?][texture?][params] ----------------
+    # --- Build the trd input stream: [mesh][texture?][frames?][params] ---------
     $framesArrow = Join-Path $work 'frames.arrows'
     $meshArrow = Join-Path $work 'mesh.arrows'
     $textureArrow = Join-Path $work 'texture.arrows'
     $streamArrow = Join-Path $work 'stream.arrows'
     $imagesArrow = Join-Path $work 'images.arrows'
+
+    if ($FramesTable -and -not (Test-Path $FramesTable)) {
+        Write-Error "error: -FramesTable '$FramesTable' not found."
+    }
 
     # 1. Build a streaming Arrow IPC file of frame params from the JSONL via
     #    scripts\jsonl_to_arrow.py (pyarrow): the always-present `model` column
@@ -540,8 +548,9 @@ f 1 3 4
         $meshGen = Start-Process -FilePath $meshProducer -NoNewWindow -Wait -PassThru -ArgumentList $meshArgs
         if ($meshGen.ExitCode -ne 0) { throw "obj_to_arrow ($meshProducer) failed (exit $($meshGen.ExitCode))" }
 
-        # 1c. -Texture: encode the image into a texture table and splice it
-        #     between the mesh table and the params ([mesh][texture][params]).
+        # 1c. -Texture: encode the image into a texture table. Then splice an
+        #     optional pre-authored inline frames table before params.
+        $streamParts = @($meshArrow)
         if ($Texture) {
             if ($textureProducer -eq 'uv') {
                 $textureArgs = @('run', '--with', 'pyarrow', '--with', 'pillow', '--with', 'numpy', $textureToArrow, $Texture, '--max-size', '2048', '-o', $textureArrow)
@@ -551,11 +560,11 @@ f 1 3 4
             }
             $texGen = Start-Process -FilePath $textureProducer -NoNewWindow -Wait -PassThru -ArgumentList $textureArgs
             if ($texGen.ExitCode -ne 0) { throw "texture_to_arrow ($textureProducer) failed (exit $($texGen.ExitCode))" }
-            Join-Files -Parts @($meshArrow, $textureArrow, $framesArrow) -Dest $streamArrow
+            $streamParts += $textureArrow
         }
-        else {
-            Join-Files -Parts @($meshArrow, $framesArrow) -Dest $streamArrow
-        }
+        if ($FramesTable) { $streamParts += $FramesTable }
+        $streamParts += $framesArrow
+        Join-Files -Parts $streamParts -Dest $streamArrow
         $trdInput = $streamArrow
     }
     else {
@@ -599,7 +608,7 @@ f 1 3 4
         # (web/src/viewer.ts) fetches at load into web/dist:
         #   stream.arrow  — the identical bytes trd-cli reads on stdin
         #   config.json   — target renderer + scene flags + baked resolution + fps
-        #   frames/…      — the 0.0.5 background stills (copied from -FramesBase)
+        #   frames/…      — external background stills (copied from -FramesBase)
         # A small Bun static server then serves the directory; only ?fps is a live
         # URL override (the resolution is baked into the CV `k`, a positional arg).
         $webDir = Join-Path $root 'web'
@@ -713,7 +722,7 @@ Bun.serve({
         Write-Host ''
         Write-Host "trd web (wasm) server - port $port  (press Ctrl-C to stop)"
         Write-Host "  renderer: $rendererLabel"
-        Write-Host "  scene:    mode=$mode aabb=$([bool]$Aabb) axes=$([bool]$Axes) axes-local=$([bool]$AxesLocal) background=$([bool]$FramesBase)"
+        Write-Host "  scene:    mode=$mode aabb=$([bool]$Aabb) axes=$([bool]$Axes) axes-local=$([bool]$AxesLocal) external-background=$([bool]$FramesBase) inline-frames=$([bool]$FramesTable)"
         Write-Host "  stream:   ${Width}x${Height}, default ${Fps}fps  (override live with ?fps=N)"
         Write-Host ''
         Write-Host "  On this machine:        http://localhost:$port"

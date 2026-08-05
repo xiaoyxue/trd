@@ -46,9 +46,9 @@ impl From<TonemapArg> for trd_core::Tonemap {
     }
 }
 
-/// Interactive desktop viewer for a trd scene stream (protocol 0.0.5).
+/// Interactive desktop viewer for a trd scene stream (protocol 0.0.6).
 ///
-/// Reads the Arrow IPC `[mesh][texture?][params]` stream on stdin — a leading
+/// Reads the Arrow IPC `[mesh][texture?][frames?][params]` stream on stdin — a leading
 /// mesh table (then an optional texture table) followed by per-frame params +
 /// instanced draw lists — and plays it live in a window, e.g.
 /// `trd-render.sh --mesh bunny.obj … | trd-app`.
@@ -147,7 +147,7 @@ pub(crate) struct Cli {
     /// under every wireframe object (#114). Ignored without `--grid-local`.
     #[arg(long, value_name = "MESH_ID")]
     pub(crate) grid_mesh: Option<u32>,
-    /// Base directory for per-frame background images (`0.0.5`, #63). When set, a
+    /// Base directory for external per-frame background images (#63). When set, a
     /// frame's `frame_path` (relative) is joined to this dir, decoded (PNG/JPEG),
     /// and composited beneath the scene as a background frame plane. Without it,
     /// `frame_path` columns are ignored.

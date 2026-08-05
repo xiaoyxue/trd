@@ -42,7 +42,8 @@ interface RenderConfig {
   showAabb: boolean;
   showAxes: boolean;
   showLocalAxes: boolean;
-  /// Composite each frame's `frame_ref` still beneath the scene (#63).
+  /// Composite external `frame_ref` stills; inline `frame_id` resources are
+  /// composited directly by the Rust renderer.
   background: boolean;
   /// Baked render resolution (matches the stream's CV `k`, so it is fixed).
   width: number;

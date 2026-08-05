@@ -10,10 +10,10 @@
 //!
 //! The fixtures are the two-stage cornellbox *placement* demo (#77), reduced to
 //! a few frames at a small resolution by `scripts/golden_fixtures.py`. The mesh,
-//! texture, and params are embedded in one Arrow byte stream; each frame keeps
-//! its `0.0.5` `frame_path`, which the test resolves against `tests/golden/`
-//! (the committed cornellbox stills, decoded from the demo video) and composites
-//! the scene over — an AR composite over the cornellbox background:
+//! texture, inline background frames, and params are embedded in one Arrow byte
+//! stream. Params `frame_id` values select the background resource, so the
+//! fixture is self-contained while still compositing the scene over the
+//! cornellbox background:
 //!
 //! * `stage1.arrow` — the reconstructed placement quad (wireframe) + local axes;
 //! * `stage2.arrow` — a textured bunny anchored on that quad, with AABB + local
@@ -59,8 +59,7 @@ use std::sync::Mutex;
 use arrow::array::{Array, FixedSizeListArray, UInt8Array};
 use arrow::ipc::reader::StreamReader;
 use trd_core::{
-    run_stream, EnvMapData, ImageData, Msaa, PbrConfig, PbrMaterial, RenderMode, RenderOptions,
-    Tonemap,
+    run_stream, EnvMapData, Msaa, PbrConfig, PbrMaterial, RenderMode, RenderOptions, Tonemap,
 };
 
 /// Golden render resolution (16:9; the fixtures' CV `k` is rescaled to match).
@@ -119,22 +118,6 @@ fn dump_actual(name: &str, index: usize, actual: &[u8], golden: &Path) {
             let _ = img.save(dir.join(format!("{name}_frame_{index}.diff8x.png")));
         }
     }
-}
-
-/// Resolve a fixture's `frame_path` background reference against `golden/`,
-/// decoding the committed cornellbox still to RGBA — the test-side equivalent of
-/// the CLI's `--frames-base`, so the scene composites over the AR background.
-fn resolve_background(path: &str) -> Option<ImageData> {
-    let full = golden_dir().join(path);
-    let img = image::open(&full)
-        .unwrap_or_else(|e| panic!("open background still {}: {e}", full.display()))
-        .to_rgba8();
-    let (width, height) = img.dimensions();
-    Some(ImageData {
-        width,
-        height,
-        rgba: img.into_raw(),
-    })
 }
 
 /// A small, deterministic synthetic HDR environment probe (equirectangular,
@@ -223,7 +206,6 @@ fn render_fixture(fixture: &str, options: RenderOptions) -> Vec<Vec<u8>> {
         .unwrap_or_else(|e| panic!("read fixture {fixture}: {e}"));
 
     let mut out = Vec::new();
-    let resolver = resolve_background;
     {
         // Serialize the GPU work across the (otherwise parallel) `#[test]` threads.
         // Each test builds its own wgpu `Instance`/`Device` and submits an
@@ -236,15 +218,8 @@ fn render_fixture(fixture: &str, options: RenderOptions) -> Vec<Vec<u8>> {
         let _serial = GPU_SERIAL
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        run_stream(
-            &bytes[..],
-            &mut out,
-            WIDTH,
-            HEIGHT,
-            options,
-            Some(&resolver),
-        )
-        .unwrap_or_else(|e| panic!("run_stream on {fixture}: {e:?}"));
+        run_stream(&bytes[..], &mut out, WIDTH, HEIGHT, options, None)
+            .unwrap_or_else(|e| panic!("run_stream on {fixture}: {e:?}"));
     }
 
     let pixels = (WIDTH * HEIGHT) as usize;

@@ -8,16 +8,17 @@
 //! the wasm decoder rejected a stream the native decoder accepted.
 //!
 //! This test decodes the **same committed Arrow bytes** (the golden fixtures,
-//! `[mesh][texture][params]`) through both paths and asserts they yield
-//! identical per-frame `(FrameParams, draws, frame_ref)`. It needs no GPU, so —
+//! `[mesh][texture?][frames][params]`) through both paths and asserts they yield
+//! identical per-frame params, draws, external references, and decoded inline
+//! background pixels. It needs no GPU, so —
 //! unlike the golden render test — it runs in `nix flake check` (`cargo test`)
 //! and guards the decoders on every change.
 
 use std::path::{Path, PathBuf};
 
-use trd_core::{read_scene_stream_with_meta, Draw, FrameParams, InputSession};
+use trd_core::{read_scene_stream_with_meta, Draw, FrameParams, ImageData, InputSession};
 
-type Frame = (FrameParams, Vec<Draw>, Option<String>);
+type Frame = (FrameParams, Vec<Draw>, Option<String>, Option<ImageData>);
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -26,7 +27,7 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 /// Drive the whole stream (leading mesh/texture tables + params) through the
-/// native decoder, collecting the resolved `(params, draws, frame_ref)` per frame.
+/// native decoder, collecting the resolved scene and inline image per frame.
 fn native_frames(bytes: &[u8]) -> Vec<Frame> {
     let mut frames = Vec::new();
     read_scene_stream_with_meta(
@@ -34,7 +35,9 @@ fn native_frames(bytes: &[u8]) -> Vec<Frame> {
         |_meshes| {},
         |_texture| {},
         |_rate| {},
-        |params, draws, frame_ref| frames.push((params, draws, frame_ref)),
+        |params, draws, frame_ref, inline| {
+            frames.push((params, draws, frame_ref, inline.as_deref().cloned()));
+        },
     )
     .expect("native decode");
     frames
@@ -48,7 +51,17 @@ fn wasm_frames(bytes: &[u8]) -> Vec<Frame> {
     let mut frames = Vec::new();
     for batch in session.push(bytes).expect("wasm push") {
         for frame in batch {
-            frames.push((frame.params, frame.resolved_draws(), frame.frame_ref));
+            let inline = frame.frame_id.map(|id| {
+                session.frames()[id as usize]
+                    .decode()
+                    .expect("inline frame decode")
+            });
+            frames.push((
+                frame.params,
+                frame.resolved_draws(),
+                frame.frame_ref,
+                inline,
+            ));
         }
     }
     session.finish().expect("wasm finish");
@@ -76,7 +89,7 @@ fn assert_parity(fixture_name: &str) {
         assert_eq!(
             n, w,
             "{fixture_name} frame {i}: native and wasm decoders disagree \
-             on (FrameParams, draws, frame_ref)"
+             on (FrameParams, draws, frame_ref, inline pixels)"
         );
     }
 }

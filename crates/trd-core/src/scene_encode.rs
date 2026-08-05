@@ -1,11 +1,11 @@
 //! Authoring the trd **input** stream in Rust (#97, Slice 3b).
 //!
-//! `trd-core` decodes the mesh-first `[mesh][texture?][params]` input stream
+//! `trd-core` decodes the `[mesh][texture?][frames?][params]` input stream
 //! (`Mesh::from_arrow_all`, [`crate::decode_frames`], the wasm
 //! [`crate::InputSession`]) and encodes the **image output** ([`crate::OutputSession`]).
 //! The **input** stream is normally authored by the Python producers
 //! (`scripts/*_to_arrow.py`); this module authors the same
-//! `0.0.5` stream **in Rust** so an in-process front-end (the GUI's
+//! `0.0.6` stream **in Rust** so an in-process front-end (the GUI's
 //! `ArrowRoundTripRenderer`) — or any Rust producer — can drive
 //! [`crate::run_stream`] without shelling out to Python.
 //!
@@ -164,7 +164,7 @@ fn write_ipc(schema: &Schema, batch: &RecordBatch) -> Result<Vec<u8>, SceneEncod
 /// Authors the leading **mesh table** IPC stream: one row per mesh with
 /// `position`/`color` `List<FixedSizeList<Float32>[3]>`, `uv`
 /// `List<FixedSizeList<Float32>[2]>`, and `index` `List<UInt32>` columns, tagged
-/// with the `0.0.5` protocol version. Decodes back via `Mesh::from_arrow_all`.
+/// with the `0.0.6` protocol version. Decodes back via `Mesh::from_arrow_all`.
 pub fn encode_mesh_stream(meshes: &[Mesh]) -> Result<Vec<u8>, SceneEncodeError> {
     let positions: Vec<Vec<f32>> = meshes
         .iter()
@@ -208,7 +208,7 @@ pub fn encode_mesh_stream(meshes: &[Mesh]) -> Result<Vec<u8>, SceneEncodeError> 
 
 /// Authors an optional **texture table** IPC stream: a one-row `rgba`
 /// `FixedSizeList<UInt8>[H*W*4]` column bearing the `arrow.fixed_shape_tensor`
-/// extension with shape `[H, W, 4]` (interleaved RGBA), tagged with the `0.0.5`
+/// extension with shape `[H, W, 4]` (interleaved RGBA), tagged with the `0.0.6`
 /// protocol version. Placed between the mesh and params sub-streams
 /// (`[mesh][texture][params]`), it binds the albedo `run_stream` samples in
 /// [`RenderMode::Textured`]. Decodes back via `ImageTexture::from_arrow`.
@@ -283,7 +283,7 @@ fn all_or_none_f32(
 /// **all** frames set that field (Arrow columns are non-null); `draws`, when
 /// given, emits the `draw_mesh`/`draw_model` (+ `draw_mode` when any override is
 /// present) instanced-draw columns. Decodes back via [`crate::decode_frames`]
-/// and the draw decoder. Tagged with the `0.0.5` protocol version.
+/// and the draw decoder. Tagged with the `0.0.6` protocol version.
 pub fn encode_params_stream(
     frames: &[FrameParams],
     draws: Option<&[Vec<Draw>]>,
@@ -453,7 +453,17 @@ pub fn encode_frames_stream(frames: &[InlineFrame]) -> Result<Vec<u8>, SceneEnco
                 width,
                 height,
             })?;
-        let mut flat = Vec::with_capacity(expected * frames.len());
+        let capacity =
+            expected
+                .checked_mul(frames.len())
+                .ok_or(SceneEncodeError::InvalidFramePixels {
+                    row: 0,
+                    actual: expected,
+                    expected,
+                    width,
+                    height,
+                })?;
+        let mut flat = Vec::with_capacity(capacity);
         let mut valid = Vec::with_capacity(frames.len());
         for (row, frame) in frames.iter().enumerate() {
             match frame {

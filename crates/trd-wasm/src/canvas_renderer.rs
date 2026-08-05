@@ -193,7 +193,7 @@ impl CanvasRenderer {
         u32::try_from(self.frames.len()).unwrap_or(u32::MAX)
     }
 
-    /// The buffered frame's optional `0.0.5` background reference
+    /// The buffered frame's optional external background reference
     /// (`frame_path`/`frame_url`), which the JS shell resolves to RGBA and uploads
     /// via [`update_frame_texture_rgba`](Self::update_frame_texture_rgba) before
     /// [`render_index`](Self::render_index). `None` when out of range or the frame
@@ -474,33 +474,33 @@ impl CanvasRenderer {
             if acquired.reconfigure_after_present {
                 self.target.reconfigure(&self.device);
             }
-
-            fn upload_inline_frame(&mut self, frame_id: Option<u32>) -> Result<bool, JsValue> {
-                let Some(frame_id) = frame_id else {
-                    self.last_inline_frame_id = None;
-                    return Ok(false);
-                };
-                if self.last_inline_frame_id == Some(frame_id) {
-                    return Ok(true);
-                }
-                let image = self
-                    .input
-                    .frames()
-                    .get(frame_id as usize)
-                    .ok_or_else(|| js_error(format!("frame_id {frame_id} is out of range")))?
-                    .decode()
-                    .map_err(|error| js_error(format!("decode frame_id {frame_id}: {error}")))?;
-                self.ensure_renderer().update_frame_texture_rgba(
-                    &self.queue,
-                    &image.rgba,
-                    image.width,
-                    image.height,
-                );
-                self.last_inline_frame_id = Some(frame_id);
-                Ok(true)
-            }
             Ok(())
         })
+    }
+
+    fn upload_inline_frame(&mut self, frame_id: Option<u32>) -> Result<bool, JsValue> {
+        let Some(frame_id) = frame_id else {
+            self.last_inline_frame_id = None;
+            return Ok(false);
+        };
+        if self.last_inline_frame_id == Some(frame_id) {
+            return Ok(true);
+        }
+        let image = self
+            .input
+            .frames()
+            .get(frame_id as usize)
+            .ok_or_else(|| js_error(format!("frame_id {frame_id} is out of range")))?
+            .decode()
+            .map_err(|error| js_error(format!("decode frame_id {frame_id}: {error}")))?;
+        self.ensure_renderer();
+        let queue = &self.queue;
+        self.renderer
+            .as_mut()
+            .expect("renderer built above")
+            .update_frame_texture_rgba(queue, &image.rgba, image.width, image.height);
+        self.last_inline_frame_id = Some(frame_id);
+        Ok(true)
     }
 
     /// Lazily builds the mesh renderer on first use. The protocol is mesh-first,

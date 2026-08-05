@@ -166,7 +166,14 @@ impl PixelColumn<'_> {
         let rgba = if self.channels == 4 {
             bytes.values().to_vec()
         } else {
-            let mut rgba = Vec::with_capacity(self.width as usize * self.height as usize * 4);
+            let rgba_len = self
+                .expected
+                .checked_div(3)
+                .and_then(|pixels| pixels.checked_mul(4))
+                .ok_or_else(|| FrameError::Shape {
+                    shape: vec![self.height as usize, self.width as usize, self.channels],
+                })?;
+            let mut rgba = Vec::with_capacity(rgba_len);
             for rgb in bytes.values().chunks_exact(3) {
                 rgba.extend_from_slice(rgb);
                 rgba.push(255);

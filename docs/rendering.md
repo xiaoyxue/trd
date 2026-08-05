@@ -60,7 +60,7 @@ them (`… | trd --width 1024 --wireframe --aabb | …`):
 | `--pbr` | Physically-based **Disney principled BRDF** shading (see [Rendering appearance](#rendering-appearance)). |
 | `--aabb` | Overlay each drawn instance's green, thickness-controlled, anti-aliased axis-aligned **bounding box**. |
 | `--axes` / `--axes-local` | Overlay smooth R/G/B axes with cone arrowheads at the **world** origin / at **each** drawn object's own model frame. |
-| `--frames-base <dir>` | Composite each frame's **background still** (its `frame_path`, relative to `<dir>`) beneath the scene via a `FramePlane`. |
+| `--frames-base <dir>` | Resolve external `frame_path` backgrounds. Inline `frame_id` resources need no base directory. |
 | `--no-msaa` | Disable 4× MSAA (default on the mesh pass). Mesh silhouettes/wireframes become single-sampled; gizmo lines retain analytic AA. |
 | `--placement-quad`, `--grid-local xy\|xz\|yz` | AR-placement overlays used by the broadcast demos below. |
 
@@ -128,7 +128,20 @@ read-back); `--no-msaa` renders single-sampled.
 - **Background compositing** —
   [`examples/bunny_frameplane.py`](../examples/bunny_frameplane.py) authors a folder
   of animated stills + a turntable JSONL whose `frame_path` names each one;
-  `--frames-base <dir>` composites them beneath the spinning bunny.
+  `--frames-base <dir>` composites them beneath the spinning bunny. For a
+  self-contained stream, pack the stills with
+  [`scripts/frames_to_arrow.py`](../scripts/frames_to_arrow.py), replace each
+  params reference with its 0-based `frame_id`, and concatenate
+  `[mesh][frames][params]`:
+
+  ```sh
+  uv run --with pyarrow scripts/frames_to_arrow.py --storage bytes \
+    output/backgrounds/frames/*.png -o /tmp/frames.arrow
+  { scripts/obj_to_arrow.py assets/meshes/bunny.obj
+    cat /tmp/frames.arrow
+    scripts/jsonl_to_arrow.py params-with-frame_id.jsonl
+  } | cargo run -q -p trd-cli -- --width 512 --height 512
+  ```
 - **Single-view AR placement (real broadcast clips)** — the perception pipeline
   (`scripts/{nba,fiba}_perception_to_arrow.py` →
   [`examples/placement_quad_by_local_coord.py`](../examples/placement_quad_by_local_coord.py))

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Convert a trd JSONL frame-params file to a protocol 0.0.5 Arrow IPC stream.
+"""Convert a trd JSONL frame-params file to a protocol 0.0.6 Arrow IPC stream.
 
 A dependency-light pyarrow producer for examples/render.sh and render.ps1. The
-stream protocol is **0.0.5-only** (mesh-first; older 0.0.1-0.0.4 wire formats are
+stream protocol is **0.0.6-only** (mesh-first; older wire formats are
 retired and no longer produced or accepted). Each JSON line is one frame.
 
 Emitted params columns (all optional except `model`, which is always emitted):
@@ -31,6 +31,9 @@ Emitted params columns (all optional except `model`, which is always emitted):
     path) and/or `frame_url` (browser URL) name the still image the shell loads and
     composites *beneath* the scene via a `FramePlane`. Each is emitted when *any*
     row provides it; a row without one renders with no background (null).
+  * **Inline background reference** (per-frame): `frame_id` (`UInt32`) indexes
+    a row in the optional preceding frames resource table. It is mutually
+    exclusive with `frame_path` / `frame_url` on the same row.
 
 Run via:
   uv run --with pyarrow scripts/jsonl_to_arrow.py examples/frames.turntable.jsonl  # -> stdout
@@ -43,8 +46,9 @@ import sys
 import pyarrow as pa
 from pyarrow import ipc
 
-PROTOCOL_VERSION = "0.0.5"
+PROTOCOL_VERSION = "0.0.6"
 PROTOCOL_VERSION_KEY = b"trd.protocol.version"
+TABLE_KIND_KEY = b"trd.table.kind"
 FRAME_RATE_KEY = b"trd.stream.frame_rate"
 
 # Optional camera columns: (json key, fixed-size-list length).
@@ -78,7 +82,10 @@ def main() -> None:
     f32 = pa.float32()
     fsl16 = pa.list_(f32, 16)  # FixedSizeList<f32>[16] = column-major Mat4
 
-    metadata = {PROTOCOL_VERSION_KEY: PROTOCOL_VERSION.encode()}
+    metadata = {
+        PROTOCOL_VERSION_KEY: PROTOCOL_VERSION.encode(),
+        TABLE_KIND_KEY: b"params",
+    }
     if args.fps and args.fps > 0:
         metadata[FRAME_RATE_KEY] = str(args.fps).encode()
 
@@ -141,6 +148,23 @@ def main() -> None:
         if any(name in r for r in rows):
             columns.append(pa.array([r.get(name) for r in rows], type=utf8))
             fields.append((name, utf8))
+
+    if any("frame_id" in r for r in rows):
+        conflicts = [
+            i
+            for i, row in enumerate(rows)
+            if row.get("frame_id") is not None
+            and (row.get("frame_path") or row.get("frame_url"))
+        ]
+        if conflicts:
+            raise SystemExit(
+                "error: frame_id is mutually exclusive with frame_path/frame_url "
+                f"(conflict at row {conflicts[0]})"
+            )
+        columns.append(
+            pa.array([r.get("frame_id") for r in rows], type=pa.uint32())
+        )
+        fields.append(("frame_id", pa.uint32()))
 
     schema = pa.schema(fields, metadata=metadata)
     batch = pa.record_batch(columns, schema=schema)

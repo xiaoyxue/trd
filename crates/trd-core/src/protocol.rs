@@ -204,8 +204,8 @@ enum StreamKind {
 }
 
 /// Incremental decoder for the trd input protocol, mirroring the native
-/// [`crate::run_stream`] multi-stream framing but push-based for wasm. A `0.0.5`
-/// stream is mesh-first `[mesh][texture?][params]`: a leading **mesh** table
+/// [`crate::run_stream`] multi-stream framing but push-based for wasm. A `0.0.6`
+/// stream is `[mesh][texture?][frames?][params]`: a leading **mesh** table
 /// (one row = one mesh) decoded via [`Mesh::from_arrow_all`] and exposed through
 /// [`InputSession::meshes`], an optional **texture** table decoded via
 /// [`ImageTexture::from_arrow`] and exposed through [`InputSession::texture`],
@@ -613,7 +613,7 @@ mod tests {
         Arc::new(Schema::new(fields).with_metadata(metadata))
     }
 
-    /// The minimal valid 0.0.5 params schema: a single `model` column.
+    /// The minimal valid 0.0.6 params schema: a single `model` column.
     fn valid_schema(version: Option<&str>) -> Arc<Schema> {
         schema_with(version, vec![model_field()])
     }
@@ -944,7 +944,7 @@ mod tests {
         )) as ArrayRef
     }
 
-    /// Builds a one-row `0.0.5` batch of an identity `model` plus the given
+    /// Builds a one-row `0.0.6` batch of an identity `model` plus the given
     /// extra `(field, column)` pairs.
     fn camera_batch(extra: Vec<(Field, ArrayRef)>) -> RecordBatch {
         let mut fields = vec![model_field()];
@@ -1632,9 +1632,14 @@ mod tests {
             FrameParams::IDENTITY,
         ];
         let ids = [Some(0), Some(1), Some(0)];
-        let bytes =
-            crate::encode_scene_with_frames(&[mesh.clone()], &resources, &params, None, &ids)
-                .unwrap();
+        let bytes = crate::encode_scene_with_frames(
+            std::slice::from_ref(&mesh),
+            &resources,
+            &params,
+            None,
+            &ids,
+        )
+        .unwrap();
 
         let mut session = InputSession::new();
         let decoded: Vec<_> = session

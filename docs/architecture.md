@@ -47,11 +47,13 @@ Platform-agnostic wgpu logic, shared verbatim by every target:
   the mesh drawable, not a separate primitive.
 - **`stream.rs` + `protocol.rs`** — the Arrow input layer. `protocol.rs`'s
   `InputSession` is the **single framing driver** (native + wasm): it feeds byte
-  chunks through `arrow`'s `StreamDecoder`, validates the schema once (`0.0.5`
-  only), and yields one `FrameBatch` per record batch. `stream.rs` (`run_stream`
-  for the CLI, `read_scene_stream_with_meta` for the window) drives it from a
-  blocking `Read`. Only one record batch is ever in flight, so an animation of any
-  length streams in constant memory.
+  chunks through `arrow`'s `StreamDecoder`, validates explicit `0.0.6`
+  `trd.table.kind` metadata, decodes `[mesh][texture?][frames?][params]`, and
+  yields one `FrameBatch` per params record batch. `stream.rs` (`run_stream` for
+  the CLI, `read_scene_stream_with_meta` for the window) drives it from a
+  blocking `Read`. Params stay one batch in flight; optional indexed frames
+  resources are retained for playback/reuse (encoded Binary stays compressed
+  until selected).
 - **`output.rs`** — the Arrow IPC *output* serialization. `OutputSession` writes
   the `r,g,b,a` `fixed_shape_tensor<u8>` stream incrementally; `tightly_pack_rgba`
   strips GPU row padding. Shared by the CLI and the browser offscreen renderer.
