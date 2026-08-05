@@ -6,6 +6,7 @@ use arrow::datatypes::{DataType, Schema};
 use arrow::error::ArrowError;
 use arrow::ipc::reader::StreamDecoder;
 
+use crate::frame::validate_schema as validate_frames_schema;
 use crate::render::Draw;
 #[cfg(test)]
 use crate::texture::TEXTURE_COLUMN;
@@ -412,9 +413,13 @@ impl InputSession {
         };
         let kind = table_kind(schema.as_ref())?;
         self.validate_table_order(kind)?;
-        if kind == StreamKind::Params {
-            validate_schema(schema.as_ref())?;
-            self.params_schema_validated = true;
+        match kind {
+            StreamKind::Frames => validate_frames_schema(schema.as_ref())?,
+            StreamKind::Params => {
+                validate_schema(schema.as_ref())?;
+                self.params_schema_validated = true;
+            }
+            StreamKind::Mesh | StreamKind::Texture => {}
         }
         self.current_kind = Some(kind);
         Ok(())
@@ -1776,6 +1781,33 @@ mod tests {
         assert!(matches!(
             session.push(&test_stream(&[unknown_kind])),
             Err(ProtocolError::UnsupportedTableKind(kind)) if kind == "mystery"
+        ));
+    }
+
+    #[test]
+    fn schema_only_frames_table_is_validated_during_classification() {
+        let mesh = crate::Mesh::hello_triangle();
+        let schema = Schema::new(vec![Field::new("other", DataType::UInt8, false)]).with_metadata(
+            [
+                (
+                    PROTOCOL_VERSION_KEY.to_string(),
+                    PROTOCOL_VERSION.to_string(),
+                ),
+                (TABLE_KIND_KEY.to_string(), FRAMES_TABLE_KIND.to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let mut frames_stream = Vec::new();
+        let mut writer = StreamWriter::try_new(&mut frames_stream, &schema).unwrap();
+        writer.finish().unwrap();
+
+        let mut bytes = write_mesh_stream(&mesh);
+        bytes.extend(frames_stream);
+        let mut session = InputSession::new();
+        assert!(matches!(
+            session.push(&bytes),
+            Err(ProtocolError::Frames(FrameError::MissingPayloadColumns))
         ));
     }
 

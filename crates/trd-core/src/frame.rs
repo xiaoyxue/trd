@@ -5,7 +5,7 @@
 //! params rows reference resources by `frame_id`.
 
 use arrow::array::{Array, BinaryArray, FixedSizeListArray, RecordBatch, UInt8Array};
-use arrow::datatypes::DataType;
+use arrow::datatypes::{DataType, Field, Schema};
 use thiserror::Error;
 
 use crate::texture::{
@@ -46,11 +46,9 @@ impl InlineFrame {
 
     /// Decodes every row of a frames-table record batch.
     pub(crate) fn from_arrow_all(batch: &RecordBatch) -> Result<Vec<Self>, FrameError> {
+        validate_schema(batch.schema().as_ref())?;
         let encoded = optional_binary(batch)?;
         let pixels = optional_pixels(batch)?;
-        if encoded.is_none() && pixels.is_none() {
-            return Err(FrameError::MissingPayloadColumns);
-        }
 
         let mut frames = Vec::with_capacity(batch.num_rows());
         for row in 0..batch.num_rows() {
@@ -65,6 +63,7 @@ impl InlineFrame {
                 (Some(bytes), None) if bytes.is_empty() => {
                     return Err(FrameError::EmptyEncoded { row });
                 }
+
                 (Some(bytes), None) => frames.push(Self::Encoded(bytes)),
                 (None, Some(image)) => frames.push(Self::Pixels(image)),
                 (None, None) => {
@@ -77,6 +76,31 @@ impl InlineFrame {
         }
         Ok(frames)
     }
+}
+
+/// Validates a frames-table schema even when its IPC stream has no record
+/// batches. This keeps schema-only resource tables from bypassing the same
+/// payload and tensor checks applied during row decoding.
+pub(crate) fn validate_schema(schema: &Schema) -> Result<(), FrameError> {
+    let encoded = schema.field_with_name(FRAME_BYTES_COLUMN).ok();
+    if let Some(field) = encoded {
+        if field.data_type() != &DataType::Binary {
+            return Err(FrameError::ColumnType {
+                column: FRAME_BYTES_COLUMN,
+                expected: "Binary",
+                actual: field.data_type().clone(),
+            });
+        }
+    }
+
+    let pixels = schema.field_with_name(FRAME_PIXELS_COLUMN).ok();
+    if let Some(field) = pixels {
+        pixel_layout(field)?;
+    }
+    if encoded.is_none() && pixels.is_none() {
+        return Err(FrameError::MissingPayloadColumns);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Error)]
@@ -132,6 +156,13 @@ fn optional_binary(batch: &RecordBatch) -> Result<Option<&BinaryArray>, FrameErr
 
 struct PixelColumn<'a> {
     array: &'a FixedSizeListArray,
+    width: u32,
+    height: u32,
+    channels: usize,
+    expected: usize,
+}
+
+struct PixelLayout {
     width: u32,
     height: u32,
     channels: usize,
@@ -194,6 +225,37 @@ fn optional_pixels(batch: &RecordBatch) -> Result<Option<PixelColumn<'_>>, Frame
     };
     let schema = batch.schema();
     let field = schema.field(index);
+    let layout = pixel_layout(field)?;
+
+    let column = batch.column(index);
+    let array = column
+        .as_any()
+        .downcast_ref::<FixedSizeListArray>()
+        .ok_or_else(|| FrameError::ColumnType {
+            column: FRAME_PIXELS_COLUMN,
+            expected: "FixedSizeList<UInt8>",
+            actual: column.data_type().clone(),
+        })?;
+    if array.values().data_type() != &DataType::UInt8 {
+        return Err(FrameError::ColumnType {
+            column: FRAME_PIXELS_COLUMN,
+            expected: "FixedSizeList<UInt8>",
+            actual: array.data_type().clone(),
+        });
+    }
+    if array.values().null_count() > 0 {
+        return Err(FrameError::NullValues(FRAME_PIXELS_COLUMN));
+    }
+    Ok(Some(PixelColumn {
+        array,
+        width: layout.width,
+        height: layout.height,
+        channels: layout.channels,
+        expected: layout.expected,
+    }))
+}
+
+fn pixel_layout(field: &Field) -> Result<PixelLayout, FrameError> {
     let metadata = field.metadata();
     if metadata.get(EXTENSION_NAME_KEY).map(String::as_str) != Some(FIXED_SHAPE_TENSOR) {
         return Err(FrameError::NotTensor(format!(
@@ -225,41 +287,35 @@ fn optional_pixels(batch: &RecordBatch) -> Result<Option<PixelColumn<'_>>, Frame
             shape: shape.clone(),
         })?;
 
-    let column = batch.column(index);
-    let array = column
-        .as_any()
-        .downcast_ref::<FixedSizeListArray>()
-        .ok_or_else(|| FrameError::ColumnType {
+    let DataType::FixedSizeList(item, list_size) = field.data_type() else {
+        return Err(FrameError::ColumnType {
             column: FRAME_PIXELS_COLUMN,
             expected: "FixedSizeList<UInt8>",
-            actual: column.data_type().clone(),
-        })?;
-    if array.value_length() as usize != expected {
+            actual: field.data_type().clone(),
+        });
+    };
+    if item.data_type() != &DataType::UInt8 {
+        return Err(FrameError::ColumnType {
+            column: FRAME_PIXELS_COLUMN,
+            expected: "FixedSizeList<UInt8>",
+            actual: field.data_type().clone(),
+        });
+    }
+    if *list_size as usize != expected {
         return Err(FrameError::ByteLength {
-            actual: array.value_length() as usize,
+            actual: *list_size as usize,
             expected,
             width,
             height,
             channels,
         });
     }
-    if array.values().data_type() != &DataType::UInt8 {
-        return Err(FrameError::ColumnType {
-            column: FRAME_PIXELS_COLUMN,
-            expected: "FixedSizeList<UInt8>",
-            actual: array.data_type().clone(),
-        });
-    }
-    if array.values().null_count() > 0 {
-        return Err(FrameError::NullValues(FRAME_PIXELS_COLUMN));
-    }
-    Ok(Some(PixelColumn {
-        array,
+    Ok(PixelLayout {
         width,
         height,
         channels,
         expected,
-    }))
+    })
 }
 
 #[cfg(test)]
@@ -456,6 +512,36 @@ mod tests {
         assert!(matches!(
             InlineFrame::from_arrow_all(&batch),
             Err(FrameError::MissingPayloadColumns)
+        ));
+    }
+
+    #[test]
+    fn schema_only_validation_rejects_missing_payloads() {
+        let schema = Schema::new(vec![Field::new("other", DataType::UInt8, false)]);
+        assert!(matches!(
+            validate_schema(&schema),
+            Err(FrameError::MissingPayloadColumns)
+        ));
+    }
+
+    #[test]
+    fn schema_only_validation_rejects_malformed_tensor() {
+        let field = Field::new(
+            FRAME_PIXELS_COLUMN,
+            DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, false)), 4),
+            true,
+        )
+        .with_metadata(
+            unchecked_pixel_field(&[1, 1, 4], 4, false)
+                .metadata()
+                .clone(),
+        );
+        assert!(matches!(
+            validate_schema(&Schema::new(vec![field])),
+            Err(FrameError::ColumnType {
+                column: FRAME_PIXELS_COLUMN,
+                ..
+            })
         ));
     }
 
