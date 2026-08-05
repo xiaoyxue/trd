@@ -8,7 +8,7 @@ use super::{GizmoLineVertex, GridPlane, Vertex};
 pub(crate) const AABB_COLOR: [f32; 3] = [0.0, 1.0, 0.0];
 
 /// Pixel width of AABB edges.
-pub(crate) const AABB_LINE_WIDTH_PX: f32 = 1.5;
+pub(crate) const AABB_LINE_WIDTH_PX: f32 = 1.2;
 
 /// The 12 edges of an axis-aligned box, indexing
 /// the 8 corners in the order produced by [`crate::math::Aabb3::corners`]
@@ -278,7 +278,7 @@ mod tests {
         assert!(grid
             .iter()
             .all(|vertex| vertex.extrusion[2] == GRID_LINE_WIDTH_PX));
-        assert_eq!(aabb[0].extrusion[2], grid[0].extrusion[2]);
+        assert!(aabb[0].extrusion[2] < grid[0].extrusion[2]);
         assert!(aabb[0].extrusion[2] < axes[0].extrusion[2]);
     }
 
