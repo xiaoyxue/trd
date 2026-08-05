@@ -7,9 +7,9 @@ use super::{GizmoLineVertex, GridPlane, Vertex};
 /// out against the default white mesh.
 pub(crate) const AABB_COLOR: [f32; 3] = [0.0, 1.0, 0.0];
 
-/// Pixel width of AABB edges. Kept at the restrained grid weight so the box
-/// frames an object without competing with it; axis shafts remain bolder.
-pub(crate) const AABB_LINE_WIDTH_PX: f32 = 1.5;
+/// Pixel width of AABB edges. Kept at the established bold overlay weight while
+/// remaining slightly lighter than the coordinate-axis shafts.
+pub(crate) const AABB_LINE_WIDTH_PX: f32 = 2.5;
 
 /// The 12 edges of an axis-aligned box, indexing
 /// the 8 corners in the order produced by [`crate::math::Aabb3::corners`]
@@ -279,7 +279,7 @@ mod tests {
         assert!(grid
             .iter()
             .all(|vertex| vertex.extrusion[2] == GRID_LINE_WIDTH_PX));
-        assert_eq!(aabb[0].extrusion[2], grid[0].extrusion[2]);
+        assert!(aabb[0].extrusion[2] > grid[0].extrusion[2]);
         assert!(aabb[0].extrusion[2] < axes[0].extrusion[2]);
     }
 
