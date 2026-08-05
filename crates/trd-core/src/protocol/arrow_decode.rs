@@ -23,14 +23,17 @@ use crate::{CameraFormError, FrameParams};
 use super::{ProtocolError, PROTOCOL_VERSION_KEY, SUPPORTED_INPUT_VERSIONS};
 
 /// Validates a schema's declared protocol version against
-/// [`SUPPORTED_INPUT_VERSIONS`] (absent metadata is allowed for legacy streams).
+/// [`SUPPORTED_INPUT_VERSIONS`]. The current protocol is deliberately not
+/// backward compatible, so missing version metadata is rejected too.
 /// The single version check shared by the wasm decoder and the native
 /// [`crate::run_stream`] (which maps [`ProtocolError`] to its `StreamError`).
 pub(crate) fn check_version(schema: &Schema) -> Result<(), ProtocolError> {
-    if let Some(version) = schema.metadata().get(PROTOCOL_VERSION_KEY) {
-        if !SUPPORTED_INPUT_VERSIONS.contains(&version.as_str()) {
-            return Err(ProtocolError::UnsupportedVersion(version.clone()));
-        }
+    let version = schema
+        .metadata()
+        .get(PROTOCOL_VERSION_KEY)
+        .ok_or(ProtocolError::MissingMetadata(PROTOCOL_VERSION_KEY))?;
+    if !SUPPORTED_INPUT_VERSIONS.contains(&version.as_str()) {
+        return Err(ProtocolError::UnsupportedVersion(version.clone()));
     }
     Ok(())
 }
@@ -43,32 +46,83 @@ pub(crate) fn check_version(schema: &Schema) -> Result<(), ProtocolError> {
 pub(crate) fn decode_frame_refs(
     batch: &RecordBatch,
 ) -> Result<Option<Vec<Option<String>>>, ProtocolError> {
-    let (name, col) = match batch
-        .column_by_name("frame_path")
-        .map(|c| ("frame_path", c))
-        .or_else(|| batch.column_by_name("frame_url").map(|c| ("frame_url", c)))
-    {
-        Some(pair) => pair,
-        None => return Ok(None),
-    };
-    let strings =
-        col.as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or_else(|| ProtocolError::ColumnType {
-                column: name,
-                expected: "Utf8",
-                actual: col.data_type().clone(),
-            })?;
+    let path = optional_string(batch, "frame_path")?;
+    let url = optional_string(batch, "frame_url")?;
+    if path.is_none() && url.is_none() {
+        return Ok(None);
+    }
     let refs = (0..batch.num_rows())
         .map(|row| {
-            if strings.is_null(row) || strings.value(row).is_empty() {
-                None
-            } else {
-                Some(strings.value(row).to_owned())
-            }
+            nonempty_string(path, row)
+                .or_else(|| nonempty_string(url, row))
+                .map(str::to_owned)
         })
         .collect();
     Ok(Some(refs))
+}
+
+fn optional_string<'a>(
+    batch: &'a RecordBatch,
+    name: &'static str,
+) -> Result<Option<&'a StringArray>, ProtocolError> {
+    let Some(column) = batch.column_by_name(name) else {
+        return Ok(None);
+    };
+    column
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .map(Some)
+        .ok_or_else(|| ProtocolError::ColumnType {
+            column: name,
+            expected: "Utf8",
+            actual: column.data_type().clone(),
+        })
+}
+
+fn nonempty_string(column: Option<&StringArray>, row: usize) -> Option<&str> {
+    let column = column?;
+    (!column.is_null(row) && !column.value(row).is_empty()).then(|| column.value(row))
+}
+
+/// Decodes nullable `frame_id` values and validates that every non-null ID
+/// addresses the preceding frames table.
+pub(crate) fn decode_frame_ids(
+    batch: &RecordBatch,
+    frames_table_present: bool,
+    frame_count: usize,
+) -> Result<Option<Vec<Option<u32>>>, ProtocolError> {
+    let Some(column) = batch.column_by_name("frame_id") else {
+        return Ok(None);
+    };
+    let ids = column
+        .as_any()
+        .downcast_ref::<UInt32Array>()
+        .ok_or_else(|| ProtocolError::ColumnType {
+            column: "frame_id",
+            expected: "UInt32",
+            actual: column.data_type().clone(),
+        })?;
+
+    let mut decoded = Vec::with_capacity(batch.num_rows());
+    for row in 0..batch.num_rows() {
+        if ids.is_null(row) {
+            decoded.push(None);
+            continue;
+        }
+        let frame_id = ids.value(row);
+        if !frames_table_present {
+            return Err(ProtocolError::MissingFramesTable { row, frame_id });
+        }
+        if frame_id as usize >= frame_count {
+            return Err(ProtocolError::FrameIdOutOfRange {
+                row,
+                frame_id,
+                frame_count,
+            });
+        }
+        decoded.push(Some(frame_id));
+    }
+    Ok(Some(decoded))
 }
 
 /// Decodes the optional per-frame **instanced draw list** columns `draw_mesh`
@@ -246,6 +300,30 @@ pub(crate) fn validate_schema(schema: &Schema) -> Result<(), ProtocolError> {
     for name in ["fovy", "aspect", "znear", "zfar"] {
         if let Ok(field) = schema.field_with_name(name) {
             validate_f32_field(field, static_name(name))?;
+        }
+    }
+    if let Ok(field) = schema.field_with_name("frame_id") {
+        if field.data_type() != &DataType::UInt32 {
+            return Err(ProtocolError::ColumnType {
+                column: "frame_id",
+                expected: "UInt32",
+                actual: field.data_type().clone(),
+            });
+        }
+    }
+    for name in ["frame_path", "frame_url"] {
+        if let Ok(field) = schema.field_with_name(name) {
+            if field.data_type() != &DataType::Utf8 {
+                return Err(ProtocolError::ColumnType {
+                    column: if name == "frame_path" {
+                        "frame_path"
+                    } else {
+                        "frame_url"
+                    },
+                    expected: "Utf8",
+                    actual: field.data_type().clone(),
+                });
+            }
         }
     }
     Ok(())

@@ -21,6 +21,7 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::DataType;
 use arrow::error::ArrowError;
 use std::io::{Read, Write};
+use std::sync::Arc;
 
 // `Schema` is only referenced by the `#[cfg(test)]` decode wrappers + unit tests.
 #[cfg(test)]
@@ -121,6 +122,9 @@ pub enum StreamError {
     /// The optional leading texture table could not be decoded.
     #[error("texture decode error: {0}")]
     Texture(#[from] crate::TextureError),
+    /// The optional inline frames table or a selected encoded frame failed to decode.
+    #[error("inline frame decode error: {0}")]
+    Frames(#[from] crate::FrameError),
     #[error(transparent)]
     Output(#[from] crate::OutputError),
 }
@@ -149,6 +153,7 @@ impl From<ProtocolError> for StreamError {
             ProtocolError::UnsupportedVersion(v) => StreamError::UnsupportedVersion(v),
             ProtocolError::Mesh(e) => StreamError::Mesh(e),
             ProtocolError::Texture(e) => StreamError::Texture(e),
+            ProtocolError::Frames(e) => StreamError::Frames(e),
             ProtocolError::MismatchedDrawLists {
                 row,
                 mesh_len,
@@ -174,7 +179,15 @@ impl From<ProtocolError> for StreamError {
             other @ (ProtocolError::SessionFinished
             | ProtocolError::SessionFailed
             | ProtocolError::MissingSchema
-            | ProtocolError::NoProgress) => StreamError::Render(other.to_string()),
+            | ProtocolError::NoProgress
+            | ProtocolError::MissingMetadata(_)
+            | ProtocolError::UnsupportedTableKind(_)
+            | ProtocolError::UnexpectedTable { .. }
+            | ProtocolError::MissingFramesTable { .. }
+            | ProtocolError::FrameIdOutOfRange { .. }
+            | ProtocolError::ConflictingFrameSources { .. }) => {
+                StreamError::Render(other.to_string())
+            }
         }
     }
 }
@@ -309,7 +322,7 @@ pub fn read_scene_stream_with_meta<R: Read>(
     on_meshes: impl FnOnce(Vec<Mesh>),
     on_texture: impl FnOnce(Option<ImageTexture>),
     on_meta: impl FnOnce(f64),
-    mut on_frame: impl FnMut(FrameParams, Vec<Draw>, Option<String>),
+    mut on_frame: impl FnMut(FrameParams, Vec<Draw>, Option<String>, Option<Arc<crate::ImageData>>),
 ) -> Result<(), StreamError> {
     let mut session = crate::InputSession::new();
     // FnOnce callbacks fired exactly once, when the params schema is first
@@ -320,6 +333,8 @@ pub fn read_scene_stream_with_meta<R: Read>(
     let mut on_meta = Some(on_meta);
     let mut mesh_count = 0usize;
     let mut ready = false;
+    let mut last_inline_id = None;
+    let mut last_inline_image = None;
 
     let mut buf = [0u8; 64 * 1024];
     loop {
@@ -350,7 +365,14 @@ pub fn read_scene_stream_with_meta<R: Read>(
         for batch in batches {
             for frame in batch {
                 let draws = resolve_frame_draws(&frame, mesh_count)?;
-                on_frame(frame.params, draws, frame.frame_ref);
+                let inline = resolve_inline_frame(
+                    frame.frame_id,
+                    session.frames(),
+                    &mut last_inline_id,
+                    &mut last_inline_image,
+                )?
+                .map(|(image, _changed)| image);
+                on_frame(frame.params, draws, frame.frame_ref, inline);
             }
         }
     }
@@ -372,6 +394,31 @@ pub fn read_scene_stream_with_meta<R: Read>(
 /// background plane (the shell decides how to report the miss).
 pub type FrameResolver<'a> = &'a dyn Fn(&str) -> Option<crate::texture::ImageData>;
 
+fn resolve_inline_frame(
+    frame_id: Option<u32>,
+    frames: &[crate::InlineFrame],
+    last_id: &mut Option<u32>,
+    last_image: &mut Option<Arc<crate::ImageData>>,
+) -> Result<Option<(Arc<crate::ImageData>, bool)>, StreamError> {
+    let Some(frame_id) = frame_id else {
+        *last_id = None;
+        *last_image = None;
+        return Ok(None);
+    };
+    if *last_id == Some(frame_id) {
+        return Ok(last_image.clone().map(|image| (image, false)));
+    }
+    let resource = frames.get(frame_id as usize).ok_or_else(|| {
+        StreamError::Render(format!(
+            "frame_id {frame_id} escaped protocol range validation"
+        ))
+    })?;
+    let image = Arc::new(resource.decode()?);
+    *last_id = Some(frame_id);
+    *last_image = Some(image.clone());
+    Ok(Some((image, true)))
+}
+
 /// Renders one decoded [`FrameBatch`](crate::FrameBatch) and writes its output
 /// batch, mirroring one Arrow output batch per input record batch. When
 /// `frame_resolver` is `Some`, a frame carrying a `frame_path`/`frame_url`
@@ -383,8 +430,11 @@ fn render_and_write_batch<W: Write>(
     renderer: &mut BatchRenderer,
     output_session: &mut OutputSession,
     batch: &crate::FrameBatch,
+    inline_frames: &[crate::InlineFrame],
     frame_resolver: Option<FrameResolver>,
     last_frame_ref: &mut Option<String>,
+    last_inline_id: &mut Option<u32>,
+    last_inline_image: &mut Option<Arc<crate::ImageData>>,
     output: &mut W,
 ) -> Result<(), StreamError> {
     let mesh_count = renderer.mesh_count();
@@ -392,7 +442,18 @@ fn render_and_write_batch<W: Write>(
     for frame in batch {
         let draws = resolve_frame_draws(frame, mesh_count)?;
         let mut frame_fit = None;
-        if let (Some(path), Some(resolve)) = (frame.frame_ref.as_deref(), frame_resolver) {
+        if let Some((image, changed)) = resolve_inline_frame(
+            frame.frame_id,
+            inline_frames,
+            last_inline_id,
+            last_inline_image,
+        )? {
+            if changed {
+                renderer.update_frame_texture(&image);
+            }
+            *last_frame_ref = None;
+            frame_fit = Some(FrameFit::Stretch);
+        } else if let (Some(path), Some(resolve)) = (frame.frame_ref.as_deref(), frame_resolver) {
             if last_frame_ref.as_deref() != Some(path) {
                 if let Some(image) = resolve(path) {
                     renderer.update_frame_texture(&image);
@@ -402,6 +463,8 @@ fn render_and_write_batch<W: Write>(
             } else {
                 frame_fit = Some(FrameFit::Stretch);
             }
+        } else {
+            *last_frame_ref = None;
         }
         planes.push(renderer.render_frame(frame.params, &draws, frame_fit)?);
     }
@@ -513,6 +576,8 @@ pub fn run_stream<R: Read, W: Write>(
     // The background currently uploaded, so consecutive frames sharing it skip
     // the decode + re-upload.
     let mut last_frame_ref: Option<String> = None;
+    let mut last_inline_id: Option<u32> = None;
+    let mut last_inline_image: Option<Arc<crate::ImageData>> = None;
 
     let mut buf = [0u8; 64 * 1024];
     loop {
@@ -564,8 +629,11 @@ pub fn run_stream<R: Read, W: Write>(
                     renderer,
                     output_session,
                     batch,
+                    session.frames(),
                     frame_resolver,
                     &mut last_frame_ref,
+                    &mut last_inline_id,
+                    &mut last_inline_image,
                     &mut output,
                 )?;
             }
@@ -585,7 +653,9 @@ pub fn run_stream<R: Read, W: Write>(
 mod tests {
     use super::*;
     use crate::math::Matrix4;
-    use crate::protocol::PROTOCOL_VERSION_KEY;
+    use crate::protocol::{
+        MESH_TABLE_KIND, PARAMS_TABLE_KIND, PROTOCOL_VERSION_KEY, TABLE_KIND_KEY,
+    };
     use crate::render::{build_scene, DrawableObject};
     use arrow::array::{
         Array, ArrayRef, FixedSizeListArray, FixedSizeListArray as U8List, Float32Array, ListArray,
@@ -605,10 +675,13 @@ mod tests {
             .collect();
         let schema = Arc::new(
             Schema::new(vec![model_field()]).with_metadata(
-                [(
-                    PROTOCOL_VERSION_KEY.to_string(),
-                    PROTOCOL_VERSION.to_string(),
-                )]
+                [
+                    (
+                        PROTOCOL_VERSION_KEY.to_string(),
+                        PROTOCOL_VERSION.to_string(),
+                    ),
+                    (TABLE_KIND_KEY.to_string(), PARAMS_TABLE_KIND.to_string()),
+                ]
                 .into_iter()
                 .collect(),
             ),
@@ -1226,8 +1299,12 @@ mod tests {
     }
 
     #[test]
-    fn version_check_allows_absent_and_matching() {
-        assert!(check_version(&Schema::empty()).is_ok());
+    fn version_check_rejects_absent_and_allows_matching() {
+        assert!(matches!(
+            check_version(&Schema::empty()),
+            Err(StreamError::Render(message))
+                if message.contains(PROTOCOL_VERSION_KEY)
+        ));
         let versioned = Schema::empty().with_metadata(
             [(
                 PROTOCOL_VERSION_KEY.to_string(),
@@ -1296,10 +1373,13 @@ mod tests {
             ),
         ])
         .with_metadata(
-            [(
-                PROTOCOL_VERSION_KEY.to_string(),
-                PROTOCOL_VERSION.to_string(),
-            )]
+            [
+                (
+                    PROTOCOL_VERSION_KEY.to_string(),
+                    PROTOCOL_VERSION.to_string(),
+                ),
+                (TABLE_KIND_KEY.to_string(), MESH_TABLE_KIND.to_string()),
+            ]
             .into_iter()
             .collect(),
         );
@@ -1354,14 +1434,6 @@ mod tests {
         session.finish().unwrap();
         assert_eq!(session.meshes(), &[mesh]);
         assert_eq!(decoded, frames);
-    }
-
-    #[test]
-    fn params_stream_is_not_mesh_schema() {
-        let mut bytes = Vec::new();
-        write_params_stream(&mut bytes, &[FrameParams::IDENTITY]);
-        let reader = StreamReader::try_new(bytes.as_slice(), None).unwrap();
-        assert!(!crate::protocol::is_mesh_schema(reader.schema().as_ref()));
     }
 
     #[test]

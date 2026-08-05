@@ -5,6 +5,7 @@
 //! target and call into this crate.
 
 mod camera;
+mod frame;
 mod math;
 mod mesh;
 mod output;
@@ -14,6 +15,7 @@ mod scene_encode;
 mod texture;
 
 pub use camera::{Camera, DEFAULT_FIT_MARGIN, DEFAULT_FOV_Y, DEFAULT_VIEW_DIR};
+pub use frame::{FrameError, InlineFrame, FRAME_BYTES_COLUMN, FRAME_PIXELS_COLUMN};
 pub use math::{
     Aabb2, Aabb3, Matrix3, Matrix4, Normal3, Point2, Point3, Point4, Rotation, Scalar, ToWgsl,
     Transform, Vector2, Vector3, Vector4, EPSILON,
@@ -23,6 +25,7 @@ pub use output::{output_schema, read_image_stream, tightly_pack_rgba, OutputErro
 pub use protocol::{
     decode_params_stream, frame_rate_from_metadata, DecodedFrame, FrameBatch, InputSession,
     ProtocolError, DEFAULT_FRAME_RATE, FRAME_RATE_KEY, PROTOCOL_VERSION, PROTOCOL_VERSION_KEY,
+    TABLE_KIND_KEY,
 };
 pub use render::{
     build_scene, create_instance, create_mesh_pipeline, plane_grid_overlays,
@@ -36,7 +39,9 @@ pub use render::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use render::BatchRenderer;
 pub use scene_encode::{
-    encode_mesh_stream, encode_params_stream, encode_scene, encode_texture_stream, SceneEncodeError,
+    encode_frames_stream, encode_mesh_stream, encode_params_stream,
+    encode_params_stream_with_frame_ids, encode_scene, encode_scene_with_frames,
+    encode_texture_stream, SceneEncodeError,
 };
 pub use texture::{
     ConstantTexture, ImageData, ImageTexture, Texture, TextureError, TEXTURE_COLUMN,

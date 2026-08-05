@@ -20,6 +20,11 @@ tobj = { version = "4", default-features = false }
 # Oneshot channel for the shared offscreen readback (`render/offscreen.rs`): the
 # map callback signals completion on both native and wasm (pure Rust, no I/O).
 futures-channel = "0.3"
+# Inline frame resources are decoded identically in native and wasm builds.
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 pollster = "0.4"
@@ -27,9 +32,3 @@ pollster = "0.4"
 [dev-dependencies]
 proptest = "1"
 approx = "0.5"
-# Golden e2e render test (#88): decode/encode + compare the committed golden
-# PNGs. Only compiled for tests, so it never enters the production graph.
-image = { version = "0.25", default-features = false, features = [
-    "png",
-    "jpeg",
-] }

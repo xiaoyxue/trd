@@ -68,12 +68,14 @@ pub(crate) fn spawn_stdin_reader(tx: mpsc::Sender<StreamMsg>, frames_base: Optio
                 |rate| {
                     let _ = rate_tx.send(StreamMsg::Rate(rate));
                 },
-                |params, draws, frame_ref| {
-                    let frame_image = frame_ref
-                        .as_deref()
-                        .zip(frames_base.as_ref())
-                        .and_then(|(rel, base)| load_frame_image(&base.join(rel)))
-                        .map(Arc::new);
+                |params, draws, frame_ref, inline_frame| {
+                    let frame_image = inline_frame.or_else(|| {
+                        frame_ref
+                            .as_deref()
+                            .zip(frames_base.as_ref())
+                            .and_then(|(rel, base)| load_frame_image(&base.join(rel)))
+                            .map(Arc::new)
+                    });
                     let _ = tx.send(StreamMsg::Frame(Box::new(FrameData {
                         params,
                         draws,
