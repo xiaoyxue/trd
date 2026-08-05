@@ -61,6 +61,8 @@ pub struct OffscreenRenderer {
     frames: Vec<DecodedFrame>,
     /// Last inline frames-table resource uploaded to the frame-plane texture.
     last_inline_frame_id: Option<u32>,
+    /// An external/manual upload waiting to be consumed by the next render.
+    external_frame_ready: bool,
     output: OutputSession,
     state: RendererState,
 }
@@ -106,6 +108,7 @@ impl OffscreenRenderer {
             input: InputSession::new(),
             frames: Vec::new(),
             last_inline_frame_id: None,
+            external_frame_ready: false,
             output,
             state: RendererState::Open,
         })
@@ -298,6 +301,7 @@ impl OffscreenRenderer {
             .expect("renderer built above")
             .update_frame_texture_rgba(queue, rgba, width, height);
         self.last_inline_frame_id = None;
+        self.external_frame_ready = true;
         Ok(())
     }
 
@@ -434,6 +438,7 @@ impl OffscreenRenderer {
         }
         let params = frame.params;
         let has_inline_frame = self.upload_inline_frame(frame.frame_id)?;
+        let has_external_frame = std::mem::take(&mut self.external_frame_ready);
         // Explicit wire draw list ⇒ drawn verbatim (an empty list ⇒ background
         // only); an absent draw list ⇒ one instance of mesh 0 placed by the
         // frame's own model (legacy single-object behavior).
@@ -456,7 +461,8 @@ impl OffscreenRenderer {
             self.show_local_axes,
             None,
             None,
-            (has_inline_frame || self.composite_frame).then_some(FrameFit::Stretch),
+            (has_inline_frame || (self.composite_frame && has_external_frame))
+                .then_some(FrameFit::Stretch),
         );
         Ok((params, scene))
     }
@@ -466,6 +472,7 @@ impl OffscreenRenderer {
             self.last_inline_frame_id = None;
             return Ok(false);
         };
+        self.external_frame_ready = false;
         if self.last_inline_frame_id == Some(frame_id) {
             return Ok(true);
         }

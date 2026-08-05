@@ -61,6 +61,9 @@ pub enum SceneEncodeError {
     /// An encoded frame payload cannot be empty.
     #[error("encoded frame resource {row} is empty")]
     EmptyEncodedFrame { row: usize },
+    /// Raw frame dimensions must be non-zero.
+    #[error("raw frame resource {row} has invalid dimensions {width}x{height}")]
+    InvalidFrameDimensions { row: usize, width: u32, height: u32 },
     /// Raw frame pixels do not match their declared dimensions.
     #[error(
         "raw frame resource {row} has {actual} RGBA bytes; expected {expected} for \
@@ -435,6 +438,13 @@ pub fn encode_frames_stream(frames: &[InlineFrame]) -> Result<Vec<u8>, SceneEnco
     }
 
     if let Some((width, height)) = pixel_shape {
+        if width == 0 || height == 0 {
+            let row = frames
+                .iter()
+                .position(|frame| matches!(frame, InlineFrame::Pixels(_)))
+                .expect("pixel_shape came from a pixel frame");
+            return Err(SceneEncodeError::InvalidFrameDimensions { row, width, height });
+        }
         let expected = (width as usize)
             .checked_mul(height as usize)
             .and_then(|pixels| pixels.checked_mul(4))
@@ -745,5 +755,22 @@ mod tests {
         };
         let err = encode_params_stream(&[frame], Some(&[])).unwrap_err();
         assert!(matches!(err, SceneEncodeError::DrawsLengthMismatch { .. }));
+    }
+
+    #[test]
+    fn frames_encoder_rejects_zero_dimensions() {
+        let frame = InlineFrame::Pixels(crate::ImageData {
+            width: 0,
+            height: 1,
+            rgba: Vec::new(),
+        });
+        assert!(matches!(
+            encode_frames_stream(&[frame]),
+            Err(SceneEncodeError::InvalidFrameDimensions {
+                row: 0,
+                width: 0,
+                height: 1
+            })
+        ));
     }
 }

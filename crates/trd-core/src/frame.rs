@@ -243,6 +243,13 @@ fn optional_pixels(batch: &RecordBatch) -> Result<Option<PixelColumn<'_>>, Frame
             channels,
         });
     }
+    if array.values().data_type() != &DataType::UInt8 {
+        return Err(FrameError::ColumnType {
+            column: FRAME_PIXELS_COLUMN,
+            expected: "FixedSizeList<UInt8>",
+            actual: array.data_type().clone(),
+        });
+    }
     if array.values().null_count() > 0 {
         return Err(FrameError::NullValues(FRAME_PIXELS_COLUMN));
     }
@@ -260,7 +267,7 @@ mod tests {
     use std::io::Cursor;
     use std::sync::Arc;
 
-    use arrow::array::{ArrayRef, BinaryArray};
+    use arrow::array::{ArrayRef, BinaryArray, Float32Array};
     use arrow::buffer::{BooleanBuffer, NullBuffer};
     use arrow::datatypes::{Field, Schema};
     use arrow_schema::extension::FixedShapeTensor;
@@ -584,6 +591,40 @@ mod tests {
         assert!(matches!(
             InlineFrame::from_arrow_all(&batch),
             Err(FrameError::NullValues(FRAME_PIXELS_COLUMN))
+        ));
+    }
+
+    #[test]
+    fn all_null_tensor_still_validates_child_type() {
+        let png = encoded_image(ImageFormat::Png);
+        let bytes = BinaryArray::from(vec![Some(png.as_slice())]);
+        let pixel_array = FixedSizeListArray::new(
+            Arc::new(Field::new("item", DataType::Float32, false)),
+            4,
+            Arc::new(Float32Array::from(vec![0.0; 4])),
+            Some(NullBuffer::new_null(1)),
+        );
+        let metadata = unchecked_pixel_field(&[1, 1, 4], 4, false)
+            .metadata()
+            .clone();
+        let pixel_field = Field::new(
+            FRAME_PIXELS_COLUMN,
+            DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, false)), 4),
+            true,
+        )
+        .with_metadata(metadata);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(FRAME_BYTES_COLUMN, DataType::Binary, true),
+            pixel_field,
+        ]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(bytes), Arc::new(pixel_array)]).unwrap();
+        assert!(matches!(
+            InlineFrame::from_arrow_all(&batch),
+            Err(FrameError::ColumnType {
+                column: FRAME_PIXELS_COLUMN,
+                ..
+            })
         ));
     }
 }
