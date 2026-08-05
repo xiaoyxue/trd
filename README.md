@@ -204,7 +204,8 @@ then edits *that* object. Everything is **per-object**:
   object (or orbit the camera), with an optional **axis lock** (X/Y/Z) and numeric
   widgets kept in sync with the mouse;
 - **Render mode** — Filled / Wireframe / Textured / **PBR**, chosen per object;
-- **PBR material** — metallic / roughness / tone-map, edited live per object;
+- **PBR appearance** — typed Disney material, IBL intensity, and tone-map,
+  edited live per object;
 - **Diffuse texture** — each object skins its own albedo;
 - **Overlays** — smooth, thickness-controlled bounding boxes/grids and
   arrowheaded world/local axes.

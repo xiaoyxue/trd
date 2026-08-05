@@ -1,10 +1,10 @@
 use trd_core::{
-    build_scene, DecodedFrame, Draw, EnvMapData, FrameFit, MeshRenderer, OnscreenTarget,
-    PbrMaterial, RenderMode, Tonemap,
+    build_scene, DecodedFrame, DisneyMaterial, Draw, EnvMapData, FrameFit, ImageBasedLighting,
+    Lighting, MeshRenderer, OnscreenTarget, RenderMode, ToneMapping, Tonemap,
 };
 use wasm_bindgen::prelude::*;
 
-use crate::js_error;
+use crate::{js_error, PbrState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CanvasState {
@@ -44,11 +44,11 @@ pub struct CanvasRenderer {
     /// until a background is uploaded via
     /// [`update_frame_texture_rgba`](Self::update_frame_texture_rgba).
     composite_frame: bool,
-    /// The global Disney [`PbrMaterial`] for [`RenderMode::Pbr`] draws, set via
+    /// The typed Disney PBR configuration for [`RenderMode::Pbr`] draws, set via
     /// [`set_pbr_material`](Self::set_pbr_material) before the first frame and
     /// applied when the renderer is built (the browser twin of trd-cli's
     /// `--metallic/--roughness/…` flags). `None` ⇒ the renderer's default.
-    pbr_material: Option<PbrMaterial>,
+    pbr: Option<PbrState>,
     /// The decoded equirectangular HDR environment probe reflected by
     /// [`RenderMode::Pbr`] draws, set via [`set_env_map_hdr`](Self::set_env_map_hdr)
     /// and applied when the renderer is built. `None` ⇒ no probe reflection.
@@ -115,7 +115,7 @@ impl CanvasRenderer {
             show_axes: false,
             show_local_axes: false,
             composite_frame: false,
-            pbr_material: None,
+            pbr: None,
             env_map: None,
             instance,
             canvas,
@@ -283,7 +283,7 @@ impl CanvasRenderer {
         };
     }
 
-    /// Sets the global Disney [`PbrMaterial`] applied to every
+    /// Sets the typed Disney PBR configuration applied to every
     /// [`RenderMode::Pbr`] draw — the browser twin of trd-cli's
     /// `--metallic/--roughness/--specular/--clearcoat/--env-intensity/--exposure/
     /// --ambient/--tonemap` flags. `tonemap` is `"aces"` (filmic) or anything
@@ -303,24 +303,32 @@ impl CanvasRenderer {
         ambient: f32,
         tonemap: &str,
     ) {
-        let material = PbrMaterial {
+        let material = DisneyMaterial {
             metallic,
             roughness,
             specular,
             clearcoat,
-            env_intensity,
-            exposure,
+            ..DisneyMaterial::default()
+        };
+        let lighting = Lighting {
             ambient,
-            tonemap: match tonemap.to_ascii_lowercase().as_str() {
+            ..Lighting::default()
+        };
+        let ibl = ImageBasedLighting {
+            intensity: env_intensity,
+        };
+        let tone_mapping = ToneMapping {
+            exposure,
+            operator: match tonemap.to_ascii_lowercase().as_str() {
                 "aces" => Tonemap::Aces,
                 _ => Tonemap::Reinhard,
             },
-            ..PbrMaterial::default()
         };
-        self.pbr_material = Some(material);
+        let pbr = PbrState::new(material, lighting, ibl, tone_mapping);
         if let Some(renderer) = self.renderer.as_mut() {
-            renderer.set_pbr_material(material);
+            pbr.apply(renderer);
         }
+        self.pbr = Some(pbr);
     }
 
     /// Decodes an equirectangular Radiance `.hdr` buffer and binds it as the
@@ -532,11 +540,8 @@ impl CanvasRenderer {
 
             // Apply the Disney PBR material + HDR environment probe staged by the
             // JS shell before the first frame (RenderMode::Pbr draws only).
-            if let Some(material) = self.pbr_material {
-                self.renderer
-                    .as_mut()
-                    .expect("renderer just built")
-                    .set_pbr_material(material);
+            if let Some(pbr) = &self.pbr {
+                pbr.apply(self.renderer.as_mut().expect("renderer just built"));
             }
             if let Some(env) = self.env_map.clone() {
                 self.renderer

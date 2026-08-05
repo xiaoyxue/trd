@@ -12,6 +12,9 @@ mod frame_plane;
 mod gizmo;
 mod gpu_context;
 mod gpu_types;
+mod ibl;
+mod light;
+mod material;
 mod mesh_renderer;
 mod offscreen;
 mod onscreen;
@@ -19,6 +22,7 @@ mod pbr;
 mod picking;
 mod pipeline;
 mod scene;
+mod tonemap;
 mod triangle_renderer;
 
 #[cfg(test)]
@@ -32,16 +36,19 @@ pub use batch_renderer::BatchRenderer;
 pub use frame_params::{CameraFormError, FrameParams, Viewport};
 pub use gpu_context::{create_instance, GpuContext, GpuInitError, GpuRequest, LimitsPreset};
 pub use gpu_types::{Mesh, Vertex};
+pub use ibl::{EnvMapData, ImageBasedLighting};
+pub use light::{Light, Lighting, PointLight};
+pub use material::{AlphaMode, Auxiliary, DisneyMaterial, Material, MaterialTextures};
 pub use mesh_renderer::MeshRenderer;
 pub use offscreen::{OffscreenError, OffscreenTarget, OFFSCREEN_FORMAT};
 pub use onscreen::OnscreenTarget;
-pub use pbr::{EnvMapData, PbrMaterial, Tonemap};
 pub use picking::PickTarget;
 pub use pipeline::create_mesh_pipeline;
 pub use scene::{
     build_scene, plane_grid_overlays, selection_aabb_overlay, Draw, DrawableObject, FrameFit,
     GridPlane, RenderMode, Scene,
 };
+pub use tonemap::{ToneMapping, Tonemap};
 pub use triangle_renderer::TriangleRenderer;
 
 // Crate-internal items shared across render submodules and sibling modules.
@@ -54,7 +61,9 @@ pub(crate) use gizmo::{
 pub(crate) use gpu_types::{
     GizmoLineVertex, GizmoUniform, InstanceRaw, PbrVertex, PickInstanceRaw, Uniform,
 };
-pub(crate) use pbr::{compute_smooth_normals, BoundEnv, PbrUniform};
+pub(crate) use ibl::BoundEnv;
+pub(crate) use light::{DEFAULT_LIGHTS, DEFAULT_POINT_LIGHTS};
+pub(crate) use pbr::{compute_smooth_normals, PbrUniform};
 pub(crate) use pipeline::{
     create_depth_target, create_env_bind_group_layout, create_frame_bind_group_layout,
     create_frame_plane_pipeline, create_gizmo_bind_group_layout, create_gizmo_binding,

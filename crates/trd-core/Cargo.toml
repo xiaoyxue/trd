@@ -11,6 +11,14 @@ log = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
 thiserror = "2"
 glam = { version = "0.30", features = ["bytemuck", "approx", "libm"] }
+gltf-rs = { package = "gltf", version = "1.4.1", default-features = false, features = [
+    "extensions",
+    "names",
+    "KHR_materials_emissive_strength",
+    "KHR_materials_ior",
+    "KHR_materials_specular",
+    "KHR_materials_transmission",
+] }
 arrow = { version = "59", default-features = false, features = ["ipc", "canonical_extension_types"] }
 arrow-schema = { version = "59", default-features = false, features = ["canonical_extension_types"] }
 # OBJ is trd's default mesh format; `tobj` is the popular pure-Rust loader

@@ -125,7 +125,9 @@ pub async fn start(
         // PBR material (#141).
         objects: vec![ObjectTransform::default(); meshes.len()],
         modes: vec![initial_mode; meshes.len()],
-        materials: vec![trd_core::PbrMaterial::default(); meshes.len()],
+        materials: vec![trd_core::DisneyMaterial::default(); meshes.len()],
+        image_based_lighting: vec![trd_core::ImageBasedLighting::default(); meshes.len()],
+        tone_mappings: vec![trd_core::ToneMapping::default(); meshes.len()],
         ..SceneState::default()
     };
     // `?backend=arrow` selects the Arrow wire round-trip; anything else (or

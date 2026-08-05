@@ -14,7 +14,10 @@
 //! [`trd_core::Mesh::preview_transform`] beneath the draw model, so the scene is
 //! authored around the world origin — the camera targets the origin by default.
 
-use trd_core::{Draw, FrameParams, PbrMaterial, Point3, RenderMode, Rotation, Transform, Vector3};
+use trd_core::{
+    DisneyMaterial, Draw, FrameParams, ImageBasedLighting, Lighting, Point3, RenderMode, Rotation,
+    ToneMapping, Transform, Vector3,
+};
 
 /// The minimum orbit distance (never let the camera cross the target).
 const MIN_DISTANCE: f32 = 0.2;
@@ -195,7 +198,13 @@ pub struct SceneState {
     /// Interactive: the UI edits the **selected** object's material
     /// (metallic/roughness/etc.); the bound HDR env probe lives on the renderer,
     /// set once from `--env` / `?env=`.
-    pub materials: Vec<PbrMaterial>,
+    pub materials: Vec<DisneyMaterial>,
+    /// Per-object image-based-lighting controls, parallel to `materials`.
+    pub image_based_lighting: Vec<ImageBasedLighting>,
+    /// Per-object tone mapping, parallel to `materials`.
+    pub tone_mappings: Vec<ToneMapping>,
+    /// Scene light-rig controls shared by every PBR object.
+    pub lighting: Lighting,
     /// Overlay each drawn mesh instance's axis-aligned bounding box (#42).
     pub show_aabb: bool,
     /// Overlay a world-origin coordinate-axes gizmo (#42).
@@ -221,7 +230,10 @@ impl Default for SceneState {
             camera: OrbitCamera::default(),
             objects: vec![ObjectTransform::default()],
             modes: vec![RenderMode::Filled],
-            materials: vec![PbrMaterial::default()],
+            materials: vec![DisneyMaterial::default()],
+            image_based_lighting: vec![ImageBasedLighting::default()],
+            tone_mappings: vec![ToneMapping::default()],
+            lighting: Lighting::default(),
             show_aabb: false,
             show_axes: false,
             show_local_axes: false,
@@ -297,9 +309,19 @@ impl SceneState {
     /// A mutable reference to the selected object's PBR **material**, or `None`
     /// when nothing is selected — so the PBR panel edits the selected object's
     /// material and is disabled otherwise (#141).
-    pub fn selected_material_mut(&mut self) -> Option<&mut PbrMaterial> {
-        self.selected
-            .and_then(|i| self.materials.get_mut(i as usize))
+    pub fn selected_pbr_mut(
+        &mut self,
+    ) -> Option<(
+        &mut DisneyMaterial,
+        &mut ImageBasedLighting,
+        &mut ToneMapping,
+    )> {
+        let i = self.selected? as usize;
+        Some((
+            self.materials.get_mut(i)?,
+            self.image_based_lighting.get_mut(i)?,
+            self.tone_mappings.get_mut(i)?,
+        ))
     }
 
     /// Whether the scene carries a **placement quad** — a given rectangle in E³

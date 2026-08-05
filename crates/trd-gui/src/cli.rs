@@ -7,7 +7,9 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use trd_core::{EnvMapData, Mesh, PbrMaterial, RenderMode};
+use trd_core::{
+    DisneyMaterial, EnvMapData, ImageBasedLighting, Lighting, Mesh, RenderMode, ToneMapping,
+};
 
 use crate::error::GuiError;
 use crate::scene::SceneState;
@@ -163,17 +165,33 @@ impl Cli {
 
     /// The initial Disney PBR material assembled from the material flags
     /// (`--metallic`, `--roughness`, …). The UI edits a live copy from here on.
-    pub fn pbr_material(&self) -> PbrMaterial {
-        PbrMaterial {
+    pub fn disney_material(&self) -> DisneyMaterial {
+        DisneyMaterial {
             metallic: self.metallic,
             roughness: self.roughness,
             specular: self.specular,
             clearcoat: self.clearcoat,
-            env_intensity: self.env_intensity,
+            ..DisneyMaterial::default()
+        }
+    }
+
+    pub fn image_based_lighting(&self) -> ImageBasedLighting {
+        ImageBasedLighting {
+            intensity: self.env_intensity,
+        }
+    }
+
+    pub fn tone_mapping(&self) -> ToneMapping {
+        ToneMapping {
+            operator: self.tonemap.into(),
             exposure: self.exposure,
+        }
+    }
+
+    pub fn lighting(&self) -> Lighting {
+        Lighting {
             ambient: self.ambient,
-            tonemap: self.tonemap.into(),
-            ..PbrMaterial::default()
+            ..Lighting::default()
         }
     }
 
@@ -189,7 +207,10 @@ impl Cli {
             } else {
                 RenderMode::Filled
             }],
-            materials: vec![self.pbr_material()],
+            materials: vec![self.disney_material()],
+            image_based_lighting: vec![self.image_based_lighting()],
+            tone_mappings: vec![self.tone_mapping()],
+            lighting: self.lighting(),
             ..SceneState::default()
         }
     }

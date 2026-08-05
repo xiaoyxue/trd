@@ -13,7 +13,9 @@
 
 use std::fmt::Display;
 
-use trd_core::EnvMapData;
+use trd_core::{
+    DisneyMaterial, EnvMapData, ImageBasedLighting, Lighting, MeshRenderer, ToneMapping,
+};
 use wasm_bindgen::prelude::*;
 
 mod canvas_renderer;
@@ -21,6 +23,37 @@ mod offscreen_renderer;
 
 pub use canvas_renderer::CanvasRenderer;
 pub use offscreen_renderer::OffscreenRenderer;
+
+#[derive(Debug, Clone)]
+pub(crate) struct PbrState {
+    material: DisneyMaterial,
+    lighting: Lighting,
+    ibl: ImageBasedLighting,
+    tone_mapping: ToneMapping,
+}
+
+impl PbrState {
+    pub(crate) fn new(
+        material: DisneyMaterial,
+        lighting: Lighting,
+        ibl: ImageBasedLighting,
+        tone_mapping: ToneMapping,
+    ) -> Self {
+        Self {
+            material,
+            lighting,
+            ibl,
+            tone_mapping,
+        }
+    }
+
+    pub(crate) fn apply(&self, renderer: &mut MeshRenderer) {
+        renderer.set_disney_material(self.material.clone());
+        renderer.set_lighting(self.lighting);
+        renderer.set_image_based_lighting(self.ibl);
+        renderer.set_tone_mapping(self.tone_mapping);
+    }
+}
 
 /// Wraps any `Display` message as a JS `Error` (for a rejected `Promise` or a
 /// thrown exception). Shared by both renderers.

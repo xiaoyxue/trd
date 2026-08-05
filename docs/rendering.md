@@ -226,9 +226,10 @@ controls. Everything is **per-object**: click an object to select it, then edit
 - **Render mode (per object).** The **Render mode** selector sets the selected
   object's mode — **Filled / Wireframe / Textured / PBR** — so objects can mix modes
   in one scene.
-- **PBR material (per object).** When the selected object is in **PBR** mode, the
-  **PBR material** panel edits *its* material live — **Metallic / Roughness /
-  Clearcoat / Env intensity / Exposure** and the **Reinhard/ACES** tone-map.
+- **PBR appearance (per object).** When the selected object is in **PBR** mode,
+  the panel edits its typed Disney surface, IBL intensity, and tone mapping live
+  — **Metallic / Roughness / Clearcoat / Env intensity / Exposure** and the
+  **Reinhard/ACES** operator.
 - **Overlays.** Toggle the **Bounding box** (all objects), **World axes**, **Local
   axes**, and the **XZ plane grid** (**World** floor / **Local** per-object).
 - **Reset view** restores the camera + every object's transform.
@@ -254,11 +255,11 @@ http://localhost:8080/?mesh=/assets/meshes/can/coke.obj&texture=/assets/meshes/c
 &env=/assets/envmap/uffizi-large.hdr
 ```
 
-> Each object carries its own **transform, render mode, PBR material, and albedo
-> texture**. The renderer binds one albedo texture + one material *per mesh* (via a
-> per-mesh bind group + a dynamic-offset PBR uniform), so per-object appearance is
-> real, not shared. On the headless RTX Linux box, reach the browser viewer over an
-> SSH port-forward (see [AGENTS.md](../AGENTS.md)).
+> Each object carries its own **transform, render mode, Disney material, IBL
+> intensity, tone mapping, and albedo texture**. The renderer composes those
+> typed values into one dynamic-offset PBR uniform per mesh, so per-object
+> appearance is real, not shared. On the headless RTX Linux box, reach the
+> browser viewer over an SSH port-forward (see [AGENTS.md](../AGENTS.md)).
 
 
 ## Web (wasm)

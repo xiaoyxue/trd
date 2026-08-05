@@ -171,17 +171,43 @@ impl BatchRenderer {
         self.renderer.set_mesh_texture(mesh_id, texture);
     }
 
-    /// Sets the Disney [`PbrMaterial`](crate::PbrMaterial) applied globally to
-    /// [`RenderMode::Pbr`] meshes. Delegates to [`MeshRenderer::set_pbr_material`].
-    pub fn set_pbr_material(&mut self, material: crate::PbrMaterial) {
-        self.renderer.set_pbr_material(material);
+    /// Sets the [`DisneyMaterial`](crate::DisneyMaterial) applied to every PBR mesh.
+    pub fn set_disney_material(&mut self, material: crate::DisneyMaterial) {
+        self.renderer.set_disney_material(material);
     }
 
-    /// Sets the Disney [`PbrMaterial`](crate::PbrMaterial) of mesh `mesh_id` only —
-    /// a **per-object** material for multi-object scenes (#141). Delegates to
-    /// [`MeshRenderer::set_mesh_pbr_material`]; out-of-range ids are ignored.
-    pub fn set_mesh_pbr_material(&mut self, mesh_id: usize, material: crate::PbrMaterial) {
-        self.renderer.set_mesh_pbr_material(mesh_id, material);
+    /// Sets one mesh's Disney material.
+    pub fn set_mesh_disney_material(&mut self, mesh_id: usize, material: crate::DisneyMaterial) {
+        self.renderer.set_mesh_disney_material(mesh_id, material);
+    }
+
+    /// Sets scene lighting controls shared by every PBR object.
+    pub fn set_lighting(&mut self, lighting: crate::Lighting) {
+        self.renderer.set_lighting(lighting);
+    }
+
+    /// Sets image-based-lighting controls for every PBR object.
+    pub fn set_image_based_lighting(&mut self, ibl: crate::ImageBasedLighting) {
+        self.renderer.set_image_based_lighting(ibl);
+    }
+
+    /// Sets one mesh's image-based-lighting controls.
+    pub fn set_mesh_image_based_lighting(
+        &mut self,
+        mesh_id: usize,
+        ibl: crate::ImageBasedLighting,
+    ) {
+        self.renderer.set_mesh_image_based_lighting(mesh_id, ibl);
+    }
+
+    /// Sets the output transform of every PBR object.
+    pub fn set_tone_mapping(&mut self, tone_mapping: crate::ToneMapping) {
+        self.renderer.set_tone_mapping(tone_mapping);
+    }
+
+    /// Sets one mesh's output transform.
+    pub fn set_mesh_tone_mapping(&mut self, mesh_id: usize, tone_mapping: crate::ToneMapping) {
+        self.renderer.set_mesh_tone_mapping(mesh_id, tone_mapping);
     }
 
     /// Binds `env` as the equirectangular HDR environment map reflected by

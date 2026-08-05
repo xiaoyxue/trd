@@ -88,6 +88,21 @@ mod native {
         renderer.set_show_object_grid(xz(state.show_local_grid));
     }
 
+    fn apply_pbr(renderer: &mut BatchRenderer, state: &SceneState) {
+        renderer.set_lighting(state.lighting);
+        for (i, ((material, ibl), tone_mapping)) in state
+            .materials
+            .iter()
+            .zip(&state.image_based_lighting)
+            .zip(&state.tone_mappings)
+            .enumerate()
+        {
+            renderer.set_mesh_disney_material(i, material.clone());
+            renderer.set_mesh_image_based_lighting(i, *ibl);
+            renderer.set_mesh_tone_mapping(i, *tone_mapping);
+        }
+    }
+
     /// The native in-process backend: builds a `trd-core` [`BatchRenderer`] once at a
     /// fixed resolution and re-renders the scene on demand. The GUI displays the
     /// output scaled to the panel, so the render resolution is stable (no GPU
@@ -136,9 +151,7 @@ mod native {
         fn render(&mut self, state: &SceneState) -> Result<ImageRgba, GuiError> {
             let aspect = self.width as f32 / self.height.max(1) as f32;
             self.renderer.set_mode(trd_core::RenderMode::Filled); // per-draw modes override
-            for (i, m) in state.materials.iter().enumerate() {
-                self.renderer.set_mesh_pbr_material(i, *m);
-            }
+            apply_pbr(&mut self.renderer, state);
             self.renderer.set_show_aabb(state.show_aabb);
             self.renderer.set_selected_aabb(state.selected);
             self.renderer.set_show_axes(state.show_axes);
@@ -233,9 +246,7 @@ mod native {
             // 3. Render on the persistent device.
             let opts = render_options(state);
             self.renderer.set_mode(opts.mode);
-            for (i, m) in state.materials.iter().enumerate() {
-                self.renderer.set_mesh_pbr_material(i, *m);
-            }
+            apply_pbr(&mut self.renderer, state);
             self.renderer.set_show_aabb(opts.show_aabb);
             self.renderer.set_selected_aabb(state.selected);
             self.renderer.set_show_axes(opts.show_axes);

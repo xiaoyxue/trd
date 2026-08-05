@@ -301,7 +301,7 @@ fn pbr_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
     let mut changed = false;
     // The PBR material is per-object (#141): edit the *selected* object's
     // material; with nothing selected there is no material to edit.
-    let Some(pbr) = view.controller.state.selected_material_mut() else {
+    let Some((material, ibl, tone_mapping)) = view.controller.state.selected_pbr_mut() else {
         ui.weak("Select an object to edit its material");
         return false;
     };
@@ -309,31 +309,31 @@ fn pbr_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
     // panel; the slider then spans the full panel width beneath it.
     ui.label("Metallic");
     changed |= ui
-        .add(egui::Slider::new(&mut pbr.metallic, 0.0..=1.0))
+        .add(egui::Slider::new(&mut material.metallic, 0.0..=1.0))
         .changed();
     ui.label("Roughness");
     changed |= ui
-        .add(egui::Slider::new(&mut pbr.roughness, 0.0..=1.0))
+        .add(egui::Slider::new(&mut material.roughness, 0.0..=1.0))
         .changed();
     ui.label("Clearcoat");
     changed |= ui
-        .add(egui::Slider::new(&mut pbr.clearcoat, 0.0..=1.0))
+        .add(egui::Slider::new(&mut material.clearcoat, 0.0..=1.0))
         .changed();
     ui.label("Env intensity");
     changed |= ui
-        .add(egui::Slider::new(&mut pbr.env_intensity, 0.0..=4.0))
+        .add(egui::Slider::new(&mut ibl.intensity, 0.0..=4.0))
         .changed();
     ui.label("Exposure");
     changed |= ui
-        .add(egui::Slider::new(&mut pbr.exposure, 0.0..=4.0))
+        .add(egui::Slider::new(&mut tone_mapping.exposure, 0.0..=4.0))
         .changed();
     ui.label("Tonemap");
     ui.horizontal_wrapped(|ui| {
         changed |= ui
-            .selectable_value(&mut pbr.tonemap, Tonemap::Reinhard, "Reinhard")
+            .selectable_value(&mut tone_mapping.operator, Tonemap::Reinhard, "Reinhard")
             .changed();
         changed |= ui
-            .selectable_value(&mut pbr.tonemap, Tonemap::Aces, "ACES")
+            .selectable_value(&mut tone_mapping.operator, Tonemap::Aces, "ACES")
             .changed();
     });
     changed

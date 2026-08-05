@@ -174,8 +174,17 @@ impl WebRenderer {
     async fn render_direct(&mut self, state: &SceneState) -> Result<Vec<u8>, GuiError> {
         let aspect = self.width as f32 / self.height.max(1) as f32;
         let params = state.frame_params(aspect);
-        for (i, m) in state.materials.iter().enumerate() {
-            self.renderer.set_mesh_pbr_material(i, *m);
+        self.renderer.set_lighting(state.lighting);
+        for (i, ((material, ibl), tone_mapping)) in state
+            .materials
+            .iter()
+            .zip(&state.image_based_lighting)
+            .zip(&state.tone_mappings)
+            .enumerate()
+        {
+            self.renderer.set_mesh_disney_material(i, material.clone());
+            self.renderer.set_mesh_image_based_lighting(i, *ibl);
+            self.renderer.set_mesh_tone_mapping(i, *tone_mapping);
         }
         let mut scene = build_scene(
             &state.draws(),
@@ -227,8 +236,17 @@ impl WebRenderer {
         );
         let mut scene = scene;
         scene.extend(scene_overlays(&draws, state));
-        for (i, m) in state.materials.iter().enumerate() {
-            self.renderer.set_mesh_pbr_material(i, *m);
+        self.renderer.set_lighting(state.lighting);
+        for (i, ((material, ibl), tone_mapping)) in state
+            .materials
+            .iter()
+            .zip(&state.image_based_lighting)
+            .zip(&state.tone_mappings)
+            .enumerate()
+        {
+            self.renderer.set_mesh_disney_material(i, material.clone());
+            self.renderer.set_mesh_image_based_lighting(i, *ibl);
+            self.renderer.set_mesh_tone_mapping(i, *tone_mapping);
         }
         let rgba = self.render_scene(frame.params, &scene).await?;
 

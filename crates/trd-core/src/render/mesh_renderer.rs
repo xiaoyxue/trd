@@ -490,13 +490,28 @@ impl MeshPass {
         queue: &wgpu::Queue,
         params: FrameParams,
         viewport: Viewport,
-        materials: &[PbrMaterial],
+        materials: &[DisneyMaterial],
+        ibl: &[ImageBasedLighting],
+        tone_mappings: &[ToneMapping],
+        lighting: Lighting,
         use_env: bool,
     ) {
+        debug_assert_eq!(materials.len(), ibl.len());
+        debug_assert_eq!(materials.len(), tone_mappings.len());
         let view_proj = params.view_proj_matrix(viewport).to_cols_array();
         let camera_pos = params.camera_position();
-        for (i, material) in materials.iter().enumerate() {
-            let uniform = PbrUniform::new(view_proj, camera_pos, material, use_env);
+        for (i, ((material, ibl), tone_mapping)) in
+            materials.iter().zip(ibl).zip(tone_mappings).enumerate()
+        {
+            let uniform = PbrUniform::new(
+                view_proj,
+                camera_pos,
+                material,
+                lighting,
+                *ibl,
+                *tone_mapping,
+                use_env,
+            );
             queue.write_buffer(
                 &self.pbr_uniform,
                 i as u64 * self.pbr_stride,
@@ -626,9 +641,14 @@ pub struct MeshRenderer {
     env: BoundEnv,
     /// The Disney material of **each** mesh (indexed by mesh id) applied to its
     /// [`RenderMode::Pbr`] draws (#141) — so a multi-object scene can give every
-    /// object its own metallic/roughness/base_color. [`set_pbr_material`] sets all
-    /// (the single-mesh / global default); [`set_mesh_pbr_material`] sets one.
-    pbr_materials: Vec<PbrMaterial>,
+    /// object its own metallic/roughness/base_color.
+    pbr_materials: Vec<DisneyMaterial>,
+    /// Per-object environment reflection gains, parallel to `pbr_materials`.
+    pbr_ibl: Vec<ImageBasedLighting>,
+    /// Per-object output transforms, parallel to `pbr_materials`.
+    pbr_tone_mappings: Vec<ToneMapping>,
+    /// Scene light rig controls shared by every PBR object.
+    lighting: Lighting,
     store: MeshStore,
     frame_plane: FramePlane,
     /// The mesh pass's depth attachment, (re)created lazily in `encode` to match
@@ -761,7 +781,10 @@ impl MeshRenderer {
         Self {
             pass,
             env,
-            pbr_materials: vec![PbrMaterial::default(); meshes.len()],
+            pbr_materials: vec![DisneyMaterial::default(); meshes.len()],
+            pbr_ibl: vec![ImageBasedLighting::default(); meshes.len()],
+            pbr_tone_mappings: vec![ToneMapping::default(); meshes.len()],
+            lighting: Lighting::default(),
             store,
             frame_plane,
             depth: None,
@@ -800,23 +823,52 @@ impl MeshRenderer {
         }
     }
 
-    /// Sets the Disney [`PbrMaterial`] of **every** mesh — the single-mesh / global
+    /// Sets the [`DisneyMaterial`] of **every** mesh — the single-mesh / global
     /// default. For a multi-object scene, give each object its own material with
-    /// [`set_mesh_pbr_material`](Self::set_mesh_pbr_material). Takes effect on the
+    /// [`set_mesh_disney_material`](Self::set_mesh_disney_material). Takes effect on the
     /// next [`encode`](Self::encode).
-    pub fn set_pbr_material(&mut self, material: PbrMaterial) {
+    pub fn set_disney_material(&mut self, material: DisneyMaterial) {
         for m in &mut self.pbr_materials {
+            *m = material.clone();
+        }
+    }
+
+    /// Sets the [`DisneyMaterial`] of mesh `mesh_id` only (#141) — so each
+    /// object in a multi-object scene has its own metallic/roughness/base_color.
+    /// Out-of-range ids are ignored. Takes effect on the next
+    /// [`encode`](Self::encode).
+    pub fn set_mesh_disney_material(&mut self, mesh_id: usize, material: DisneyMaterial) {
+        if let Some(m) = self.pbr_materials.get_mut(mesh_id) {
             *m = material;
         }
     }
 
-    /// Sets the Disney [`PbrMaterial`] of mesh `mesh_id` only (#141) — so each
-    /// object in a multi-object scene has its own metallic/roughness/base_color.
-    /// Out-of-range ids are ignored. Takes effect on the next
-    /// [`encode`](Self::encode).
-    pub fn set_mesh_pbr_material(&mut self, mesh_id: usize, material: PbrMaterial) {
-        if let Some(m) = self.pbr_materials.get_mut(mesh_id) {
-            *m = material;
+    /// Sets scene lighting controls shared by every PBR object.
+    pub fn set_lighting(&mut self, lighting: Lighting) {
+        self.lighting = lighting;
+    }
+
+    /// Sets image-based-lighting controls for every PBR object.
+    pub fn set_image_based_lighting(&mut self, ibl: ImageBasedLighting) {
+        self.pbr_ibl.fill(ibl);
+    }
+
+    /// Sets image-based-lighting controls for one PBR object.
+    pub fn set_mesh_image_based_lighting(&mut self, mesh_id: usize, ibl: ImageBasedLighting) {
+        if let Some(current) = self.pbr_ibl.get_mut(mesh_id) {
+            *current = ibl;
+        }
+    }
+
+    /// Sets the per-object output transform of every PBR object.
+    pub fn set_tone_mapping(&mut self, tone_mapping: ToneMapping) {
+        self.pbr_tone_mappings.fill(tone_mapping);
+    }
+
+    /// Sets the output transform of one PBR object.
+    pub fn set_mesh_tone_mapping(&mut self, mesh_id: usize, tone_mapping: ToneMapping) {
+        if let Some(current) = self.pbr_tone_mappings.get_mut(mesh_id) {
+            *current = tone_mapping;
         }
     }
 
@@ -880,6 +932,9 @@ impl MeshRenderer {
             params,
             viewport,
             &self.pbr_materials,
+            &self.pbr_ibl,
+            &self.pbr_tone_mappings,
+            self.lighting,
             self.env.has_env(),
         );
 
