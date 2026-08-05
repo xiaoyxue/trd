@@ -24,11 +24,12 @@ Guidance for agents working in this repository.
   `CoordinateAxes { model }` | `FramePlane { fit }`) — the single base interface
   for every primitive. Geometry is owned once (decode-once mesh store + shared
   gizmo buffers); a drawable is a light handle naming *which* primitive + its
-  per-frame model. `MeshRenderer::encode` walks a `Scene` (`= Vec<DrawableObject>`,
-  rebuilt per frame) with **no per-type branching**; a single-object frame is the
-  degenerate one-element scene. Add a primitive by adding a variant, not by
-  bolting flags onto the renderer. Wireframe (and PBR) is a *mode* of `Mesh`, not
-  a separate variant.
+  per-frame model. Every front-end hands the same `Scene`
+  (`= Vec<DrawableObject>`, rebuilt per frame) to `MeshRenderer::encode` without
+  per-type branching; the render core batches it by draw kind. A single-object
+  frame is the degenerate one-element scene. Add a primitive by adding a variant,
+  not by bolting flags onto the renderer. Wireframe (and PBR) is a *mode* of
+  `Mesh`, not a separate variant.
 - **Shared render harness.** The offscreen render-target + async pixel read-back
   is factored into `OffscreenTarget` (`render/offscreen.rs`), reused by every
   read-back consumer (`trd-cli`, the browser `OffscreenRenderer`, `trd-gui`).

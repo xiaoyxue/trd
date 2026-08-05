@@ -1,5 +1,5 @@
 //! The persistent [`MeshRenderer`]: a decode-once GPU mesh store, instance
-//! batching, and the branch-free [`Scene`](super::Scene) encode.
+//! batching, and [`Scene`](super::Scene) encoding.
 //!
 //! The renderer is a composition of a few cohesive parts, each with a single
 //! job, so no one struct is a grab-bag of wgpu handles:
@@ -68,6 +68,24 @@ struct MeshGpu {
     /// each object with its own diffuse (#141). Defaults to 1×1 white (identity
     /// albedo) until [`set`](BoundTexture::set) via `set_mesh_texture`.
     texture: BoundTexture,
+}
+
+impl MeshGpu {
+    fn filled(&self) -> (&wgpu::Buffer, &IndexBuf) {
+        (&self.vertex_buffer, &self.triangles)
+    }
+
+    fn pbr(&self) -> (&wgpu::Buffer, &IndexBuf) {
+        (&self.pbr_vertex_buffer, &self.triangles)
+    }
+
+    fn wireframe(&self) -> (&wgpu::Buffer, &IndexBuf) {
+        (&self.vertex_buffer, &self.edges)
+    }
+
+    fn aabb(&self) -> (&wgpu::Buffer, &IndexBuf) {
+        (&self.aabb.vertex_buffer, &self.aabb.index)
+    }
 }
 
 fn upload_mesh(
@@ -155,8 +173,7 @@ fn create_instance_buffer(device: &wgpu::Device, capacity: u32) -> wgpu::Buffer 
 /// bindings are the caller's responsibility.
 fn draw_indexed(
     pass: &mut wgpu::RenderPass,
-    vertex_buffer: &wgpu::Buffer,
-    index: &IndexBuf,
+    (vertex_buffer, index): (&wgpu::Buffer, &IndexBuf),
     instances: Range<u32>,
 ) {
     pass.set_vertex_buffer(0, vertex_buffer.slice(..));
@@ -166,8 +183,13 @@ fn draw_indexed(
 
 /// Which geometry a [`DrawCommand`] binds. The `usize` is a mesh id (index into
 /// [`MeshStore::meshes`]) for the mesh kinds, or a [`GridPlane::index`] for
-/// `Grid`; `Axes` uses the shared gizmo geometry.
+/// `Grid`; `Axes` uses the shared gizmo geometry. Variants are declared in their
+/// layered draw order; the derived ordering is the batching order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum DrawKind {
+    /// A contact / blob **grounding shadow** (the shared shadow quad geometry,
+    /// non-indexed triangle draw, alpha-blended over the frame plane).
+    Shadow,
     /// Filled triangles of a mesh (its triangle index buffer + filled pipeline).
     Filled(usize),
     /// Textured triangles of a mesh (triangle index buffer + textured pipeline,
@@ -177,56 +199,104 @@ enum DrawKind {
     /// vertex buffer + `disney.wgsl` pipeline, lit by the virtual light rig and
     /// the bound HDR environment map). Reuses the triangle index buffer.
     Pbr(usize),
+    /// A coordinate-plane grid (the shared per-plane grid vertex buffer indexed
+    /// by [`GridPlane::index`], non-indexed line draw).
+    Grid(usize),
     /// Edge lines of a mesh (its deduped edge index buffer + line pipeline).
     Wireframe(usize),
     /// A mesh's AABB box (its precomputed corner geometry + line pipeline).
     Aabb(usize),
-    /// A coordinate-plane grid (the shared per-plane grid vertex buffer indexed
-    /// by [`GridPlane::index`], non-indexed line draw).
-    Grid(usize),
-    /// A contact / blob **grounding shadow** (the shared shadow quad geometry,
-    /// non-indexed triangle draw, alpha-blended over the frame plane).
-    Shadow,
     /// The coordinate-axes gizmo (shared vertex buffer, non-indexed line draw).
     Axes,
 }
 
 /// One instanced draw recorded while walking a [`Scene`]: the geometry to bind
 /// ([`DrawKind`]) and the contiguous instance-buffer range to draw it over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct DrawCommand {
     kind: DrawKind,
     start: u32,
     count: u32,
 }
 
-/// Appends `bucket`'s instance models to `instances` and, when non-empty,
-/// records a [`DrawCommand`] over the appended range. Grouping same-geometry
-/// instances into one range preserves GPU instancing.
-fn push_command(
-    instances: &mut Vec<InstanceRaw>,
-    commands: &mut Vec<DrawCommand>,
-    kind: DrawKind,
-    bucket: &[InstanceRaw],
-) {
-    if bucket.is_empty() {
-        return;
-    }
-    let start = instances.len() as u32;
-    instances.extend_from_slice(bucket);
-    commands.push(DrawCommand {
-        kind,
-        start,
-        count: bucket.len() as u32,
-    });
-}
-
-/// The result of walking a [`Scene`] once ([`MeshStore::build_batches`]): the
-/// flattened per-instance models, the [`DrawCommand`]s over them (already in
-/// draw order), and the singleton background frame-plane fit (if any).
+/// The result of walking a [`Scene`] once: the flattened per-instance models,
+/// the [`DrawCommand`]s over them (already in draw order), and the singleton
+/// background frame-plane fit (if any).
 struct Batches {
     instances: Vec<InstanceRaw>,
     commands: Vec<DrawCommand>,
     frame_fit: Option<FrameFit>,
+}
+
+/// Walks `scene` once into a flat draw list, stable-sorts by [`DrawKind`], then
+/// groups equal runs into instanced commands. Out-of-range mesh ids are skipped;
+/// the last background frame plane wins.
+fn build_batches(
+    scene: &[DrawableObject],
+    mut mesh_base_model: impl FnMut(usize) -> Option<Matrix4>,
+) -> Batches {
+    let mut draws: Vec<(DrawKind, InstanceRaw)> = Vec::with_capacity(scene.len());
+    let mut frame_fit = None;
+
+    for object in scene {
+        let (kind, model) = match *object {
+            DrawableObject::Mesh {
+                mesh_id,
+                model,
+                mode,
+            } => {
+                let mesh_id = mesh_id as usize;
+                let Some(base_model) = mesh_base_model(mesh_id) else {
+                    continue;
+                };
+                let kind = match mode {
+                    RenderMode::Filled => DrawKind::Filled(mesh_id),
+                    RenderMode::Textured => DrawKind::Textured(mesh_id),
+                    RenderMode::Pbr => DrawKind::Pbr(mesh_id),
+                    RenderMode::Wireframe => DrawKind::Wireframe(mesh_id),
+                    RenderMode::Shadow => continue,
+                };
+                let effective = Matrix4::from_cols_array(&model) * base_model;
+                (kind, effective.to_cols_array())
+            }
+            DrawableObject::AabbBox { mesh_id, model } => {
+                let mesh_id = mesh_id as usize;
+                let Some(base_model) = mesh_base_model(mesh_id) else {
+                    continue;
+                };
+                let effective = Matrix4::from_cols_array(&model) * base_model;
+                (DrawKind::Aabb(mesh_id), effective.to_cols_array())
+            }
+            DrawableObject::CoordinateAxes { model } => (DrawKind::Axes, model),
+            DrawableObject::PlaneGrid { plane, model } => (DrawKind::Grid(plane.index()), model),
+            DrawableObject::BlobShadow { model } => (DrawKind::Shadow, model),
+            DrawableObject::FramePlane { fit } => {
+                frame_fit = Some(fit);
+                continue;
+            }
+        };
+        draws.push((kind, InstanceRaw { model }));
+    }
+
+    draws.sort_by_key(|(kind, _)| *kind);
+
+    let mut instances = Vec::with_capacity(draws.len());
+    let mut commands = Vec::new();
+    for run in draws.chunk_by(|a, b| a.0 == b.0) {
+        let start = instances.len() as u32;
+        instances.extend(run.iter().map(|(_, instance)| *instance));
+        commands.push(DrawCommand {
+            kind: run[0].0,
+            start,
+            count: run.len() as u32,
+        });
+    }
+
+    Batches {
+        instances,
+        commands,
+        frame_fit,
+    }
 }
 
 /// The three mesh pipelines sharing one bind-group layout, plus the camera
@@ -402,8 +472,7 @@ impl MeshPass {
 
 /// The decode-once geometry store: the uploaded [`MeshGpu`]s (referenced by a
 /// scene's mesh ids), the shared coordinate-axes gizmo vertices, and the
-/// growable per-instance model-matrix buffer. Also walks a [`Scene`] into
-/// [`Batches`], the one place mesh base models are applied.
+/// growable per-instance model-matrix buffer.
 struct MeshStore {
     meshes: Vec<MeshGpu>,
     /// The coordinate-axes gizmo geometry (six `LineList` vertices); each
@@ -488,124 +557,6 @@ impl MeshStore {
 
     fn len(&self) -> usize {
         self.meshes.len()
-    }
-
-    /// Walks `scene` once, bucketing each drawable's instance model by the
-    /// geometry it draws (its base model pre-multiplied in, `effective = model ·
-    /// base`), then flattens the buckets into one instance list + ordered
-    /// [`DrawCommand`]s. Draw order: grounding shadows, filled, textured, PBR,
-    /// grids, wireframe, AABB boxes, then axes — so the blob shadow sits under the
-    /// opaque meshes, which precede the line overlays, and the plane grid sits
-    /// beneath the wireframe/axes gizmos drawn over it. Out-of-range mesh ids are
-    /// skipped.
-    fn build_batches(&self, scene: &[DrawableObject]) -> Batches {
-        let mesh_count = self.meshes.len();
-        let mut filled: Vec<Vec<InstanceRaw>> = vec![Vec::new(); mesh_count];
-        let mut textured: Vec<Vec<InstanceRaw>> = vec![Vec::new(); mesh_count];
-        let mut pbr: Vec<Vec<InstanceRaw>> = vec![Vec::new(); mesh_count];
-        let mut wireframe: Vec<Vec<InstanceRaw>> = vec![Vec::new(); mesh_count];
-        let mut aabb: Vec<Vec<InstanceRaw>> = vec![Vec::new(); mesh_count];
-        // One instance bucket per grid plane (XY/XZ/YZ), keyed by GridPlane::index.
-        let mut grid: [Vec<InstanceRaw>; 3] = [Vec::new(), Vec::new(), Vec::new()];
-        // Contact / blob grounding-shadow instances (shared quad geometry).
-        let mut shadow: Vec<InstanceRaw> = Vec::new();
-        let mut axes: Vec<InstanceRaw> = Vec::new();
-        // The background frame plane is a singleton overlay (there is one bound
-        // frame texture); the last FramePlane in the scene wins its fit.
-        let mut frame_fit: Option<FrameFit> = None;
-
-        for object in scene {
-            match *object {
-                DrawableObject::Mesh {
-                    mesh_id,
-                    model,
-                    mode,
-                } => {
-                    let Some(mesh) = self.meshes.get(mesh_id as usize) else {
-                        continue;
-                    };
-                    let effective = Matrix4::from_cols_array(&model) * mesh.base_model;
-                    let instance = InstanceRaw {
-                        model: effective.to_cols_array(),
-                    };
-                    match mode {
-                        RenderMode::Filled => filled[mesh_id as usize].push(instance),
-                        RenderMode::Textured => textured[mesh_id as usize].push(instance),
-                        RenderMode::Pbr => pbr[mesh_id as usize].push(instance),
-                        RenderMode::Wireframe => wireframe[mesh_id as usize].push(instance),
-                        // A Shadow draw is emitted as DrawableObject::BlobShadow by
-                        // build_scene, never as a Mesh — so this arm is unreachable;
-                        // skip defensively rather than panic.
-                        RenderMode::Shadow => {}
-                    }
-                }
-                DrawableObject::AabbBox { mesh_id, model } => {
-                    let Some(mesh) = self.meshes.get(mesh_id as usize) else {
-                        continue;
-                    };
-                    let effective = Matrix4::from_cols_array(&model) * mesh.base_model;
-                    aabb[mesh_id as usize].push(InstanceRaw {
-                        model: effective.to_cols_array(),
-                    });
-                }
-                DrawableObject::CoordinateAxes { model } => {
-                    axes.push(InstanceRaw { model });
-                }
-                DrawableObject::PlaneGrid { plane, model } => {
-                    grid[plane.index()].push(InstanceRaw { model });
-                }
-                DrawableObject::BlobShadow { model } => {
-                    shadow.push(InstanceRaw { model });
-                }
-                DrawableObject::FramePlane { fit } => {
-                    frame_fit = Some(fit);
-                }
-            }
-        }
-
-        // Flatten every instance model into one buffer, recording a draw command
-        // per non-empty group in the layered draw order.
-        let mut instances: Vec<InstanceRaw> = Vec::with_capacity(scene.len());
-        let mut commands: Vec<DrawCommand> = Vec::new();
-        // Grounding shadows first (right after the background frame plane) so the
-        // opaque content meshes composite on top and only the surrounding rim
-        // darkens the floor.
-        push_command(&mut instances, &mut commands, DrawKind::Shadow, &shadow);
-        for (id, bucket) in filled.iter().enumerate() {
-            push_command(&mut instances, &mut commands, DrawKind::Filled(id), bucket);
-        }
-        for (id, bucket) in textured.iter().enumerate() {
-            push_command(
-                &mut instances,
-                &mut commands,
-                DrawKind::Textured(id),
-                bucket,
-            );
-        }
-        for (id, bucket) in pbr.iter().enumerate() {
-            push_command(&mut instances, &mut commands, DrawKind::Pbr(id), bucket);
-        }
-        for (plane, bucket) in grid.iter().enumerate() {
-            push_command(&mut instances, &mut commands, DrawKind::Grid(plane), bucket);
-        }
-        for (id, bucket) in wireframe.iter().enumerate() {
-            push_command(
-                &mut instances,
-                &mut commands,
-                DrawKind::Wireframe(id),
-                bucket,
-            );
-        }
-        for (id, bucket) in aabb.iter().enumerate() {
-            push_command(&mut instances, &mut commands, DrawKind::Aabb(id), bucket);
-        }
-        push_command(&mut instances, &mut commands, DrawKind::Axes, &axes);
-
-        Batches {
-            instances,
-            commands,
-            frame_fit,
-        }
     }
 
     /// Uploads the flattened instance models, growing the buffer (to the next
@@ -898,7 +849,9 @@ impl MeshRenderer {
 
         // 2. Walk the scene once into per-geometry instance batches, then upload
         //    the flattened instance models (growing the buffer if needed).
-        let batches = self.store.build_batches(scene);
+        let batches = build_batches(scene, |mesh_id| {
+            self.store.meshes.get(mesh_id).map(|mesh| mesh.base_model)
+        });
         self.store
             .upload_instances(&self.device, queue, &batches.instances);
 
@@ -984,13 +937,13 @@ impl MeshRenderer {
                 DrawKind::Filled(id) => {
                     let mesh = &self.store.meshes[id];
                     pass.set_pipeline(&self.pass.filled);
-                    draw_indexed(&mut pass, &mesh.vertex_buffer, &mesh.triangles, range);
+                    draw_indexed(&mut pass, mesh.filled(), range);
                 }
                 DrawKind::Textured(id) => {
                     let mesh = &self.store.meshes[id];
                     pass.set_pipeline(&self.pass.textured);
                     pass.set_bind_group(1, mesh.texture.bind_group(), &[]);
-                    draw_indexed(&mut pass, &mesh.vertex_buffer, &mesh.triangles, range);
+                    draw_indexed(&mut pass, mesh.filled(), range);
                 }
                 DrawKind::Pbr(id) => {
                     let mesh = &self.store.meshes[id];
@@ -1001,7 +954,7 @@ impl MeshRenderer {
                     pass.set_bind_group(0, &self.pass.pbr_bind_group, &[offset]);
                     pass.set_bind_group(1, mesh.texture.bind_group(), &[]);
                     pass.set_bind_group(2, env_bind_group, &[]);
-                    draw_indexed(&mut pass, &mesh.pbr_vertex_buffer, &mesh.triangles, range);
+                    draw_indexed(&mut pass, mesh.pbr(), range);
                     // Restore group 0 = camera for the following non-PBR draws
                     // (their pipelines' group-0 layout is the camera uniform).
                     pass.set_bind_group(0, &self.pass.camera_bind_group, &[]);
@@ -1009,12 +962,12 @@ impl MeshRenderer {
                 DrawKind::Wireframe(id) => {
                     let mesh = &self.store.meshes[id];
                     pass.set_pipeline(&self.pass.wireframe);
-                    draw_indexed(&mut pass, &mesh.vertex_buffer, &mesh.edges, range);
+                    draw_indexed(&mut pass, mesh.wireframe(), range);
                 }
                 DrawKind::Aabb(id) => {
                     let mesh = &self.store.meshes[id];
                     pass.set_pipeline(&self.pass.wireframe);
-                    draw_indexed(&mut pass, &mesh.aabb.vertex_buffer, &mesh.aabb.index, range);
+                    draw_indexed(&mut pass, mesh.aabb(), range);
                 }
                 DrawKind::Grid(plane) => {
                     pass.set_pipeline(&self.pass.wireframe);
@@ -1125,12 +1078,7 @@ impl MeshRenderer {
         pass.set_vertex_buffer(1, self.pick_instances.slice(..));
         for (mesh_id, slot) in records {
             let mesh = &self.store.meshes[mesh_id];
-            draw_indexed(
-                &mut pass,
-                &mesh.vertex_buffer,
-                &mesh.triangles,
-                slot..slot + 1,
-            );
+            draw_indexed(&mut pass, mesh.filled(), slot..slot + 1);
         }
     }
 
@@ -1178,3 +1126,7 @@ impl MeshRenderer {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "mesh_renderer_tests.rs"]
+mod tests;
