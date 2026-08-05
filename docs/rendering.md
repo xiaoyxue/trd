@@ -58,11 +58,19 @@ them (`… | trd --width 1024 --wireframe --aabb | …`):
 | `--texture <img>` | Splice a texture stream from `<img>` and render **textured** (samples the image at each vertex UV). Requires `--mesh` with UVs. |
 | `--wireframe` | Draw mesh **edges** as a line list instead of filled triangles. |
 | `--pbr` | Physically-based **Disney principled BRDF** shading (see [Rendering appearance](#rendering-appearance)). |
-| `--aabb` | Overlay each drawn instance's green axis-aligned **bounding box**. |
-| `--axes` / `--axes-local` | Overlay a coordinate-axes gizmo at the **world** origin / at **each** drawn object's own model frame. |
+| `--aabb` | Overlay each drawn instance's green, thickness-controlled, anti-aliased axis-aligned **bounding box**. |
+| `--axes` / `--axes-local` | Overlay smooth R/G/B axes with cone arrowheads at the **world** origin / at **each** drawn object's own model frame. |
 | `--frames-base <dir>` | Composite each frame's **background still** (its `frame_path`, relative to `<dir>`) beneath the scene via a `FramePlane`. |
-| `--no-msaa` | Disable 4× MSAA (default on the mesh pass); render single-sampled/aliased. |
+| `--no-msaa` | Disable 4× MSAA (default on the mesh pass). Mesh silhouettes/wireframes become single-sampled; gizmo lines retain analytic AA. |
 | `--placement-quad`, `--grid-local xy\|xz\|yz` | AR-placement overlays used by the broadcast demos below. |
+
+Axes, AABBs, and plane grids are expanded into camera-facing triangle quads in
+the shader, with edge alpha derived from pixel distance rather than MSAA
+coverage. Their pixel widths and the axis-head dimensions are centralized in
+`render/gizmo.rs` (`AXES_LINE_WIDTH_PX`, `AABB_LINE_WIDTH_PX`,
+`GRID_LINE_WIDTH_PX`, and `AXES_ARROW_*`) for later UI exposure.
+
+![Illustrative axes and gizmo beautification design reference](images/gizmo-beautify-design.png)
 
 ```sh
 # Single bunny turntable, filled, with its bounding box:

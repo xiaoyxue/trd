@@ -20,6 +20,27 @@ impl Uniform {
     }
 }
 
+/// GPU uniform for screen-space gizmo lines. The camera matrix stays byte-for-byte
+/// identical to [`Uniform`]; the extra vec4 carries viewport size in `xy` and
+/// clip-space pixel scale (`2 / size`) in `zw`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct GizmoUniform {
+    view_proj: [f32; 16],
+    viewport: [f32; 4],
+}
+
+impl GizmoUniform {
+    pub(crate) fn new(params: FrameParams, viewport: Viewport) -> Self {
+        let width = viewport.width.max(1) as f32;
+        let height = viewport.height.max(1) as f32;
+        Self {
+            view_proj: params.view_proj_matrix(viewport).to_cols_array(),
+            viewport: [width, height, 2.0 / width, 2.0 / height],
+        }
+    }
+}
+
 /// A mesh vertex consumed by `mesh.wgsl` / `textured.wgsl`.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
@@ -52,6 +73,52 @@ impl Vertex {
 
     /// Returns the vertex buffer layout expected by `mesh.wgsl`.
     pub const fn layout() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &Self::ATTRIBUTES,
+        }
+    }
+}
+
+/// One vertex of a screen-space-expanded gizmo line quad. Every six vertices
+/// describe one segment: `start`/`end` are shared, while `extrusion` stores the
+/// endpoint selector, side (`-1`/`+1`), and full line width in pixels.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct GizmoLineVertex {
+    pub(crate) start: [f32; 3],
+    pub(crate) end: [f32; 3],
+    pub(crate) color: [f32; 3],
+    pub(crate) extrusion: [f32; 3],
+}
+
+impl GizmoLineVertex {
+    const ATTRIBUTES: [wgpu::VertexAttribute; 4] = [
+        wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Float32x3,
+            offset: 0,
+            shader_location: 0,
+        },
+        wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Float32x3,
+            offset: 12,
+            shader_location: 1,
+        },
+        wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Float32x3,
+            offset: 24,
+            shader_location: 2,
+        },
+        // Locations 3-6 remain the shared per-instance model matrix.
+        wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Float32x3,
+            offset: 36,
+            shader_location: 7,
+        },
+    ];
+
+    pub(crate) const fn layout() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Vertex,
@@ -301,6 +368,18 @@ mod tests {
     }
 
     #[test]
+    fn gizmo_uniform_layout_matches_wgsl_params() {
+        assert_eq!(std::mem::size_of::<GizmoUniform>(), 80);
+        let viewport = Viewport {
+            width: 8,
+            height: 4,
+        };
+        let uniform = GizmoUniform::new(FrameParams::IDENTITY, viewport);
+        assert_eq!(uniform.view_proj, Matrix4::IDENTITY.to_cols_array());
+        assert_eq!(uniform.viewport, [8.0, 4.0, 0.25, 0.5]);
+    }
+
+    #[test]
     fn vertex_layout_matches_wgsl_inputs() {
         assert_eq!(std::mem::size_of::<Vertex>(), 32);
         assert_eq!(std::mem::align_of::<Vertex>(), 4);
@@ -318,6 +397,22 @@ mod tests {
         assert_eq!(layout.attributes[2].offset, 24);
         assert_eq!(layout.attributes[2].shader_location, 2);
         assert_eq!(layout.attributes[2].format, wgpu::VertexFormat::Float32x2);
+    }
+
+    #[test]
+    fn gizmo_line_vertex_layout_matches_wgsl_inputs() {
+        assert_eq!(std::mem::size_of::<GizmoLineVertex>(), 48);
+        let layout = GizmoLineVertex::layout();
+        assert_eq!(layout.array_stride, 48);
+        assert_eq!(layout.step_mode, wgpu::VertexStepMode::Vertex);
+        assert_eq!(
+            layout
+                .attributes
+                .iter()
+                .map(|attribute| attribute.shader_location)
+                .collect::<Vec<_>>(),
+            [0, 1, 2, 7]
+        );
     }
 
     #[test]

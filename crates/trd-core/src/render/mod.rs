@@ -48,17 +48,21 @@ pub use triangle_renderer::TriangleRenderer;
 pub(crate) use color::upload_texture;
 pub(crate) use frame_params::{projection_from_intrinsics, DEFAULT_FAR, DEFAULT_NEAR};
 pub(crate) use gizmo::{
-    axes_vertices, blob_shadow_vertices, grid_vertices, AABB_COLOR, AABB_EDGE_INDICES,
-    AXES_VERTEX_COUNT, GRID_VERTEX_COUNT, SHADOW_VERTEX_COUNT,
+    aabb_line_vertices, axes_arrow_vertices, axes_line_vertices, blob_shadow_vertices,
+    grid_line_vertices, SHADOW_VERTEX_COUNT,
 };
-pub(crate) use gpu_types::{InstanceRaw, PbrVertex, PickInstanceRaw, Uniform};
+pub(crate) use gpu_types::{
+    GizmoLineVertex, GizmoUniform, InstanceRaw, PbrVertex, PickInstanceRaw, Uniform,
+};
 pub(crate) use pbr::{compute_smooth_normals, BoundEnv, PbrUniform};
 pub(crate) use pipeline::{
     create_depth_target, create_env_bind_group_layout, create_frame_bind_group_layout,
-    create_frame_plane_pipeline, create_mesh_bind_group_layout, create_mesh_pipeline_with,
+    create_frame_plane_pipeline, create_gizmo_bind_group_layout, create_gizmo_binding,
+    create_gizmo_line_pipeline, create_mesh_bind_group_layout, create_mesh_pipeline_with,
     create_msaa_color_target, create_pbr_bind_group_layout, create_pbr_pipeline,
     create_picking_pipeline, create_shadow_pipeline, create_texture_bind_group_layout,
     create_textured_pipeline, create_view_proj_binding, overlay_depth_stencil, solid_depth_stencil,
-    write_view_proj, DepthTarget, MsaaColorTarget, MSAA_SAMPLE_COUNT, PICK_FORMAT,
+    write_gizmo_params, write_view_proj, DepthTarget, MsaaColorTarget, MSAA_SAMPLE_COUNT,
+    PICK_FORMAT,
 };
 pub(crate) use scene::{frame_fit_uv_scale, DRAW_MODE_INHERIT};

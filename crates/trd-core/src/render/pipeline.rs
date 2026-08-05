@@ -1,15 +1,19 @@
 //! wgpu render-pipeline, bind-group-layout, depth-target, and camera
 //! uniform construction helpers.
 
-use super::{FrameParams, InstanceRaw, PbrVertex, PickInstanceRaw, Uniform, Vertex, Viewport};
+use super::{
+    FrameParams, GizmoLineVertex, GizmoUniform, InstanceRaw, PbrVertex, PickInstanceRaw, Uniform,
+    Vertex, Viewport,
+};
 
 /// The mesh pass's MSAA sample count. 4× multisampling is the WebGPU-guaranteed
 /// level for renderable formats (native Vulkan/Metal/DX + the WebGL2 downlevel
-/// backend), so it needs no adapter feature check. It smooths the aliased edges
-/// of the wireframe / local-axes gizmo / AABB line geometry (and the mesh
-/// silhouette). Every part of the mesh pass — the color attachment, the depth
-/// attachment, and all four participating pipelines — must share this count; the
-/// multisampled color target is resolved into the caller's single-sample `view`.
+/// backend), so it needs no adapter feature check. It smooths mesh silhouettes,
+/// hardware wireframes, and solid gizmo arrowheads; expanded AABB/axes/grid lines
+/// also apply analytic AA in their shader, including when this count is `1`.
+/// Every part of the mesh pass — the color attachment, the depth attachment, and
+/// every participating pipeline — must share this count; the multisampled color
+/// target is resolved into the caller's single-sample `view`.
 pub(crate) const MSAA_SAMPLE_COUNT: u32 = 4;
 
 /// A [`wgpu::MultisampleState`] for `sample_count` (full coverage mask, no
@@ -66,6 +70,24 @@ pub(crate) fn create_mesh_bind_group_layout(device: &wgpu::Device) -> wgpu::Bind
     })
 }
 
+/// Group-0 layout for analytic gizmo lines: camera `P·V` plus viewport pixel
+/// dimensions in one vertex-stage uniform.
+pub(crate) fn create_gizmo_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("trd gizmo bind group layout"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<GizmoUniform>() as u64),
+            },
+            count: None,
+        }],
+    })
+}
+
 /// The depth buffer format used by the mesh pass. `Depth32Float` is guaranteed
 /// by WebGPU (and supported by the GL/WebGL2 downlevel backend), matching the
 /// renderer's portability target.
@@ -85,10 +107,9 @@ pub(crate) fn solid_depth_stencil() -> wgpu::DepthStencilState {
     }
 }
 
-/// Depth state for **line overlays** (wireframe, AABB boxes, coordinate axes):
+/// Depth state for overlays (wireframe, AABB boxes, grids, and coordinate axes):
 /// always pass and never write, so they composite on top of the solid meshes in
-/// submission order (preserving the pre-depth-buffer overlay behavior) while
-/// still being valid in a pass that carries a depth attachment.
+/// submission order while remaining valid in a pass with a depth attachment.
 pub(crate) fn overlay_depth_stencil() -> wgpu::DepthStencilState {
     wgpu::DepthStencilState {
         format: DEPTH_FORMAT,
@@ -261,6 +282,45 @@ pub(crate) fn create_mesh_pipeline_with(
             ..Default::default()
         },
         depth_stencil,
+        multisample: multisample_state(sample_count),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+/// Builds the analytic-AA gizmo line pipeline. Model-space segments are expanded
+/// to triangle quads in screen space, then alpha-feathered in the fragment stage.
+pub(crate) fn create_gizmo_line_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    layout: &wgpu::PipelineLayout,
+    sample_count: u32,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::include_wgsl!("../gizmo_line.wgsl"));
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("trd gizmo line pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            compilation_options: Default::default(),
+            buffers: &[Some(GizmoLineVertex::layout()), Some(InstanceRaw::layout())],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            ..Default::default()
+        },
+        depth_stencil: Some(overlay_depth_stencil()),
         multisample: multisample_state(sample_count),
         multiview_mask: None,
         cache: None,
@@ -488,6 +548,44 @@ pub(crate) fn write_view_proj(
         buffer,
         0,
         bytemuck::bytes_of(&Uniform::view_proj(params, viewport)),
+    );
+}
+
+/// Creates the viewport-aware gizmo uniform and bind group.
+pub(crate) fn create_gizmo_binding(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    params: FrameParams,
+    viewport: Viewport,
+) -> (wgpu::Buffer, wgpu::BindGroup) {
+    use wgpu::util::DeviceExt;
+    let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("trd gizmo uniform"),
+        contents: bytemuck::bytes_of(&GizmoUniform::new(params, viewport)),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("trd gizmo bind group"),
+        layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: buffer.as_entire_binding(),
+        }],
+    });
+    (buffer, bind_group)
+}
+
+/// Updates the gizmo camera + viewport uniform for the current frame.
+pub(crate) fn write_gizmo_params(
+    queue: &wgpu::Queue,
+    buffer: &wgpu::Buffer,
+    params: FrameParams,
+    viewport: Viewport,
+) {
+    queue.write_buffer(
+        buffer,
+        0,
+        bytemuck::bytes_of(&GizmoUniform::new(params, viewport)),
     );
 }
 

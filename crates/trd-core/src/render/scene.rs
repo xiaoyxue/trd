@@ -172,7 +172,7 @@ pub struct Draw {
 ///
 /// Wireframe is a render *mode* of the [`DrawableObject::Mesh`] primitive (not a
 /// separate variant); the coordinate axes and the AABB box are genuinely
-/// distinct line-topology primitives.
+/// distinct gizmo primitives rendered with screen-space-expanded line geometry.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DrawableObject {
     /// A decoded mesh (id = row index in the leading mesh table) placed by
@@ -184,20 +184,22 @@ pub enum DrawableObject {
         model: [f32; 16],
         mode: RenderMode,
     },
-    /// The axis-aligned bounding-box wireframe of mesh `mesh_id` (#42), placed by
+    /// The axis-aligned bounding-box outline of mesh `mesh_id` (#42), placed by
     /// the same `model` as the mesh instance it boxes (the renderer applies that
     /// mesh's base model beneath `model` too), so the box tracks the mesh
     /// exactly. Reuses the mesh's precomputed corner geometry.
     AabbBox { mesh_id: u32, model: [f32; 16] },
-    /// The world-orientation coordinate gizmo (#42): three lines from the origin
-    /// along +X/+Y/+Z, colored red/green/blue. Placed by `model` (identity marks
-    /// the world origin); not tied to any mesh, so no base model is applied.
+    /// The world-orientation coordinate gizmo (#42): three anti-aliased shafts
+    /// with cone arrowheads from the origin along +X/+Y/+Z, colored
+    /// red/green/blue. Placed by `model` (identity marks the world origin); not
+    /// tied to any mesh, so no base model is applied.
     CoordinateAxes { model: [f32; 16] },
     /// A **coordinate-plane grid** lattice on `plane` (X/Y, X/Z, or Y/Z),
     /// spanning the model-space square `[-1, 1]²`, placed by `model`. Like
-    /// [`CoordinateAxes`](Self::CoordinateAxes) it is a line-topology gizmo tied
-    /// to no mesh (no base model); with a #77 placement-quad `model` the `Xy`
-    /// grid lays exactly over the reconstructed quad in its local frame.
+    /// [`CoordinateAxes`](Self::CoordinateAxes) it is a screen-space-expanded
+    /// line gizmo tied to no mesh (no base model); with a #77 placement-quad
+    /// `model` the `Xy` grid lays exactly over the reconstructed quad in its
+    /// local frame.
     PlaneGrid { plane: GridPlane, model: [f32; 16] },
     /// A **contact / blob grounding shadow** (#110 follow-up): a soft dark radial
     /// blob laid on a placed mesh's ground plane, placed by `model` (a flat quad
