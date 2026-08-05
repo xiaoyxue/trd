@@ -332,6 +332,13 @@ struct MeshPass {
     gizmo_bind_group: wgpu::BindGroup,
 }
 
+struct PbrInputs<'a> {
+    materials: &'a [DisneyMaterial],
+    ibl: &'a [ImageBasedLighting],
+    tone_mappings: &'a [ToneMapping],
+    lighting: Lighting,
+}
+
 impl MeshPass {
     /// Constructs a `MeshPass` for `format`, building all pipelines over their
     /// bind-group layouts at `sample_count`× MSAA. `texture_layout` is the albedo
@@ -490,24 +497,25 @@ impl MeshPass {
         queue: &wgpu::Queue,
         params: FrameParams,
         viewport: Viewport,
-        materials: &[DisneyMaterial],
-        ibl: &[ImageBasedLighting],
-        tone_mappings: &[ToneMapping],
-        lighting: Lighting,
+        inputs: PbrInputs<'_>,
         use_env: bool,
     ) {
-        debug_assert_eq!(materials.len(), ibl.len());
-        debug_assert_eq!(materials.len(), tone_mappings.len());
+        debug_assert_eq!(inputs.materials.len(), inputs.ibl.len());
+        debug_assert_eq!(inputs.materials.len(), inputs.tone_mappings.len());
         let view_proj = params.view_proj_matrix(viewport).to_cols_array();
         let camera_pos = params.camera_position();
-        for (i, ((material, ibl), tone_mapping)) in
-            materials.iter().zip(ibl).zip(tone_mappings).enumerate()
+        for (i, ((material, ibl), tone_mapping)) in inputs
+            .materials
+            .iter()
+            .zip(inputs.ibl)
+            .zip(inputs.tone_mappings)
+            .enumerate()
         {
             let uniform = PbrUniform::new(
                 view_proj,
                 camera_pos,
                 material,
-                lighting,
+                inputs.lighting,
                 *ibl,
                 *tone_mapping,
                 use_env,
@@ -931,10 +939,12 @@ impl MeshRenderer {
             queue,
             params,
             viewport,
-            &self.pbr_materials,
-            &self.pbr_ibl,
-            &self.pbr_tone_mappings,
-            self.lighting,
+            PbrInputs {
+                materials: &self.pbr_materials,
+                ibl: &self.pbr_ibl,
+                tone_mappings: &self.pbr_tone_mappings,
+                lighting: self.lighting,
+            },
             self.env.has_env(),
         );
 
