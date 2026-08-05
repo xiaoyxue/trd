@@ -173,6 +173,10 @@ is hard-rejected.
   (`frame_id` for inline data, or external `frame_path`/`frame_url`) composited
   beneath the scene.
 
+The standard inline e2e packs all 250 native 1920×1080 frames of the Cornell-box
+clip as a raw RGBA tensor table and renders only the correctly placed textured bunny; see
+[`docs/frame-extraction.md`](docs/frame-extraction.md).
+
 All params columns are optional/additive and drive `clip = P · V · M · (pos, 1)`.
 Rendering appearance (filled / wireframe / textured / **PBR**) is a render-time
 choice, **not** a wire column, so the same stream renders any way.

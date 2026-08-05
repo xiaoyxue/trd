@@ -128,20 +128,25 @@ read-back); `--no-msaa` renders single-sampled.
 - **Background compositing** —
   [`examples/bunny_frameplane.py`](../examples/bunny_frameplane.py) authors a folder
   of animated stills + a turntable JSONL whose `frame_path` names each one;
-  `--frames-base <dir>` composites them beneath the spinning bunny. For a
-  self-contained stream, pack the stills with
-  [`scripts/frames_to_arrow.py`](../scripts/frames_to_arrow.py), replace each
-  params reference with its 0-based `frame_id`, and concatenate
-  `[mesh][frames][params]`:
+  `--frames-base <dir>` composites them beneath the spinning bunny. The standard
+  self-contained protocol e2e uses all 250 annotated Cornell-box frames as raw
+  native 1920×1080 RGBA tensors and the same placement pipeline as the path-backed demo:
 
   ```sh
-  uv run --with pyarrow scripts/frames_to_arrow.py --storage bytes \
-    crates/trd-core/tests/golden/frames/*.jpg -o /tmp/frames.arrow
-  { scripts/obj_to_arrow.py assets/meshes/bunny.obj
-    cat /tmp/frames.arrow
-    scripts/jsonl_to_arrow.py examples/frames.inline_background.jsonl
-  } | cargo run -q -p trd-cli -- --width 512 --height 512
+  uv run --with pyarrow --with pillow --with numpy scripts/extract_frames.py \
+    assets/videos/cornellbox/CameraMovement.mp4 --format jpg \
+    --width 1920 --height 1080 --embed pixels -o output/cornellbox-inline
+  examples/render.sh --cli \
+    --frames-table output/cornellbox-inline/frames.arrow \
+    --mesh assets/meshes/bunny_with_texture/bunny.obj \
+    --texture assets/meshes/bunny_with_texture/bunny_uv_map1.jpg \
+    examples/frames.cornellbox.inline.jsonl \
+    output/cornellbox-inline-tensor-bunny.gif 1920 1080 25
   ```
+
+  This draws only the textured bunny. Its 250 `frame_id` rows preserve the
+  external `frame_path` demo's camera and placement transforms exactly. See
+  [frame extraction](frame-extraction.md) for the complete generation recipe.
 - **Single-view AR placement (real broadcast clips)** — the perception pipeline
   (`scripts/{nba,fiba}_perception_to_arrow.py` →
   [`examples/placement_quad_by_local_coord.py`](../examples/placement_quad_by_local_coord.py))

@@ -188,6 +188,14 @@ Examples:
     --texture assets/meshes/bunny_with_texture/bunny_uv_map1.jpg \
     --frames-base output/cornellbox \
     examples/frames.cornellbox.stage2.jsonl output/cornellbox_stage2.gif 960 540 25  # stage 2: mesh placed
+  # Full self-contained tensor e2e: all 250 frames, correctly placed bunny only.
+  #   uv run --with pyarrow --with pillow --with numpy scripts/extract_frames.py \
+  #     assets/videos/cornellbox/CameraMovement.mp4 --format jpg --width 1920 --height 1080 \
+  #     --embed pixels -o output/cornellbox-inline
+  examples/render.sh --cli --frames-table output/cornellbox-inline/frames.arrow \
+    --mesh assets/meshes/bunny_with_texture/bunny.obj \
+    --texture assets/meshes/bunny_with_texture/bunny_uv_map1.jpg \
+    examples/frames.cornellbox.inline.jsonl output/cornellbox-inline-tensor-bunny.gif 1920 1080 25
   # --web replays any --cli scene in the browser (same flags + positional W H FPS):
   examples/render.sh --web --canvas-renderer --placement-quad --axes-local \
     --frames-base output/cornellbox \

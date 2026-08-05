@@ -90,6 +90,38 @@ No `--frames-base` is needed. `trd-core` decodes Binary PNG/JPEG when selected
 and uploads tensor RGBA directly. Binary is recommended for clips; raw pixels
 retain the full uncompressed resource table in memory.
 
+### Standard full-clip tensor e2e
+
+The repository's inline protocol e2e uses every annotated frame from the
+Cornell-box source (250 frames at 25 fps) at its native 1920×1080 resolution.
+The params are produced by the same perception and placement stages
+as the external `frame_path` demo, but emit `frame_id`; the scene contains only
+the textured bunny.
+
+```sh
+mkdir -p output/cornellbox-inline
+uv run --with pyarrow --with numpy scripts/perception_to_arrow.py \
+  --assets assets/videos/cornellbox --step 1 \
+  -o output/cornellbox-inline/perception.arrow
+uv run --with pyarrow --with numpy examples/placement_quad_by_local_coord.py \
+  --from-perception output/cornellbox-inline/perception.arrow --inline-frames \
+  --width 1920 --height 1080 \
+  -o examples/frames.cornellbox.inline.jsonl
+uv run --with pyarrow --with pillow --with numpy scripts/extract_frames.py \
+  assets/videos/cornellbox/CameraMovement.mp4 --format jpg \
+  --width 1920 --height 1080 --embed pixels -o output/cornellbox-inline
+examples/render.sh --cli \
+  --frames-table output/cornellbox-inline/frames.arrow \
+  --mesh assets/meshes/bunny_with_texture/bunny.obj \
+  --texture assets/meshes/bunny_with_texture/bunny_uv_map1.jpg \
+  examples/frames.cornellbox.inline.jsonl \
+  output/cornellbox-inline-tensor-bunny.gif 1920 1080 25
+```
+
+The raw tensor table is approximately 1.93 GiB. This intentionally exercises the
+tensor wire path end to end; use Binary or external references for scalable
+production clips.
+
 ## Pack existing images
 
 Use [`scripts/frames_to_arrow.py`](../scripts/frames_to_arrow.py) when stills
