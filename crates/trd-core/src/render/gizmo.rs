@@ -7,9 +7,9 @@ use super::{GizmoLineVertex, GridPlane, Vertex};
 /// out against the default white mesh.
 pub(crate) const AABB_COLOR: [f32; 3] = [0.0, 1.0, 0.0];
 
-/// Pixel width of AABB edges. Expanded in `gizmo_line.wgsl`, so it is stable
-/// under perspective and independently configurable from the other gizmos.
-pub(crate) const AABB_LINE_WIDTH_PX: f32 = 2.5;
+/// Pixel width of AABB edges. Kept at the restrained grid weight so the box
+/// frames an object without competing with it; axis shafts remain bolder.
+pub(crate) const AABB_LINE_WIDTH_PX: f32 = 1.5;
 
 /// The 12 edges of an axis-aligned box, indexing
 /// the 8 corners in the order produced by [`crate::math::Aabb3::corners`]
@@ -38,8 +38,8 @@ pub(crate) const AXES_LINE_WIDTH_PX: f32 = 3.0;
 
 /// Arrowhead dimensions scale with [`AXES_LENGTH`] and keep each tip at the old
 /// line endpoint, so the gizmo's extent and meaning stay unchanged.
-pub(crate) const AXES_ARROW_LENGTH: f32 = AXES_LENGTH * 0.20;
-pub(crate) const AXES_ARROW_RADIUS: f32 = AXES_LENGTH * 0.10;
+pub(crate) const AXES_ARROW_LENGTH: f32 = AXES_LENGTH * 0.12;
+pub(crate) const AXES_ARROW_RADIUS: f32 = AXES_LENGTH * 0.05;
 const AXES_ARROW_SIDES: usize = 12;
 
 /// RGB color of the coordinate-plane grid overlay (#PlaneGrid): a light gray —
@@ -279,6 +279,8 @@ mod tests {
         assert!(grid
             .iter()
             .all(|vertex| vertex.extrusion[2] == GRID_LINE_WIDTH_PX));
+        assert_eq!(aabb[0].extrusion[2], grid[0].extrusion[2]);
+        assert!(aabb[0].extrusion[2] < axes[0].extrusion[2]);
     }
 
     #[test]

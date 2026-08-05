@@ -666,10 +666,10 @@ fn gizmo_lines_and_arrowheads_stay_smooth_without_msaa() {
         "shaft edge should contain analytically anti-aliased pixels"
     );
 
-    // Near the +X tip, the cone is wider than the shaft. A red pixel at least
-    // four rows off the centerline proves the arrowhead geometry is present.
+    // Beyond the shortened +X shaft, a red pixel off the centerline proves the
+    // cone geometry continues to the original axis tip.
     let arrow_wing_lit =
-        (101u32..109).any(|x| (56u32..72).any(|y| y.abs_diff(height / 2) >= 4 && red(x, y) > 0));
+        (107u32..111).any(|x| (58u32..70).any(|y| y.abs_diff(height / 2) >= 2 && red(x, y) > 0));
     assert!(
         arrow_wing_lit,
         "the +X arrowhead should light pixels outside the shaft"
