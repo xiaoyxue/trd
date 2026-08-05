@@ -60,7 +60,7 @@ them (`… | trd --width 1024 --wireframe --aabb | …`):
 | `--pbr` | Physically-based **Disney principled BRDF** shading (see [Rendering appearance](#rendering-appearance)). |
 | `--aabb` | Overlay each drawn instance's green, thickness-controlled, anti-aliased axis-aligned **bounding box**. |
 | `--axes` / `--axes-local` | Overlay smooth R/G/B axes with cone arrowheads at the **world** origin / at **each** drawn object's own model frame. |
-| `--frames-base <dir>` | Composite each frame's **background still** (its `frame_path`, relative to `<dir>`) beneath the scene via a `FramePlane`. |
+| `--frames-base <dir>` | Resolve external `frame_path` backgrounds. Inline `frame_id` resources need no base directory. |
 | `--no-msaa` | Disable 4× MSAA (default on the mesh pass). Mesh silhouettes/wireframes become single-sampled; gizmo lines retain analytic AA. |
 | `--placement-quad`, `--grid-local xy\|xz\|yz` | AR-placement overlays used by the broadcast demos below. |
 
@@ -128,7 +128,25 @@ read-back); `--no-msaa` renders single-sampled.
 - **Background compositing** —
   [`examples/bunny_frameplane.py`](../examples/bunny_frameplane.py) authors a folder
   of animated stills + a turntable JSONL whose `frame_path` names each one;
-  `--frames-base <dir>` composites them beneath the spinning bunny.
+  `--frames-base <dir>` composites them beneath the spinning bunny. The standard
+  self-contained protocol e2e uses all 250 annotated Cornell-box frames as raw
+  native 1920×1080 RGBA tensors and the same placement pipeline as the path-backed demo:
+
+  ```sh
+  uv run --with pyarrow --with pillow --with numpy scripts/extract_frames.py \
+    assets/videos/cornellbox/CameraMovement.mp4 --format jpg \
+    --width 1920 --height 1080 --embed pixels -o output/cornellbox-inline
+  examples/render.sh --cli \
+    --frames-table output/cornellbox-inline/frames.arrow \
+    --mesh assets/meshes/bunny_with_texture/bunny.obj \
+    --texture assets/meshes/bunny_with_texture/bunny_uv_map1.jpg \
+    examples/frames.cornellbox.inline.jsonl \
+    output/cornellbox-inline-tensor-bunny.gif 1920 1080 25
+  ```
+
+  This draws only the textured bunny. Its 250 `frame_id` rows preserve the
+  external `frame_path` demo's camera and placement transforms exactly. See
+  [frame extraction](frame-extraction.md) for the complete generation recipe.
 - **Single-view AR placement (real broadcast clips)** — the perception pipeline
   (`scripts/{nba,fiba}_perception_to_arrow.py` →
   [`examples/placement_quad_by_local_coord.py`](../examples/placement_quad_by_local_coord.py))

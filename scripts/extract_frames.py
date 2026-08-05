@@ -14,7 +14,8 @@ Convention (issue #76)
 * Layout: ``<out>/frames/frame_000000.png`` … (zero-padded 6-digit index).
 * **0-based frame index == Arrow row 0** — output order *is* the scene-stream
   order (#62 D2), so ``row N`` ↔ ``frame N`` is a pure function of the row index.
-* Manifest ``<out>/frames.arrow`` (Arrow IPC) — one row per frame, columns:
+* Reference manifest ``<out>/frames.arrow`` (Arrow IPC) — one row per frame,
+  columns:
     - ``row``        — ``uint32`` frame/row index (0-based).
     - ``frame_path`` — ``utf8`` native path, **relative to the manifest dir**
       (e.g. ``frames/frame_000000.png``).
@@ -25,6 +26,8 @@ Convention (issue #76)
   ``trd.frames.height`` / ``trd.frames.count``.
 * A sidecar ``<out>/frames.json`` mirrors the manifest for human inspection and
   for demos/tools that would rather not read Arrow.
+* With ``--embed bytes|pixels``, ``frames.arrow`` is instead a protocol ``0.0.6``
+  inline frames resource table. Params rows select it with ``frame_id``.
 
 Determinism
 -----------
@@ -46,13 +49,14 @@ the JSON sidecar without it.
 import argparse
 import json
 import os
+from pathlib import Path
 import subprocess
 import sys
 
 FRAME_STEM = "frame_"
 FRAME_DIGITS = 6
 PROTOCOL_VERSION_KEY = b"trd.protocol.version"
-PROTOCOL_VERSION = b"0.0.5"
+PROTOCOL_VERSION = b"0.0.6"
 FRAME_RATE_KEY = b"trd.stream.frame_rate"
 
 
@@ -63,7 +67,8 @@ def usage_guidance() -> str:
         "frame-to-row mapping manifest (#76).\n\n"
         "Usage:\n"
         "  scripts/extract_frames.py VIDEO [-o OUT_DIR] [--format png|jpg]\n"
-        "                            [--url-base BASE] [--fps N] [--no-arrow]\n\n"
+        "                            [--url-base BASE] [--fps N]\n"
+        "                            [--embed bytes|pixels] [--no-arrow]\n\n"
         "Arguments:\n"
         "  VIDEO           input video file (e.g. a .mp4).\n"
         "  -o, --out       output directory (default: output/<video-stem>).\n"
@@ -71,10 +76,12 @@ def usage_guidance() -> str:
         "  --url-base      served-base prefix for frame_url (default: frames).\n"
         "  --fps           override the source fps recorded in the manifest\n"
         "                  metadata (does NOT resample; extraction is passthrough).\n"
+        "  --embed         emit a 0.0.6 inline frames table: compressed Binary\n"
+        "                  bytes (recommended) or raw fixed-shape RGBA pixels.\n"
         "  --no-arrow      skip the frames.arrow manifest (emit frames.json only).\n\n"
         "Emits:\n"
         "  <out>/frames/frame_000000.png …   zero-padded stills (row N == frame N)\n"
-        "  <out>/frames.arrow                Arrow IPC manifest (row/path/url + w/h/fps)\n"
+        "  <out>/frames.arrow                reference manifest, or inline table\n"
         "  <out>/frames.json                 human-readable sidecar\n\n"
         "Example:\n"
         "  scripts/extract_frames.py assets/videos/cornellbox/CameraMovement.mp4 \\\n"
@@ -184,7 +191,13 @@ def write_json_manifest(path, rows, width, height, fps):
         "fps": fps,
         "count": len(rows),
         "frames": [
-            {"row": r, "frame_path": p, "frame_url": u} for (r, p, u) in rows
+            {
+                "row": r,
+                "frame_id": r,
+                "frame_path": p,
+                "frame_url": u,
+            }
+            for (r, p, u) in rows
         ],
     }
     with open(path, "w", encoding="utf-8") as fh:
@@ -240,8 +253,17 @@ def main() -> None:
                          "the native viewer and the browser.")
     ap.add_argument("--url-base", default="frames", help="served-base prefix for frame_url")
     ap.add_argument("--fps", type=float, default=None, help="override source fps in the manifest")
+    ap.add_argument(
+        "--embed",
+        choices=["bytes", "pixels"],
+        default=None,
+        help="write frames.arrow as a 0.0.6 inline frames resource table",
+    )
     ap.add_argument("--no-arrow", action="store_true", help="skip frames.arrow (JSON only)")
     args = ap.parse_args()
+
+    if args.embed and args.no_arrow:
+        raise SystemExit("error: --embed cannot be combined with --no-arrow")
 
     if not os.path.isfile(args.video):
         raise SystemExit(f"error: video not found: {args.video}")
@@ -272,10 +294,22 @@ def main() -> None:
     emitted = [json_path]
     if not args.no_arrow:
         arrow_path = os.path.join(out_dir, "frames.arrow")
-        write_arrow_manifest(arrow_path, rows, out_w, out_h, fps)
+        if args.embed:
+            from frames_to_arrow import write_frames_stream
+
+            with open(arrow_path, "wb") as sink:
+                write_frames_stream(
+                    [Path(frames_dir) / name for name in names],
+                    sink,
+                    args.embed,
+                )
+        else:
+            write_arrow_manifest(arrow_path, rows, out_w, out_h, fps)
         emitted.append(arrow_path)
 
-    print(f"extracted {len(rows)} frames ({args.format}, {out_w}x{out_h} @ {fps:g} fps)",
+    storage_note = f", inline {args.embed}" if args.embed else ""
+    print(f"extracted {len(rows)} frames ({args.format}, {out_w}x{out_h} @ {fps:g} fps"
+          f"{storage_note})",
           file=sys.stderr)
     print("wrote " + " + ".join(emitted), file=sys.stderr)
 

@@ -34,10 +34,10 @@ use thiserror::Error;
 pub const TEXTURE_COLUMN: &str = "rgba";
 
 /// Arrow canonical-extension metadata keys carried on the `rgba` field.
-const EXTENSION_NAME_KEY: &str = "ARROW:extension:name";
-const EXTENSION_METADATA_KEY: &str = "ARROW:extension:metadata";
+pub(crate) const EXTENSION_NAME_KEY: &str = "ARROW:extension:name";
+pub(crate) const EXTENSION_METADATA_KEY: &str = "ARROW:extension:metadata";
 /// The canonical fixed-shape-tensor extension name.
-const FIXED_SHAPE_TENSOR: &str = "arrow.fixed_shape_tensor";
+pub(crate) const FIXED_SHAPE_TENSOR: &str = "arrow.fixed_shape_tensor";
 
 /// Raw RGBA8 image data ready to upload to a `wgpu::Texture`: tightly-packed,
 /// row-major, `height * width * 4` bytes (`[H, W, 4]`).
@@ -303,7 +303,7 @@ impl Texture for ConstantTexture {
 /// A tiny purpose-built parser (no JSON dependency) for this fixed,
 /// arrow-produced shape; returns `None` if the `shape` array is absent or
 /// malformed.
-fn parse_tensor_shape(json: &str) -> Option<Vec<usize>> {
+pub(crate) fn parse_tensor_shape(json: &str) -> Option<Vec<usize>> {
     const KEY: &str = "\"shape\"";
     let after_key = &json[json.find(KEY)? + KEY.len()..];
     let open = after_key.find('[')?;

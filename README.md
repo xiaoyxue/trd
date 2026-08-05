@@ -154,27 +154,35 @@ Full setup — Windows `dev-env.ps1`, GPU-driver notes (nixGL / `WGPU_BACKEND=gl
 and the `wrappers ⇄ cargo run` mapping — is in
 [`docs/rendering.md`](docs/rendering.md).
 
-## [Stream protocol](docs/protocol/0.0.5.md)
+## [Stream protocol](docs/protocol/0.0.6.md)
 
 Frame parameters are plain columnar data, so **any** tool that emits the input
 columns as an Arrow IPC stream can drive the renderer. The current — and **only
-supported** — version is **0.0.5**: **mesh-first** (`[mesh][texture?][params]`)
-and **not** backward-compatible with `0.0.1`–`0.0.4` (older streams are
-hard-rejected).
+supported** — version is **0.0.6**:
+`[mesh][texture?][frames?][params]`, with every table explicitly tagged by
+`trd.table.kind`. It is not backward-compatible; every other or missing version
+is hard-rejected.
 
 - a leading **mesh** table (`position`/`color`/`uv`/`index`) — one row per mesh;
 - an optional **texture** table (`rgba` tensor) for textured/PBR albedo;
+- an optional indexed **frames** resource table (`frame_bytes` Binary or
+  `frame_pixels` tensor) for self-contained backgrounds;
 - the per-frame **params** table — an optional **camera** (**CV** `k`+`pose`, or
   **CG** `eye`/`target`/`up`+`fovy`…), an optional **draw list** (`draw_mesh` +
   `draw_model`) instancing several meshes, and an optional **background frame**
-  (`frame_path`/`frame_url`) composited beneath the scene.
+  (`frame_id` for inline data, or external `frame_path`/`frame_url`) composited
+  beneath the scene.
+
+The standard inline e2e packs all 250 native 1920×1080 frames of the Cornell-box
+clip as a raw RGBA tensor table and renders only the correctly placed textured bunny; see
+[`docs/frame-extraction.md`](docs/frame-extraction.md).
 
 All params columns are optional/additive and drive `clip = P · V · M · (pos, 1)`.
 Rendering appearance (filled / wireframe / textured / **PBR**) is a render-time
 choice, **not** a wire column, so the same stream renders any way.
 
 **Full column-by-column specification:
-[`docs/protocol/0.0.5.md`](docs/protocol/0.0.5.md).**
+[`docs/protocol/0.0.6.md`](docs/protocol/0.0.6.md).**
 
 ## [Material (PBR)](docs/pbr.md)
 
@@ -215,9 +223,9 @@ params: **[`docs/rendering.md`](docs/rendering.md#interactive-viewer--trd-gui)**
   AR demos, the native window, the interactive viewer, web, and Windows setup.
 - [`docs/pbr.md`](docs/pbr.md) — the Disney principled-BRDF material model, all PBR
   parameters + defaults, tone mapping, and the HDR environment probe.
-- [`docs/protocol/0.0.5.md`](docs/protocol/0.0.5.md) — the full stream-protocol spec.
+- [`docs/protocol/0.0.6.md`](docs/protocol/0.0.6.md) — the full stream-protocol spec.
 - [`docs/frame-extraction.md`](docs/frame-extraction.md) — background-frame
-  extraction + the frame-to-row mapping manifest.
+  extraction, external references, and inline frames-table authoring.
 - [`docs/gui-design.md`](docs/gui-design.md) — the `trd-gui` interactive-viewer design.
 - [`AGENTS.md`](AGENTS.md) — contributor/agent guide: build system, GPU-adapter
   selection, testing policy, PR workflow.

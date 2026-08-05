@@ -4,8 +4,8 @@
 use std::sync::Arc;
 
 use trd_core::{
-    build_scene, EnvMapData, FrameFit, GridPlane, ImageTexture, Mesh, MeshRenderer, OnscreenTarget,
-    PbrMaterial, RenderMode,
+    build_scene, EnvMapData, FrameFit, GridPlane, ImageData, ImageTexture, Mesh, MeshRenderer,
+    OnscreenTarget, PbrMaterial, RenderMode,
 };
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
@@ -23,6 +23,9 @@ pub(crate) struct WindowRenderer {
     /// The scene renderer, built lazily once the stream's mesh table (or the
     /// legacy built-in fallback) has arrived from the reader thread.
     pub(crate) renderer: Option<MeshRenderer>,
+    /// CPU image backing the currently uploaded frame-plane texture. Inline
+    /// frame reuse preserves the same Arc, so repeated IDs skip GPU writes.
+    uploaded_frame_image: Option<Arc<ImageData>>,
 }
 
 impl WindowRenderer {
@@ -85,6 +88,7 @@ impl WindowRenderer {
             queue,
             target,
             renderer: None,
+            uploaded_frame_image: None,
         })
     }
 
@@ -101,6 +105,7 @@ impl WindowRenderer {
             self.target.view_format(),
             meshes,
         ));
+        self.uploaded_frame_image = None;
     }
 
     /// Binds `texture` as the albedo sampled by [`RenderMode::Textured`] meshes
@@ -163,10 +168,28 @@ impl WindowRenderer {
         // flags, then hand it to the shared MeshRenderer — the same Scene the
         // headless CLI and wasm front-ends build. A per-frame background image
         // (#63) is uploaded first, then composited beneath the scene.
-        let frame_fit = frame.frame_image.as_ref().map(|img| {
-            renderer.update_frame_texture_rgba(&self.queue, &img.rgba, img.width, img.height);
-            FrameFit::Stretch
-        });
+        let frame_fit = match frame.frame_image.as_ref() {
+            Some(image) => {
+                let already_uploaded = self
+                    .uploaded_frame_image
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, image));
+                if !already_uploaded {
+                    renderer.update_frame_texture_rgba(
+                        &self.queue,
+                        &image.rgba,
+                        image.width,
+                        image.height,
+                    );
+                    self.uploaded_frame_image = Some(image.clone());
+                }
+                Some(FrameFit::Stretch)
+            }
+            None => {
+                self.uploaded_frame_image = None;
+                None
+            }
+        };
         let scene = build_scene(
             &frame.draws,
             mode,

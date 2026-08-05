@@ -24,7 +24,7 @@ pub(crate) enum StreamMsg {
 
 /// One decoded frame: its camera/transform params and resolved instanced draw
 /// list, built into a [`trd_core::Scene`] at render time. `frame_image` holds a
-/// per-frame background image (`0.0.5`, #63) decoded to RGBA at full source
+/// per-frame background image (#63) decoded to RGBA at full source
 /// resolution off the render thread (from `frame_path` + `--frames-base`),
 /// uploaded + composited beneath the scene at render time (the GPU samples it
 /// down to the surface via the frame plane's `Stretch` fit); `None` when the
@@ -40,7 +40,7 @@ pub(crate) struct FrameData {
 /// Reads the Arrow IPC frame-params stream from stdin on a background thread,
 /// forwarding the stream's declared playback rate then each decoded frame over
 /// `tx` until the stream ends. When `frames_base` is set, a frame's `frame_path`
-/// (`0.0.5`, #63) is loaded and decoded to RGBA at full source resolution off the
+/// is loaded and decoded to RGBA at full source resolution off the
 /// render thread, then shipped with the frame for compositing (the GPU samples it
 /// down to the surface via the frame plane's `Stretch` fit). Decoded stills are
 /// held in an `Arc` so cloning a frame for loop playback never re-copies the
@@ -68,12 +68,14 @@ pub(crate) fn spawn_stdin_reader(tx: mpsc::Sender<StreamMsg>, frames_base: Optio
                 |rate| {
                     let _ = rate_tx.send(StreamMsg::Rate(rate));
                 },
-                |params, draws, frame_ref| {
-                    let frame_image = frame_ref
-                        .as_deref()
-                        .zip(frames_base.as_ref())
-                        .and_then(|(rel, base)| load_frame_image(&base.join(rel)))
-                        .map(Arc::new);
+                |params, draws, frame_ref, inline_frame| {
+                    let frame_image = inline_frame.or_else(|| {
+                        frame_ref
+                            .as_deref()
+                            .zip(frames_base.as_ref())
+                            .and_then(|(rel, base)| load_frame_image(&base.join(rel)))
+                            .map(Arc::new)
+                    });
                     let _ = tx.send(StreamMsg::Frame(Box::new(FrameData {
                         params,
                         draws,

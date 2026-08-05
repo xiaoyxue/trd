@@ -4,15 +4,16 @@ The **trd stream protocol** defines the columnar wire format the rendering core
 consumes and produces. It is an **Apache Arrow IPC stream**: one schema message
 followed by N record-batch messages, on stdin (input) and stdout (output).
 
-- **Semantics:** `1 row = 1 frame`. The output stream is 1:1 with the input
-  stream; output batch boundaries mirror the input batches, so memory stays
-  bounded to a single batch in flight.
+- **Semantics:** one **params** row = one rendered frame. Mesh/texture/frames
+  rows are indexed resources. Output is 1:1 with params, and output batch
+  boundaries mirror params batches.
 - **Versioning:** the protocol version is carried in schema-level metadata under
   the key `trd.protocol.version` and follows `MAJOR.MINOR.PATCH`. **The renderer
-  supports exactly one version — currently `0.0.5` — and hard-rejects any other
-  declared version.** The protocol is **not backward compatible**: support for
-  `0.0.1`–`0.0.4` was **deliberately dropped** to simplify the code (see the
-  [no-backward-compat policy](../../AGENTS.md)).
+  supports exactly one version — currently `0.0.6` — and hard-rejects any other
+  or missing version.** The protocol is deliberately not backward compatible
+  (see the [policy](../../AGENTS.md)).
+- **Table identity:** every input sub-stream declares `trd.table.kind`; schemas
+  are not guessed from column names.
 - **Playback rate:** an optional schema-metadata key `trd.stream.frame_rate`
   (float, frames/sec, default **30**) declares the stream's intended playback
   frame rate — like a video file's fps. Front-ends play at this rate (speed =
@@ -38,17 +39,18 @@ the classic video-player model:
 
 ## Specification
 
-The protocol is **`0.0.5`-only**; there is a single, self-contained spec:
+The protocol is **`0.0.6`-only**; there is a single, self-contained spec:
 
-- **[0.0.5](./0.0.5.md)** — **mesh-first** `[mesh][texture?][params]`. Per-mesh
+- **[0.0.6](./0.0.6.md)** — `[mesh][texture?][frames?][params]`. Per-mesh
   geometry (`position`/`color`/`uv`/`index`), an optional **texture** table
-  (`rgba`), and per-frame params: `model`, a **camera** (CV `k`/`pose` or CG
+  (`rgba`), optional inline background **frames** (`frame_bytes` /
+  `frame_pixels`), and per-frame params: `model`, a **camera** (CV `k`/`pose` or CG
   `eye`/`target`/`direction`/`up`/`fovy`/`aspect`/`znear`/`zfar`), an instanced
-  **draw list** (`draw_mesh`/`draw_model`), and an optional **`frame_path`/
-  `frame_url`** background image composited beneath the scene by a `FramePlane`.
+  **draw list** (`draw_mesh`/`draw_model`), and an optional background selected
+  by inline `frame_id` or external `frame_path`/`frame_url`.
 
-Earlier iterations (`0.0.1`–`0.0.4`) were removed; the renderer hard-rejects any
-version other than `0.0.5`.
+Earlier iterations were removed; the renderer hard-rejects any version other
+than `0.0.6`.
 
 The accepted input version and current output version are defined in
 `crates/trd-core/src/protocol.rs` (`SUPPORTED_INPUT_VERSIONS`, `PROTOCOL_VERSION`).

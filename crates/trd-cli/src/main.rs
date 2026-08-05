@@ -1,7 +1,7 @@
 //! trd-cli: native headless entry point.
 //!
 //! Reads an Arrow IPC scene stream on stdin and writes an Arrow
-//! IPC stream of rendered images on stdout (trd protocol 0.0.5).
+//! IPC stream of rendered images on stdout (trd protocol 0.0.6).
 
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -50,7 +50,7 @@ impl From<TonemapArg> for trd_core::Tonemap {
     }
 }
 
-/// Streaming Arrow renderer for trd (protocol 0.0.5).
+/// Streaming Arrow renderer for trd (protocol 0.0.6).
 #[derive(Parser)]
 #[command(name = "trd", version, about)]
 struct Cli {
@@ -133,7 +133,7 @@ struct Cli {
     /// under every wireframe object. Ignored without `--grid-local`.
     #[arg(long, value_name = "MESH_ID")]
     grid_mesh: Option<u32>,
-    /// Base directory for per-frame background images (`0.0.5`). When set, a
+    /// Base directory for external per-frame background images. When set, a
     /// frame's `frame_path` (relative, e.g. `frames/frame_000000.png`) is joined
     /// to this dir, decoded (PNG/JPEG), and composited beneath the scene as a
     /// background frame plane. Without it, `frame_path` columns are ignored.

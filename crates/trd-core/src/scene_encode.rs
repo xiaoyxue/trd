@@ -1,11 +1,11 @@
 //! Authoring the trd **input** stream in Rust (#97, Slice 3b).
 //!
-//! `trd-core` decodes the mesh-first `[mesh][texture?][params]` input stream
+//! `trd-core` decodes the `[mesh][texture?][frames?][params]` input stream
 //! (`Mesh::from_arrow_all`, [`crate::decode_frames`], the wasm
 //! [`crate::InputSession`]) and encodes the **image output** ([`crate::OutputSession`]).
 //! The **input** stream is normally authored by the Python producers
 //! (`scripts/*_to_arrow.py`); this module authors the same
-//! `0.0.5` stream **in Rust** so an in-process front-end (the GUI's
+//! `0.0.6` stream **in Rust** so an in-process front-end (the GUI's
 //! `ArrowRoundTripRenderer`) — or any Rust producer — can drive
 //! [`crate::run_stream`] without shelling out to Python.
 //!
@@ -23,16 +23,21 @@
 use std::sync::Arc;
 
 use arrow::array::{
-    ArrayRef, FixedSizeListArray, Float32Array, ListArray, RecordBatch, UInt32Array, UInt8Array,
+    ArrayRef, BinaryArray, FixedSizeListArray, Float32Array, ListArray, RecordBatch, UInt32Array,
+    UInt8Array,
 };
-use arrow::buffer::OffsetBuffer;
+use arrow::buffer::{BooleanBuffer, NullBuffer, OffsetBuffer};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use thiserror::Error;
 
-use crate::protocol::{PROTOCOL_VERSION, PROTOCOL_VERSION_KEY};
+use crate::protocol::{
+    FRAMES_TABLE_KIND, MESH_TABLE_KIND, PARAMS_TABLE_KIND, PROTOCOL_VERSION, PROTOCOL_VERSION_KEY,
+    TABLE_KIND_KEY, TEXTURE_TABLE_KIND,
+};
 use crate::render::{Draw, FrameParams, Mesh, RenderMode};
 use crate::texture::{Texture, TEXTURE_COLUMN};
+use crate::{InlineFrame, FRAME_BYTES_COLUMN, FRAME_PIXELS_COLUMN};
 
 /// A failure authoring an input Arrow stream.
 #[derive(Debug, Error)]
@@ -47,6 +52,45 @@ pub enum SceneEncodeError {
     /// The `draws` list length disagrees with the frame count.
     #[error("draws has {draws} rows but there are {frames} frames")]
     DrawsLengthMismatch { draws: usize, frames: usize },
+    /// The `frame_id` list length disagrees with the params row count.
+    #[error("frame_ids has {frame_ids} rows but there are {frames} frames")]
+    FrameIdsLengthMismatch { frame_ids: usize, frames: usize },
+    /// An explicit frames table must contain at least one resource.
+    #[error("frames table is empty")]
+    EmptyFrames,
+    /// An encoded frame payload cannot be empty.
+    #[error("encoded frame resource {row} is empty")]
+    EmptyEncodedFrame { row: usize },
+    /// Raw frame dimensions must be non-zero.
+    #[error("raw frame resource {row} has invalid dimensions {width}x{height}")]
+    InvalidFrameDimensions { row: usize, width: u32, height: u32 },
+    /// Raw frame pixels do not match their declared dimensions.
+    #[error(
+        "raw frame resource {row} has {actual} RGBA bytes; expected {expected} for \
+         {width}x{height}"
+    )]
+    InvalidFramePixels {
+        row: usize,
+        actual: usize,
+        expected: usize,
+        width: u32,
+        height: u32,
+    },
+    /// One fixed-shape tensor column cannot carry several image dimensions.
+    #[error(
+        "raw frame resource {row} is {width}x{height}, but the frames tensor is \
+         {expected_width}x{expected_height}"
+    )]
+    MixedFrameDimensions {
+        row: usize,
+        width: u32,
+        height: u32,
+        expected_width: u32,
+        expected_height: u32,
+    },
+    /// A full scene references a missing inline frame resource.
+    #[error("frame_id {frame_id} is out of range for {frame_count} frame resource(s)")]
+    FrameIdOutOfRange { frame_id: u32, frame_count: usize },
 }
 
 /// The `FixedSizeList<Float32>[stride]` element type of a geometry column.
@@ -98,12 +142,15 @@ fn fixed_list_column(len: i32, flat: Vec<f32>) -> ArrayRef {
     ))
 }
 
-/// The `trd.protocol.version` schema metadata every sub-stream carries.
-fn version_metadata() -> std::collections::HashMap<String, String> {
-    [(
-        PROTOCOL_VERSION_KEY.to_string(),
-        PROTOCOL_VERSION.to_string(),
-    )]
+/// Required schema metadata every input sub-stream carries.
+fn table_metadata(kind: &'static str) -> std::collections::HashMap<String, String> {
+    [
+        (
+            PROTOCOL_VERSION_KEY.to_string(),
+            PROTOCOL_VERSION.to_string(),
+        ),
+        (TABLE_KIND_KEY.to_string(), kind.to_string()),
+    ]
     .into_iter()
     .collect()
 }
@@ -120,7 +167,7 @@ fn write_ipc(schema: &Schema, batch: &RecordBatch) -> Result<Vec<u8>, SceneEncod
 /// Authors the leading **mesh table** IPC stream: one row per mesh with
 /// `position`/`color` `List<FixedSizeList<Float32>[3]>`, `uv`
 /// `List<FixedSizeList<Float32>[2]>`, and `index` `List<UInt32>` columns, tagged
-/// with the `0.0.5` protocol version. Decodes back via `Mesh::from_arrow_all`.
+/// with the `0.0.6` protocol version. Decodes back via `Mesh::from_arrow_all`.
 pub fn encode_mesh_stream(meshes: &[Mesh]) -> Result<Vec<u8>, SceneEncodeError> {
     let positions: Vec<Vec<f32>> = meshes
         .iter()
@@ -148,7 +195,7 @@ pub fn encode_mesh_stream(meshes: &[Mesh]) -> Result<Vec<u8>, SceneEncodeError> 
             false,
         ),
     ])
-    .with_metadata(version_metadata());
+    .with_metadata(table_metadata(MESH_TABLE_KIND));
 
     let batch = RecordBatch::try_new(
         Arc::new(schema.clone()),
@@ -164,7 +211,7 @@ pub fn encode_mesh_stream(meshes: &[Mesh]) -> Result<Vec<u8>, SceneEncodeError> 
 
 /// Authors an optional **texture table** IPC stream: a one-row `rgba`
 /// `FixedSizeList<UInt8>[H*W*4]` column bearing the `arrow.fixed_shape_tensor`
-/// extension with shape `[H, W, 4]` (interleaved RGBA), tagged with the `0.0.5`
+/// extension with shape `[H, W, 4]` (interleaved RGBA), tagged with the `0.0.6`
 /// protocol version. Placed between the mesh and params sub-streams
 /// (`[mesh][texture][params]`), it binds the albedo `run_stream` samples in
 /// [`RenderMode::Textured`]. Decodes back via `ImageTexture::from_arrow`.
@@ -195,7 +242,7 @@ pub fn encode_texture_stream(texture: &dyn Texture) -> Result<Vec<u8>, SceneEnco
         None,
     );
 
-    let schema = Schema::new(vec![field]).with_metadata(version_metadata());
+    let schema = Schema::new(vec![field]).with_metadata(table_metadata(TEXTURE_TABLE_KIND));
     let batch = RecordBatch::try_new(Arc::new(schema.clone()), vec![Arc::new(array) as ArrayRef])?;
     write_ipc(&schema, &batch)
 }
@@ -239,15 +286,33 @@ fn all_or_none_f32(
 /// **all** frames set that field (Arrow columns are non-null); `draws`, when
 /// given, emits the `draw_mesh`/`draw_model` (+ `draw_mode` when any override is
 /// present) instanced-draw columns. Decodes back via [`crate::decode_frames`]
-/// and the draw decoder. Tagged with the `0.0.5` protocol version.
+/// and the draw decoder. Tagged with the `0.0.6` protocol version.
 pub fn encode_params_stream(
     frames: &[FrameParams],
     draws: Option<&[Vec<Draw>]>,
+) -> Result<Vec<u8>, SceneEncodeError> {
+    encode_params_stream_with_frame_ids(frames, draws, None)
+}
+
+/// Authors params with optional nullable `frame_id` references into a preceding
+/// frames table.
+pub fn encode_params_stream_with_frame_ids(
+    frames: &[FrameParams],
+    draws: Option<&[Vec<Draw>]>,
+    frame_ids: Option<&[Option<u32>]>,
 ) -> Result<Vec<u8>, SceneEncodeError> {
     if let Some(draws) = draws {
         if draws.len() != frames.len() {
             return Err(SceneEncodeError::DrawsLengthMismatch {
                 draws: draws.len(),
+                frames: frames.len(),
+            });
+        }
+    }
+    if let Some(frame_ids) = frame_ids {
+        if frame_ids.len() != frames.len() {
+            return Err(SceneEncodeError::FrameIdsLengthMismatch {
+                frame_ids: frame_ids.len(),
                 frames: frames.len(),
             });
         }
@@ -324,12 +389,147 @@ pub fn encode_params_stream(
             )) as ArrayRef);
         }
     }
+    if let Some(frame_ids) = frame_ids {
+        fields.push(Field::new("frame_id", DataType::UInt32, true));
+        columns.push(Arc::new(UInt32Array::from(frame_ids.to_vec())));
+    }
 
     if columns.is_empty() {
         return Err(SceneEncodeError::EmptyParams);
     }
 
-    let schema = Schema::new(fields).with_metadata(version_metadata());
+    let schema = Schema::new(fields).with_metadata(table_metadata(PARAMS_TABLE_KIND));
+    let batch = RecordBatch::try_new(Arc::new(schema.clone()), columns)?;
+    write_ipc(&schema, &batch)
+}
+
+/// Authors an inline background `frames` resource table. Encoded and raw rows
+/// may coexist through two nullable columns; raw rows share one RGBA tensor
+/// shape, as required by Arrow's field-level fixed-shape metadata.
+pub fn encode_frames_stream(frames: &[InlineFrame]) -> Result<Vec<u8>, SceneEncodeError> {
+    if frames.is_empty() {
+        return Err(SceneEncodeError::EmptyFrames);
+    }
+
+    let has_encoded = frames
+        .iter()
+        .any(|frame| matches!(frame, InlineFrame::Encoded(_)));
+    let pixel_shape = frames.iter().find_map(|frame| match frame {
+        InlineFrame::Pixels(image) => Some((image.width, image.height)),
+        InlineFrame::Encoded(_) => None,
+    });
+    let mut fields = Vec::new();
+    let mut columns: Vec<ArrayRef> = Vec::new();
+
+    if has_encoded {
+        let rows: Vec<Option<&[u8]>> = frames
+            .iter()
+            .enumerate()
+            .map(|(row, frame)| match frame {
+                InlineFrame::Encoded(bytes) if bytes.is_empty() => {
+                    Err(SceneEncodeError::EmptyEncodedFrame { row })
+                }
+                InlineFrame::Encoded(bytes) => Ok(Some(bytes.as_slice())),
+                InlineFrame::Pixels(_) => Ok(None),
+            })
+            .collect::<Result<_, _>>()?;
+        fields.push(Field::new(FRAME_BYTES_COLUMN, DataType::Binary, true));
+        columns.push(Arc::new(BinaryArray::from_iter(rows)));
+    }
+
+    if let Some((width, height)) = pixel_shape {
+        if width == 0 || height == 0 {
+            let row = frames
+                .iter()
+                .position(|frame| matches!(frame, InlineFrame::Pixels(_)))
+                .expect("pixel_shape came from a pixel frame");
+            return Err(SceneEncodeError::InvalidFrameDimensions { row, width, height });
+        }
+        let expected = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or(SceneEncodeError::InvalidFramePixels {
+                row: 0,
+                actual: 0,
+                expected: 0,
+                width,
+                height,
+            })?;
+        let list_size =
+            i32::try_from(expected).map_err(|_| SceneEncodeError::InvalidFramePixels {
+                row: 0,
+                actual: expected,
+                expected,
+                width,
+                height,
+            })?;
+        let capacity =
+            expected
+                .checked_mul(frames.len())
+                .ok_or(SceneEncodeError::InvalidFramePixels {
+                    row: 0,
+                    actual: expected,
+                    expected,
+                    width,
+                    height,
+                })?;
+        let mut flat = Vec::with_capacity(capacity);
+        let mut valid = Vec::with_capacity(frames.len());
+        for (row, frame) in frames.iter().enumerate() {
+            match frame {
+                InlineFrame::Encoded(_) => {
+                    valid.push(false);
+                    flat.resize(flat.len() + expected, 0);
+                }
+                InlineFrame::Pixels(image) => {
+                    if (image.width, image.height) != (width, height) {
+                        return Err(SceneEncodeError::MixedFrameDimensions {
+                            row,
+                            width: image.width,
+                            height: image.height,
+                            expected_width: width,
+                            expected_height: height,
+                        });
+                    }
+                    if image.rgba.len() != expected {
+                        return Err(SceneEncodeError::InvalidFramePixels {
+                            row,
+                            actual: image.rgba.len(),
+                            expected,
+                            width,
+                            height,
+                        });
+                    }
+                    valid.push(true);
+                    flat.extend_from_slice(&image.rgba);
+                }
+            }
+        }
+
+        let storage = DataType::FixedSizeList(
+            Arc::new(Field::new("item", DataType::UInt8, false)),
+            list_size,
+        );
+        let extension = arrow_schema::extension::FixedShapeTensor::try_new(
+            DataType::UInt8,
+            vec![height as usize, width as usize, 4],
+            Some(vec![
+                "height".to_string(),
+                "width".to_string(),
+                "channel".to_string(),
+            ]),
+            None,
+        )?;
+        fields.push(Field::new(FRAME_PIXELS_COLUMN, storage, true).with_extension_type(extension));
+        columns.push(Arc::new(FixedSizeListArray::new(
+            Arc::new(Field::new("item", DataType::UInt8, false)),
+            list_size,
+            Arc::new(UInt8Array::from(flat)),
+            Some(NullBuffer::new(BooleanBuffer::from(valid))),
+        )));
+    }
+
+    let schema = Schema::new(fields).with_metadata(table_metadata(FRAMES_TABLE_KIND));
     let batch = RecordBatch::try_new(Arc::new(schema.clone()), columns)?;
     write_ipc(&schema, &batch)
 }
@@ -343,6 +543,35 @@ pub fn encode_scene(
 ) -> Result<Vec<u8>, SceneEncodeError> {
     let mut bytes = encode_mesh_stream(meshes)?;
     bytes.extend(encode_params_stream(frames, draws)?);
+    Ok(bytes)
+}
+
+/// Authors a complete scene with inline frame resources.
+pub fn encode_scene_with_frames(
+    meshes: &[Mesh],
+    inline_frames: &[InlineFrame],
+    frames: &[FrameParams],
+    draws: Option<&[Vec<Draw>]>,
+    frame_ids: &[Option<u32>],
+) -> Result<Vec<u8>, SceneEncodeError> {
+    if let Some(frame_id) = frame_ids
+        .iter()
+        .flatten()
+        .copied()
+        .find(|frame_id| *frame_id as usize >= inline_frames.len())
+    {
+        return Err(SceneEncodeError::FrameIdOutOfRange {
+            frame_id,
+            frame_count: inline_frames.len(),
+        });
+    }
+    let mut bytes = encode_mesh_stream(meshes)?;
+    bytes.extend(encode_frames_stream(inline_frames)?);
+    bytes.extend(encode_params_stream_with_frame_ids(
+        frames,
+        draws,
+        Some(frame_ids),
+    )?);
     Ok(bytes)
 }
 
@@ -526,5 +755,22 @@ mod tests {
         };
         let err = encode_params_stream(&[frame], Some(&[])).unwrap_err();
         assert!(matches!(err, SceneEncodeError::DrawsLengthMismatch { .. }));
+    }
+
+    #[test]
+    fn frames_encoder_rejects_zero_dimensions() {
+        let frame = InlineFrame::Pixels(crate::ImageData {
+            width: 0,
+            height: 1,
+            rgba: Vec::new(),
+        });
+        assert!(matches!(
+            encode_frames_stream(&[frame]),
+            Err(SceneEncodeError::InvalidFrameDimensions {
+                row: 0,
+                width: 0,
+                height: 1
+            })
+        ));
     }
 }

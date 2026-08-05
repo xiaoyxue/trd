@@ -6,24 +6,31 @@ use arrow::datatypes::{DataType, Schema};
 use arrow::error::ArrowError;
 use arrow::ipc::reader::StreamDecoder;
 
+use crate::frame::validate_schema as validate_frames_schema;
 use crate::render::Draw;
-use crate::texture::{ImageTexture, TextureError, TEXTURE_COLUMN};
-use crate::{FrameParams, Mesh, MeshError};
+#[cfg(test)]
+use crate::texture::TEXTURE_COLUMN;
+use crate::texture::{ImageTexture, TextureError};
+use crate::{FrameError, FrameParams, InlineFrame, Mesh, MeshError};
 
 mod arrow_decode;
 pub(crate) use arrow_decode::{
-    check_version, decode_batch, decode_draws, decode_frame_refs, validate_schema,
+    check_version, decode_batch, decode_draws, decode_frame_ids, decode_frame_refs, validate_schema,
 };
 
-pub const PROTOCOL_VERSION: &str = "0.0.5";
+pub const PROTOCOL_VERSION: &str = "0.0.6";
 pub const PROTOCOL_VERSION_KEY: &str = "trd.protocol.version";
+pub const TABLE_KIND_KEY: &str = "trd.table.kind";
+
+pub(crate) const MESH_TABLE_KIND: &str = "mesh";
+pub(crate) const TEXTURE_TABLE_KIND: &str = "texture";
+pub(crate) const FRAMES_TABLE_KIND: &str = "frames";
+pub(crate) const PARAMS_TABLE_KIND: &str = "params";
 
 /// Input schema versions this build accepts. The protocol is **not** backward
-/// compatible: only the current [`PROTOCOL_VERSION`] (`0.0.5`) is accepted; a
-/// stream declaring `0.0.1`–`0.0.4` is hard-rejected (see `AGENTS.md`). A `0.0.5`
-/// stream is mesh-first `[mesh][texture?][params]` with an optional per-frame
-/// background `frame_path`/`frame_url` reference, optional camera columns, and an
-/// optional per-frame instanced draw list.
+/// compatible: only the current [`PROTOCOL_VERSION`] (`0.0.6`) is accepted. A
+/// stream is `[mesh][texture?][frames?][params]`; every sub-stream declares its
+/// kind through [`TABLE_KIND_KEY`].
 pub const SUPPORTED_INPUT_VERSIONS: &[&str] = &[PROTOCOL_VERSION];
 
 /// Schema-metadata key declaring the stream's intended playback rate in frames
@@ -60,14 +67,15 @@ pub type FrameBatch = Vec<DecodedFrame>;
 ///     so the frame is just its background plate (e.g. an AR frame where tracking
 ///     dropped out) rather than a default mesh.
 ///
-/// `frame_ref` is the optional `0.0.5` background frame reference
+/// `frame_ref` is the optional external background frame reference
 /// (`frame_path`/`frame_url`) the shell resolves + composites beneath the scene;
-/// `None` when the frame has no background.
+/// `frame_id` is an optional index into the preceding inline frames table.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecodedFrame {
     pub params: FrameParams,
     pub draws: Option<Vec<Draw>>,
     pub frame_ref: Option<String>,
+    pub frame_id: Option<u32>,
 }
 
 impl DecodedFrame {
@@ -101,6 +109,18 @@ pub enum ProtocolError {
     MissingSchema,
     #[error("decoder made no progress while input bytes remained")]
     NoProgress,
+    #[error("input schema metadata is missing required key `{0}`")]
+    MissingMetadata(&'static str),
+    #[error(
+        "input schema has unsupported `{TABLE_KIND_KEY}` value `{0}` \
+         (expected mesh, texture, frames, or params)"
+    )]
+    UnsupportedTableKind(String),
+    #[error("input table `{actual}` is out of order; expected {expected}")]
+    UnexpectedTable {
+        actual: &'static str,
+        expected: &'static str,
+    },
     #[error("input schema is missing required field `{0}`")]
     MissingColumn(&'static str),
     #[error("input column `{column}` has type {actual:?}, expected {expected}")]
@@ -124,6 +144,21 @@ pub enum ProtocolError {
     Mesh(#[from] MeshError),
     #[error("texture table decode failed: {0}")]
     Texture(#[from] TextureError),
+    #[error("frames table decode failed: {0}")]
+    Frames(#[from] FrameError),
+    #[error("params row {row} references frame_id {frame_id}, but the stream has no frames table")]
+    MissingFramesTable { row: usize, frame_id: u32 },
+    #[error(
+        "params row {row} references frame_id {frame_id}, but the frames table has \
+         {frame_count} row(s)"
+    )]
+    FrameIdOutOfRange {
+        row: usize,
+        frame_id: u32,
+        frame_count: usize,
+    },
+    #[error("params row {row} specifies both inline frame_id and external frame_path/frame_url")]
+    ConflictingFrameSources { row: usize },
     #[error(
         "per-frame draw list length mismatch at row {row}: \
          `draw_mesh` has {mesh_len} entries but `draw_model` has {model_len}"
@@ -154,11 +189,8 @@ enum SessionState {
 }
 
 /// Which kind of concatenated IPC sub-stream the session is currently decoding.
-/// A `0.0.5` stream is mesh-first `[mesh][texture?][params]`: a **required**
-/// leading **mesh** table, then an optional **texture** table, followed by the
-/// **params** stream. Each sub-stream is classified from its schema
-/// ([`is_mesh_schema`] / [`is_texture_schema`]); the params stream is the
-/// terminal one.
+/// A `0.0.6` stream is `[mesh][texture?][frames?][params]`; the params stream is
+/// terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StreamKind {
     /// The leading **mesh** table (one row = one mesh); accumulated into `meshes`.
@@ -166,13 +198,15 @@ enum StreamKind {
     /// The optional **texture** table (one row = one image); decoded into
     /// `texture` and bound as the sampled albedo for [`RenderMode::Textured`].
     Texture,
+    /// Optional inline background-frame resources indexed by params `frame_id`.
+    Frames,
     /// The terminal **params** stream (one row = one frame).
     Params,
 }
 
 /// Incremental decoder for the trd input protocol, mirroring the native
-/// [`crate::run_stream`] multi-stream framing but push-based for wasm. A `0.0.5`
-/// stream is mesh-first `[mesh][texture?][params]`: a leading **mesh** table
+/// [`crate::run_stream`] multi-stream framing but push-based for wasm. A `0.0.6`
+/// stream is `[mesh][texture?][frames?][params]`: a leading **mesh** table
 /// (one row = one mesh) decoded via [`Mesh::from_arrow_all`] and exposed through
 /// [`InputSession::meshes`], an optional **texture** table decoded via
 /// [`ImageTexture::from_arrow`] and exposed through [`InputSession::texture`],
@@ -190,6 +224,10 @@ pub struct InputSession {
     /// The image decoded from an optional leading **texture** table (`0.0.4`),
     /// bound as the sampled albedo. `None` for streams without a texture table.
     texture: Option<ImageTexture>,
+    frames: Vec<InlineFrame>,
+    frames_table_present: bool,
+    mesh_table_present: bool,
+    texture_table_present: bool,
     /// Whether a **params** schema has been decoded and validated (the terminal
     /// sub-stream). Frames can only be produced once true.
     params_schema_validated: bool,
@@ -203,6 +241,10 @@ impl InputSession {
             current_kind: None,
             meshes: Vec::new(),
             texture: None,
+            frames: Vec::new(),
+            frames_table_present: false,
+            mesh_table_present: false,
+            texture_table_present: false,
             params_schema_validated: false,
             state: SessionState::Open,
         }
@@ -272,6 +314,16 @@ impl InputSession {
         self.texture.is_some()
     }
 
+    /// Inline background resources in frames-table row order.
+    pub fn frames(&self) -> &[InlineFrame] {
+        &self.frames
+    }
+
+    /// Whether an explicit frames table appeared, including an empty one.
+    pub fn has_frames_table(&self) -> bool {
+        self.frames_table_present
+    }
+
     /// The stream's declared playback rate (fps) once a schema has been decoded,
     /// or `None` if none has arrived yet. Falls back to [`DEFAULT_FRAME_RATE`]
     /// when the metadata key is absent.
@@ -304,7 +356,14 @@ impl InputSession {
                                 self.meshes.extend(Mesh::from_arrow_all(&batch)?)
                             }
                             Some(StreamKind::Texture) => self.decode_texture(&batch)?,
-                            Some(StreamKind::Params) => batches.push(decode_frame_batch(&batch)?),
+                            Some(StreamKind::Frames) => {
+                                self.frames.extend(InlineFrame::from_arrow_all(&batch)?)
+                            }
+                            Some(StreamKind::Params) => batches.push(decode_frame_batch(
+                                &batch,
+                                self.frames_table_present,
+                                self.frames.len(),
+                            )?),
                             // A batch always implies its schema (classified above)
                             // is available, so `current_kind` is set here.
                             None => return Err(ProtocolError::MissingSchema),
@@ -319,7 +378,9 @@ impl InputSession {
                     if is_stream_boundary(&error)
                         && matches!(
                             self.current_kind,
-                            Some(StreamKind::Mesh) | Some(StreamKind::Texture)
+                            Some(StreamKind::Mesh)
+                                | Some(StreamKind::Texture)
+                                | Some(StreamKind::Frames)
                         )
                     {
                         self.decoder = StreamDecoder::new();
@@ -350,16 +411,64 @@ impl InputSession {
         let Some(schema) = self.decoder.schema() else {
             return Ok(());
         };
-        if is_mesh_schema(schema.as_ref()) {
-            check_version(schema.as_ref())?;
-            self.current_kind = Some(StreamKind::Mesh);
-        } else if is_texture_schema(schema.as_ref()) {
-            check_version(schema.as_ref())?;
-            self.current_kind = Some(StreamKind::Texture);
-        } else {
-            validate_schema(schema.as_ref())?;
-            self.current_kind = Some(StreamKind::Params);
-            self.params_schema_validated = true;
+        let kind = table_kind(schema.as_ref())?;
+        self.validate_table_order(kind)?;
+        match kind {
+            StreamKind::Frames => validate_frames_schema(schema.as_ref())?,
+            StreamKind::Params => {
+                validate_schema(schema.as_ref())?;
+                self.params_schema_validated = true;
+            }
+            StreamKind::Mesh | StreamKind::Texture => {}
+        }
+        self.current_kind = Some(kind);
+        Ok(())
+    }
+
+    fn validate_table_order(&mut self, kind: StreamKind) -> Result<(), ProtocolError> {
+        let valid = match kind {
+            StreamKind::Mesh => {
+                !self.mesh_table_present
+                    && !self.texture_table_present
+                    && !self.frames_table_present
+                    && !self.params_schema_validated
+            }
+            StreamKind::Texture => {
+                self.mesh_table_present
+                    && !self.texture_table_present
+                    && !self.frames_table_present
+                    && !self.params_schema_validated
+            }
+            StreamKind::Frames => {
+                self.mesh_table_present
+                    && !self.frames_table_present
+                    && !self.params_schema_validated
+            }
+            // `decode_params_stream` intentionally uses the same decoder on a
+            // standalone params stream. Full render entry points still require
+            // the leading mesh table.
+            StreamKind::Params => {
+                !self.params_schema_validated
+                    && (self.mesh_table_present
+                        || (!self.texture_table_present && !self.frames_table_present))
+            }
+        };
+        if !valid {
+            return Err(ProtocolError::UnexpectedTable {
+                actual: kind.as_str(),
+                expected: match kind {
+                    StreamKind::Mesh => "mesh as the first table",
+                    StreamKind::Texture => "texture after mesh and before frames/params",
+                    StreamKind::Frames => "frames after mesh/texture and before params",
+                    StreamKind::Params => "one terminal params table",
+                },
+            });
+        }
+        match kind {
+            StreamKind::Mesh => self.mesh_table_present = true,
+            StreamKind::Texture => self.texture_table_present = true,
+            StreamKind::Frames => self.frames_table_present = true,
+            StreamKind::Params => {}
         }
         Ok(())
     }
@@ -381,6 +490,29 @@ impl Default for InputSession {
     }
 }
 
+impl StreamKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Mesh => MESH_TABLE_KIND,
+            Self::Texture => TEXTURE_TABLE_KIND,
+            Self::Frames => FRAMES_TABLE_KIND,
+            Self::Params => PARAMS_TABLE_KIND,
+        }
+    }
+}
+
+fn table_kind(schema: &Schema) -> Result<StreamKind, ProtocolError> {
+    check_version(schema)?;
+    match schema.metadata().get(TABLE_KIND_KEY).map(String::as_str) {
+        Some(MESH_TABLE_KIND) => Ok(StreamKind::Mesh),
+        Some(TEXTURE_TABLE_KIND) => Ok(StreamKind::Texture),
+        Some(FRAMES_TABLE_KIND) => Ok(StreamKind::Frames),
+        Some(PARAMS_TABLE_KIND) => Ok(StreamKind::Params),
+        Some(other) => Err(ProtocolError::UnsupportedTableKind(other.to_owned())),
+        None => Err(ProtocolError::MissingMetadata(TABLE_KIND_KEY)),
+    }
+}
+
 /// True if `error` is the arrow "Unexpected EOS" signal a [`StreamDecoder`]
 /// raises when bytes remain after a stream's end-of-stream marker — i.e. the
 /// boundary between a leading mesh stream and the params stream that follows it
@@ -389,39 +521,38 @@ fn is_stream_boundary(error: &ArrowError) -> bool {
     matches!(error, ArrowError::IpcError(message) if message == "Unexpected EOS")
 }
 
-/// True if `schema` is a **mesh table** (has a `position` column) — used to tell
-/// a leading `0.0.3`+ mesh stream apart from the params stream that follows it (or
-/// a legacy params-only stream).
-pub(crate) fn is_mesh_schema(schema: &Schema) -> bool {
-    schema.fields().iter().any(|f| f.name() == "position")
-}
-
-/// True if `schema` is a **texture table** (has the `rgba` image column) — used
-/// to tell an optional leading `0.0.4` texture stream apart from the mesh stream
-/// before it and the params stream after it.
-pub(crate) fn is_texture_schema(schema: &Schema) -> bool {
-    schema.fields().iter().any(|f| f.name() == TEXTURE_COLUMN)
-}
-
 /// Decodes one params batch into [`DecodedFrame`]s: each row's [`FrameParams`]
 /// zipped with its optional per-frame instanced draw list and optional background
 /// frame reference. Rows from a stream without `draw_mesh`/`draw_model` columns
 /// get `draws: None` (the renderer draws one default instance); when the columns
 /// are present each row's list is carried as `Some(list)` (an explicit empty list
 /// ⇒ background only). Rows without a frame column get `frame_ref: None`.
-fn decode_frame_batch(batch: &RecordBatch) -> Result<FrameBatch, ProtocolError> {
+fn decode_frame_batch(
+    batch: &RecordBatch,
+    frames_table_present: bool,
+    frame_count: usize,
+) -> Result<FrameBatch, ProtocolError> {
     let params = decode_batch(batch)?;
     let draws = decode_draws(batch)?;
     let frame_refs = decode_frame_refs(batch)?;
-    Ok(params
+    let frame_ids = decode_frame_ids(batch, frames_table_present, frame_count)?;
+    params
         .into_iter()
         .enumerate()
-        .map(|(row, params)| DecodedFrame {
-            params,
-            draws: draws.as_ref().map(|rows| rows[row].clone()),
-            frame_ref: frame_refs.as_ref().and_then(|rows| rows[row].clone()),
+        .map(|(row, params)| {
+            let frame_ref = frame_refs.as_ref().and_then(|rows| rows[row].clone());
+            let frame_id = frame_ids.as_ref().and_then(|rows| rows[row]);
+            if frame_ref.is_some() && frame_id.is_some() {
+                return Err(ProtocolError::ConflictingFrameSources { row });
+            }
+            Ok(DecodedFrame {
+                params,
+                draws: draws.as_ref().map(|rows| rows[row].clone()),
+                frame_ref,
+                frame_id,
+            })
         })
-        .collect())
+        .collect()
 }
 
 /// Decodes a standalone **params** Arrow IPC stream (the bytes authored by
@@ -448,6 +579,7 @@ mod tests {
 
     use arrow::array::{
         Array, ArrayRef, FixedSizeListArray, Float32Array, Int32Array, RecordBatch, StringArray,
+        UInt32Array,
     };
     use arrow::buffer::NullBuffer;
     use arrow::datatypes::{DataType, Field, Schema};
@@ -482,10 +614,11 @@ mod tests {
         if let Some(version) = version {
             metadata.insert(PROTOCOL_VERSION_KEY.to_owned(), version.to_owned());
         }
+        metadata.insert(TABLE_KIND_KEY.to_owned(), PARAMS_TABLE_KIND.to_owned());
         Arc::new(Schema::new(fields).with_metadata(metadata))
     }
 
-    /// The minimal valid 0.0.5 params schema: a single `model` column.
+    /// The minimal valid 0.0.6 params schema: a single `model` column.
     fn valid_schema(version: Option<&str>) -> Arc<Schema> {
         schema_with(version, vec![model_field()])
     }
@@ -526,6 +659,7 @@ mod tests {
                 params,
                 draws: None,
                 frame_ref: None,
+                frame_id: None,
             })
             .collect()
     }
@@ -644,14 +778,14 @@ mod tests {
             Err(ProtocolError::UnsupportedVersion(value)) if value == "9.9.9"
         ));
 
-        // Absent version metadata is still accepted (the version is optional).
+        // Absent version metadata is rejected: the protocol has no compatibility
+        // mode and every input table declares its exact version.
         let without_version = test_batch_with(valid_schema(None), &[identity_frame()]);
-        let mut compatible = InputSession::new();
-        assert_eq!(
-            compatible.push(&test_stream(&[without_version])).unwrap(),
-            vec![plain(vec![identity_frame()])]
-        );
-        compatible.finish().unwrap();
+        let mut missing = InputSession::new();
+        assert!(matches!(
+            missing.push(&test_stream(&[without_version])),
+            Err(ProtocolError::MissingMetadata(PROTOCOL_VERSION_KEY))
+        ));
     }
 
     #[test]
@@ -741,13 +875,13 @@ mod tests {
 
     #[test]
     fn accepts_only_current_version_and_rejects_others() {
-        // 0.0.5 is the only supported version: there is no backward compat for
-        // 0.0.1–0.0.4, and future (0.0.6) versions are rejected too.
+        // 0.0.6 is the only supported version: there is no backward compat for
+        // 0.0.1–0.0.5, and future versions are rejected too.
         let mut session = InputSession::new();
         session.push(&version_stream(PROTOCOL_VERSION)).unwrap();
         session.finish().unwrap();
 
-        for version in ["0.0.1", "0.0.2", "0.0.3", "0.0.4", "0.0.6"] {
+        for version in ["0.0.1", "0.0.2", "0.0.3", "0.0.4", "0.0.5", "0.0.7"] {
             let mut session = InputSession::new();
             assert!(
                 matches!(
@@ -815,7 +949,7 @@ mod tests {
         )) as ArrayRef
     }
 
-    /// Builds a one-row `0.0.5` batch of an identity `model` plus the given
+    /// Builds a one-row `0.0.6` batch of an identity `model` plus the given
     /// extra `(field, column)` pairs.
     fn camera_batch(extra: Vec<(Field, ArrayRef)>) -> RecordBatch {
         let mut fields = vec![model_field()];
@@ -854,7 +988,7 @@ mod tests {
 
     #[test]
     fn decodes_frame_reference_column_prefers_path_and_maps_null_or_empty_to_none() {
-        // 0.0.5 background frame reference: `decode_frame_refs` surfaces one
+        // External background reference: `decode_frame_refs` surfaces one
         // Option<String> per row — the value the browser shell (and CLI/app)
         // resolves + composites beneath the scene, and the wasm renderers expose
         // via `frameRef(i)`. Per-row null/empty ⇒ None (keep the previous
@@ -895,15 +1029,21 @@ mod tests {
                 Field::new("frame_url", DataType::Utf8, true),
             ])),
             vec![
-                Arc::new(StringArray::from(vec![Some("local/a.jpg")])) as ArrayRef,
-                Arc::new(StringArray::from(vec![Some("https://cdn/x.jpg")])) as ArrayRef,
+                Arc::new(StringArray::from(vec![Some("local/a.jpg"), None])) as ArrayRef,
+                Arc::new(StringArray::from(vec![
+                    Some("https://cdn/x.jpg"),
+                    Some("https://cdn/fallback.jpg"),
+                ])) as ArrayRef,
             ],
         )
         .unwrap();
         assert_eq!(
             decode_frame_refs(&batch).unwrap(),
-            Some(vec![Some("local/a.jpg".to_owned())]),
-            "frame_path is preferred over frame_url"
+            Some(vec![
+                Some("local/a.jpg".to_owned()),
+                Some("https://cdn/fallback.jpg".to_owned()),
+            ]),
+            "frame_path is preferred per row, then frame_url is the fallback"
         );
 
         // (c) neither column present ⇒ None for the whole batch (params-only stream).
@@ -947,7 +1087,7 @@ mod tests {
             Field::new("frame_path", DataType::Utf8, true),
             Arc::new(StringArray::from(vec![Some("frames/frame_000000.jpg")])) as ArrayRef,
         )]);
-        let frames = decode_frame_batch(&batch).unwrap();
+        let frames = decode_frame_batch(&batch, false, 0).unwrap();
         assert_eq!(
             frames[0].frame_ref,
             Some("frames/frame_000000.jpg".to_owned())
@@ -1142,10 +1282,13 @@ mod tests {
             ),
         ])
         .with_metadata(
-            [(
-                PROTOCOL_VERSION_KEY.to_string(),
-                PROTOCOL_VERSION.to_string(),
-            )]
+            [
+                (
+                    PROTOCOL_VERSION_KEY.to_string(),
+                    PROTOCOL_VERSION.to_string(),
+                ),
+                (TABLE_KIND_KEY.to_string(), MESH_TABLE_KIND.to_string()),
+            ]
             .into_iter()
             .collect(),
         );
@@ -1213,6 +1356,7 @@ mod tests {
 
         let mut metadata = std::collections::HashMap::new();
         metadata.insert(PROTOCOL_VERSION_KEY.to_owned(), PROTOCOL_VERSION.to_owned());
+        metadata.insert(TABLE_KIND_KEY.to_owned(), PARAMS_TABLE_KIND.to_owned());
         let schema = Arc::new(Schema::new(fields).with_metadata(metadata));
         let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
         let mut bytes = Vec::new();
@@ -1278,6 +1422,7 @@ mod tests {
             params: identity_frame(),
             draws: None,
             frame_ref: None,
+            frame_id: None,
         };
         let resolved = absent.resolved_draws();
         assert_eq!(resolved.len(), 1);
@@ -1289,6 +1434,7 @@ mod tests {
             params: identity_frame(),
             draws: Some(Vec::new()),
             frame_ref: None,
+            frame_id: None,
         };
         assert!(empty.resolved_draws().is_empty());
 
@@ -1302,6 +1448,7 @@ mod tests {
             params: identity_frame(),
             draws: Some(vec![one]),
             frame_ref: None,
+            frame_id: None,
         };
         assert_eq!(explicit.resolved_draws(), vec![one]);
     }
@@ -1383,10 +1530,13 @@ mod tests {
         );
         let schema = Arc::new(
             Schema::new(vec![field]).with_metadata(
-                [(
-                    PROTOCOL_VERSION_KEY.to_string(),
-                    PROTOCOL_VERSION.to_string(),
-                )]
+                [
+                    (
+                        PROTOCOL_VERSION_KEY.to_string(),
+                        PROTOCOL_VERSION.to_string(),
+                    ),
+                    (TABLE_KIND_KEY.to_string(), TEXTURE_TABLE_KIND.to_string()),
+                ]
                 .into_iter()
                 .collect(),
             ),
@@ -1467,5 +1617,234 @@ mod tests {
         assert!(session.has_meshes());
         assert!(!session.has_texture());
         assert!(session.texture().is_none());
+    }
+
+    fn inline_pixel(value: u8) -> InlineFrame {
+        InlineFrame::Pixels(crate::ImageData {
+            width: 1,
+            height: 1,
+            rgba: vec![value, value + 1, value + 2, 255],
+        })
+    }
+
+    #[test]
+    fn decodes_frames_table_and_reusable_frame_ids() {
+        let mesh = crate::Mesh::hello_triangle();
+        let resources = vec![inline_pixel(10), inline_pixel(20)];
+        let params = vec![
+            FrameParams::IDENTITY,
+            FrameParams::IDENTITY,
+            FrameParams::IDENTITY,
+        ];
+        let ids = [Some(0), Some(1), Some(0)];
+        let bytes = crate::encode_scene_with_frames(
+            std::slice::from_ref(&mesh),
+            &resources,
+            &params,
+            None,
+            &ids,
+        )
+        .unwrap();
+
+        let mut session = InputSession::new();
+        let decoded: Vec<_> = session
+            .push(&bytes)
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .collect();
+        session.finish().unwrap();
+
+        assert_eq!(session.meshes(), &[mesh]);
+        assert!(session.has_frames_table());
+        assert_eq!(session.frames(), resources);
+        assert_eq!(
+            decoded
+                .iter()
+                .map(|frame| frame.frame_id)
+                .collect::<Vec<_>>(),
+            ids
+        );
+        assert!(decoded.iter().all(|frame| frame.frame_ref.is_none()));
+    }
+
+    #[test]
+    fn mesh_texture_frames_params_decodes_across_every_split() {
+        let mesh = crate::Mesh::hello_triangle();
+        let texture = crate::ImageTexture::from_rgba(1, 1, vec![100, 110, 120, 255]).unwrap();
+        let resources = vec![inline_pixel(30)];
+        let mut bytes = crate::encode_mesh_stream(std::slice::from_ref(&mesh)).unwrap();
+        bytes.extend(crate::encode_texture_stream(&texture).unwrap());
+        bytes.extend(crate::encode_frames_stream(&resources).unwrap());
+        bytes.extend(
+            crate::encode_params_stream_with_frame_ids(
+                &[FrameParams::IDENTITY],
+                None,
+                Some(&[Some(0)]),
+            )
+            .unwrap(),
+        );
+
+        for split in 0..=bytes.len() {
+            let mut session = InputSession::new();
+            let mut batches = session.push(&bytes[..split]).unwrap();
+            batches.extend(session.push(&bytes[split..]).unwrap());
+            session.finish().unwrap();
+            assert_eq!(
+                session.meshes(),
+                std::slice::from_ref(&mesh),
+                "split {split}"
+            );
+            assert_eq!(session.frames(), resources, "split {split}");
+            assert!(session.has_texture(), "split {split}");
+            assert_eq!(batches.len(), 1, "split {split}");
+            assert_eq!(batches[0][0].frame_id, Some(0), "split {split}");
+        }
+    }
+
+    #[test]
+    fn frame_id_requires_table_and_valid_index() {
+        let missing = camera_batch(vec![(
+            Field::new("frame_id", DataType::UInt32, true),
+            Arc::new(UInt32Array::from(vec![Some(0)])) as ArrayRef,
+        )]);
+        assert!(matches!(
+            decode_frame_batch(&missing, false, 0),
+            Err(ProtocolError::MissingFramesTable {
+                row: 0,
+                frame_id: 0
+            })
+        ));
+
+        let out_of_range = camera_batch(vec![(
+            Field::new("frame_id", DataType::UInt32, true),
+            Arc::new(UInt32Array::from(vec![Some(2)])) as ArrayRef,
+        )]);
+        assert!(matches!(
+            decode_frame_batch(&out_of_range, true, 2),
+            Err(ProtocolError::FrameIdOutOfRange {
+                row: 0,
+                frame_id: 2,
+                frame_count: 2
+            })
+        ));
+
+        let null = camera_batch(vec![(
+            Field::new("frame_id", DataType::UInt32, true),
+            Arc::new(UInt32Array::from(vec![None])) as ArrayRef,
+        )]);
+        let decoded = decode_frame_batch(&null, false, 0).unwrap();
+        assert_eq!(decoded[0].frame_id, None);
+    }
+
+    #[test]
+    fn inline_and_external_frame_sources_conflict() {
+        let batch = camera_batch(vec![
+            (
+                Field::new("frame_id", DataType::UInt32, true),
+                Arc::new(UInt32Array::from(vec![Some(0)])) as ArrayRef,
+            ),
+            (
+                Field::new("frame_path", DataType::Utf8, true),
+                Arc::new(StringArray::from(vec![Some("frames/a.png")])) as ArrayRef,
+            ),
+        ]);
+        assert!(matches!(
+            decode_frame_batch(&batch, true, 1),
+            Err(ProtocolError::ConflictingFrameSources { row: 0 })
+        ));
+    }
+
+    #[test]
+    fn explicit_table_kind_is_required_and_validated() {
+        let schema = valid_schema(Some(PROTOCOL_VERSION));
+        let mut metadata = schema.metadata().clone();
+        metadata.remove(TABLE_KIND_KEY);
+        let missing_kind = test_batch_with(
+            Arc::new(Schema::new(schema.fields().clone()).with_metadata(metadata)),
+            &[identity_frame()],
+        );
+        let mut session = InputSession::new();
+        assert!(matches!(
+            session.push(&test_stream(&[missing_kind])),
+            Err(ProtocolError::MissingMetadata(TABLE_KIND_KEY))
+        ));
+
+        let schema = valid_schema(Some(PROTOCOL_VERSION));
+        let mut metadata = schema.metadata().clone();
+        metadata.insert(TABLE_KIND_KEY.to_owned(), "mystery".to_owned());
+        let unknown_kind = test_batch_with(
+            Arc::new(Schema::new(schema.fields().clone()).with_metadata(metadata)),
+            &[identity_frame()],
+        );
+        let mut session = InputSession::new();
+        assert!(matches!(
+            session.push(&test_stream(&[unknown_kind])),
+            Err(ProtocolError::UnsupportedTableKind(kind)) if kind == "mystery"
+        ));
+    }
+
+    #[test]
+    fn schema_only_frames_table_is_validated_during_classification() {
+        let mesh = crate::Mesh::hello_triangle();
+        let schema = Schema::new(vec![Field::new("other", DataType::UInt8, false)]).with_metadata(
+            [
+                (
+                    PROTOCOL_VERSION_KEY.to_string(),
+                    PROTOCOL_VERSION.to_string(),
+                ),
+                (TABLE_KIND_KEY.to_string(), FRAMES_TABLE_KIND.to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let mut frames_stream = Vec::new();
+        let mut writer = StreamWriter::try_new(&mut frames_stream, &schema).unwrap();
+        writer.finish().unwrap();
+
+        let mut bytes = write_mesh_stream(&mesh);
+        bytes.extend(frames_stream);
+        let mut session = InputSession::new();
+        assert!(matches!(
+            session.push(&bytes),
+            Err(ProtocolError::Frames(FrameError::MissingPayloadColumns))
+        ));
+    }
+
+    #[test]
+    fn rejects_frames_table_before_mesh_and_duplicate_resource_tables() {
+        let mesh = crate::Mesh::hello_triangle();
+        let frames = crate::encode_frames_stream(&[inline_pixel(1)]).unwrap();
+        let params = crate::encode_params_stream_with_frame_ids(
+            &[FrameParams::IDENTITY],
+            None,
+            Some(&[Some(0)]),
+        )
+        .unwrap();
+
+        let mut before_mesh = frames.clone();
+        before_mesh.extend(crate::encode_mesh_stream(std::slice::from_ref(&mesh)).unwrap());
+        before_mesh.extend(params.clone());
+        let mut session = InputSession::new();
+        assert!(matches!(
+            session.push(&before_mesh),
+            Err(ProtocolError::UnexpectedTable {
+                actual: FRAMES_TABLE_KIND,
+                ..
+            })
+        ));
+
+        let mut duplicate = crate::encode_mesh_stream(std::slice::from_ref(&mesh)).unwrap();
+        duplicate.extend(frames.clone());
+        duplicate.extend(frames);
+        duplicate.extend(params);
+        let mut session = InputSession::new();
+        assert!(matches!(
+            session.push(&duplicate),
+            Err(ProtocolError::UnexpectedTable {
+                actual: FRAMES_TABLE_KIND,
+                ..
+            })
+        ));
     }
 }

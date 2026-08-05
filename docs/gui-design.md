@@ -82,7 +82,7 @@ FrameParams { model?, k?, pose?, eye?, target?, fovy?, ... }  // camera
 
 The **model matrix lives per-draw** (`Draw.model`, composed under the mesh's
 preview base model). The wire protocol is mesh-first Arrow
-`[mesh][texture?][params]` at `PROTOCOL_VERSION = 0.0.5`. This is exactly the
+`[mesh][texture?][frames?][params]` at `PROTOCOL_VERSION = 0.0.6`. This is exactly the
 value the interaction loop needs to recompute.
 
 `trd-gui` is a **new front-end peer** to `trd-app` — it owns UI + interaction,
@@ -213,7 +213,7 @@ trait SceneRenderer {
   or a live `MeshRenderer`. No serialization; lowest latency. Good for smooth
   drag.
 * **`ArrowRoundTripRenderer`** (the literal request): serializes the updated
-  scene state to a **new Arrow `[mesh][texture?][params]` stream**, feeds it to
+  scene state to a **new Arrow `[mesh][texture?][frames?][params]` stream**, feeds it to
   `trd_core::run_stream` (in-proc) or the `trd-cli` binary (out-of-process),
   reads the Arrow **image** stream back (`output_schema` fixed-shape tensor),
   and decodes it to RGBA. This produces output **pixel-identical to the batch
@@ -230,10 +230,10 @@ third `LiveSurfaceRenderer` later.
 
 trd-core today only *decodes* the input scene Arrow (`Mesh::from_arrow_all`,
 `decode_frames`, `decode_draws`) and *encodes* the **image output**
-(`OutputSession`). The input `[mesh][texture?][params]` stream is currently
+(`OutputSession`). The input `[mesh][texture?][frames?][params]` stream is currently
 authored only by the Python producers (`scripts/*_to_arrow.py`) and by test
 code. `ArrowRoundTripRenderer` needs to author that input stream **in Rust**
-(arrow `StreamWriter` + the 0.0.5 schema/metadata). Proposed: add a small
+(arrow `StreamWriter` + the 0.0.6 schema/metadata). Proposed: add a small
 `trd_core::scene_encode` module (mirror of the decoders, reused by tests) so
 the encoder is covered by the existing decoder-parity net. `InProcRenderer`
 avoids this entirely.
@@ -248,7 +248,7 @@ adds a **reverse** flow (events GUI → producer). Design:
 * **Out-of-process producer (future):** define a **separate**, small event
   channel (Arrow event schema or JSON lines) so a Python/ML producer can consume
   events and emit the next scene frame. This is a *new, independent* protocol —
-  **do not** fold it into the image/scene `PROTOCOL_VERSION` (0.0.5) or bump
+  **do not** fold it into the image/scene `PROTOCOL_VERSION` (0.0.6) or bump
   that version for it. Version the event channel on its own.
 
 Recommendation: ship the in-proc enum first; standardize an Arrow event schema
@@ -391,5 +391,5 @@ scene authoring, and the image-display texture. All pixels come from trd-core.
 * Render values (`Scene`, `DrawableObject`, `Draw`, `FrameParams`,
   `build_scene`, `MeshRenderer::encode`, `BatchRenderer::render_frame`,
   `run_stream`, `RenderOptions`, `OutputSession`) — `crates/trd-core/src/{render,stream,output}.rs`.
-* Protocol 0.0.5 mesh-first `[mesh][texture?][params]`, model per `Draw.model` —
-  `docs/protocol/0.0.5.md`, AGENTS.md.
+* Protocol 0.0.6 `[mesh][texture?][frames?][params]`, model per `Draw.model` —
+  `docs/protocol/0.0.6.md`, AGENTS.md.

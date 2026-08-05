@@ -59,6 +59,10 @@ pub struct CanvasRenderer {
     /// renderer loads the whole stream once, then paces playback by index (so the
     /// JS shell can upload each frame's background *before* rendering it).
     frames: Vec<DecodedFrame>,
+    /// Last inline frames-table resource uploaded to the frame-plane texture.
+    last_inline_frame_id: Option<u32>,
+    /// An external/manual upload waiting to be consumed by the next render.
+    external_frame_ready: bool,
     state: CanvasState,
 }
 
@@ -120,6 +124,8 @@ impl CanvasRenderer {
             target,
             input: trd_core::InputSession::new(),
             frames: Vec::new(),
+            last_inline_frame_id: None,
+            external_frame_ready: false,
             state: CanvasState::Open,
         })
     }
@@ -190,7 +196,7 @@ impl CanvasRenderer {
         u32::try_from(self.frames.len()).unwrap_or(u32::MAX)
     }
 
-    /// The buffered frame's optional `0.0.5` background reference
+    /// The buffered frame's optional external background reference
     /// (`frame_path`/`frame_url`), which the JS shell resolves to RGBA and uploads
     /// via [`update_frame_texture_rgba`](Self::update_frame_texture_rgba) before
     /// [`render_index`](Self::render_index). `None` when out of range or the frame
@@ -403,6 +409,8 @@ impl CanvasRenderer {
             .as_mut()
             .expect("renderer built above")
             .update_frame_texture_rgba(queue, rgba, width, height);
+        self.last_inline_frame_id = None;
+        self.external_frame_ready = true;
         Ok(())
     }
 }
@@ -431,6 +439,8 @@ impl CanvasRenderer {
             ));
         }
         let params = frame.params;
+        let has_inline_frame = self.upload_inline_frame(frame.frame_id)?;
+        let has_external_frame = std::mem::take(&mut self.external_frame_ready);
         // Explicit wire draw list ⇒ drawn verbatim (an empty list ⇒ background
         // only); an absent draw list ⇒ one instance of mesh 0 placed by the
         // frame's own model (legacy single-object behavior).
@@ -452,7 +462,8 @@ impl CanvasRenderer {
             self.show_local_axes,
             None,
             None,
-            self.composite_frame.then_some(FrameFit::Stretch),
+            (has_inline_frame || (self.composite_frame && has_external_frame))
+                .then_some(FrameFit::Stretch),
         );
 
         measure("trd.canvas.render-submit", || {
@@ -471,6 +482,32 @@ impl CanvasRenderer {
             }
             Ok(())
         })
+    }
+
+    fn upload_inline_frame(&mut self, frame_id: Option<u32>) -> Result<bool, JsValue> {
+        let Some(frame_id) = frame_id else {
+            self.last_inline_frame_id = None;
+            return Ok(false);
+        };
+        self.external_frame_ready = false;
+        if self.last_inline_frame_id == Some(frame_id) {
+            return Ok(true);
+        }
+        let image = self
+            .input
+            .frames()
+            .get(frame_id as usize)
+            .ok_or_else(|| js_error(format!("frame_id {frame_id} is out of range")))?
+            .decode()
+            .map_err(|error| js_error(format!("decode frame_id {frame_id}: {error}")))?;
+        self.ensure_renderer();
+        let queue = &self.queue;
+        self.renderer
+            .as_mut()
+            .expect("renderer built above")
+            .update_frame_texture_rgba(queue, &image.rgba, image.width, image.height);
+        self.last_inline_frame_id = Some(frame_id);
+        Ok(true)
     }
 
     /// Lazily builds the mesh renderer on first use. The protocol is mesh-first,

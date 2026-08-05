@@ -17,7 +17,7 @@ This is deliberately *placement-free*: it carries no ``model``/``draws`` columns
 The **downstream** stage (examples/placement_quad_by_local_coord.py --from-perception)
 consumes this stream, runs the #77 single-view reconstruction (K + quad → the
 plane's ``(e1,e2,e3)`` frame in camera E³), anchors the mesh there, and emits a
-render-ready 0.0.5 params stream. Splitting the two stages this way lets the
+render-ready 0.0.6 params stream. Splitting the two stages this way lets the
 perception output be produced/checked independently of the renderer.
 
 Here we *simulate* that upstream by reading the recorded ``K.txt`` /

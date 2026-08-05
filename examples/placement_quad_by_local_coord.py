@@ -59,6 +59,12 @@ Run (from ``nix develop``) — simulate the upstream perception stream, then thi
         --placement-quad --place-mesh \
         -o examples/frames.cornellbox.stage2.jsonl
 
+    # Full 250-frame bunny-only variant for an inline frames resource table:
+    uv run --with numpy examples/placement_quad_by_local_coord.py \
+        --assets assets/videos/cornellbox --step 1 --inline-frames \
+        --width 1920 --height 1080 \
+        -o examples/frames.cornellbox.inline.jsonl
+
 then render each stage's GIF via trd-cli (wrap with nixGL on native GPU boxes)::
 
     examples/render.sh --cli --placement-quad --axes-local \
@@ -239,7 +245,7 @@ def k_render_columns(K, width, height, src_w, src_h):
 
 
 def emit_placement_jsonl(K, quads, args):
-    """Emit a 0.0.5 JSONL that places the bunny **per frame via #77's single-view
+    """Emit a 0.0.6 JSONL that places the bunny **per frame via #77's single-view
     basis**, using only ``K`` + the quad — **no ``pose`` column**.
 
     Reads the recorded ``K.txt``/``QuadImagePoints.txt`` fixture directly: builds
@@ -254,6 +260,19 @@ def emit_placement_jsonl(K, quads, args):
         (K, quads[f], f"{args.frame_rel}/frame_{f:06d}.{args.frame_ext}") for f in idx
     ]
     emit_records(records, args)
+
+
+def frame_reference(frame_path, inline_frames):
+    """Return the params field selecting this record's background resource."""
+    if not inline_frames:
+        return {"frame_path": frame_path}
+    match = re.search(r"(?:^|[/\\])frame_(\d+)\.[^./\\]+$", frame_path)
+    if match is None:
+        raise SystemExit(
+            "error: --inline-frames requires frame paths ending in "
+            f"frame_NNNNNN.ext, got {frame_path!r}"
+        )
+    return {"frame_id": int(match.group(1))}
 
 
 def read_perception_records(path):
@@ -295,7 +314,7 @@ def read_perception_records(path):
 
 
 def emit_records(records, args):
-    """Reconstruct + emit the 0.0.5 render stream for ``(K, quad, frame_path)`` records.
+    """Reconstruct + emit the 0.0.6 render stream for ``(K, quad, frame_path)`` records.
 
     The placement-quad's local frame is reconstructed from ``K`` + the quad points.
     With ``--place-mesh`` (default) the model mesh is anchored on it (stage 2); with
@@ -310,7 +329,8 @@ def emit_records(records, args):
     A record with **null geometry** (``K``/``quad`` is ``None`` — an untracked
     frame) is emitted as a **background-plate-only** row: an explicit *empty*
     ``draws`` list (trd-core draws no mesh for it, per
-    ``DecodedFrame::resolved_draws``) plus its ``frame_path``. It carries a
+    ``DecodedFrame::resolved_draws``) plus its external ``frame_path`` or inline
+    ``frame_id``. It carries a
     placeholder ``k`` (the last tracked frame's render-K) only so
     ``scripts/jsonl_to_arrow.py``'s all-or-nothing ``k`` column stays present for
     the tracked frames; the frame plane ignores the camera, so it is never
@@ -337,9 +357,10 @@ def emit_records(records, args):
     last_render_k = render_k(tracked[0][0]) if tracked else None
     placed_i = 0
     for K, quad, frame_path in records:
+        frame_ref = frame_reference(frame_path, args.inline_frames)
         if K is None or quad is None:
             # Untracked frame → just the video still: empty draw list = no mesh.
-            row = {"draws": [], "frame_path": frame_path}
+            row = {"draws": [], **frame_ref}
             if last_render_k is not None:
                 row["k"] = last_render_k
             out.write(json.dumps(row) + "\n")
@@ -436,7 +457,7 @@ def emit_records(records, args):
         row = {
             "k": last_render_k,
             "draws": draws,
-            "frame_path": frame_path,
+            **frame_ref,
         }
         out.write(json.dumps(row) + "\n")
         written += 1
@@ -524,6 +545,9 @@ def main():
     ap.add_argument("--frame-ext", default="jpg", help="still extension (png|jpg)")
     ap.add_argument("--frame-rel", default="frames",
                     help="frame_path prefix relative to --frames-base (default: frames)")
+    ap.add_argument("--inline-frames", action="store_true",
+                    help="emit frame_id parsed from each frame_NNNNNN path instead of "
+                         "frame_path; pair with scripts/extract_frames.py --embed")
     ap.add_argument("--width", type=int, default=960, help="render width")
     ap.add_argument("--height", type=int, default=540, help="render height")
     ap.add_argument("--src-width", type=int, default=DEFAULT_SRC_W,

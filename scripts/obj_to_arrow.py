@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Convert one or more Wavefront ``.obj`` meshes to a trd **mesh** Arrow IPC
-stream (0.0.5).
+stream (0.0.6).
 
 A trd input stream is two concatenated Arrow IPC streams — ``[mesh][params]``
 — so a mesh table is authored by this script and the per-frame params by
@@ -55,7 +55,8 @@ import pyarrow as pa
 from pyarrow import ipc
 
 PROTOCOL_VERSION_KEY = b"trd.protocol.version"
-PROTOCOL_VERSION = b"0.0.5"
+PROTOCOL_VERSION = b"0.0.6"
+TABLE_KIND_KEY = b"trd.table.kind"
 
 
 def parse_obj(text):
@@ -183,7 +184,13 @@ def mesh_batch(meshes):
     columns.append(pa.array([m[3] for m in meshes], type=index_type))
     fields.append(("index", index_type))
 
-    schema = pa.schema(fields, metadata={PROTOCOL_VERSION_KEY: PROTOCOL_VERSION})
+    schema = pa.schema(
+        fields,
+        metadata={
+            PROTOCOL_VERSION_KEY: PROTOCOL_VERSION,
+            TABLE_KIND_KEY: b"mesh",
+        },
+    )
     return schema, pa.record_batch(columns, schema=schema)
 
 

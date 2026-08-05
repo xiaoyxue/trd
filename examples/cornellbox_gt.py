@@ -203,7 +203,7 @@ def colmajor(m):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Author the cornellbox AR composite JSONL (0.0.5).")
+    ap = argparse.ArgumentParser(description="Author the cornellbox AR composite JSONL (0.0.6).")
     ap.add_argument("--assets", default="assets/videos/cornellbox",
                     help="dir with K.txt / Pose.txt / QuadImagePoints.txt")
     ap.add_argument("--frames", default="output/cornellbox/frames",
