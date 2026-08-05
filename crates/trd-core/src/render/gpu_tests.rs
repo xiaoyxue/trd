@@ -619,6 +619,66 @@ fn mesh_renderer_axes_overlay_draws_rgb_gizmo() {
 #[test]
 #[ignore = "requires a GPU adapter"]
 #[cfg(not(target_arch = "wasm32"))]
+fn gizmo_lines_and_arrowheads_stay_smooth_without_msaa() {
+    let (device, queue) = test_device();
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+    let (width, height) = (128, 128);
+    let mesh_data = Mesh::hello_triangle();
+    let mut renderer = MeshRenderer::with_sample_count(
+        &device,
+        format,
+        std::slice::from_ref(&mesh_data),
+        &[Matrix4::IDENTITY],
+        1,
+    );
+    let model = Matrix4::from_scale(Vector3::new(0.5, 0.5, 0.5)).to_cols_array();
+    let scene = [DrawableObject::CoordinateAxes { model }];
+
+    let pixels = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
+        renderer.encode(
+            q,
+            e,
+            v,
+            FrameParams::IDENTITY,
+            &scene,
+            Viewport { width, height },
+        );
+    });
+    let red = |x: u32, y: u32| {
+        let i = ((y * width + x) * 4) as usize;
+        pixels[i]
+    };
+
+    // Halfway along +X, the 3px shaft plus its analytic feather covers multiple
+    // rows and includes partial-alpha edge pixels even in this single-sample pass.
+    let shaft_x = 80;
+    let shaft_rows = (56..72)
+        .filter(|&y| red(shaft_x, y) > 0)
+        .collect::<Vec<_>>();
+    assert!(
+        shaft_rows.len() >= 4,
+        "expanded shaft should cover multiple rows, got {shaft_rows:?}"
+    );
+    assert!(
+        shaft_rows
+            .iter()
+            .any(|&y| (1..=254).contains(&red(shaft_x, y))),
+        "shaft edge should contain analytically anti-aliased pixels"
+    );
+
+    // Beyond the shortened +X shaft, a red pixel off the centerline proves the
+    // cone geometry continues to the original axis tip.
+    let arrow_wing_lit =
+        (107u32..111).any(|x| (58u32..70).any(|y| y.abs_diff(height / 2) >= 2 && red(x, y) > 0));
+    assert!(
+        arrow_wing_lit,
+        "the +X arrowhead should light pixels outside the shaft"
+    );
+}
+
+#[test]
+#[ignore = "requires a GPU adapter"]
+#[cfg(not(target_arch = "wasm32"))]
 fn scene_composes_all_drawable_kinds_together() {
     // #41: every primitive is a `DrawableObject`, and every front-end submits
     // the same heterogeneous `Scene` for draw-kind batching. A scene mixing a

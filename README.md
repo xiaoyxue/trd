@@ -198,7 +198,8 @@ then edits *that* object. Everything is **per-object**:
 - **Render mode** — Filled / Wireframe / Textured / **PBR**, chosen per object;
 - **PBR material** — metallic / roughness / tone-map, edited live per object;
 - **Diffuse texture** — each object skins its own albedo;
-- **Overlays** — bounding box, world/local axes, XZ plane grid.
+- **Overlays** — smooth, thickness-controlled bounding boxes/grids and
+  arrowheaded world/local axes.
 
 The browser loads multiple objects from **repeatable `?mesh=`** (+ positional
 `?texture=`, and `?env=` for PBR):

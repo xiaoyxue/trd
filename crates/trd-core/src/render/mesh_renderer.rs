@@ -39,20 +39,33 @@ impl IndexBuf {
     }
 }
 
-/// A vertex buffer paired with one index buffer: a self-contained indexed draw
-/// (e.g. a mesh's AABB box, which carries its own corner vertices). Meshes reuse
-/// one vertex buffer for both their filled triangles and wireframe edges, so
-/// those keep a shared vertex buffer plus two [`IndexBuf`]s instead.
-struct IndexedGeometry {
+/// A self-contained non-indexed draw.
+struct VertexGeometry {
     vertex_buffer: wgpu::Buffer,
-    index: IndexBuf,
+    vertex_count: u32,
+}
+
+impl VertexGeometry {
+    fn new<T: bytemuck::Pod>(device: &wgpu::Device, label: &str, vertices: &[T]) -> Self {
+        use wgpu::util::DeviceExt;
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents: bytemuck::cast_slice(vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let vertex_count = u32::try_from(vertices.len()).expect("vertex count exceeds u32::MAX");
+        Self {
+            vertex_buffer,
+            vertex_count,
+        }
+    }
 }
 
 /// A mesh uploaded to the GPU. Its `vertex_buffer` feeds both the filled
 /// `triangles` and the deduped wireframe `edges` (#38); the `aabb` overlay (#42)
-/// is a standalone box (own corner vertices + 12-edge `LineList`). `base_model`
-/// is the base (preview) transform pre-multiplied beneath every per-frame
-/// instance model (`effective = model · base`).
+/// is a standalone box of 12 screen-space-expanded edge quads. `base_model` is
+/// the base (preview) transform pre-multiplied beneath every per-frame instance
+/// model (`effective = model · base`).
 struct MeshGpu {
     vertex_buffer: wgpu::Buffer,
     /// Parallel vertex buffer for the Disney PBR path (`disney.wgsl`): the same
@@ -62,7 +75,7 @@ struct MeshGpu {
     pbr_vertex_buffer: wgpu::Buffer,
     triangles: IndexBuf,
     edges: IndexBuf,
-    aabb: IndexedGeometry,
+    aabb: VertexGeometry,
     base_model: Matrix4,
     /// This mesh's **own** albedo texture (group 1), so a multi-object scene skins
     /// each object with its own diffuse (#141). Defaults to 1×1 white (identity
@@ -83,8 +96,8 @@ impl MeshGpu {
         (&self.vertex_buffer, &self.edges)
     }
 
-    fn aabb(&self) -> (&wgpu::Buffer, &IndexBuf) {
-        (&self.aabb.vertex_buffer, &self.aabb.index)
+    fn aabb(&self) -> &VertexGeometry {
+        &self.aabb
     }
 }
 
@@ -128,32 +141,15 @@ fn upload_mesh(
     // AABB overlay box: the mesh's own bounding box (mesh-local coords) as 8
     // colored corner vertices + a 12-edge line list. Built once per mesh; drawn
     // only when the scene contains an `AabbBox` for this mesh.
-    let aabb_vertices: Vec<Vertex> = mesh
-        .aabb()
-        .corners()
-        .iter()
-        .map(|c| Vertex {
-            position: c.to_array(),
-            color: AABB_COLOR,
-            uv: [0.0, 0.0],
-        })
-        .collect();
-    let aabb_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("trd mesh aabb vertex buffer"),
-        contents: bytemuck::cast_slice(&aabb_vertices),
-        usage: wgpu::BufferUsages::VERTEX,
-    });
-    let aabb_edges = IndexBuf::new(device, "trd mesh aabb edge buffer", &AABB_EDGE_INDICES);
+    let aabb_corners = mesh.aabb().corners().map(|corner| corner.to_array());
+    let aabb_vertices = aabb_line_vertices(&aabb_corners);
 
     MeshGpu {
         vertex_buffer,
         pbr_vertex_buffer,
         triangles,
         edges,
-        aabb: IndexedGeometry {
-            vertex_buffer: aabb_vertex_buffer,
-            index: aabb_edges,
-        },
+        aabb: VertexGeometry::new(device, "trd mesh aabb line buffer", &aabb_vertices),
         base_model,
         texture: BoundTexture::with_layout(texture_layout.clone()),
     }
@@ -179,6 +175,11 @@ fn draw_indexed(
     pass.set_vertex_buffer(0, vertex_buffer.slice(..));
     pass.set_index_buffer(index.buffer.slice(..), wgpu::IndexFormat::Uint32);
     pass.draw_indexed(0..index.count, 0, instances);
+}
+
+fn draw_vertices(pass: &mut wgpu::RenderPass, geometry: &VertexGeometry, instances: Range<u32>) {
+    pass.set_vertex_buffer(0, geometry.vertex_buffer.slice(..));
+    pass.draw(0..geometry.vertex_count, instances);
 }
 
 /// Which geometry a [`DrawCommand`] binds. The `usize` is a mesh id (index into
@@ -299,14 +300,16 @@ fn build_batches(
     }
 }
 
-/// The three mesh pipelines sharing one bind-group layout, plus the camera
-/// (`P·V`) uniform buffer + bind group they all bind at group 0. Filled and
-/// wireframe share one explicit layout so a single camera bind group is valid
-/// whichever [`RenderMode`] is active; the textured pipeline adds the albedo
-/// texture at group 1.
+/// The mesh and gizmo pipelines plus their camera/material bindings. Filled,
+/// wireframe, arrowheads, and textured rendering share the camera layout;
+/// expanded gizmo lines use a viewport-aware group-0 uniform.
 struct MeshPass {
     filled: wgpu::RenderPipeline,
     wireframe: wgpu::RenderPipeline,
+    /// Screen-space expanded, alpha-feathered AABB/axes/grid line pipeline.
+    gizmo_line: wgpu::RenderPipeline,
+    /// Unlit overlay triangles for coordinate-axis arrowheads.
+    gizmo_solid: wgpu::RenderPipeline,
     textured: wgpu::RenderPipeline,
     /// The contact / blob grounding-shadow pipeline (alpha-blended, depth-write
     /// off); shares the untextured camera bind-group layout (group 0).
@@ -325,6 +328,8 @@ struct MeshPass {
     pbr_stride: u64,
     camera_uniform: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
+    gizmo_uniform: wgpu::Buffer,
+    gizmo_bind_group: wgpu::BindGroup,
 }
 
 impl MeshPass {
@@ -366,6 +371,23 @@ impl MeshPass {
             Some(overlay_depth_stencil()),
             sample_count,
         );
+        let gizmo_solid = create_mesh_pipeline_with(
+            device,
+            format,
+            &pipeline_layout,
+            wgpu::PrimitiveTopology::TriangleList,
+            Some(overlay_depth_stencil()),
+            sample_count,
+        );
+        let gizmo_layout = create_gizmo_bind_group_layout(device);
+        let gizmo_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("trd gizmo pipeline layout"),
+                bind_group_layouts: &[Some(&gizmo_layout)],
+                immediate_size: 0,
+            });
+        let gizmo_line =
+            create_gizmo_line_pipeline(device, format, &gizmo_pipeline_layout, sample_count);
         // Contact / blob grounding-shadow pipeline (#110 follow-up): shares the
         // untextured camera layout (group 0), alpha-blended, depth-write off.
         let shadow = create_shadow_pipeline(device, format, &pipeline_layout, sample_count);
@@ -425,9 +447,20 @@ impl MeshPass {
                 height: 1,
             },
         );
+        let (gizmo_uniform, gizmo_bind_group) = create_gizmo_binding(
+            device,
+            &gizmo_layout,
+            FrameParams::IDENTITY,
+            Viewport {
+                width: 1,
+                height: 1,
+            },
+        );
         Self {
             filled,
             wireframe,
+            gizmo_line,
+            gizmo_solid,
             textured,
             shadow,
             pbr,
@@ -436,12 +469,15 @@ impl MeshPass {
             pbr_stride,
             camera_uniform,
             camera_bind_group,
+            gizmo_uniform,
+            gizmo_bind_group,
         }
     }
 
     /// Rewrites the camera `P·V` uniform for this frame's `params`/`viewport`.
     fn write_camera(&self, queue: &wgpu::Queue, params: FrameParams, viewport: Viewport) {
         write_view_proj(queue, &self.camera_uniform, params, viewport);
+        write_gizmo_params(queue, &self.gizmo_uniform, params, viewport);
     }
 
     /// Rewrites the Disney PBR uniform **slots** for this frame: one slot per
@@ -475,15 +511,14 @@ impl MeshPass {
 /// growable per-instance model-matrix buffer.
 struct MeshStore {
     meshes: Vec<MeshGpu>,
-    /// The coordinate-axes gizmo geometry (six `LineList` vertices); each
-    /// [`DrawableObject::CoordinateAxes`] draws it under its own model, supplied
-    /// through the shared instance buffer.
-    axes_vertex_buffer: wgpu::Buffer,
-    /// The coordinate-plane grid geometry, one `LineList` vertex buffer per
+    /// The coordinate-axis shafts and cone arrowheads.
+    axes_lines: VertexGeometry,
+    axes_heads: VertexGeometry,
+    /// The coordinate-plane grid geometry, one expanded-line buffer per
     /// [`GridPlane`] (indexed by [`GridPlane::index`]): XY, XZ, YZ. Each
     /// [`DrawableObject::PlaneGrid`] draws the buffer for its plane under its own
     /// model, supplied through the shared instance buffer.
-    grid_vertex_buffers: [wgpu::Buffer; 3],
+    grid_lines: [VertexGeometry; 3],
     /// The contact / blob **grounding-shadow** quad geometry (six `TriangleList`
     /// vertices, a unit XY quad); each [`DrawableObject::BlobShadow`] draws it
     /// under its own model through the shared instance buffer, alpha-blended.
@@ -511,29 +546,28 @@ impl MeshStore {
         let instance_capacity = (meshes.len() as u32).max(1);
         let instance_buffer = create_instance_buffer(device, instance_capacity);
 
-        // Coordinate-axes gizmo: six LineList vertices at the world origin. Each
-        // CoordinateAxes drawable draws them under its own model, supplied via
-        // the shared instance buffer (so the gizmo is not tied to a fixed model).
-        let axes_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("trd axes vertex buffer"),
-            contents: bytemuck::cast_slice(&axes_vertices()),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
+        let axes_lines = VertexGeometry::new(device, "trd axes line buffer", &axes_line_vertices());
+        let axes_heads =
+            VertexGeometry::new(device, "trd axes arrow buffer", &axes_arrow_vertices());
 
-        // Coordinate-plane grids: one LineList vertex buffer per plane (XY/XZ/YZ),
-        // spanning the unit model-space square. Each PlaneGrid drawable draws its
-        // plane's buffer under its own model via the shared instance buffer.
-        let grid_buffer = |plane: GridPlane| {
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("trd grid vertex buffer"),
-                contents: bytemuck::cast_slice(&grid_vertices(plane)),
-                usage: wgpu::BufferUsages::VERTEX,
-            })
-        };
-        let grid_vertex_buffers = [
-            grid_buffer(GridPlane::Xy),
-            grid_buffer(GridPlane::Xz),
-            grid_buffer(GridPlane::Yz),
+        // Coordinate-plane grids: one expanded-line vertex buffer per plane
+        // (XY/XZ/YZ), drawn under each PlaneGrid object's model.
+        let grid_lines = [
+            VertexGeometry::new(
+                device,
+                "trd xy grid line buffer",
+                &grid_line_vertices(GridPlane::Xy),
+            ),
+            VertexGeometry::new(
+                device,
+                "trd xz grid line buffer",
+                &grid_line_vertices(GridPlane::Xz),
+            ),
+            VertexGeometry::new(
+                device,
+                "trd yz grid line buffer",
+                &grid_line_vertices(GridPlane::Yz),
+            ),
         ];
 
         // Contact / blob grounding-shadow quad: six TriangleList vertices (a unit
@@ -547,8 +581,9 @@ impl MeshStore {
 
         Self {
             meshes: gpu_meshes,
-            axes_vertex_buffer,
-            grid_vertex_buffers,
+            axes_lines,
+            axes_heads,
+            grid_lines,
             shadow_vertex_buffer,
             instance_buffer,
             instance_capacity,
@@ -602,13 +637,14 @@ pub struct MeshRenderer {
     /// The mesh pass's multisampled color attachment ([`sample_count`](Self::sample_count)×),
     /// (re)created lazily in `encode` to match the viewport. The pass renders into
     /// it and resolves into the caller's single-sample `view`, so every front-end
-    /// gets anti-aliased edges transparently. `None` when MSAA is disabled
-    /// (`sample_count == 1`): the pass then renders straight into `view`.
+    /// gets multisampled mesh/arrowhead edges transparently. Gizmo lines add
+    /// analytic AA separately. `None` when MSAA is disabled (`sample_count == 1`):
+    /// the pass then renders straight into `view`.
     msaa: Option<MsaaColorTarget>,
     /// The mesh pass's MSAA sample count — `4` (the default,
-    /// [`MSAA_SAMPLE_COUNT`]) for anti-aliased edges, or `1` to render
-    /// single-sampled (no MSAA). Fixed at construction because every pipeline +
-    /// the depth/color attachments must share it.
+    /// [`MSAA_SAMPLE_COUNT`]) for multisampled edges, or `1` for single-sample
+    /// rasterization. Fixed at construction because every pipeline plus the
+    /// depth/color attachments must share it.
     sample_count: u32,
     /// The color format the pipelines were built for; the MSAA color target must
     /// be created with the same format.
@@ -665,10 +701,10 @@ impl MeshRenderer {
     }
 
     /// Like [`new`](Self::new), but with an explicit mesh-pass MSAA
-    /// `sample_count`: `4` ([`MSAA_SAMPLE_COUNT`]) for anti-aliased edges, or `1`
-    /// to render single-sampled (no MSAA — aliased edges, the raw rasterized
-    /// coverage). All pipelines and the depth/color attachments are built for this
-    /// count.
+    /// `sample_count`: `4` ([`MSAA_SAMPLE_COUNT`]) for multisampled edges, or `1`
+    /// to render single-sampled. Gizmo lines retain their shader-based analytic AA
+    /// at `1`; mesh silhouettes and hardware wireframes do not. All pipelines and
+    /// the depth/color attachments are built for this count.
     ///
     /// Panics if `meshes` is empty, `meshes`/`base_models` differ in length, or
     /// `sample_count` is 0.
@@ -879,7 +915,7 @@ impl MeshRenderer {
         // 6. Record the pass. With MSAA (`sample_count > 1`) the mesh pass renders
         //    into the multisampled color attachment and resolves into the caller's
         //    single-sample `view`, so every front-end (offscreen CLI, native
-        //    window, wasm canvas) gets anti-aliased edges with no API change.
+        //    window, wasm canvas) gets multisampled mesh/arrowhead edges.
         //    Without MSAA (`sample_count == 1`) there is no MSAA target — the pass
         //    renders straight into `view` (no resolve).
         let depth_view = &self.depth.as_ref().expect("depth set in step 3").view;
@@ -926,9 +962,9 @@ impl MeshRenderer {
             self.frame_plane.draw(&mut pass);
         }
 
-        // The camera bind group (group 0) and the instance buffer (slot 1) stay
-        // bound across every mesh draw; each command only swaps pipeline +
-        // geometry (and, for textured, the group-1 albedo texture).
+        // The instance buffer (slot 1) stays bound across every draw. Most
+        // commands use the camera bind group; expanded lines briefly swap in the
+        // viewport-aware gizmo bind group.
         pass.set_bind_group(0, &self.pass.camera_bind_group, &[]);
         pass.set_vertex_buffer(1, self.store.instance_buffer.slice(..));
         for command in &batches.commands {
@@ -966,13 +1002,16 @@ impl MeshRenderer {
                 }
                 DrawKind::Aabb(id) => {
                     let mesh = &self.store.meshes[id];
-                    pass.set_pipeline(&self.pass.wireframe);
-                    draw_indexed(&mut pass, mesh.aabb(), range);
+                    pass.set_pipeline(&self.pass.gizmo_line);
+                    pass.set_bind_group(0, &self.pass.gizmo_bind_group, &[]);
+                    draw_vertices(&mut pass, mesh.aabb(), range);
+                    pass.set_bind_group(0, &self.pass.camera_bind_group, &[]);
                 }
                 DrawKind::Grid(plane) => {
-                    pass.set_pipeline(&self.pass.wireframe);
-                    pass.set_vertex_buffer(0, self.store.grid_vertex_buffers[plane].slice(..));
-                    pass.draw(0..GRID_VERTEX_COUNT, range);
+                    pass.set_pipeline(&self.pass.gizmo_line);
+                    pass.set_bind_group(0, &self.pass.gizmo_bind_group, &[]);
+                    draw_vertices(&mut pass, &self.store.grid_lines[plane], range);
+                    pass.set_bind_group(0, &self.pass.camera_bind_group, &[]);
                 }
                 DrawKind::Shadow => {
                     pass.set_pipeline(&self.pass.shadow);
@@ -980,9 +1019,12 @@ impl MeshRenderer {
                     pass.draw(0..SHADOW_VERTEX_COUNT, range);
                 }
                 DrawKind::Axes => {
-                    pass.set_pipeline(&self.pass.wireframe);
-                    pass.set_vertex_buffer(0, self.store.axes_vertex_buffer.slice(..));
-                    pass.draw(0..AXES_VERTEX_COUNT, range);
+                    pass.set_pipeline(&self.pass.gizmo_line);
+                    pass.set_bind_group(0, &self.pass.gizmo_bind_group, &[]);
+                    draw_vertices(&mut pass, &self.store.axes_lines, range.clone());
+                    pass.set_pipeline(&self.pass.gizmo_solid);
+                    pass.set_bind_group(0, &self.pass.camera_bind_group, &[]);
+                    draw_vertices(&mut pass, &self.store.axes_heads, range);
                 }
             }
         }

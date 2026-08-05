@@ -29,18 +29,22 @@ Platform-agnostic wgpu logic, shared verbatim by every target:
   (`render/offscreen.rs`), reused by every read-back front-end (`trd-cli`, the
   browser `OffscreenRenderer`, and `trd-gui`). The live-present front-ends
   (`trd-app`, `trd-wasm`'s `CanvasRenderer`) instead own their `wgpu::Surface`
-  swapchain directly and draw the same `Scene` into it.
+  swapchain directly and draw the same `Scene` into it. Gizmo segments use
+  `gizmo_line.wgsl`: the vertex stage expands each model-space segment to a
+  configurable pixel-width quad and the fragment stage feathers its rectangle
+  distance, so axes/AABBs/grids remain anti-aliased without MSAA. Axis cone tips
+  reuse the unlit triangle path.
 - **`DrawableObject` + `Scene` (`render/scene.rs`)** — the base interface for every
   primitive (#41). It is a small `Copy` enum — `Mesh { mesh_id, model, mode }`,
   `AabbBox { mesh_id, model }`, `CoordinateAxes { model }`, and `FramePlane { fit }`
   (a background still). Geometry is owned once (decode-once mesh store + shared
-  gizmo buffers); a drawable is a light handle naming *which* primitive + its
-  per-frame model. A `Scene = Vec<DrawableObject>` is rebuilt each frame;
+  line-quad/arrow buffers); a drawable is a light handle naming *which* primitive
+  + its per-frame model. A `Scene = Vec<DrawableObject>` is rebuilt each frame;
   every front-end hands it to `MeshRenderer::encode` without per-type branching.
   The render core walks it into a flat list, batches by draw kind, binds the
-  shared `P·V` camera uniform, and records the draws. Appearance (filled /
-  wireframe / textured / **PBR**) is a *mode* of the mesh drawable, not a
-  separate primitive.
+  shared `P·V` camera uniform (plus viewport size for gizmo lines), and records
+  the draws. Appearance (filled / wireframe / textured / **PBR**) is a *mode* of
+  the mesh drawable, not a separate primitive.
 - **`stream.rs` + `protocol.rs`** — the Arrow input layer. `protocol.rs`'s
   `InputSession` is the **single framing driver** (native + wasm): it feeds byte
   chunks through `arrow`'s `StreamDecoder`, validates the schema once (`0.0.5`
