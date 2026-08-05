@@ -516,8 +516,11 @@ f 1 3 4
     $streamArrow = Join-Path $work 'stream.arrows'
     $imagesArrow = Join-Path $work 'images.arrows'
 
-    if ($FramesTable -and -not (Test-Path $FramesTable)) {
-        Write-Error "error: -FramesTable '$FramesTable' not found."
+    if ($FramesTable) {
+        if (-not (Test-Path -LiteralPath $FramesTable)) {
+            Write-Error "error: -FramesTable '$FramesTable' not found."
+        }
+        $FramesTable = (Resolve-Path -LiteralPath $FramesTable).Path
     }
 
     # 1. Build a streaming Arrow IPC file of frame params from the JSONL via
