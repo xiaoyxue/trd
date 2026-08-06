@@ -85,8 +85,11 @@ Guidance for agents working in this repository.
   under `web/gui-viewer/pkg`; do not generate a second package under the editor.
   Run `bun run check` / `format` / `typecheck` from `nix develop`, or directly on
   Windows — `@biomejs/biome` + `apache-arrow` are in
-  `web/viewer/package.json`, so
-  `bun install` + `bun run check` / `typecheck` / `build:web` work without Nix.
+  `web/viewer/package.json`. On a clean non-Nix checkout, first run
+  `bun run --cwd viewer build:wasm` and
+  `bun run --cwd gui-viewer build:wasm` from `web/` to stage both local wasm
+  packages, then `bun install --frozen-lockfile`; the workspace
+  `check`/`typecheck`/build scripts work without Nix.
 - **Nix web deps are installed offline via
   [bun2nix](https://github.com/nix-community/bun2nix).** `web/bun.nix`
   (generated from `web/bun.lock`, hash-pinned) lets
@@ -274,7 +277,7 @@ examples\render.ps1 -Web -CanvasRenderer -Mesh assets\meshes\can\coke.obj -Textu
   -Tonemap aces -Env assets\envmap\uffizi-large.hdr -Aabb -Axes `
   -InputPath examples\frames.qd_beer_dolly.cg.jsonl -Width 512 -Height 768
 # trd-gui web — build+serve, then open the ?mesh/?texture/?env URL below
-cd web; bun install; $env:BUN_PORT='8082'; bun run --cwd gui-viewer dev
+cd web; $env:BUN_PORT='8082'; bun run --cwd gui-viewer dev
 #   http://localhost:8082/?mesh=/assets/meshes/can/coke.obj&texture=/assets/meshes/can/can_around.jpg&env=/assets/envmap/uffizi-large.hdr
 ```
 

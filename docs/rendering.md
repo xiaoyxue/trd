@@ -268,13 +268,19 @@ http://localhost:8080/?mesh=/assets/meshes/can/coke.obj&texture=/assets/meshes/c
 ## Video editor — `web/video-editing`
 
 The dedicated FIBA editor is a sibling of the generic stream viewer and GUI
-viewer in the shared `web/` Bun workspace:
+viewer in the shared `web/` Bun workspace. Generate the ignored
+`web/video-editing/data/fiba-shot1.arrow` document first using
+[`video-editing.md`](video-editing.md#generate-the-document), then:
 
 ```sh
 cd web
+bun run --cwd viewer build:wasm  # stage the local trd-wasm file dependency
 bun install --frozen-lockfile
 bun run --cwd video-editing dev  # http://localhost:8085
 ```
+
+The same commands run natively in PowerShell 7 on Windows; no WSL or Nix is
+required.
 
 Open the local `shot_0001.mp4` or an HTTP(S) video URL, select the tracked quad,
 then place/edit Coke, beer, or Dragon. HTML video owns playback; Rust maps each
@@ -340,6 +346,8 @@ workspace rooted at `web/`:
 
 ```sh
 cd web
+bun run --cwd viewer build:wasm     # clean-checkout bootstrap for file: dependency
+bun run --cwd gui-viewer build:wasm # shared GUI/editor wasm package
 bun install --frozen-lockfile
 bun run typecheck                    # all three packages
 bun run check                        # all three Biome gates
@@ -399,7 +407,9 @@ Notes:
 - `render.ps1` auto-sources `dev-env.ps1` (`-NoInstall`), so step 2 is optional when
   you only run the wrapper.
 - The **web** wrapper builds on Windows with just `bun` (no Nix):
-  `cd web; bun install; bun run typecheck; bun run check; bun run --cwd viewer dev`.
+  `cd web; bun run --cwd viewer build:wasm;
+  bun run --cwd gui-viewer build:wasm; bun install --frozen-lockfile;
+  bun run typecheck; bun run check`.
 
 ## GPU notes
 

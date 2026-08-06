@@ -7,8 +7,10 @@ TypeScript only opens/fetches browser resources and copies decoded video pixels.
 
 ## Data set
 
-- video: `/home/xiaoyxue/Asset/fiba-shot1/shot_0001.mp4`
-  (1920x1080, 24 fps, 288 frames);
+- video: local `shot_0001.mp4` (1920x1080, 24 fps, 288 frames); the
+  reference Linux location is
+  `/home/xiaoyxue/Asset/fiba-shot1/shot_0001.mp4`, while Windows can use any
+  local path;
 - calibration:
   `assets/videos/fiba/per_frame_KVP_cube_best.parquet`;
 - selected method: `2VP_4510`;
@@ -53,12 +55,25 @@ is fetched from repository assets at runtime. Exporting edited state as a normal
 
 ## Generate the document
 
+Linux/Nix:
+
 ```sh
 uv run --with pyarrow scripts/fiba_video_editing_bundle.py \
   --video /home/xiaoyxue/Asset/fiba-shot1/shot_0001.mp4 \
   --calibration assets/videos/fiba/per_frame_KVP_cube_best.parquet \
   --method 2VP_4510 \
   -o web/video-editing/data/fiba-shot1.arrow
+```
+
+PowerShell 7 (Windows native):
+
+```powershell
+$video = 'C:\path\to\fiba-shot1\shot_0001.mp4'
+uv run --with pyarrow scripts\fiba_video_editing_bundle.py `
+  --video $video `
+  --calibration assets\videos\fiba\per_frame_KVP_cube_best.parquet `
+  --method 2VP_4510 `
+  -o web\video-editing\data\fiba-shot1.arrow
 ```
 
 The generated Arrow file is ignored; regenerate it from the local MP4.
@@ -150,17 +165,23 @@ continues.
 
 ## Build and run
 
-All browser delivery surfaces share the Bun workspace and one generated
-`trd-gui` wasm package:
+All browser delivery surfaces share the Bun workspace. The GUI viewer and video
+editor additionally share the generated `web/gui-viewer/pkg` `trd-gui` wasm
+package. Generate `fiba-shot1.arrow` first, then run:
 
 ```sh
 cd web
+bun run --cwd viewer build:wasm      # stage the local trd-wasm file dependency
+bun run --cwd gui-viewer build:wasm  # shared GUI/editor wasm package
 bun install --frozen-lockfile
 bun run typecheck
 bun run check
 bun run build
 bun run --cwd video-editing dev
 ```
+
+The same Bun commands run natively in PowerShell 7 on Windows; WSL and Nix are
+not involved.
 
 The editor defaults to port 8085. On the headless Linux host:
 
@@ -190,7 +211,7 @@ Open <http://localhost:8085> in a WebGPU browser and select the local MP4.
 - add multi-frame Python/Rust matrix and reprojection parity;
 - complete pre-video poster/digest UX;
 - add temporal pose smoothing;
-- complete the Windows/MSVC native/Web/GPU handoff.
+- add automated browser coverage for local-video playback and editing.
 
 PBR material state remains runtime asset state because render protocol `0.0.6`
 does not serialize PBR fields.

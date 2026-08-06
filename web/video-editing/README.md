@@ -34,6 +34,8 @@ simple slice because protocol `0.0.6` does not serialize PBR material fields.
 
 ## Generate the FIBA document
 
+Linux/Nix:
+
 ```sh
 uv run --with pyarrow scripts/fiba_video_editing_bundle.py \
   --video /home/xiaoyxue/Asset/fiba-shot1/shot_0001.mp4 \
@@ -42,17 +44,33 @@ uv run --with pyarrow scripts/fiba_video_editing_bundle.py \
   -o web/video-editing/data/fiba-shot1.arrow
 ```
 
+PowerShell 7 (Windows native):
+
+```powershell
+$video = 'C:\path\to\fiba-shot1\shot_0001.mp4'
+uv run --with pyarrow scripts\fiba_video_editing_bundle.py `
+  --video $video `
+  --calibration assets\videos\fiba\per_frame_KVP_cube_best.parquet `
+  --method 2VP_4510 `
+  -o web\video-editing\data\fiba-shot1.arrow
+```
+
 ## Run
 
 ```sh
 cd web
+bun run --cwd viewer build:wasm  # stage the local trd-wasm file dependency
 bun install --frozen-lockfile
 bun run --cwd video-editing dev
 ```
 
+These Bun commands run natively in PowerShell 7 on Windows as well as under
+Linux/Nix.
+
 Open the URL printed by Bun. The canvas stays blank until **Open video...**
-selects either a local file or an HTTP(S) URL; for the local sample choose
-`/home/xiaoyxue/Asset/fiba-shot1/shot_0001.mp4`. It remains paused on frame 0.
+selects either a local file or an HTTP(S) URL. Choose the same
+`shot_0001.mp4` used to generate the Arrow document (for example the reference
+Linux path above or the `$video` path on Windows). It remains paused on frame 0.
 Use **Play** or the full-width player timeline below the viewer to move through
 the shot. The HTML video element owns playback; each presented frame is copied
 through WebCodecs to RGBA and sent to Rust. Rust validates the source dimensions
