@@ -2,15 +2,47 @@
 
 use std::collections::BTreeMap;
 
-use crate::{AlphaMode, Auxiliary, DisneyMaterial, MaterialTextures};
+use crate::{
+    AlphaMode, Auxiliary, DisneyMaterial, ImageTexture, MaterialTextures, Mesh, TextureError,
+    Vertex,
+};
 use thiserror::Error;
 
 const DEFAULT_IOR: f32 = 1.5;
+const MAX_TEXTURE_DIM: u32 = 2048;
+
+/// One renderable glTF primitive and its Disney PBR resources.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GltfAsset {
+    pub mesh: Mesh,
+    pub material: DisneyMaterial,
+    pub base_color_texture: Option<ImageTexture>,
+}
 
 #[derive(Debug, Error)]
 pub enum GltfImportError {
     #[error("invalid glTF: {0}")]
     Gltf(#[from] gltf_rs::Error),
+    #[error("glTF asset has no mesh primitive")]
+    MissingPrimitive,
+    #[error("glTF import currently requires one mesh with one primitive")]
+    MultiplePrimitives,
+    #[error("glTF primitive mode {0:?} is unsupported (expected triangles)")]
+    PrimitiveMode(gltf_rs::mesh::Mode),
+    #[error("glTF primitive has no POSITION attribute")]
+    MissingPositions,
+    #[error("glTF buffer {0} is external; GLB BIN data is required")]
+    ExternalBuffer(usize),
+    #[error("GLB has no BIN chunk")]
+    MissingBlob,
+    #[error("glTF base-color image is external; an embedded GLB image is required")]
+    ExternalImage,
+    #[error("glTF embedded image buffer view is outside the GLB BIN chunk")]
+    ImageViewOutOfBounds,
+    #[error("failed to decode glTF base-color image: {0}")]
+    Image(#[from] image::ImageError),
+    #[error("invalid decoded glTF base-color texture: {0}")]
+    Texture(#[from] TextureError),
     #[error("glTF extension `{extension}` field `{field}` must be {expected}")]
     MalformedExtension {
         extension: &'static str,
@@ -19,10 +51,96 @@ pub enum GltfImportError {
     },
 }
 
+/// Parses one binary glTF primitive, its Disney material, and embedded albedo.
+///
+/// This is the first runtime GLB slice. It deliberately rejects multi-primitive
+/// assets rather than separating their pieces into unrelated GUI objects.
+pub fn import_glb(bytes: &[u8]) -> Result<GltfAsset, GltfImportError> {
+    let gltf = gltf_rs::Gltf::from_slice(bytes)?;
+    let blob = gltf.blob.as_deref().ok_or(GltfImportError::MissingBlob)?;
+    let mut primitives = gltf.document.meshes().flat_map(|mesh| mesh.primitives());
+    let primitive = primitives.next().ok_or(GltfImportError::MissingPrimitive)?;
+    if primitives.next().is_some() {
+        return Err(GltfImportError::MultiplePrimitives);
+    }
+    if primitive.mode() != gltf_rs::mesh::Mode::Triangles {
+        return Err(GltfImportError::PrimitiveMode(primitive.mode()));
+    }
+
+    let reader = primitive.reader(|buffer| match buffer.source() {
+        gltf_rs::buffer::Source::Bin => Some(blob),
+        gltf_rs::buffer::Source::Uri(_) => None,
+    });
+    let positions: Vec<[f32; 3]> = reader
+        .read_positions()
+        .ok_or(GltfImportError::MissingPositions)?
+        .collect();
+    let tex_coords: Vec<[f32; 2]> = reader
+        .read_tex_coords(0)
+        .map(|coords| coords.into_f32().collect())
+        .unwrap_or_else(|| vec![[0.0; 2]; positions.len()]);
+    let indices: Vec<u32> = reader
+        .read_indices()
+        .map(|indices| indices.into_u32().collect())
+        .unwrap_or_else(|| (0..positions.len() as u32).collect());
+    let vertices = positions
+        .into_iter()
+        .zip(tex_coords)
+        .map(|(position, uv)| Vertex {
+            position,
+            color: [1.0; 3],
+            uv,
+        })
+        .collect();
+
+    let source_material = primitive.material();
+    let material = import_material(source_material.clone())?;
+    let base_color_texture = source_material
+        .pbr_metallic_roughness()
+        .base_color_texture()
+        .map(|info| import_embedded_texture(info.texture().source(), blob))
+        .transpose()?;
+
+    Ok(GltfAsset {
+        mesh: Mesh { vertices, indices },
+        material,
+        base_color_texture,
+    })
+}
+
 /// Parses every explicit glTF material without loading geometry or image bytes.
 pub fn import_gltf_materials(bytes: &[u8]) -> Result<Vec<DisneyMaterial>, GltfImportError> {
     let gltf = gltf_rs::Gltf::from_slice(bytes)?;
     gltf.document.materials().map(import_material).collect()
+}
+
+fn import_embedded_texture(
+    image: gltf_rs::Image<'_>,
+    blob: &[u8],
+) -> Result<ImageTexture, GltfImportError> {
+    let gltf_rs::image::Source::View { view, .. } = image.source() else {
+        return Err(GltfImportError::ExternalImage);
+    };
+    let start = view.offset();
+    let end = start
+        .checked_add(view.length())
+        .ok_or(GltfImportError::ImageViewOutOfBounds)?;
+    let encoded = blob
+        .get(start..end)
+        .ok_or(GltfImportError::ImageViewOutOfBounds)?;
+    let decoded = image::load_from_memory(encoded)?;
+    let decoded = if decoded.width() > MAX_TEXTURE_DIM || decoded.height() > MAX_TEXTURE_DIM {
+        decoded.resize(
+            MAX_TEXTURE_DIM,
+            MAX_TEXTURE_DIM,
+            image::imageops::FilterType::Triangle,
+        )
+    } else {
+        decoded
+    };
+    let rgba = decoded.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    Ok(ImageTexture::from_rgba(width, height, rgba.into_raw())?)
 }
 
 fn import_material(material: gltf_rs::Material<'_>) -> Result<DisneyMaterial, GltfImportError> {
@@ -226,6 +344,74 @@ fn source_or_default(present: bool, present_source: &str, default_source: &str) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn single_triangle_glb() -> Vec<u8> {
+        let mut bin = Vec::new();
+        for value in [0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0] {
+            bin.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in [0.0f32, 0.0, 1.0, 0.0, 0.0, 1.0] {
+            bin.extend_from_slice(&value.to_le_bytes());
+        }
+        for index in [0u16, 1, 2] {
+            bin.extend_from_slice(&index.to_le_bytes());
+        }
+        let declared_bin_len = bin.len();
+        while bin.len() % 4 != 0 {
+            bin.push(0);
+        }
+
+        let mut json = format!(
+            r#"{{
+              "asset":{{"version":"2.0"}},
+              "buffers":[{{"byteLength":{declared_bin_len}}}],
+              "bufferViews":[
+                {{"buffer":0,"byteOffset":0,"byteLength":36}},
+                {{"buffer":0,"byteOffset":36,"byteLength":24}},
+                {{"buffer":0,"byteOffset":60,"byteLength":6}}
+              ],
+              "accessors":[
+                {{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]}},
+                {{"bufferView":1,"componentType":5126,"count":3,"type":"VEC2"}},
+                {{"bufferView":2,"componentType":5123,"count":3,"type":"SCALAR"}}
+              ],
+              "materials":[{{"pbrMetallicRoughness":{{"metallicFactor":0.25,"roughnessFactor":0.75}}}}],
+              "meshes":[{{"primitives":[{{"attributes":{{"POSITION":0,"TEXCOORD_0":1}},"indices":2,"material":0}}]}}],
+              "nodes":[{{"mesh":0}}],
+              "scenes":[{{"nodes":[0]}}],
+              "scene":0
+            }}"#
+        )
+        .into_bytes();
+        while json.len() % 4 != 0 {
+            json.push(b' ');
+        }
+
+        let total_len = 12 + 8 + json.len() + 8 + bin.len();
+        let mut glb = Vec::with_capacity(total_len);
+        glb.extend_from_slice(b"glTF");
+        glb.extend_from_slice(&2u32.to_le_bytes());
+        glb.extend_from_slice(&(total_len as u32).to_le_bytes());
+        glb.extend_from_slice(&(json.len() as u32).to_le_bytes());
+        glb.extend_from_slice(b"JSON");
+        glb.extend_from_slice(&json);
+        glb.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+        glb.extend_from_slice(b"BIN\0");
+        glb.extend_from_slice(&bin);
+        glb
+    }
+
+    #[test]
+    fn imports_binary_gltf_geometry_and_material() {
+        let asset = import_glb(&single_triangle_glb()).expect("valid GLB");
+        assert_eq!(asset.mesh.vertices.len(), 3);
+        assert_eq!(asset.mesh.indices, [0, 1, 2]);
+        assert_eq!(asset.mesh.vertices[1].position, [1.0, 0.0, 0.0]);
+        assert_eq!(asset.mesh.vertices[2].uv, [0.0, 1.0]);
+        assert_eq!(asset.material.metallic, 0.25);
+        assert_eq!(asset.material.roughness, 0.75);
+        assert!(asset.base_color_texture.is_none());
+    }
 
     #[test]
     fn parses_disney_and_auxiliary_fields() {

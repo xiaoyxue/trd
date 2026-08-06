@@ -18,6 +18,7 @@ gltf-rs = { package = "gltf", version = "1.4.1", default-features = false, featu
     "KHR_materials_ior",
     "KHR_materials_specular",
     "KHR_materials_transmission",
+    "utils",
 ] }
 arrow = { version = "59", default-features = false, features = ["ipc", "canonical_extension_types"] }
 arrow-schema = { version = "59", default-features = false, features = ["canonical_extension_types"] }

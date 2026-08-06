@@ -242,7 +242,7 @@ query params — the equivalents of the native `--mesh`/`--texture`/`--env`/
 
 | Param | Meaning |
 |-------|---------|
-| `?mesh=<url>` | An object's OBJ. **Repeatable** — each `?mesh=` adds an object laid out side-by-side. |
+| `?mesh=<url>` | An object's OBJ or single-primitive GLB. **Repeatable** — each `?mesh=` adds an object laid out side-by-side; GLB starts in PBR and uses its embedded base-color texture/material. |
 | `?texture=<url>` | **Positional** albedo: the *i*-th `?texture=` skins the *i*-th `?mesh=` (each object its own diffuse). |
 | `?env=<url>` | An equirectangular HDR probe; supplying it **starts every object in PBR** mode. |
 | `?backend=arrow` | Route frames through the Arrow wire round-trip (vs. the default in-process render). |

@@ -88,6 +88,12 @@ bytes into this model without filesystem access; its per-parameter `sources` map
 records whether values came from glTF, an extension-derived mapping, or a
 default.
 
+`trd_core::import_glb` additionally imports one triangle primitive and its
+embedded base-color texture for runtime viewing. `trd-gui` web accepts the GLB
+directly through `?mesh=/assets/.../model.glb`, starts that object in PBR mode,
+and keeps metallic-roughness/normal texture presence in `Auxiliary`; those two
+maps remain unshaded in this slice.
+
 ## Tone mapping
 
 PBR shading accumulates **linear HDR radiance**, which is tone-mapped to the sRGB

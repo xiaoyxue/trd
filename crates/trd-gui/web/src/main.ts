@@ -17,20 +17,19 @@ async function main(): Promise<void> {
 
   // `?mesh=<url>` (repeatable) / `?texture=<url>` / `?env=<url>` are the browser
   // equivalents of the native `--mesh` / `--texture` / `--env` flags: fetch the
-  // OBJ text(s) / image bytes / HDR probe bytes and hand them to Rust
-  // (`Mesh::from_obj` / `decode_texture` / `decode_env_hdr`). Multiple `?mesh=`
+  // OBJ/GLB bytes / image bytes / HDR probe bytes and hand them to Rust. Multiple `?mesh=`
   // params load multiple objects (laid out side-by-side; click to select one).
   // Absent → built-in cube / no texture / no env probe. `?env=` starts PBR mode.
   const params = new URLSearchParams(location.search);
 
   const meshUrls = params.getAll("mesh");
-  const meshObjs: string[] = await Promise.all(
+  const meshBytes: Uint8Array[] = await Promise.all(
     meshUrls.map(async (url) => {
       const res = await fetch(url);
       if (!res.ok) {
         throw new Error(`failed to fetch mesh "${url}": ${res.status} ${res.statusText}`);
       }
-      return res.text();
+      return new Uint8Array(await res.arrayBuffer());
     }),
   );
 
@@ -66,7 +65,7 @@ async function main(): Promise<void> {
   // (Arrow wire round-trip); absent → the direct in-process render.
   const backend = params.get("backend") ?? undefined;
 
-  await start(canvas, meshObjs, textureBytes, envBytes, backend);
+  await start(canvas, meshBytes, textureBytes, envBytes, backend);
 }
 
 main().catch((err) => {

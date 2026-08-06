@@ -17,7 +17,7 @@ mod texture;
 
 pub use camera::{Camera, DEFAULT_FIT_MARGIN, DEFAULT_FOV_Y, DEFAULT_VIEW_DIR};
 pub use frame::{FrameError, InlineFrame, FRAME_BYTES_COLUMN, FRAME_PIXELS_COLUMN};
-pub use gltf::{import_gltf_materials, GltfImportError};
+pub use gltf::{import_glb, import_gltf_materials, GltfAsset, GltfImportError};
 pub use math::{
     Aabb2, Aabb3, Matrix3, Matrix4, Normal3, Point2, Point3, Point4, Rotation, Scalar, ToWgsl,
     Transform, Vector2, Vector3, Vector4, EPSILON,
