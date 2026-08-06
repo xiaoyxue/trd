@@ -209,7 +209,10 @@ not complete until these tiers pass; **record the results on the PR.**
 4. **Native window e2e — Windows:** the live-surface paths that need a display —
    `trd-app` playing a stream (`examples/render.ps1 -App`) and the interactive
    `trd-gui` window (`cargo run -p trd-gui-app -- --mesh …`, both `--backend inproc`
-   and `--backend arrow`). Confirm the window renders and interaction works.
+   and `--backend arrow`). Confirm the windows render and interaction works.
+   This is a **Windows-only manual e2e gate**: mark it N/A/ignored on Linux, and
+   include the exact Windows commands in the PR and issue handoff whenever the
+   current platform cannot run it.
 
 The non-GPU gates (`nix flake check`: `cargo fmt`, clippy native + wasm32,
 `cargo test`, `tsc`, Biome) must pass on both platforms as well.
