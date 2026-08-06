@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    AlphaMode, Auxiliary, DisneyMaterial, ImageTexture, MaterialTextures, Mesh, TextureError,
-    Vertex,
+    AlphaMode, Auxiliary, DisneyMaterial, ImageTexture, MaterialTextures, Mesh, MeshShading,
+    TextureError, Vertex,
 };
 use thiserror::Error;
 
@@ -17,6 +17,8 @@ pub struct GltfAsset {
     pub mesh: Mesh,
     pub material: DisneyMaterial,
     pub base_color_texture: Option<ImageTexture>,
+    pub metallic_roughness_texture: Option<ImageTexture>,
+    pub normal_texture: Option<ImageTexture>,
 }
 
 #[derive(Debug, Error)]
@@ -79,11 +81,16 @@ pub fn import_glb(bytes: &[u8]) -> Result<GltfAsset, GltfImportError> {
         .read_tex_coords(0)
         .map(|coords| coords.into_f32().collect())
         .unwrap_or_else(|| vec![[0.0; 2]; positions.len()]);
+    let normals: Option<Vec<[f32; 3]>> = reader.read_normals().map(Iterator::collect);
+    let tangents: Vec<[f32; 4]> = reader
+        .read_tangents()
+        .map(Iterator::collect)
+        .unwrap_or_default();
     let indices: Vec<u32> = reader
         .read_indices()
         .map(|indices| indices.into_u32().collect())
         .unwrap_or_else(|| (0..positions.len() as u32).collect());
-    let vertices = positions
+    let vertices: Vec<Vertex> = positions
         .into_iter()
         .zip(tex_coords)
         .map(|(position, uv)| Vertex {
@@ -95,16 +102,31 @@ pub fn import_glb(bytes: &[u8]) -> Result<GltfAsset, GltfImportError> {
 
     let source_material = primitive.material();
     let material = import_material(source_material.clone())?;
-    let base_color_texture = source_material
-        .pbr_metallic_roughness()
+    let pbr = source_material.pbr_metallic_roughness();
+    let base_color_texture = pbr
         .base_color_texture()
         .map(|info| import_embedded_texture(info.texture().source(), blob))
         .transpose()?;
-
+    let metallic_roughness_texture = pbr
+        .metallic_roughness_texture()
+        .map(|info| import_embedded_texture(info.texture().source(), blob))
+        .transpose()?;
+    let normal_texture = source_material
+        .normal_texture()
+        .map(|info| import_embedded_texture(info.texture().source(), blob))
+        .transpose()?;
     Ok(GltfAsset {
-        mesh: Mesh { vertices, indices },
+        mesh: Mesh {
+            shading: normals
+                .filter(|normals| normals.len() == vertices.len())
+                .map(|normals| MeshShading { normals, tangents }),
+            vertices,
+            indices,
+        },
         material,
         base_color_texture,
+        metallic_roughness_texture,
+        normal_texture,
     })
 }
 
@@ -411,6 +433,8 @@ mod tests {
         assert_eq!(asset.material.metallic, 0.25);
         assert_eq!(asset.material.roughness, 0.75);
         assert!(asset.base_color_texture.is_none());
+        assert!(asset.metallic_roughness_texture.is_none());
+        assert!(asset.normal_texture.is_none());
     }
 
     #[test]

@@ -255,6 +255,7 @@ fn mesh_renderer_depth_buffer_occludes_far_behind_near() {
             },
         ],
         indices: vec![0, 2, 3, 0, 3, 1],
+        shading: None,
     };
     // mesh 0 = red (drawn first), mesh 1 = green (drawn last).
     let mut mesh = MeshRenderer::new(
@@ -413,6 +414,7 @@ fn mesh_renderer_textured_samples_bound_texture() {
             }, // bottom-right
         ],
         indices: vec![0, 2, 3, 0, 3, 1],
+        shading: None,
     };
 
     // 2×2 checker, row-major top-left origin: white, red / green, blue.
@@ -794,6 +796,49 @@ f 1 2 6 5
 #[test]
 #[ignore = "requires a GPU adapter"]
 #[cfg(not(target_arch = "wasm32"))]
+fn environment_background_draws_bound_probe() {
+    let (device, queue) = test_device();
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+    let (width, height) = (32, 32);
+    let mut renderer = single(&device, format, &Mesh::hello_triangle());
+    renderer.set_env_map(EnvMapData::from_rgba32f(
+        2,
+        1,
+        vec![4.0, 0.1, 0.1, 1.0, 4.0, 0.1, 0.1, 1.0],
+        2048,
+    ));
+    let scene = [DrawableObject::EnvironmentBackground {
+        rotation: 0.0,
+        exposure: 1.0,
+        blur: 0.0,
+        tonemap: Tonemap::Reinhard,
+    }];
+    let pixels = render_with_readback(
+        &device,
+        &queue,
+        format,
+        width,
+        height,
+        |q, encoder, view| {
+            renderer.encode(
+                q,
+                encoder,
+                view,
+                FrameParams::IDENTITY,
+                &scene,
+                Viewport { width, height },
+            );
+        },
+    );
+    assert!(
+        pixels.chunks_exact(4).any(|pixel| pixel[0] > 128),
+        "environment background should produce visible probe color"
+    );
+}
+
+#[test]
+#[ignore = "requires a GPU adapter"]
+#[cfg(not(target_arch = "wasm32"))]
 fn mesh_renderer_renders_loaded_quad_filled_with_correct_coverage() {
     // #37/#41: a mesh loaded from OBJ (not the baked triangle) renders filled
     // via `draw_indexed` as a `DrawableObject::Mesh`. Under the identity camera
@@ -1121,6 +1166,7 @@ fn frame_plane_composites_background_under_scene() {
             },
         ],
         indices: vec![0, 2, 3, 0, 3, 1],
+        shading: None,
     };
     let mut mesh = single(&device, format, &quad);
 

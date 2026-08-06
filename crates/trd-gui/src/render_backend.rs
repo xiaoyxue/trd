@@ -100,6 +100,10 @@ mod native {
             renderer.set_mesh_disney_material(i, material.clone());
             renderer.set_mesh_image_based_lighting(i, *ibl);
             renderer.set_mesh_tone_mapping(i, *tone_mapping);
+            renderer.set_mesh_pbr_debug_view(
+                i,
+                state.pbr_debug_views.get(i).copied().unwrap_or_default(),
+            );
         }
     }
 

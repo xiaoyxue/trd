@@ -88,11 +88,11 @@ bytes into this model without filesystem access; its per-parameter `sources` map
 records whether values came from glTF, an extension-derived mapping, or a
 default.
 
-`trd_core::import_glb` additionally imports one triangle primitive and its
-embedded base-color texture for runtime viewing. `trd-gui` web accepts the GLB
-directly through `?mesh=/assets/.../model.glb`, starts that object in PBR mode,
-and keeps metallic-roughness/normal texture presence in `Auxiliary`; those two
-maps remain unshaded in this slice.
+`trd_core::import_glb` additionally imports one triangle primitive, authored
+normals, and its embedded base-color / metallic-roughness / normal textures.
+`trd-gui` web accepts the GLB directly through
+`?mesh=/assets/.../model.glb` and starts it in PBR mode. The glTF path uses
+`pbr.wgsl`; the original Disney-only `disney.wgsl` remains unchanged.
 
 ## Tone mapping
 
@@ -119,12 +119,19 @@ does no file I/O) and downscaled to the renderer's 2048 px limit;
 [`assets/envmap/`](../assets/envmap/) (`uffizi-large.hdr`, `cathedral.hdr`,
 `museum.hdr`, `ballroom.hdr`, `grace-new.hdr`).
 
+For glTF PBR, trd precomputes a GGX-filtered PMREM mip chain, diffuse irradiance
+map, and split-sum BRDF integration LUT. This avoids view-dependent noise while
+preserving roughness-dependent reflections. The GUI can show/blur/rotate the
+camera-centered environment background independently; its rotation is shared
+with IBL.
+
 ## Interactive editing — `trd-gui`
 
 The interactive viewer starts in PBR mode with `--pbr` and exposes per-object
 surface, IBL, and tone-mapping controls (metallic, roughness, clearcoat,
-env-intensity, exposure, tone-map), so you can dial in a look before baking it
-into a `--cli` render:
+env-intensity, exposure, tone-map), plus Shaded / Roughness / Metallic / Normal
+diagnostic views, so you can dial in or inspect a look before baking it into a
+`--cli` render:
 
 ```sh
 cargo run -p trd-gui -- --pbr --env assets/envmap/uffizi-large.hdr \

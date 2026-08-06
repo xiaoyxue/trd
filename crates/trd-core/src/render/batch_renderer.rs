@@ -210,6 +210,11 @@ impl BatchRenderer {
         self.renderer.set_mesh_tone_mapping(mesh_id, tone_mapping);
     }
 
+    /// Selects a diagnostic PBR output for one mesh.
+    pub fn set_mesh_pbr_debug_view(&mut self, mesh_id: usize, debug_view: crate::PbrDebugView) {
+        self.renderer.set_mesh_pbr_debug_view(mesh_id, debug_view);
+    }
+
     /// Binds `env` as the equirectangular HDR environment map reflected by
     /// [`RenderMode::Pbr`] meshes. Delegates to [`MeshRenderer::set_env_map`]; the
     /// probe is (re)uploaded on the next `render`.

@@ -180,6 +180,7 @@ fn main() -> Result<(), trd_core::StreamError> {
         };
         let ibl = trd_core::ImageBasedLighting {
             intensity: cli.env_intensity,
+            ..trd_core::ImageBasedLighting::default()
         };
         let tone_mapping = trd_core::ToneMapping {
             operator: cli.tonemap.into(),

@@ -5,8 +5,10 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 mod batch_renderer;
+mod bound_material_maps;
 mod bound_texture;
 mod color;
+mod env_background;
 mod frame_params;
 mod frame_plane;
 mod gizmo;
@@ -35,13 +37,14 @@ mod gpu_tests;
 pub use batch_renderer::BatchRenderer;
 pub use frame_params::{CameraFormError, FrameParams, Viewport};
 pub use gpu_context::{create_instance, GpuContext, GpuInitError, GpuRequest, LimitsPreset};
-pub use gpu_types::{Mesh, Vertex};
+pub use gpu_types::{Mesh, MeshShading, Vertex};
 pub use ibl::{EnvMapData, ImageBasedLighting};
 pub use light::{Light, Lighting, PointLight};
 pub use material::{AlphaMode, Auxiliary, DisneyMaterial, Material, MaterialTextures};
 pub use mesh_renderer::MeshRenderer;
 pub use offscreen::{OffscreenError, OffscreenTarget, OFFSCREEN_FORMAT};
 pub use onscreen::OnscreenTarget;
+pub use pbr::PbrDebugView;
 pub use picking::PickTarget;
 pub use pipeline::create_mesh_pipeline;
 pub use scene::{
@@ -63,7 +66,7 @@ pub(crate) use gpu_types::{
 };
 pub(crate) use ibl::BoundEnv;
 pub(crate) use light::{DEFAULT_LIGHTS, DEFAULT_POINT_LIGHTS};
-pub(crate) use pbr::{compute_smooth_normals, PbrUniform};
+pub(crate) use pbr::{compute_smooth_normals, compute_tangents, PbrUniform, PbrUniformInputs};
 pub(crate) use pipeline::{
     create_depth_target, create_env_bind_group_layout, create_frame_bind_group_layout,
     create_frame_plane_pipeline, create_gizmo_bind_group_layout, create_gizmo_binding,

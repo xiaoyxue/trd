@@ -137,7 +137,11 @@ impl Mesh {
         if vertices.is_empty() || indices.is_empty() {
             return Err(MeshError::Empty);
         }
-        Ok(Mesh { vertices, indices })
+        Ok(Mesh {
+            vertices,
+            indices,
+            shading: None,
+        })
     }
 
     /// The axis-aligned bounding box of the mesh's vertex positions.
@@ -349,7 +353,11 @@ impl Mesh {
         if indices.is_empty() {
             return Err(MeshError::Empty);
         }
-        Ok(Mesh { vertices, indices })
+        Ok(Mesh {
+            vertices,
+            indices,
+            shading: None,
+        })
     }
 }
 
@@ -935,6 +943,7 @@ f 1 2 3
                 },
             ],
             indices: vec![0, 1, 0],
+            shading: None,
         };
         let target = 2.0;
         let t = mesh.preview_transform(target);
@@ -963,6 +972,7 @@ f 1 2 3
                 uv: [0.0, 0.0],
             }],
             indices: vec![0],
+            shading: None,
         };
         let t = mesh.preview_transform(2.0);
         // A single point has zero extent → unit scale, only the centering shift.

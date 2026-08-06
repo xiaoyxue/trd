@@ -6,8 +6,38 @@ use super::{
 };
 use crate::math::Vector3;
 
+/// Diagnostic output of one PBR material input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PbrDebugView {
+    #[default]
+    Shaded,
+    Roughness,
+    Metallic,
+    Normal,
+}
+
+impl PbrDebugView {
+    fn to_uniform(self) -> f32 {
+        match self {
+            Self::Shaded => 1.0,
+            Self::Roughness => 2.0,
+            Self::Metallic => 3.0,
+            Self::Normal => 4.0,
+        }
+    }
+}
+
 /// Maximum lights per kind, matching `disney.wgsl`'s `MAX_LIGHTS` array size.
 const MAX_LIGHTS: usize = 4;
+
+pub(crate) struct PbrUniformInputs<'a> {
+    pub material: &'a DisneyMaterial,
+    pub lighting: Lighting,
+    pub ibl: ImageBasedLighting,
+    pub tone_mapping: ToneMapping,
+    pub debug_view: PbrDebugView,
+    pub use_env: bool,
+}
 
 /// GPU byte layout matching `disney.wgsl`'s `PbrUniform` (std140-compatible: all
 /// members are 16-byte-aligned `vec4`/`mat4`). 304 bytes, uploaded per frame
@@ -32,11 +62,7 @@ impl PbrUniform {
     pub(crate) fn new(
         view_proj: [f32; 16],
         camera_pos: [f32; 3],
-        material: &DisneyMaterial,
-        lighting: Lighting,
-        ibl: ImageBasedLighting,
-        tone_mapping: ToneMapping,
-        use_env: bool,
+        inputs: PbrUniformInputs<'_>,
     ) -> Self {
         let mut dir_lights = [[0.0f32; 4]; MAX_LIGHTS];
         for (packed, light) in dir_lights.iter_mut().zip(DEFAULT_LIGHTS) {
@@ -48,38 +74,56 @@ impl PbrUniform {
         }
         Self {
             view_proj,
-            camera_pos: [camera_pos[0], camera_pos[1], camera_pos[2], 1.0],
+            camera_pos: [
+                camera_pos[0],
+                camera_pos[1],
+                camera_pos[2],
+                inputs.debug_view.to_uniform(),
+            ],
             mat0: [
-                material.metallic,
-                material.subsurface,
-                material.specular,
-                material.roughness,
+                inputs.material.metallic,
+                inputs.material.subsurface,
+                inputs.material.specular,
+                inputs.material.roughness,
             ],
             mat1: [
-                material.specular_tint,
-                material.anisotropic,
-                material.sheen,
-                material.sheen_tint,
+                inputs.material.specular_tint,
+                inputs.material.anisotropic,
+                inputs.material.sheen,
+                inputs.material.sheen_tint,
             ],
             mat2: [
-                material.clearcoat,
-                material.clearcoat_gloss,
-                ibl.intensity,
-                tone_mapping.exposure,
+                inputs.material.clearcoat,
+                inputs.material.clearcoat_gloss,
+                inputs.ibl.intensity,
+                inputs.tone_mapping.exposure,
             ],
             mat3: [
-                material.base_color[0],
-                material.base_color[1],
-                material.base_color[2],
-                lighting.ambient,
+                inputs.material.base_color[0],
+                inputs.material.base_color[1],
+                inputs.material.base_color[2],
+                inputs.lighting.ambient,
             ],
             counts: [
                 DEFAULT_LIGHTS.len() as f32,
                 DEFAULT_POINT_LIGHTS.len() as f32,
-                if use_env { 1.0 } else { 0.0 },
-                lighting.scale,
+                if inputs.use_env { 1.0 } else { 0.0 },
+                inputs.lighting.scale,
             ],
-            mat4: [tone_mapping.operator.to_uniform(), 0.0, 0.0, 0.0],
+            mat4: [
+                inputs.tone_mapping.operator.to_uniform(),
+                inputs.ibl.rotation,
+                if inputs.material.auxiliary.textures.normal {
+                    1.0
+                } else {
+                    0.0
+                },
+                if inputs.material.auxiliary.textures.metallic_roughness {
+                    1.0
+                } else {
+                    0.0
+                },
+            ],
             dir_lights,
             point_lights,
         }
@@ -118,10 +162,80 @@ pub(crate) fn compute_smooth_normals(vertices: &[Vertex], indices: &[u32]) -> Ve
         .collect()
 }
 
+/// Derives a MikkTSpace-compatible tangent basis approximation from positions
+/// and UVs, orthonormalized against the shading normal.
+pub(crate) fn compute_tangents(
+    vertices: &[Vertex],
+    indices: &[u32],
+    normals: &[[f32; 3]],
+) -> Vec<[f32; 4]> {
+    let mut tangents = vec![Vector3::ZERO; vertices.len()];
+    let mut bitangents = vec![Vector3::ZERO; vertices.len()];
+    for tri in indices.chunks_exact(3) {
+        let [i0, i1, i2] = [tri[0] as usize, tri[1] as usize, tri[2] as usize];
+        let p0 = Vector3::from_array(vertices[i0].position);
+        let p1 = Vector3::from_array(vertices[i1].position);
+        let p2 = Vector3::from_array(vertices[i2].position);
+        let uv0 = vertices[i0].uv;
+        let uv1 = vertices[i1].uv;
+        let uv2 = vertices[i2].uv;
+        let edge1 = p1 - p0;
+        let edge2 = p2 - p0;
+        let duv1 = [uv1[0] - uv0[0], uv1[1] - uv0[1]];
+        let duv2 = [uv2[0] - uv0[0], uv2[1] - uv0[1]];
+        let det = duv1[0] * duv2[1] - duv1[1] * duv2[0];
+        if det.abs() <= 1e-12 {
+            continue;
+        }
+        let r = det.recip();
+        let tangent = (edge1 * duv2[1] - edge2 * duv1[1]) * r;
+        let bitangent = (edge2 * duv1[0] - edge1 * duv2[0]) * r;
+        for i in [i0, i1, i2] {
+            tangents[i] = tangents[i] + tangent;
+            bitangents[i] = bitangents[i] + bitangent;
+        }
+    }
+    normals
+        .iter()
+        .enumerate()
+        .map(|(i, normal)| {
+            let n = Vector3::from_array(*normal);
+            let mut t = tangents[i] - n * n.dot(tangents[i]);
+            if t.length() <= 1e-12 {
+                let axis = if n.x().abs() < 0.9 {
+                    Vector3::X
+                } else {
+                    Vector3::Y
+                };
+                t = n.cross(axis);
+            }
+            t = t.normalize();
+            let handedness = if n.cross(t).dot(bitangents[i]) < 0.0 {
+                -1.0
+            } else {
+                1.0
+            };
+            let t = t.to_array();
+            [t[0], t[1], t[2], handedness]
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::Tonemap;
+
+    fn inputs(material: &DisneyMaterial, use_env: bool) -> PbrUniformInputs<'_> {
+        PbrUniformInputs {
+            material,
+            lighting: Lighting::default(),
+            ibl: ImageBasedLighting::default(),
+            tone_mapping: ToneMapping::default(),
+            debug_view: PbrDebugView::Shaded,
+            use_env,
+        }
+    }
 
     #[test]
     fn pbr_uniform_is_304_bytes() {
@@ -150,11 +264,8 @@ mod tests {
     #[test]
     fn use_env_flag_packs_into_counts() {
         let m = DisneyMaterial::default();
-        let lighting = Lighting::default();
-        let ibl = ImageBasedLighting::default();
-        let tone_mapping = ToneMapping::default();
-        let with = PbrUniform::new([0.0; 16], [0.0; 3], &m, lighting, ibl, tone_mapping, true);
-        let without = PbrUniform::new([0.0; 16], [0.0; 3], &m, lighting, ibl, tone_mapping, false);
+        let with = PbrUniform::new([0.0; 16], [0.0; 3], inputs(&m, true));
+        let without = PbrUniform::new([0.0; 16], [0.0; 3], inputs(&m, false));
         assert_eq!(with.counts[2], 1.0);
         assert_eq!(without.counts[2], 0.0);
         assert_eq!(with.counts[0], DEFAULT_LIGHTS.len() as f32);
@@ -165,26 +276,17 @@ mod tests {
         let reinhard = PbrUniform::new(
             [0.0; 16],
             [0.0; 3],
-            &DisneyMaterial::default(),
-            Lighting::default(),
-            ImageBasedLighting::default(),
-            ToneMapping::default(),
-            false,
+            inputs(&DisneyMaterial::default(), false),
         );
         assert_eq!(reinhard.mat4[0], 0.0);
         let tone_mapping = ToneMapping {
             operator: Tonemap::Aces,
             ..ToneMapping::default()
         };
-        let u = PbrUniform::new(
-            [0.0; 16],
-            [0.0; 3],
-            &DisneyMaterial::default(),
-            Lighting::default(),
-            ImageBasedLighting::default(),
-            tone_mapping,
-            false,
-        );
+        let material = DisneyMaterial::default();
+        let mut inputs = inputs(&material, false);
+        inputs.tone_mapping = tone_mapping;
+        let u = PbrUniform::new([0.0; 16], [0.0; 3], inputs);
         assert_eq!(u.mat4[0], 1.0);
         assert_eq!([u.mat4[1], u.mat4[2], u.mat4[3]], [0.0, 0.0, 0.0]);
     }
@@ -194,11 +296,7 @@ mod tests {
         let uniform = PbrUniform::new(
             [0.0; 16],
             [0.0; 3],
-            &DisneyMaterial::default(),
-            Lighting::default(),
-            ImageBasedLighting::default(),
-            ToneMapping::default(),
-            true,
+            inputs(&DisneyMaterial::default(), true),
         );
         let expected = PbrUniform {
             view_proj: [0.0; 16],

@@ -75,6 +75,8 @@ pub async fn start(
         mesh: trd_core::Mesh,
         material: trd_core::DisneyMaterial,
         texture: Option<trd_core::ImageTexture>,
+        metallic_roughness: Option<trd_core::ImageTexture>,
+        normal: Option<trd_core::ImageTexture>,
         is_gltf: bool,
     }
 
@@ -87,6 +89,8 @@ pub async fn start(
                 .map_err(to_js)?,
             material: trd_core::DisneyMaterial::default(),
             texture: None,
+            metallic_roughness: None,
+            normal: None,
             is_gltf: false,
         }]
     } else {
@@ -101,6 +105,8 @@ pub async fn start(
                         mesh: asset.mesh,
                         material: asset.material,
                         texture: asset.base_color_texture,
+                        metallic_roughness: asset.metallic_roughness_texture,
+                        normal: asset.normal_texture,
                         is_gltf: true,
                     })
                 } else {
@@ -112,6 +118,8 @@ pub async fn start(
                             .map_err(to_js)?,
                         material: trd_core::DisneyMaterial::default(),
                         texture: None,
+                        metallic_roughness: None,
+                        normal: None,
                         is_gltf: false,
                     })
                 }
@@ -137,6 +145,10 @@ pub async fn start(
     let meshes: Vec<trd_core::Mesh> = loaded.iter().map(|asset| asset.mesh.clone()).collect();
     let textures: Vec<Option<trd_core::ImageTexture>> =
         loaded.iter().map(|asset| asset.texture.clone()).collect();
+    let material_maps: Vec<_> = loaded
+        .iter()
+        .map(|asset| (asset.metallic_roughness.clone(), asset.normal.clone()))
+        .collect();
     // The optional HDR env probe (browser `?env=`). Decoded in Rust so trd-core
     // stays I/O-free; when present, the viewer starts in PBR mode.
     let env = match env_bytes {
@@ -150,15 +162,38 @@ pub async fn start(
     } else {
         trd_core::RenderMode::Filled
     };
+    let lighting = if has_gltf && env.is_some() {
+        trd_core::Lighting {
+            ambient: 0.0,
+            scale: 0.0,
+        }
+    } else {
+        trd_core::Lighting::default()
+    };
+    let tone_mapping = if has_gltf {
+        trd_core::ToneMapping {
+            operator: trd_core::Tonemap::Aces,
+            exposure: 1.0,
+        }
+    } else {
+        trd_core::ToneMapping::default()
+    };
     let scene = SceneState {
         // One transform + mode + material per loaded mesh, so `draws()` lays them
         // out side-by-side and each object has its **own** editable render mode +
         // PBR material (#141).
         objects: vec![ObjectTransform::default(); meshes.len()],
         modes: vec![initial_mode; meshes.len()],
-        materials: loaded.into_iter().map(|asset| asset.material).collect(),
-        image_based_lighting: vec![trd_core::ImageBasedLighting::default(); meshes.len()],
-        tone_mappings: vec![trd_core::ToneMapping::default(); meshes.len()],
+        materials: loaded.iter().map(|asset| asset.material.clone()).collect(),
+        image_based_lighting: loaded
+            .iter()
+            .map(|_| trd_core::ImageBasedLighting::default())
+            .collect(),
+        tone_mappings: vec![tone_mapping; meshes.len()],
+        pbr_debug_views: vec![trd_core::PbrDebugView::default(); meshes.len()],
+        lighting,
+        environment_available: env.is_some(),
+        show_environment_background: env.is_some(),
         ..SceneState::default()
     };
     // `?backend=arrow` selects the Arrow wire round-trip; anything else (or
@@ -172,9 +207,17 @@ pub async fn start(
     // instead of upscaling a small fixed buffer. Bounded (aspect-preserving) to
     // keep GPU + readback cost in check.
     let (render_w, render_h) = browser_render_size(&canvas);
-    let renderer = WebRenderer::new(&meshes, &textures, env, render_w, render_h, backend)
-        .await
-        .map_err(to_js)?;
+    let renderer = WebRenderer::new(
+        &meshes,
+        &textures,
+        &material_maps,
+        env,
+        render_w,
+        render_h,
+        backend,
+    )
+    .await
+    .map_err(to_js)?;
     let app = WebApp::new(InteractionController::new(scene), renderer);
 
     eframe::WebRunner::new()

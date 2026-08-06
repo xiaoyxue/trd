@@ -375,6 +375,7 @@ pub fn run() -> Result<(), AppError> {
         };
         let ibl = ImageBasedLighting {
             intensity: cli.env_intensity,
+            ..ImageBasedLighting::default()
         };
         let tone_mapping = ToneMapping {
             operator: cli.tonemap.into(),

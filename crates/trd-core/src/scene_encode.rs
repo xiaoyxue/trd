@@ -601,6 +601,7 @@ mod tests {
                 },
             ],
             indices: vec![0, 1, 2],
+            shading: None,
         }
     }
 

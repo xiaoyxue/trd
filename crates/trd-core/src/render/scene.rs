@@ -210,6 +210,13 @@ pub enum DrawableObject {
     /// and drawn *before* the opaque content mesh (depth-write off) so the mesh
     /// composites on top while the surrounding rim darkens the floor.
     BlobShadow { model: [f32; 16] },
+    /// Camera-centered spherical HDR environment drawn behind the scene.
+    EnvironmentBackground {
+        rotation: f32,
+        exposure: f32,
+        blur: f32,
+        tonemap: super::Tonemap,
+    },
     /// A screen-aligned **background frame plane** (#63): a fullscreen quad that
     /// samples the renderer's bound background frame texture (set via
     /// [`MeshRenderer::update_frame_texture_rgba`]), composited **under** the

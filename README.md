@@ -212,7 +212,7 @@ then edits *that* object. Everything is **per-object**:
 
 The browser loads OBJ or single-primitive GLB objects from **repeatable
 `?mesh=`** (+ positional `?texture=`, and `?env=` for PBR). GLB uses its
-embedded base-color texture/material and starts in PBR:
+embedded base-color / metallic-roughness / normal maps and starts in PBR:
 `?mesh=a.obj&texture=a.jpg&mesh=b.obj&env=probe.hdr`. Full control reference + URL
 params: **[`docs/rendering.md`](docs/rendering.md#interactive-viewer--trd-gui)**.
 
