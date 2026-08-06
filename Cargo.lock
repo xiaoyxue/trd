@@ -4044,20 +4044,41 @@ dependencies = [
 name = "trd-gui"
 version = "0.1.0"
 dependencies = [
- "clap",
  "console_error_panic_hook",
  "eframe",
  "egui",
- "env_logger",
  "image",
  "js-sys",
  "log",
  "thiserror 2.0.18",
  "trd-core",
+ "trd-placement",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
  "wgpu 30.0.0",
+]
+
+[[package]]
+name = "trd-gui-app"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "eframe",
+ "egui",
+ "env_logger",
+ "log",
+ "trd-core",
+ "trd-gui",
+]
+
+[[package]]
+name = "trd-placement"
+version = "0.1.0"
+dependencies = [
+ "approx",
+ "thiserror 2.0.18",
+ "trd-core",
 ]
 
 [[package]]

@@ -134,7 +134,7 @@ diagnostic views, so you can dial in or inspect a look before baking it into a
 `--cli` render:
 
 ```sh
-cargo run -p trd-gui -- --pbr --env assets/envmap/uffizi-large.hdr \
+cargo run -p trd-gui-app -- --pbr --env assets/envmap/uffizi-large.hdr \
   --mesh assets/meshes/bunny_with_texture/bunny.obj \
   --texture assets/meshes/bunny_with_texture/bunny_uv_map1.jpg
 ```

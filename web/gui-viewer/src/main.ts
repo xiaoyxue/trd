@@ -1,13 +1,13 @@
 // Thin bootstrap for the browser `trd-gui` viewer (issue #97, Slice 4). The whole
 // UI + interaction + offscreen rendering live in Rust (the trd-gui wasm module);
 // this file only loads that module and hands it the canvas — the browser twin of
-// `main.rs`'s `eframe::run_native`. Bundled/served by bun, mirroring `web/`.
+// `main.rs`'s `eframe::run_native`. Bundled/served by the shared Bun workspace.
 import init, { start } from "../pkg/trd_gui.js";
 import wasmUrl from "../pkg/trd_gui_bg.wasm" with { type: "file" };
 
 async function main(): Promise<void> {
   // wasm-bindgen's default wasm path breaks once bundled, so pass the bundler's
-  // asset URL explicitly (same pattern as web/src/viewer.ts).
+  // asset URL explicitly (same pattern as web/viewer/src/viewer.ts).
   await init({ module_or_path: wasmUrl });
 
   const canvas = document.getElementById("trd-gui-canvas");

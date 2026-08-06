@@ -14,6 +14,7 @@ mod protocol;
 mod render;
 mod scene_encode;
 mod texture;
+mod video_editing;
 
 pub use camera::{Camera, DEFAULT_FIT_MARGIN, DEFAULT_FOV_Y, DEFAULT_VIEW_DIR};
 pub use frame::{FrameError, InlineFrame, FRAME_BYTES_COLUMN, FRAME_PIXELS_COLUMN};
@@ -49,6 +50,11 @@ pub use scene_encode::{
 };
 pub use texture::{
     ConstantTexture, ImageData, ImageTexture, Texture, TextureError, TEXTURE_COLUMN,
+};
+pub use video_editing::{
+    decode_video_editing_document, VideoEditingDocument, VideoEditingError, VideoEditingFrame,
+    VideoInfo, VIDEO_EDIT_TABLE_KIND_KEY, VIDEO_EDIT_TIMELINE_KIND, VIDEO_EDIT_VERSION,
+    VIDEO_EDIT_VERSION_KEY,
 };
 
 #[cfg(not(target_arch = "wasm32"))]

@@ -11,9 +11,24 @@ use egui::{Color32, PointerButton, Sense, TextureHandle, Vec2};
 use trd_core::{PbrDebugView, RenderMode, Tonemap};
 
 use crate::interaction::{
-    AxisConstraint, InteractionController, InteractionEvent, InteractionTarget, TransformMode,
+    AxisConstraint, InteractionController, InteractionEvent, InteractionTarget, MoveDirection,
+    TransformMode,
 };
 use crate::scene::{MAX_SCALE, MIN_SCALE};
+
+pub type ExtraControls<'a> = dyn FnMut(&mut egui::Ui) -> bool + 'a;
+pub type ImageOverlay<'a> = dyn FnMut(&egui::Ui, egui::Rect) + 'a;
+pub type CentralBottom<'a> = dyn FnMut(&mut egui::Ui) + 'a;
+
+/// How the render target is sized inside the central panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ImageSizing {
+    /// Preserve aspect while fitting the entire image inside the panel.
+    #[default]
+    FitCanvas,
+    /// Display one image pixel per logical UI point with scrollbars as needed.
+    OriginalResolution,
+}
 
 /// The per-frame view the shared UI draws: the interaction state, the current
 /// display texture (if a frame has been rendered), the render resolution, and an
@@ -30,9 +45,33 @@ pub struct View<'a> {
     pub pick_request: &'a mut Option<(u32, u32)>,
 }
 
+/// Optional feature-specific additions around the standard viewer.
+#[derive(Default)]
+pub struct UiExtensions<'a> {
+    pub top_controls: Option<&'a mut ExtraControls<'a>>,
+    pub extra_controls: Option<&'a mut ExtraControls<'a>>,
+    pub image_overlay: Option<&'a mut ImageOverlay<'a>>,
+    pub camera_locked: bool,
+    pub image_sizing: ImageSizing,
+    pub move_reference_labels: Option<[&'static str; 3]>,
+    pub hide_empty_image: bool,
+    pub fitted_render_size: Option<&'a mut (u32, u32)>,
+    pub central_bottom: Option<&'a mut CentralBottom<'a>>,
+    pub central_bottom_height: Option<f32>,
+}
+
 /// Lays out the side controls + central image and maps input to interaction
 /// events. Returns `true` if the scene changed and a re-render is needed.
 pub fn show(ui: &mut egui::Ui, view: &mut View) -> bool {
+    show_with_extensions(ui, view, &mut UiExtensions::default())
+}
+
+/// Lays out the shared viewer with feature-specific controls and image paint.
+pub fn show_with_extensions(
+    ui: &mut egui::Ui,
+    view: &mut View,
+    extensions: &mut UiExtensions,
+) -> bool {
     let mut needs_render = false;
     egui::Panel::left("controls")
         .resizable(true)
@@ -40,10 +79,21 @@ pub fn show(ui: &mut egui::Ui, view: &mut View) -> bool {
         .min_size(240.0)
         .max_size(420.0)
         .show(ui, |ui| {
-            needs_render |= controls_panel(ui, view);
+            needs_render |= controls_panel(ui, view, extensions);
         });
+    let bottom_height = extensions.central_bottom_height.unwrap_or(72.0);
+    if let Some(bottom) = extensions.central_bottom.as_deref_mut() {
+        egui::Panel::bottom("feature-central-bottom")
+            .resizable(false)
+            .default_size(bottom_height)
+            .min_size(bottom_height)
+            .max_size(bottom_height)
+            .show(ui, |ui| {
+                bottom(ui);
+            });
+    }
     egui::CentralPanel::default().show(ui, |ui| {
-        needs_render |= image_panel(ui, view);
+        needs_render |= image_panel(ui, view, extensions);
     });
     needs_render
 }
@@ -51,7 +101,7 @@ pub fn show(ui: &mut egui::Ui, view: &mut View) -> bool {
 /// The left control panel: primary-drag target, render mode, overlays, reset, and
 /// a status readout. Grouped into collapsible sections inside a scroll area so the
 /// (now taller) panel stays usable. Returns whether the scene changed.
-fn controls_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
+fn controls_panel(ui: &mut egui::Ui, view: &mut View, extensions: &mut UiExtensions) -> bool {
     let mut needs_render = false;
     ui.horizontal(|ui| {
         ui.heading("trd-gui");
@@ -62,15 +112,21 @@ fn controls_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
     ui.separator();
 
     egui::ScrollArea::vertical().show(ui, |ui| {
+        if let Some(top) = extensions.top_controls.as_deref_mut() {
+            needs_render |= top(ui);
+            ui.separator();
+        }
         // ── Interaction ──────────────────────────────────────────────────
         needs_render |= section(ui, "Interaction", |ui| {
             let mut c = false;
             ui.label("Primary drag");
             let target = &mut view.controller.target;
             ui.horizontal_wrapped(|ui| {
-                c |= ui
-                    .selectable_value(target, InteractionTarget::Camera, "Orbit camera")
-                    .changed();
+                ui.add_enabled_ui(!extensions.camera_locked, |ui| {
+                    c |= ui
+                        .selectable_value(target, InteractionTarget::Camera, "Orbit camera")
+                        .changed();
+                });
                 c |= ui
                     .selectable_value(target, InteractionTarget::Object, "Object")
                     .changed();
@@ -86,10 +142,61 @@ fn controls_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
                     ui.selectable_value(mode, TransformMode::Move, "Move");
                     ui.selectable_value(mode, TransformMode::Scale, "Scale");
                 });
-                if matches!(
-                    view.controller.mode,
-                    TransformMode::Rotate | TransformMode::Move
-                ) {
+                if view.controller.mode == TransformMode::Move {
+                    ui.add_space(4.0);
+                    ui.label("Translate direction");
+                    if extensions.move_reference_labels.is_none() {
+                        ui.selectable_value(
+                            &mut view.controller.move_direction,
+                            MoveDirection::Free,
+                            "Free",
+                        );
+                    }
+                    let reference_labels = extensions
+                        .move_reference_labels
+                        .unwrap_or(["Parent X", "Parent Y", "Parent Z"]);
+                    ui.label(if extensions.move_reference_labels.is_some() {
+                        "Quad basis"
+                    } else {
+                        "Parent basis"
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        ui.selectable_value(
+                            &mut view.controller.move_direction,
+                            MoveDirection::Reference1,
+                            reference_labels[0],
+                        );
+                        ui.selectable_value(
+                            &mut view.controller.move_direction,
+                            MoveDirection::Reference2,
+                            reference_labels[1],
+                        );
+                        ui.selectable_value(
+                            &mut view.controller.move_direction,
+                            MoveDirection::Reference3,
+                            reference_labels[2],
+                        );
+                    });
+                    ui.label("Object local basis");
+                    ui.horizontal_wrapped(|ui| {
+                        ui.selectable_value(
+                            &mut view.controller.move_direction,
+                            MoveDirection::LocalX,
+                            "X",
+                        );
+                        ui.selectable_value(
+                            &mut view.controller.move_direction,
+                            MoveDirection::LocalY,
+                            "Y",
+                        );
+                        ui.selectable_value(
+                            &mut view.controller.move_direction,
+                            MoveDirection::LocalZ,
+                            "Z",
+                        );
+                    });
+                }
+                if view.controller.mode == TransformMode::Rotate {
                     ui.add_space(4.0);
                     ui.label("Axis lock");
                     let axis = &mut view.controller.axis;
@@ -207,6 +314,11 @@ fn controls_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
             }
             c
         });
+
+        if let Some(extra) = extensions.extra_controls.as_deref_mut() {
+            ui.separator();
+            needs_render |= extra(ui);
+        }
 
         ui.add_space(4.0);
         if ui.button("Reset view").clicked() {
@@ -399,33 +511,67 @@ fn pbr_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
 }
 /// pointer/scroll input over it into interaction events. Returns whether the
 /// scene changed.
-fn image_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
+fn image_panel(ui: &mut egui::Ui, view: &mut View, extensions: &mut UiExtensions) -> bool {
     let Some(texture) = view.texture else {
-        ui.centered_and_justified(|ui| {
-            ui.label("Rendering…");
-        });
+        if !extensions.hide_empty_image {
+            ui.centered_and_justified(|ui| {
+                ui.label("Rendering…");
+            });
+        }
         return false;
     };
 
     let (img_w, img_h) = view.render_size;
     let img_aspect = img_w as f32 / img_h.max(1) as f32;
     let avail = ui.available_size();
-    // Fit the image inside the panel, preserving aspect (letterboxed).
-    let disp = if avail.x / avail.y.max(1.0) > img_aspect {
-        Vec2::new(avail.y * img_aspect, avail.y)
-    } else {
-        Vec2::new(avail.x, avail.x / img_aspect)
+    let fit = || {
+        if avail.x / avail.y.max(1.0) > img_aspect {
+            Vec2::new(avail.y * img_aspect, avail.y)
+        } else {
+            Vec2::new(avail.x, avail.x / img_aspect)
+        }
+    };
+    let add_image = |ui: &mut egui::Ui, size| {
+        ui.add(
+            egui::Image::new(egui::load::SizedTexture::from_handle(texture))
+                .fit_to_exact_size(size)
+                .sense(Sense::click_and_drag()),
+        )
+    };
+    let response = match extensions.image_sizing {
+        ImageSizing::FitCanvas => {
+            let display_size = fit();
+            if let Some(size) = extensions.fitted_render_size.as_deref_mut() {
+                let pixels_per_point = ui.ctx().pixels_per_point();
+                *size = (
+                    (display_size.x * pixels_per_point).round().max(1.0) as u32,
+                    (display_size.y * pixels_per_point).round().max(1.0) as u32,
+                );
+            }
+            ui.centered_and_justified(|ui| add_image(ui, display_size))
+                .inner
+        }
+        ImageSizing::OriginalResolution => {
+            egui::ScrollArea::both()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    let image_size = Vec2::new(img_w as f32, img_h as f32);
+                    let canvas_size =
+                        Vec2::new(image_size.x.max(avail.x), image_size.y.max(avail.y));
+                    ui.allocate_ui_with_layout(
+                        canvas_size,
+                        egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                        |ui| add_image(ui, image_size),
+                    )
+                    .inner
+                })
+                .inner
+        }
     };
 
-    let response = ui
-        .centered_and_justified(|ui| {
-            ui.add(
-                egui::Image::new(egui::load::SizedTexture::from_handle(texture))
-                    .fit_to_exact_size(disp)
-                    .sense(Sense::click_and_drag()),
-            )
-        })
-        .inner;
+    if let Some(overlay) = extensions.image_overlay.as_mut() {
+        overlay(ui, response.rect);
+    }
 
     let size = response.rect.size();
     if size.x <= 0.0 || size.y <= 0.0 {
@@ -467,11 +613,15 @@ fn image_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
             let event = if view.controller.target == InteractionTarget::Object
                 && view.controller.mode == TransformMode::Scale
             {
-                InteractionEvent::Scale { delta }
+                Some(InteractionEvent::Scale { delta })
+            } else if extensions.camera_locked {
+                None
             } else {
-                InteractionEvent::Zoom { delta }
+                Some(InteractionEvent::Zoom { delta })
             };
-            changed |= view.controller.apply(event);
+            if let Some(event) = event {
+                changed |= view.controller.apply(event);
+            }
         }
     }
 

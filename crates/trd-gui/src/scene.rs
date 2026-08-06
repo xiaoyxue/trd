@@ -124,6 +124,12 @@ impl Default for ObjectTransform {
 }
 
 impl ObjectTransform {
+    fn rotation(&self) -> Rotation {
+        Rotation::from_rotation_y(self.yaw)
+            * Rotation::from_rotation_x(self.pitch)
+            * Rotation::from_rotation_z(self.roll)
+    }
+
     /// The column-major model matrix `T · R · S`: scale, then rotate about `+Y`,
     /// `+X`, `+Z`, then translate. Built with the typed `trd-core` transforms so
     /// the affine composition rule (`a.then(b) == b · a`) holds.
@@ -136,9 +142,7 @@ impl ObjectTransform {
     /// the translation). Used to lay out a multi-object scene: each object keeps
     /// its own transform while a per-object layout `offset` spreads them apart.
     pub fn model_matrix_offset(&self, offset: [f32; 3]) -> [f32; 16] {
-        let rotation = Rotation::from_rotation_y(self.yaw)
-            * Rotation::from_rotation_x(self.pitch)
-            * Rotation::from_rotation_z(self.roll);
+        let rotation = self.rotation();
         let scale = Vector3::new(self.scale[0], self.scale[1], self.scale[2]);
         let translation = Vector3::new(
             self.translation[0] + offset[0],
@@ -155,6 +159,12 @@ impl ObjectTransform {
         self.translation[0] += delta[0];
         self.translation[1] += delta[1];
         self.translation[2] += delta[2];
+    }
+
+    /// Translates along the object's rotated local axes.
+    pub fn translate_local(&mut self, delta: [f32; 3]) {
+        let rotated = self.rotation() * Vector3::new(delta[0], delta[1], delta[2]);
+        self.translate(rotated.to_array());
     }
 
     /// Rotates the object by `(dyaw, dpitch)` radians.

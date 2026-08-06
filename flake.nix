@@ -104,15 +104,15 @@
         );
 
         # --- Native interactive GUI (eframe/egui) ---------------------------
-        # trd-gui is the interactive front-end (issue #97). Like trd-cli it
-        # dlopens the GPU/windowing libs (GL/Vulkan/X11/Wayland) at run time, so
-        # wrap the binary with the same `runtimeLibs` on LD_LIBRARY_PATH.
+        # native/trd-gui-app is the interactive front-end (issue #97), built as
+        # the public `trd-gui` Nix output. Like trd-cli it dlopens the GPU/window
+        # libs (GL/Vulkan/X11/Wayland), so expose the same runtime libraries.
         trd-gui = craneLib.buildPackage (
           commonArgs
           // {
             inherit cargoArtifacts;
             pname = "trd-gui";
-            cargoExtraArgs = "--package trd-gui";
+            cargoExtraArgs = "--package trd-gui-app";
             doCheck = false;
             # X11/Wayland/xkbcommon dev libs for the eframe/winit build.
             buildInputs = runtimeLibs;
@@ -175,9 +175,39 @@
           }
         );
 
+        # wasm-bindgen package shared by web/gui-viewer and web/video-editing.
+        trdGuiWasmArgs = commonArgs // {
+          CARGO_BUILD_TARGET = "wasm32-unknown-unknown";
+          cargoExtraArgs = "--package trd-gui";
+          doCheck = false;
+        };
+        cargoArtifactsTrdGuiWasm = craneLib.buildDepsOnly trdGuiWasmArgs;
+
+        trd-gui-wasm = craneLib.buildPackage (
+          trdGuiWasmArgs
+          // {
+            pname = "trd-gui-wasm";
+            cargoArtifacts = cargoArtifactsTrdGuiWasm;
+            nativeBuildInputs = commonArgs.nativeBuildInputs ++ [
+              wasmBindgenCli
+              pkgs.binaryen
+            ];
+            doNotPostBuildInstallCargoBinaries = true;
+            installPhaseCommand = ''
+              mkdir -p $out
+              wasm-bindgen \
+                --target web \
+                --out-dir $out \
+                --out-name trd_gui \
+                target/wasm32-unknown-unknown/release/trd_gui.wasm
+              wasm-opt -Oz -o $out/trd_gui_bg.wasm $out/trd_gui_bg.wasm
+            '';
+          }
+        );
+
         # --- Web bundle ------------------------------------------------------
-        # bun2nix materializes web/'s npm dependencies (apache-arrow, typescript,
-        # and their transitive tree) reproducibly from web/bun.nix, so the nix
+        # bun2nix materializes the web workspace's npm dependencies
+        # reproducibly from web/bun.nix, so the nix
         # web build and tsc check can run an offline `bun install` in the sandbox
         # instead of the old shortcut of injecting only trd-wasm. (The biome lint
         # runs from nixpkgs' biome instead, see the `biome` check below.)
@@ -187,9 +217,9 @@
           bunNix = ./web/bun.nix;
         };
 
-        # The web build resolves `trd-wasm` via `file:../crates/trd-wasm/pkg`, so
-        # the source must contain the repo layout (web/ as a subdir with a sibling
-        # crates/). Keep it lean by dropping build outputs and VCS metadata.
+        # The viewer resolves `trd-wasm` via
+        # `file:../../crates/trd-wasm/pkg`, so the source must retain the repo
+        # layout. Keep it lean by dropping build outputs and VCS metadata.
         webSrc = lib.cleanSourceWith {
           src = ./.;
           filter =
@@ -208,8 +238,8 @@
 
         # Shared builder for the bun-driven web derivations (bundle + checks).
         # The bun2nix hook installs node_modules offline in `bunRoot`; the
-        # pre-install hook first materializes the nix-built trd-wasm at the
-        # `file:` path referenced by web/package.json.
+        # pre-install hook first materializes both nix-built wasm packages at the
+        # paths referenced by the three web workspace packages.
         mkWebDerivation =
           {
             pname,
@@ -233,11 +263,14 @@
               mkdir -p ../crates/trd-wasm/pkg
               cp -r ${trd-wasm}/. ../crates/trd-wasm/pkg/
               chmod -R u+w ../crates/trd-wasm/pkg
+              mkdir -p gui-viewer/pkg
+              cp -r ${trd-gui-wasm}/. gui-viewer/pkg/
+              chmod -R u+w gui-viewer/pkg
             '';
 
             buildPhase = ''
               runHook preBuild
-              cd web
+              cd web/viewer
               ${buildCommand}
               runHook postBuild
             '';
@@ -336,6 +369,7 @@
           tsc = mkWebDerivation {
             pname = "check-tsc";
             buildCommand = ''
+              cd ..
               bun run typecheck
             '';
             installCommand = ''
@@ -344,10 +378,11 @@
             '';
           };
 
-          # Biome format-check + lint for the web wrapper. Biome only parses the
+          # Biome format-check + lint for every web package. Biome only parses the
           # source (it never resolves npm imports), so it needs no node_modules
           # and runs straight from nixpkgs' biome. nixpkgs pins the same version
-          # as web/package.json (2.4.16), so the gate matches `bun run check`.
+          # as web/viewer/package.json (2.4.16), so the gate matches
+          # `bun run check`.
           # (bun2nix can't materialize biome's large optional platform binary
           # @biomejs/cli-linux-x64 into the sandbox node_modules, so we avoid it.)
           biome =
@@ -356,8 +391,11 @@
                 nativeBuildInputs = [ pkgs.biome ];
               }
               ''
-                cp -r ${webSrc}/web web && chmod -R u+w web && cd web
-                biome ci .
+                cp -r ${webSrc}/web web
+                chmod -R u+w web
+                (cd web/viewer && biome ci .)
+                (cd web/gui-viewer && biome ci .)
+                (cd web/video-editing && biome ci .)
                 touch $out
               '';
         };

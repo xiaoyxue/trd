@@ -11,8 +11,8 @@ use trd_core::{
     DisneyMaterial, EnvMapData, ImageBasedLighting, Lighting, Mesh, RenderMode, ToneMapping,
 };
 
-use crate::error::GuiError;
-use crate::scene::SceneState;
+use trd_gui::error::GuiError;
+use trd_gui::scene::SceneState;
 
 /// Which render backend the viewer drives (design §5.2).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default, clap::ValueEnum)]
@@ -131,7 +131,7 @@ impl Cli {
                 })?;
                 Ok(Mesh::from_obj(&text)?)
             }
-            None => Ok(crate::assets::default_mesh()?),
+            None => Ok(trd_gui::assets::default_mesh()?),
         }
     }
 
@@ -146,7 +146,7 @@ impl Cli {
             path: path.display().to_string(),
             source,
         })?;
-        Ok(Some(crate::assets::decode_texture(&bytes)?))
+        Ok(Some(trd_gui::assets::decode_texture(&bytes)?))
     }
 
     /// Loads and decodes the `--env` HDR probe (if any) into an [`EnvMapData`] via
@@ -160,7 +160,7 @@ impl Cli {
             path: path.display().to_string(),
             source,
         })?;
-        Ok(Some(crate::assets::decode_env_hdr(&bytes)?))
+        Ok(Some(trd_gui::assets::decode_env_hdr(&bytes)?))
     }
 
     /// The initial Disney PBR material assembled from the material flags

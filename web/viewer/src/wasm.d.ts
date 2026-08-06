@@ -4,3 +4,8 @@ declare module "*.wasm" {
   const url: string;
   export default url;
 }
+
+declare module "trd-wasm/trd_wasm_bg.wasm" {
+  const url: string;
+  export default url;
+}

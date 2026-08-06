@@ -1,23 +1,14 @@
 {
   "name": "trd-web",
-  "version": "0.1.0",
   "private": true,
-  "type": "module",
+  "workspaces": ["viewer", "gui-viewer", "video-editing"],
   "scripts": {
-    "build:wasm": "wasm-pack build ../crates/trd-wasm --mode no-install --target web --out-dir pkg",
-    "build:web": "bun build ./index.html --outdir dist",
-    "build": "bun run build:wasm && bun install --frozen-lockfile && bun run build:web",
-    "dev": "bun run build && BUN_PORT=8080 bun ./index.html",
-    "typecheck": "tsc --noEmit",
-    "check": "biome ci .",
-    "format": "biome format --write ."
-  },
-  "dependencies": {
-    "apache-arrow": "21.1.0",
-    "trd-wasm": "file:../crates/trd-wasm/pkg"
-  },
-  "devDependencies": {
-    "@biomejs/biome": "2.4.16",
-    "typescript": "^5.6.0"
+    "build:viewer": "bun run --cwd viewer build",
+    "build:gui-viewer": "bun run --cwd gui-viewer build",
+    "build:video-editing": "bun run --cwd video-editing build",
+    "build": "bun run build:viewer && bun run build:gui-viewer && bun run --cwd video-editing build:web",
+    "typecheck": "bun run --cwd viewer typecheck && bun run --cwd gui-viewer typecheck && bun run --cwd video-editing typecheck",
+    "check": "bun run --cwd viewer check && bun run --cwd gui-viewer check && bun run --cwd video-editing check",
+    "format": "bun run --cwd viewer format && bun run --cwd gui-viewer format && bun run --cwd video-editing format"
   }
 }

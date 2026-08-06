@@ -201,6 +201,9 @@ pub enum DrawableObject {
     /// `model` the `Xy` grid lays exactly over the reconstructed quad in its
     /// local frame.
     PlaneGrid { plane: GridPlane, model: [f32; 16] },
+    /// The tracked placement-quad outline, rendered by the shared analytic-AA
+    /// gizmo line pipeline at 1.5 px.
+    QuadOutline { model: [f32; 16], selected: bool },
     /// A **contact / blob grounding shadow** (#110 follow-up): a soft dark radial
     /// blob laid on a placed mesh's ground plane, placed by `model` (a flat quad
     /// on the plane, sized to the mesh footprint), so the mesh reads as *sitting

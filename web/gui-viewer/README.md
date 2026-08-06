@@ -6,17 +6,18 @@ the egui UI runs on a `<canvas>` via eframe while `trd-core` renders the scene
 UI + interaction + rendering are in Rust; `index.html` is the only JS — a thin
 bootstrap that loads the wasm module and calls `start(canvas)`.
 
-## Build & run (bun)
+## Build & run (Bun workspace)
 
-Served/bundled with **bun**, mirroring the repo's `web/` folder. From this
-directory (`crates/trd-gui/web/`):
+The browser delivery surfaces share the Bun workspace rooted at `web/`. From the
+repository root:
 
 ```sh
-bun install          # once, for the biome/tsc dev tools
-bun run dev          # build the wasm (wasm-pack) + serve on http://localhost:8080
+cd web
+bun install --frozen-lockfile
+bun run --cwd gui-viewer dev  # build wasm + serve on http://localhost:8082
 ```
 
-`bun run dev` runs `build:wasm` (wasm-pack → `pkg/`) then `serve.ts`, which
+`dev` runs `build:wasm` (wasm-pack → `pkg/`) then `serve.ts`, which
 bundles `index.html` + `src/main.ts` + the wasm asset **and** statically serves
 the repo's real `assets/` directory (so `?mesh=`/`?texture=` fetch the same files
 the native viewer reads — no copies). If `pkg/` is already built, `bun run serve`
@@ -29,7 +30,7 @@ enabled) for `trd-core`'s offscreen wgpu renderer.
 
 | Native | Browser URL |
 |--------|-------------|
-| *(default)* | `http://localhost:8080/` — built-in cube |
+| *(default)* | `http://localhost:8082/` — built-in cube |
 | `--mesh assets/meshes/bunny.obj` | `?mesh=/assets/meshes/bunny.obj` |
 | `--mesh …bunny.obj --texture …map1.jpg` | `?mesh=/assets/meshes/bunny_with_texture/bunny.obj&texture=/assets/meshes/bunny_with_texture/bunny_uv_map1.jpg` |
 | `--backend arrow` | append `&backend=arrow` (the Arrow wire round-trip) |

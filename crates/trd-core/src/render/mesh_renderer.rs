@@ -221,6 +221,8 @@ enum DrawKind {
     /// A coordinate-plane grid (the shared per-plane grid vertex buffer indexed
     /// by [`GridPlane::index`], non-indexed line draw).
     Grid(usize),
+    /// Green/yellow placement-quad outline.
+    QuadOutline(usize),
     /// Edge lines of a mesh (its deduped edge index buffer + line pipeline).
     Wireframe(usize),
     /// A mesh's AABB box (its precomputed corner geometry + line pipeline).
@@ -290,6 +292,9 @@ fn build_batches(
             }
             DrawableObject::CoordinateAxes { model } => (DrawKind::Axes, model),
             DrawableObject::PlaneGrid { plane, model } => (DrawKind::Grid(plane.index()), model),
+            DrawableObject::QuadOutline { model, selected } => {
+                (DrawKind::QuadOutline(usize::from(selected)), model)
+            }
             DrawableObject::BlobShadow { model } => (DrawKind::Shadow, model),
             DrawableObject::EnvironmentBackground {
                 rotation,
@@ -584,6 +589,7 @@ struct MeshStore {
     /// [`DrawableObject::PlaneGrid`] draws the buffer for its plane under its own
     /// model, supplied through the shared instance buffer.
     grid_lines: [VertexGeometry; 3],
+    quad_lines: [VertexGeometry; 2],
     /// The contact / blob **grounding-shadow** quad geometry (six `TriangleList`
     /// vertices, a unit XY quad); each [`DrawableObject::BlobShadow`] draws it
     /// under its own model through the shared instance buffer, alpha-blended.
@@ -637,6 +643,18 @@ impl MeshStore {
                 &grid_line_vertices(GridPlane::Yz),
             ),
         ];
+        let quad_lines = [
+            VertexGeometry::new(
+                device,
+                "trd placement quad line buffer",
+                &quad_outline_vertices(false),
+            ),
+            VertexGeometry::new(
+                device,
+                "trd selected placement quad line buffer",
+                &quad_outline_vertices(true),
+            ),
+        ];
 
         // Contact / blob grounding-shadow quad: six TriangleList vertices (a unit
         // XY quad). Each BlobShadow drawable draws them under its own model via
@@ -652,6 +670,7 @@ impl MeshStore {
             axes_lines,
             axes_heads,
             grid_lines,
+            quad_lines,
             shadow_vertex_buffer,
             instance_buffer,
             instance_capacity,
@@ -1009,6 +1028,34 @@ impl MeshRenderer {
         scene: &[DrawableObject],
         viewport: Viewport,
     ) {
+        self.encode_pass(queue, encoder, view, params, scene, viewport, false);
+    }
+
+    /// Encodes a foreground scene while preserving color already rendered into
+    /// `view` by an earlier pass in the same command encoder.
+    pub fn encode_overlay(
+        &mut self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        params: FrameParams,
+        scene: &[DrawableObject],
+        viewport: Viewport,
+    ) {
+        self.encode_pass(queue, encoder, view, params, scene, viewport, true);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_pass(
+        &mut self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        params: FrameParams,
+        scene: &[DrawableObject],
+        viewport: Viewport,
+        load_color: bool,
+    ) {
         // 1. Camera P·V for this frame.
         self.pass.write_camera(queue, params, viewport);
         // 1b. Disney PBR uniform slots for this frame — one per mesh (each carries
@@ -1078,13 +1125,18 @@ impl MeshRenderer {
         //    Without MSAA (`sample_count == 1`) there is no MSAA target — the pass
         //    renders straight into `view` (no resolve).
         let depth_view = &self.depth.as_ref().expect("depth set in step 3").view;
+        let color_load = if load_color {
+            wgpu::LoadOp::Load
+        } else {
+            wgpu::LoadOp::Clear(wgpu::Color::BLACK)
+        };
         let color_attachment = match self.msaa.as_ref() {
             Some(msaa) => wgpu::RenderPassColorAttachment {
                 view: &msaa.view,
                 depth_slice: None,
                 resolve_target: Some(view),
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    load: color_load,
                     store: wgpu::StoreOp::Store,
                 },
             },
@@ -1093,7 +1145,7 @@ impl MeshRenderer {
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    load: color_load,
                     store: wgpu::StoreOp::Store,
                 },
             },
@@ -1175,6 +1227,12 @@ impl MeshRenderer {
                     pass.set_pipeline(&self.pass.gizmo_line);
                     pass.set_bind_group(0, &self.pass.gizmo_bind_group, &[]);
                     draw_vertices(&mut pass, &self.store.grid_lines[plane], range);
+                    pass.set_bind_group(0, &self.pass.camera_bind_group, &[]);
+                }
+                DrawKind::QuadOutline(selected) => {
+                    pass.set_pipeline(&self.pass.gizmo_line);
+                    pass.set_bind_group(0, &self.pass.gizmo_bind_group, &[]);
+                    draw_vertices(&mut pass, &self.store.quad_lines[selected], range);
                     pass.set_bind_group(0, &self.pass.camera_bind_group, &[]);
                 }
                 DrawKind::Shadow => {
