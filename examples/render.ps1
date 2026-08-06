@@ -624,7 +624,7 @@ f 1 3 4
         # A small Bun static server then serves the directory; only ?fps is a live
         # URL override (the resolution is baked into the CV `k`, a positional arg).
         $webDir = Join-Path $root 'web'
-        $distDir = Join-Path $webDir 'dist'
+        $distDir = Join-Path $webDir 'viewer\dist'
         $port = if ($env:PORT) { $env:PORT } else { '8080' }
 
         # Renderer target: on-screen canvas (default) vs. offscreen texture readback.
@@ -648,7 +648,7 @@ f 1 3 4
         Write-Host 'building trd web (wasm) bundle (wasm-pack + bun)...'
         Push-Location $webDir
         try {
-            & bun run build
+            & bun run build:viewer
             if ($LASTEXITCODE -ne 0) { throw "web build failed (exit $LASTEXITCODE)" }
         }
         finally {
