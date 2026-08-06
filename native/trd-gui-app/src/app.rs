@@ -14,9 +14,9 @@ use std::time::Instant;
 
 use egui::{TextureHandle, TextureOptions};
 
-use crate::interaction::InteractionController;
-use crate::render_backend::SceneRenderer;
-use crate::ui;
+use trd_gui::interaction::InteractionController;
+use trd_gui::render_backend::SceneRenderer;
+use trd_gui::ui;
 
 /// The interactive viewer application.
 pub struct TrdGuiApp {

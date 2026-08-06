@@ -134,23 +134,133 @@ impl OffscreenTarget {
         params: FrameParams,
         scene: &[DrawableObject],
     ) -> Result<Vec<u8>, OffscreenError> {
+        self.render_passes(device, queue, renderer, params, params, None, scene, None)
+            .await
+    }
+
+    /// Renders a background scene first, then preserves that color while
+    /// rendering the foreground scene in a second pass.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn render_two_pass(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        renderer: &mut MeshRenderer,
+        background_params: FrameParams,
+        foreground_params: FrameParams,
+        background: &[DrawableObject],
+        foreground: &[DrawableObject],
+    ) -> Result<Vec<u8>, OffscreenError> {
+        self.render_passes(
+            device,
+            queue,
+            renderer,
+            background_params,
+            foreground_params,
+            Some(background),
+            foreground,
+            None,
+        )
+        .await
+    }
+
+    /// Renders background, foreground, and selection/gizmo overlay as three
+    /// independently submitted passes.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn render_three_pass(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        renderer: &mut MeshRenderer,
+        background_params: FrameParams,
+        foreground_params: FrameParams,
+        background: &[DrawableObject],
+        foreground: &[DrawableObject],
+        overlay: &[DrawableObject],
+    ) -> Result<Vec<u8>, OffscreenError> {
+        self.render_passes(
+            device,
+            queue,
+            renderer,
+            background_params,
+            foreground_params,
+            Some(background),
+            foreground,
+            Some(overlay),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn render_passes(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        renderer: &mut MeshRenderer,
+        background_params: FrameParams,
+        foreground_params: FrameParams,
+        background: Option<&[DrawableObject]>,
+        foreground: &[DrawableObject],
+        overlay: Option<&[DrawableObject]>,
+    ) -> Result<Vec<u8>, OffscreenError> {
         let view = self
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+        let viewport = Viewport {
+            width: self.width,
+            height: self.height,
+        };
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("trd offscreen frame"),
+            label: Some("trd offscreen foreground"),
         });
-        renderer.encode(
-            queue,
-            &mut encoder,
-            &view,
-            params,
-            scene,
-            Viewport {
-                width: self.width,
-                height: self.height,
-            },
-        );
+        if let Some(background) = background {
+            let mut background_encoder =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("trd offscreen background"),
+                });
+            renderer.encode(
+                queue,
+                &mut background_encoder,
+                &view,
+                background_params,
+                background,
+                viewport,
+            );
+            // Submit before `encode_overlay` uploads foreground instances into
+            // MeshRenderer's shared instance buffer.
+            queue.submit(Some(background_encoder.finish()));
+            renderer.encode_overlay(
+                queue,
+                &mut encoder,
+                &view,
+                foreground_params,
+                foreground,
+                viewport,
+            );
+        } else {
+            renderer.encode(
+                queue,
+                &mut encoder,
+                &view,
+                foreground_params,
+                foreground,
+                viewport,
+            );
+        }
+        if let Some(overlay) = overlay {
+            queue.submit(Some(encoder.finish()));
+            encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("trd offscreen selection overlay"),
+            });
+            renderer.encode_overlay(
+                queue,
+                &mut encoder,
+                &view,
+                foreground_params,
+                overlay,
+                viewport,
+            );
+        }
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.texture,

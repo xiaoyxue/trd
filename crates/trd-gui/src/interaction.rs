@@ -50,12 +50,21 @@ pub enum TransformMode {
     Scale,
 }
 
-/// Constrains an object [`TransformMode::Rotate`] / [`TransformMode::Move`] drag
-/// to a single axis, locking the other two. In [`AxisConstraint::Free`] the drag
-/// keeps its natural two-degree-of-freedom mapping (orbit-style rotate / screen-
-/// plane move); when locked to an axis, a drag maps to **that axis only** — rotate
-/// **about** it, or translate **along** it — using a single scalar from the drag
-/// (`dx − dy`, so dragging right/up increases, left/down decreases).
+/// Mutually exclusive direction used by an object move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MoveDirection {
+    /// Free two-axis movement in the parent X/Y plane.
+    #[default]
+    Free,
+    Reference1,
+    Reference2,
+    Reference3,
+    LocalX,
+    LocalY,
+    LocalZ,
+}
+
+/// Constrains an object rotation to a single axis, locking the other two.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AxisConstraint {
     /// No constraint — the drag uses its natural mapping (the default).
@@ -111,7 +120,11 @@ pub struct InteractionController {
     pub target: InteractionTarget,
     /// Which object transform a primary drag edits when targeting the object.
     pub mode: TransformMode,
-    /// Locks an object rotate/move drag to a single axis (the other two frozen).
+    /// Mutually exclusive direction used by object translation.
+    pub move_direction: MoveDirection,
+    /// Maps the three reference directions into the object's parent frame.
+    pub move_reference_axes: [[f32; 3]; 3],
+    /// Locks an object rotation to a single axis (the other two frozen).
     pub axis: AxisConstraint,
     /// The state to restore on [`InteractionEvent::Reset`].
     initial: SceneState,
@@ -125,9 +138,16 @@ impl InteractionController {
             state,
             target: InteractionTarget::default(),
             mode: TransformMode::default(),
+            move_direction: MoveDirection::default(),
+            move_reference_axes: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             axis: AxisConstraint::default(),
             initial,
         }
+    }
+
+    /// Uses the current scene as the new reset baseline.
+    pub fn rebase_reset(&mut self) {
+        self.initial = self.state.clone();
     }
 
     /// Applies one gesture, returning `true` if the scene changed (so the caller
@@ -200,6 +220,8 @@ impl InteractionController {
     /// selected** — with nothing selected, an object drag can't edit anything.
     fn apply_object_drag(&mut self, dx: f32, dy: f32) -> bool {
         let mode = self.mode;
+        let move_direction = self.move_direction;
+        let move_reference_axes = self.move_reference_axes;
         let axis = self.axis;
         let dist = self.state.camera.distance;
         let Some(obj) = self.state.selected_object_mut() else {
@@ -219,20 +241,29 @@ impl InteractionController {
                 // Free: yaw follows horizontal, pitch follows vertical drag.
                 None => obj.rotate(dx * ROTATE_SPEED, -dy * ROTATE_SPEED),
             },
-            TransformMode::Move => match axis.index() {
-                // Locked: translate along the single world axis only.
-                Some(i) => {
-                    let a = (dx - dy) * PAN_SPEED * dist;
-                    let mut delta = [0.0, 0.0, 0.0];
-                    delta[i] = a;
-                    obj.translate(delta);
-                }
-                // Free: translate in the screen (world XY) plane.
-                None => {
+            TransformMode::Move => {
+                if move_direction == MoveDirection::Free {
                     let scale = PAN_SPEED * dist;
                     obj.translate([dx * scale, -dy * scale, 0.0]);
+                } else {
+                    let amount = (dx - dy) * PAN_SPEED * dist;
+                    match move_direction {
+                        MoveDirection::Reference1 => {
+                            obj.translate(scale3(move_reference_axes[0], amount));
+                        }
+                        MoveDirection::Reference2 => {
+                            obj.translate(scale3(move_reference_axes[1], amount));
+                        }
+                        MoveDirection::Reference3 => {
+                            obj.translate(scale3(move_reference_axes[2], amount));
+                        }
+                        MoveDirection::LocalX => obj.translate_local([amount, 0.0, 0.0]),
+                        MoveDirection::LocalY => obj.translate_local([0.0, amount, 0.0]),
+                        MoveDirection::LocalZ => obj.translate_local([0.0, 0.0, amount]),
+                        MoveDirection::Free => unreachable!(),
+                    }
                 }
-            },
+            }
             TransformMode::Scale => {
                 // Drag up (dy < 0) grows, drag down shrinks; exponential so the
                 // gesture is symmetric and never crosses zero.
@@ -241,6 +272,10 @@ impl InteractionController {
         }
         true
     }
+}
+
+fn scale3(vector: [f32; 3], scalar: f32) -> [f32; 3] {
+    [vector[0] * scalar, vector[1] * scalar, vector[2] * scalar]
 }
 
 #[cfg(test)]
@@ -311,6 +346,19 @@ mod tests {
     }
 
     #[test]
+    fn object_move_reference_direction_uses_configured_basis() {
+        let mut c = selected_controller();
+        c.mode = TransformMode::Move;
+        c.move_direction = MoveDirection::Reference2;
+        c.move_reference_axes[1] = [0.0, 0.0, -1.0];
+        assert!(c.apply(InteractionEvent::Primary { dx: 0.25, dy: -0.5 }));
+        let t = c.state.objects[0].translation;
+        assert_eq!(t[0], 0.0);
+        assert_eq!(t[1], 0.0);
+        assert!(t[2] < 0.0);
+    }
+
+    #[test]
     fn object_scale_mode_drag_up_grows() {
         let mut c = selected_controller();
         c.mode = TransformMode::Scale;
@@ -357,16 +405,16 @@ mod tests {
     }
 
     #[test]
-    fn axis_locked_move_z_translates_only_z() {
+    fn local_z_move_follows_rotated_object_basis() {
         let mut c = selected_controller();
         c.mode = TransformMode::Move;
-        c.axis = AxisConstraint::Z;
+        c.state.objects[0].yaw = std::f32::consts::FRAC_PI_2;
+        c.move_direction = MoveDirection::LocalZ;
         assert!(c.apply(InteractionEvent::Primary { dx: 0.2, dy: -0.4 }));
         let t = c.state.objects[0].translation;
-        // Only world Z moves; X and Y stay locked.
-        assert_eq!(t[0], 0.0);
+        assert!(t[0].abs() > 0.0);
         assert_eq!(t[1], 0.0);
-        assert_ne!(t[2], 0.0);
+        assert!(t[2].abs() < 1e-5);
     }
 
     #[test]

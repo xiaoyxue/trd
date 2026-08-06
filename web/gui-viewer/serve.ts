@@ -3,14 +3,14 @@
 // `?mesh=`/`?texture=` asset would return HTML instead of the file. This uses
 // `Bun.serve` with an HTML route (bundles index.html + src/main.ts + the wasm
 // asset) plus a static handler that serves:
-//   - files under this `web/` folder (e.g. the built pkg), and
+//   - files under this `gui-viewer/` folder (e.g. the built pkg), and
 //   - the repo's real `assets/` directory, so `?mesh=/assets/meshes/bunny.obj`
 //     resolves to the same file the native `--mesh` reads — no copies.
 import { existsSync } from "node:fs";
 import index from "./index.html";
 
-const port = Number(process.env.BUN_PORT ?? 8080);
-const REPO_ROOT = new URL("../../../", import.meta.url);
+const port = Number(process.env.BUN_PORT ?? 8082);
+const REPO_ROOT = new URL("../../", import.meta.url);
 
 const server = Bun.serve({
   port,
@@ -22,7 +22,7 @@ const server = Bun.serve({
       return new Response("not found", { status: 404 });
     }
 
-    // 1. Files under web/ (e.g. the built pkg/), served from the cwd.
+    // 1. Files under gui-viewer/ (e.g. the built pkg/), served from the cwd.
     const local = Bun.file(`.${pathname}`);
     if (await local.exists()) {
       return new Response(local);

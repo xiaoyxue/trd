@@ -11,8 +11,8 @@ anything they do, you can run by hand with `cargo run`.
 |---|---|
 | `render.sh --cli  IN.jsonl OUT.gif W H FPS` | `obj_to_arrow.py MESH` + `jsonl_to_arrow.py IN.jsonl` piped to `cargo run -p trd-cli -- --width W --height H` piped to `encode.py --fps FPS -o OUT.gif` |
 | `render.sh --native` | same producers piped to `cargo run -p trd-app -- --fps FPS` |
-| `render.sh --web` | `nix build .#web` (or `cd web && bun run build`) then serve `dist/` |
-| *(interactive viewer)* | `cargo run -p trd-gui -- --mesh MESH [--texture IMG] [--backend arrow]` |
+| `render.sh --web` | `nix build .#web` (or `cd web/viewer && bun run build`) then serve `dist/` |
+| *(interactive viewer)* | `cargo run -p trd-gui-app -- --mesh MESH [--texture IMG] [--backend arrow]` |
 
 Run either wrapper with **no arguments** to print its full flag guidance. On
 Windows use `render.ps1` with `-CLI` / `-Native` / `-Web` and `-InputPath` /
@@ -191,14 +191,14 @@ needed:
 
 ```sh
 # Native (eframe): defaults to a built-in cube; pass a mesh + texture to view it.
-cargo run -p trd-gui -- --mesh assets/meshes/bunny_with_texture/bunny.obj \
+cargo run -p trd-gui-app -- --mesh assets/meshes/bunny_with_texture/bunny.obj \
   --texture assets/meshes/bunny_with_texture/bunny_uv_map1.jpg
 
 # --backend arrow round-trips each frame through the real Arrow wire (vs inproc).
-cargo run -p trd-gui -- --backend arrow --mesh assets/meshes/bunny.obj
+cargo run -p trd-gui-app -- --backend arrow --mesh assets/meshes/bunny.obj
 
 # Browser: build + serve, then load ?mesh=…&texture=… (WebGPU browser).
-cd crates/trd-gui/web && bun run dev
+cd web && bun run --cwd gui-viewer dev
 ```
 
 ### Controls & operations
@@ -314,19 +314,23 @@ returning that frame's RGBA `Uint8Array` to paint onto a 2D canvas. Both also ke
 the streaming `pushIpc` path (append input / emit output, `finish()` → EOS) for
 producer-driven pipelines.
 
-For local iteration inside `nix develop`, `web/` uses `wasm-pack` + bun:
+For local iteration inside `nix develop`, all browser surfaces share the Bun
+workspace rooted at `web/`:
 
 ```sh
 cd web
-bun run build      # wasm-pack → pkg, then bun bundles → web/dist
-bun run dev        # dev server; open the printed URL in a WebGPU browser
-bun run check      # Biome format-check + lint
-bun run typecheck  # tsc --noEmit
+bun install --frozen-lockfile
+bun run typecheck                    # all three packages
+bun run check                        # all three Biome gates
+bun run --cwd viewer dev             # stream viewer, :8080
+bun run --cwd gui-viewer dev         # interactive GUI viewer, :8082
+BUN_PORT=8085 bun run --cwd video-editing dev
 ```
 
 `web/`'s npm deps are installed offline in the Nix sandbox via
-[bun2nix](https://github.com/nix-community/bun2nix) (`web/bun.nix` pins them by hash
-from `web/bun.lock`); regenerate it after changing `web/bun.lock` — see
+[bun2nix](https://github.com/nix-community/bun2nix) (`web/bun.nix` pins
+them by hash from `web/bun.lock`); regenerate it after changing
+`web/bun.lock` — see
 [`AGENTS.md`](../AGENTS.md) for the exact command.
 
 > **Windows:** `render.ps1 -Web` still builds the older `wasm-pack` demo bundle; the
@@ -372,8 +376,8 @@ Notes:
   `dev-env.ps1` runs `rustup set default-host x86_64-pc-windows-msvc` for you.
 - `render.ps1` auto-sources `dev-env.ps1` (`-NoInstall`), so step 2 is optional when
   you only run the wrapper.
-- The **web** wrapper builds on Windows with just `bun` (no Nix): `cd web; bun run
-  build:wasm; bun install; bun run typecheck; bun run check; bun run dev`.
+- The **web** wrapper builds on Windows with just `bun` (no Nix):
+  `cd web; bun install; bun run typecheck; bun run check; bun run --cwd viewer dev`.
 
 ## GPU notes
 

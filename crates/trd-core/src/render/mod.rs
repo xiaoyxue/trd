@@ -59,7 +59,7 @@ pub(crate) use color::upload_texture;
 pub(crate) use frame_params::{projection_from_intrinsics, DEFAULT_FAR, DEFAULT_NEAR};
 pub(crate) use gizmo::{
     aabb_line_vertices, axes_arrow_vertices, axes_line_vertices, blob_shadow_vertices,
-    grid_line_vertices, SHADOW_VERTEX_COUNT,
+    grid_line_vertices, quad_outline_vertices, SHADOW_VERTEX_COUNT,
 };
 pub(crate) use gpu_types::{
     GizmoLineVertex, GizmoUniform, InstanceRaw, PbrVertex, PickInstanceRaw, Uniform,

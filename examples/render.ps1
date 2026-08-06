@@ -36,7 +36,8 @@
 # With -Web (alias -Wasm) it renders the SAME scene as -CLI, but in a WebGPU
 # browser: it builds the config-driven web bundle, writes stream.arrow (the
 # identical bytes trd-cli reads on stdin) + config.json (renderer target + scene
-# flags + baked resolution + default fps) + the -FramesBase stills into web/dist,
+# flags + baked resolution + default fps) + the -FramesBase stills into
+# web/viewer/dist,
 # and serves it so the browser replays exactly what -CLI would render.
 # The content flags below (-Mesh/-Texture/-Wireframe/-Aabb/-Axes/-AxesLocal/
 # -PlacementQuad/-FramesBase) and the positional Width/Height apply to all three
@@ -616,14 +617,14 @@ f 1 3 4
         # Windows-native counterpart of render.sh --web (which builds `nix .#web`
         # and serves it with static-web-server). Build the config-driven bundle
         # with wasm-pack + bun, then drop the runtime inputs the generic viewer
-        # (web/src/viewer.ts) fetches at load into web/dist:
+        # (web/viewer/src/viewer.ts) fetches at load into web/viewer/dist:
         #   stream.arrow  — the identical bytes trd-cli reads on stdin
         #   config.json   — target renderer + scene flags + baked resolution + fps
         #   frames/…      — external background stills (copied from -FramesBase)
         # A small Bun static server then serves the directory; only ?fps is a live
         # URL override (the resolution is baked into the CV `k`, a positional arg).
         $webDir = Join-Path $root 'web'
-        $distDir = Join-Path $webDir 'dist'
+        $distDir = Join-Path $webDir 'viewer\dist'
         $port = if ($env:PORT) { $env:PORT } else { '8080' }
 
         # Renderer target: on-screen canvas (default) vs. offscreen texture readback.
@@ -647,7 +648,7 @@ f 1 3 4
         Write-Host 'building trd web (wasm) bundle (wasm-pack + bun)...'
         Push-Location $webDir
         try {
-            & bun run build
+            & bun run build:viewer
             if ($LASTEXITCODE -ne 0) { throw "web build failed (exit $LASTEXITCODE)" }
         }
         finally {
@@ -688,7 +689,7 @@ f 1 3 4
         }
         $config | ConvertTo-Json -Depth 5 | Set-Content -Path (Join-Path $distDir 'config.json') -Encoding utf8
 
-        # Background stills: copy the -FramesBase tree into web/dist so each frame's
+        # Background stills: copy the -FramesBase tree into web/viewer/dist so each frame's
         # `frame_path` ("frames/frame_xxxxxx.jpg", relative to it) resolves under
         # the served root.
         if ($FramesBase) {

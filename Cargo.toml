@@ -3,9 +3,11 @@ resolver = "2"
 members = [
     "crates/trd-core",
     "crates/trd-cli",
-    "crates/trd-app",
     "crates/trd-gui",
+    "crates/trd-placement",
     "crates/trd-wasm",
+    "native/trd-app",
+    "native/trd-gui-app",
 ]
 
 [workspace.package]
@@ -16,6 +18,7 @@ repository = "https://github.com/Hong-Xiang/trd"
 
 [workspace.dependencies]
 trd-core = { path = "crates/trd-core" }
+trd-placement = { path = "crates/trd-placement" }
 
 [workspace.metadata.crane]
 name = "trd"

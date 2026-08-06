@@ -10,7 +10,7 @@
 //!   → InteractionController (events → camera / model matrix)   [interaction.rs]
 //!   → SceneState (orbit camera + object transform)             [scene.rs]
 //!   → SceneRenderer::render (trd-core headless RGBA)           [render_backend.rs]
-//!   → egui texture in the central panel                        [app.rs]
+//!   → egui texture in the delivery surface
 //! ```
 //!
 //! It follows **Strategy A** (the decoupled CPU-RGBA handoff): eframe draws the
@@ -22,8 +22,8 @@
 //!
 //! `scene`/`interaction`/`ui`/`assets`/`error` are **platform-agnostic** (the
 //! scene + controller are unit-tested without egui or a GPU; `ui` is the shared
-//! egui layout). The render path is target-split: native uses the synchronous
-//! `render_backend` (`BatchRenderer`) driven by `app`; wasm uses the asynchronous
+//! egui layout). The render path is target-split: `native/trd-gui-app` drives the
+//! synchronous `render_backend` (`BatchRenderer`); wasm uses the asynchronous
 //! offscreen `web_renderer` driven by `web_app`, started via [`start`].
 
 pub mod assets;
@@ -32,11 +32,9 @@ pub mod interaction;
 pub mod render_backend;
 pub mod scene;
 pub mod ui;
-
-#[cfg(not(target_arch = "wasm32"))]
-pub mod app;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod cli;
+pub mod video_editing;
+#[cfg(target_arch = "wasm32")]
+pub mod video_editing_renderer;
 
 #[cfg(target_arch = "wasm32")]
 pub mod web_app;
@@ -78,6 +76,40 @@ pub async fn start(
         metallic_roughness: Option<trd_core::ImageTexture>,
         normal: Option<trd_core::ImageTexture>,
         is_gltf: bool,
+    }
+
+    /// Starts the dedicated `web/video-editing/` poster/document example.
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = startVideoEditing)]
+    pub async fn start_video_editing(
+        canvas: web_sys::HtmlCanvasElement,
+        document_bytes: Vec<u8>,
+    ) -> Result<video_editing::VideoEditingHandle, wasm_bindgen::JsValue> {
+        use std::rc::Rc;
+
+        console_error_panic_hook::set_once();
+        let _ = eframe::WebLogger::init(log::LevelFilter::Warn);
+        let document = trd_core::decode_video_editing_document(&document_bytes)
+            .map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()))?;
+        let shared = Rc::new(video_editing::VideoEditingShared::default());
+        let renderer = video_editing_renderer::VideoPlacementRenderer::new_empty(
+            document.video.width,
+            document.video.height,
+        )
+        .await
+        .map_err(|error| wasm_bindgen::JsValue::from_str(&error))?;
+        shared.renderer.replace(Some(renderer));
+        let handle = video_editing::VideoEditingHandle::new(&document, shared.clone());
+        let app = video_editing::VideoEditingApp::new(document, shared)
+            .map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()))?;
+        eframe::WebRunner::new()
+            .start(
+                canvas,
+                eframe::WebOptions::default(),
+                Box::new(|_cc| Ok(Box::new(app))),
+            )
+            .await?;
+        Ok(handle)
     }
 
     // One or more meshes (repeated `?mesh=`), each an object in the scene. Rust

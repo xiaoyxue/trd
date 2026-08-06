@@ -55,6 +55,8 @@ pub(crate) const GRID_DIVISIONS: u32 = 30;
 
 /// Pixel width of coordinate-plane grid lines.
 pub(crate) const GRID_LINE_WIDTH_PX: f32 = 1.5;
+pub(crate) const QUAD_LINE_WIDTH_PX: f32 = 1.5;
+const QUAD_COLORS: [[f32; 3]; 2] = [[0.0, 1.0, 0.0], [1.0, 1.0, 0.0]];
 
 /// Half-extent of the coordinate-plane grid in model space (the grid spans
 /// `[-GRID_HALF, GRID_HALF]` on each in-plane axis). `3.0` reaches three times
@@ -219,6 +221,28 @@ pub(crate) fn grid_line_vertices(plane: GridPlane) -> Vec<GizmoLineVertex> {
     vertices
 }
 
+/// Anti-aliased outline of the unit XY square, colored green or selected yellow.
+pub(crate) fn quad_outline_vertices(selected: bool) -> Vec<GizmoLineVertex> {
+    let color = QUAD_COLORS[usize::from(selected)];
+    let corners = [
+        [-1.0, -1.0, 0.0],
+        [1.0, -1.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [-1.0, 1.0, 0.0],
+    ];
+    let mut vertices = Vec::with_capacity(4 * LINE_QUAD_CORNERS.len());
+    for index in 0..4 {
+        push_line(
+            &mut vertices,
+            corners[index],
+            corners[(index + 1) % 4],
+            color,
+            QUAD_LINE_WIDTH_PX,
+        );
+    }
+    vertices
+}
+
 /// Number of `TriangleList` vertices in the **contact/blob-shadow** quad: two
 /// triangles → `6`.
 pub(crate) const SHADOW_VERTEX_COUNT: u32 = 6;
@@ -265,10 +289,14 @@ mod tests {
             [1.0, 1.0, 1.0],
         ]);
         let grid = grid_line_vertices(GridPlane::Xy);
+        let quad = quad_outline_vertices(false);
+        let selected_quad = quad_outline_vertices(true);
 
         assert_eq!(axes.len(), 3 * 6);
         assert_eq!(aabb.len(), 12 * 6);
         assert_eq!(grid.len(), 2 * (GRID_DIVISIONS + 1) as usize * 6);
+        assert_eq!(quad.len(), 4 * 6);
+        assert_eq!(selected_quad.len(), 4 * 6);
         assert!(axes
             .iter()
             .all(|vertex| vertex.extrusion[2] == AXES_LINE_WIDTH_PX));
@@ -278,6 +306,13 @@ mod tests {
         assert!(grid
             .iter()
             .all(|vertex| vertex.extrusion[2] == GRID_LINE_WIDTH_PX));
+        assert!(quad
+            .iter()
+            .all(|vertex| vertex.extrusion[2] == QUAD_LINE_WIDTH_PX));
+        assert!(quad.iter().all(|vertex| vertex.color == [0.0, 1.0, 0.0]));
+        assert!(selected_quad
+            .iter()
+            .all(|vertex| vertex.color == [1.0, 1.0, 0.0]));
         assert!(aabb[0].extrusion[2] < grid[0].extrusion[2]);
         assert!(aabb[0].extrusion[2] < axes[0].extrusion[2]);
     }

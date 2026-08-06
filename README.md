@@ -132,11 +132,12 @@ Linux, the vendor driver on Windows).
 **🐧 Linux** (a host toolchain, or inside `nix develop`):
 
 ```sh
-cargo build --workspace                                # trd-cli + trd-app + trd-gui
+cargo build --workspace                                # shared crates + native delivery apps
 cargo run -p trd-cli -- --width 256 --height 256       # headless Arrow filter (stdin → stdout)
-cargo run -p trd-gui -- --mesh assets/meshes/bunny.obj # interactive viewer window
+cargo run -p trd-gui-app -- --mesh assets/meshes/bunny.obj # interactive viewer window
 examples/render.sh --cli                               # end-to-end demo → output/out.gif
-( cd web && bun run dev )                               # build wasm + serve on :8080
+( cd web/viewer && bun run dev )                        # build wasm + serve on :8080
+( cd web/gui-viewer && bun run dev )                    # interactive GUI viewer on :8082
 ```
 
 **🪟 Windows** (PowerShell 7; `. .\scripts\dev-env.ps1` puts cargo / MSVC / ffmpeg / uv on PATH):
@@ -145,9 +146,9 @@ examples/render.sh --cli                               # end-to-end demo → out
 . .\scripts\dev-env.ps1                                # once per shell (must be dot-sourced)
 cargo build --workspace
 cargo run -p trd-cli -- --width 256 --height 256       # headless Arrow filter (stdin → stdout)
-cargo run -p trd-gui -- --mesh assets\meshes\bunny.obj # interactive viewer window
+cargo run -p trd-gui-app -- --mesh assets\meshes\bunny.obj # interactive viewer window
 examples\render.ps1 -CLI                               # end-to-end demo → output\out.gif
-cd web; bun run dev                                    # build wasm + serve on :8080
+cd web/viewer; bun run dev                             # build wasm + serve on :8080
 ```
 
 Full setup — Windows `dev-env.ps1`, GPU-driver notes (nixGL / `WGPU_BACKEND=gl`),

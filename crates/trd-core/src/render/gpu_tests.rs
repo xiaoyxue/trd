@@ -1246,6 +1246,33 @@ fn frame_plane_composites_background_under_scene() {
             Viewport { width, height },
         );
     });
+    let foreground = [DrawableObject::Mesh {
+        mesh_id: 0,
+        model: Matrix4::IDENTITY.to_cols_array(),
+        mode: RenderMode::Filled,
+    }];
+    let two_pass = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
+        mesh.encode(
+            q,
+            e,
+            v,
+            FrameParams::IDENTITY,
+            &plane_only,
+            Viewport { width, height },
+        );
+        mesh.encode_overlay(
+            q,
+            e,
+            v,
+            FrameParams::IDENTITY,
+            &foreground,
+            Viewport { width, height },
+        );
+    });
+    assert_eq!(
+        two_pass, over,
+        "two-pass composite must match one-pass output"
+    );
     for &(x, y) in &[
         (width / 4, height / 4),
         (3 * width / 4, height / 4),

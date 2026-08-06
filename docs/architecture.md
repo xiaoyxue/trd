@@ -36,7 +36,8 @@ Platform-agnostic wgpu logic, shared verbatim by every target:
   reuse the unlit triangle path.
 - **`DrawableObject` + `Scene` (`render/scene.rs`)** — the base interface for every
   primitive (#41). It is a small `Copy` enum — `Mesh { mesh_id, model, mode }`,
-  `AabbBox { mesh_id, model }`, `CoordinateAxes { model }`, and `FramePlane { fit }`
+  `AabbBox { mesh_id, model }`, `CoordinateAxes { model }`,
+  `QuadOutline { model, selected }`, and `FramePlane { fit }`
   (a background still). Geometry is owned once (decode-once mesh store + shared
   line-quad/arrow buffers); a drawable is a light handle naming *which* primitive
   + its per-frame model. A `Scene = Vec<DrawableObject>` is rebuilt each frame;
@@ -93,7 +94,8 @@ Each is a *thin shell* that only supplies a render target and calls the core:
   persistent `MeshRenderer` + `InputSession` and renders the **same** `Scene` as
   the CLI. There is **one** config-driven front-end: `render.sh --web` writes the
   demo's `stream.arrow` + `config.json`, and
-  [`web/src/viewer.ts`](../web/src/viewer.ts) fetches both and replays by index.
+  [`web/viewer/src/viewer.ts`](../web/viewer/src/viewer.ts) fetches both and
+  replays by index.
   Two targets share the bundle: the on-screen `CanvasRenderer` and the offscreen
   `OffscreenRenderer` (renders to a texture, reads it back, paints a 2D canvas). JS
   only moves Arrow bytes; it never touches WebGPU. Ships as the `trd-wasm` npm
@@ -102,7 +104,9 @@ Each is a *thin shell* that only supplies a render target and calls the core:
   gestures into an updated camera + model matrix and re-renders one mesh through
   `trd-core`, offscreen, shown as an egui image. `--backend arrow` (or
   `?backend=arrow`) round-trips each frame through the real Arrow wire — the seam
-  an external producer would drive. Design notes: [`docs/gui-design.md`](gui-design.md).
+  an external producer would drive. Shared state/UI/render backends live in
+  `crates/trd-gui`; `native/trd-gui-app` and `web/gui-viewer` are its thin
+  delivery shells. Design notes: [`docs/gui-design.md`](gui-design.md).
 
 ## Source layout
 
@@ -110,10 +114,14 @@ Each is a *thin shell* that only supplies a render target and calls the core:
 |---|---|
 | `crates/trd-core` | the unified render core (`render/` module tree, `*.wgsl` shaders, `stream.rs`, `protocol.rs`) |
 | `crates/trd-cli` | headless CLI: Arrow stream in → Arrow image out |
-| `crates/trd-app` | native interactive window (winit + live wgpu surface) |
-| `crates/trd-gui` | interactive egui orbit/zoom viewer (native eframe + browser wasm) |
+| `crates/trd-gui` | reusable egui UI, scene/interaction state, native render backends, and browser wasm entry |
 | `crates/trd-wasm` | `wasm-bindgen` browser bindings (`canvas_renderer`/`offscreen_renderer`); the `trd-wasm` npm library |
-| `web/` | bun-managed TypeScript wrapper (`main.ts` → config-driven `viewer.ts`) that loads `trd-wasm` |
+| `native/trd-app` | native stream-playback window (winit + live wgpu surface) |
+| `native/trd-gui-app` | native eframe shell around the reusable `trd-gui` library |
+| `web/viewer` | config-driven browser stream player around `trd-wasm` |
+| `web/gui-viewer` | browser eframe shell around the `trd-gui` wasm module |
+| `web/video-editing` | browser video-editing surface using the shared `trd-gui` wasm module |
+| `web/package.json` | shared Bun workspace for all browser delivery surfaces |
 | `examples/` | demo streams + `render.sh` / `render.ps1` wrappers + producer scripts |
 | `scripts/` | pyarrow producers (`obj`/`texture`/`jsonl`/perception `_to_arrow.py`), `encode.py`, `extract_frames.py`, `dev-env.ps1` |
 

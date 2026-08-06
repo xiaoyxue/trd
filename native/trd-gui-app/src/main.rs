@@ -3,14 +3,19 @@
 //!
 //! The interactive stack (eframe/egui + `trd-core`'s native `BatchRenderer`) is
 //! native-only; on wasm the crate compiles to an empty `main` so workspace-wide
-//! wasm builds skip it (mirroring `trd-app`). The browser target — egui on a
-//! canvas with `trd-core`'s offscreen wasm renderer — is a later slice in #97.
+//! wasm builds skip it (mirroring `trd-app`). The browser delivery shell lives
+//! in `web/gui-viewer` and calls the wasm entry exported by `crates/trd-gui`.
+
+#[cfg(not(target_arch = "wasm32"))]
+mod app;
+#[cfg(not(target_arch = "wasm32"))]
+mod cli;
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result<()> {
+    use crate::app::TrdGuiApp;
+    use crate::cli::{Backend, Cli};
     use clap::Parser;
-    use trd_gui::app::TrdGuiApp;
-    use trd_gui::cli::{Backend, Cli};
     use trd_gui::interaction::InteractionController;
     use trd_gui::render_backend::{
         mesh_has_uvs, ArrowRoundTripRenderer, InProcRenderer, SceneRenderer,

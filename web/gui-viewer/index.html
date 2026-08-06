@@ -24,7 +24,7 @@
     <!-- The whole UI + interaction + rendering happen in Rust (trd-gui wasm);
          this page + src/main.ts are the only JS — the thin bootstrap the repo's
          "JS is a thin bootstrap only" invariant allows (load the wasm-bindgen
-         module and hand it the canvas). Served/bundled by bun, mirroring web/. -->
+         module and hand it the canvas). Served/bundled by the web workspace. -->
     <canvas id="trd-gui-canvas"></canvas>
     <script type="module" src="./src/main.ts"></script>
   </body>
