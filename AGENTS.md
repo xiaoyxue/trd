@@ -37,6 +37,15 @@ Guidance for agents working in this repository.
   Live-surface front-ends (`trd-app`, `trd-wasm`'s `CanvasRenderer`) own their
   `wgpu::Surface` swapchain directly — there is **no** shared on-screen harness.
 - Major input data is columnar (Apache Arrow tables) with simple glue logic.
+- **Video editing uses a separate authoring document.**
+  `web/video-editing` reads `trd.video_edit.version = 0.1.0` timeline rows
+  (video metadata/poster + per-frame K/quad/tracked state). It is deliberately
+  independent of render `PROTOCOL_VERSION`; do not add editor-only columns to
+  `0.0.6` or bump the render protocol for editor state. Rust maps each presented
+  browser `VideoFrame` to a timeline row, reconstructs the quad through
+  `crates/trd-placement`, and derives ordinary `DrawableObject`s. Current
+  catalog resources are loaded at runtime; protocol export remains a separate
+  later slice.
 - **The input protocol is NOT backward compatible.** Wire format is **mesh-first**
   `[mesh][texture?][frames?][params]`; only the current `PROTOCOL_VERSION`
   (`trd_core::protocol::PROTOCOL_VERSION`, currently `0.0.6`) is accepted — every
@@ -72,10 +81,15 @@ Guidance for agents working in this repository.
   `video-editing/` packages. Each package's lint/format gate is Biome; run all
   packages' checks from the workspace root
   with `bun run check`.
+  `gui-viewer` and `video-editing` share the generated `trd-gui` wasm package
+  under `web/gui-viewer/pkg`; do not generate a second package under the editor.
   Run `bun run check` / `format` / `typecheck` from `nix develop`, or directly on
   Windows — `@biomejs/biome` + `apache-arrow` are in
-  `web/viewer/package.json`, so
-  `bun install` + `bun run check` / `typecheck` / `build:web` work without Nix.
+  `web/viewer/package.json`. On a clean non-Nix checkout, first run
+  `bun run --cwd viewer build:wasm` and
+  `bun run --cwd gui-viewer build:wasm` from `web/` to stage both local wasm
+  packages, then `bun install --frozen-lockfile`; the workspace
+  `check`/`typecheck`/build scripts work without Nix.
 - **Nix web deps are installed offline via
   [bun2nix](https://github.com/nix-community/bun2nix).** `web/bun.nix`
   (generated from `web/bun.lock`, hash-pinned) lets
@@ -206,6 +220,10 @@ not complete until these tiers pass; **record the results on the PR.**
      matching the CLI.
    - **trd-gui (wasm + web):** build the gui wasm, serve, and load a mesh
      (`?mesh=…&texture=…`) in the browser.
+   - **video editor:** serve `web/video-editing`, open the FIBA MP4, and exercise
+     quad selection, all three catalog assets, object picking/editing,
+     play/pause/seek, and the video-only 222–287 tail. Confirm PBR/IBL and colors
+     match the other front-ends. The MP4 stays external/uncommitted.
 4. **Native window e2e — Windows:** the live-surface paths that need a display —
    `trd-app` playing a stream (`examples/render.ps1 -App`) and the interactive
    `trd-gui` window (`cargo run -p trd-gui-app -- --mesh …`, both `--backend inproc`
@@ -259,7 +277,7 @@ examples\render.ps1 -Web -CanvasRenderer -Mesh assets\meshes\can\coke.obj -Textu
   -Tonemap aces -Env assets\envmap\uffizi-large.hdr -Aabb -Axes `
   -InputPath examples\frames.qd_beer_dolly.cg.jsonl -Width 512 -Height 768
 # trd-gui web — build+serve, then open the ?mesh/?texture/?env URL below
-cd web; bun install; $env:BUN_PORT='8082'; bun run --cwd gui-viewer dev
+cd web; $env:BUN_PORT='8082'; bun run --cwd gui-viewer dev
 #   http://localhost:8082/?mesh=/assets/meshes/can/coke.obj&texture=/assets/meshes/can/can_around.jpg&env=/assets/envmap/uffizi-large.hdr
 ```
 
@@ -370,9 +388,10 @@ considered done:
   sync: whenever a change updates `README.md`, update the affected `docs/` page(s)
   in the **same** PR — and vice-versa. In particular, `docs/architecture.md`
   (crates/render core), `docs/rendering.md` (CLI flags, wrappers ⇄ `cargo run`,
-  demos), `docs/pbr.md` (PBR params), and `docs/protocol/0.0.6.md` (wire format)
-  mirror the README's summaries, so a behavior/flag/layout change must be reflected
-  in both. Don't let the README and `docs/` drift.
+  demos), `docs/pbr.md` (PBR params), `docs/video-editing.md` (editor timeline,
+  playback, placement, and catalog), and `docs/protocol/0.0.6.md` (wire format)
+  mirror the README's summaries, so a behavior/flag/layout change must be
+  reflected in both. Don't let the README and `docs/` drift.
 
 ### Worktrees
 

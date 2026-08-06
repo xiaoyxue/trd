@@ -223,6 +223,7 @@ controls. Everything is **per-object**: click an object to select it, then edit
   with numeric **Translation** (x/y/z), **Rotation** (X/Y/Z°), and **Scale**
   (uniform + per-axis) — the widgets and the mouse stay in sync (dragging updates
   the numbers and vice-versa).
+
 - **Render mode (per object).** The **Render mode** selector sets the selected
   object's mode — **Filled / Wireframe / Textured / PBR** — so objects can mix modes
   in one scene.
@@ -264,6 +265,32 @@ http://localhost:8080/?mesh=/assets/meshes/can/coke.obj&texture=/assets/meshes/c
 > shared. On the headless RTX Linux box, reach the browser viewer over an SSH
 > port-forward (see [AGENTS.md](../AGENTS.md)).
 
+## Video editor — `web/video-editing`
+
+The dedicated FIBA editor is a sibling of the generic stream viewer and GUI
+viewer in the shared `web/` Bun workspace. Generate the ignored
+`web/video-editing/data/fiba-shot1.arrow` document first using
+[`video-editing.md`](video-editing.md#generate-the-document), then:
+
+```sh
+cd web
+bun run --cwd viewer build:wasm  # stage the local trd-wasm file dependency
+bun install --frozen-lockfile
+bun run --cwd video-editing dev  # http://localhost:8085
+```
+
+The same commands run natively in PowerShell 7 on Windows; no WSL or Nix is
+required.
+
+Open the local `shot_0001.mp4` or an HTTP(S) video URL, select the tracked quad,
+then place/edit Coke, beer, or Dragon. HTML video owns playback; Rust maps each
+presented frame to the separate `0.1.0` Arrow timeline and renders the video,
+placed mesh, and editor overlays. This is not the `0.0.6` render protocol:
+edited-scene export to `[mesh][texture?][frames][params]` remains future work.
+
+See [`video-editing.md`](video-editing.md) for the document generation command,
+schema, quad basis, lighting defaults, playback visibility, SSH tunnel, and
+known tracking-jitter behavior.
 
 ## Web (wasm)
 
@@ -319,6 +346,8 @@ workspace rooted at `web/`:
 
 ```sh
 cd web
+bun run --cwd viewer build:wasm     # clean-checkout bootstrap for file: dependency
+bun run --cwd gui-viewer build:wasm # shared GUI/editor wasm package
 bun install --frozen-lockfile
 bun run typecheck                    # all three packages
 bun run check                        # all three Biome gates
@@ -333,8 +362,9 @@ them by hash from `web/bun.lock`); regenerate it after changing
 `web/bun.lock` — see
 [`AGENTS.md`](../AGENTS.md) for the exact command.
 
-> **Windows:** `render.ps1 -Web` still builds the older `wasm-pack` demo bundle; the
-> config-driven `render.sh --web` flow above is the current Nix/Linux path.
+> **Windows:** `render.ps1 -Web` builds the same generic `web/viewer` delivery
+> surface with `wasm-pack` + Bun (no Nix); `render.sh --web` uses the Nix-built
+> package on Linux.
 
 ## Windows setup (without Nix)
 
@@ -377,7 +407,9 @@ Notes:
 - `render.ps1` auto-sources `dev-env.ps1` (`-NoInstall`), so step 2 is optional when
   you only run the wrapper.
 - The **web** wrapper builds on Windows with just `bun` (no Nix):
-  `cd web; bun install; bun run typecheck; bun run check; bun run --cwd viewer dev`.
+  `cd web; bun run --cwd viewer build:wasm;
+  bun run --cwd gui-viewer build:wasm; bun install --frozen-lockfile;
+  bun run typecheck; bun run check`.
 
 ## GPU notes
 

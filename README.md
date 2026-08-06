@@ -16,14 +16,17 @@ from JS.
 - [Building directly (no Nix)](#building-directly-linux--windows-no-nix)
 - [Stream protocol](#stream-protocol)
 - [Material (PBR)](#material-pbr)
+- [Interactive viewer](#interactive-viewer)
+- [Video editing](#video-editing)
 - [Documentation](#documentation)
 - [Tests](#tests)
 - [Verification icons](#verification-icons)
 
 ## [How it fits together](docs/architecture.md)
 
-Everything shares **one render function** and **one data format** (a mesh-first
-Arrow stream):
+Everything shares **one render function** and one mesh-first render format. The
+video editor additionally reads a separate `0.1.0` authoring timeline and
+derives normal render scenes from it in Rust:
 
 ```
 input-stream ─┬─ trd-cli  → trd-core → offscreen readback → image-stream   (headless)
@@ -40,6 +43,7 @@ input-stream ─┬─ trd-cli  → trd-core → offscreen readback → image-st
 | **`trd-app`** | Arrow stream (stdin) | live window swapchain | frames on screen |
 | **`trd-wasm`** | Arrow stream (via `loadIpc`) | live canvas (or offscreen texture) | frames in the browser |
 | **`trd-gui`** | a mesh + live gestures | offscreen → egui image | an interactive orbit/zoom viewer |
+| **video editor** | `0.1.0` timeline + external video | offscreen → egui image | quad-local 3D editing over video |
 
 Each front-end is a *thin shell* that only supplies a render target and calls the
 core — no per-front-end rendering logic. Primitive dispatch and draw-kind
@@ -136,8 +140,9 @@ cargo build --workspace                                # shared crates + native 
 cargo run -p trd-cli -- --width 256 --height 256       # headless Arrow filter (stdin → stdout)
 cargo run -p trd-gui-app -- --mesh assets/meshes/bunny.obj # interactive viewer window
 examples/render.sh --cli                               # end-to-end demo → output/out.gif
-( cd web/viewer && bun run dev )                        # build wasm + serve on :8080
-( cd web/gui-viewer && bun run dev )                    # interactive GUI viewer on :8082
+( cd web && bun run --cwd viewer dev )                 # stream viewer on :8080
+( cd web && bun run --cwd gui-viewer dev )             # GUI viewer on :8082
+( cd web && bun run --cwd video-editing dev )          # editor on :8085; generate its timeline first
 ```
 
 **🪟 Windows** (PowerShell 7; `. .\scripts\dev-env.ps1` puts cargo / MSVC / ffmpeg / uv on PATH):
@@ -148,7 +153,9 @@ cargo build --workspace
 cargo run -p trd-cli -- --width 256 --height 256       # headless Arrow filter (stdin → stdout)
 cargo run -p trd-gui-app -- --mesh assets\meshes\bunny.obj # interactive viewer window
 examples\render.ps1 -CLI                               # end-to-end demo → output\out.gif
-cd web/viewer; bun run dev                             # build wasm + serve on :8080
+cd web; bun run --cwd viewer dev                       # stream viewer on :8080
+# use `bun run --cwd gui-viewer dev` for :8082
+# after generating the editor timeline, use `bun run --cwd video-editing dev` for :8085
 ```
 
 Full setup — Windows `dev-env.ps1`, GPU-driver notes (nixGL / `WGPU_BACKEND=gl`),
@@ -217,6 +224,30 @@ embedded base-color / metallic-roughness / normal maps and starts in PBR:
 `?mesh=a.obj&texture=a.jpg&mesh=b.obj&env=probe.hdr`. Full control reference + URL
 params: **[`docs/rendering.md`](docs/rendering.md#interactive-viewer--trd-gui)**.
 
+## [Video editing](docs/video-editing.md)
+
+`web/video-editing` is a Rust-owned WebGPU editor for placing catalog objects on
+the tracked FIBA court quad while an external MP4 plays. The browser owns media
+decode and copies each presented `VideoFrame` to RGBA; Rust owns the separate
+`trd.video_edit.version = 0.1.0` Arrow timeline, quad reconstruction,
+quad/object-local transforms, GPU picking, PBR/IBL, and final composition.
+
+Generate the ignored local timeline first using
+[`docs/video-editing.md`](docs/video-editing.md#generate-the-document), then:
+
+```sh
+cd web
+bun run --cwd viewer build:wasm  # stage the local trd-wasm file dependency
+bun install --frozen-lockfile
+bun run --cwd video-editing dev  # http://localhost:8085
+```
+
+The MP4 remains local and uncommitted. The initial fixed catalog contains the
+Coca-Cola can, beer can, and Dragon; every PBR object uses
+`assets/envmap/uffizi-large.hdr` by default. Current behavior, document schema,
+placement conventions, generation command, and known limitations are in
+**[`docs/video-editing.md`](docs/video-editing.md)**.
+
 ## Documentation
 
 - [`docs/architecture.md`](docs/architecture.md) — the render core + front-ends,
@@ -230,6 +261,8 @@ params: **[`docs/rendering.md`](docs/rendering.md#interactive-viewer--trd-gui)**
 - [`docs/frame-extraction.md`](docs/frame-extraction.md) — background-frame
   extraction, external references, and inline frames-table authoring.
 - [`docs/gui-design.md`](docs/gui-design.md) — the `trd-gui` interactive-viewer design.
+- [`docs/video-editing.md`](docs/video-editing.md) — FIBA timeline document,
+  WebCodecs boundary, quad-local placement, catalog, playback, and known limits.
 - [`AGENTS.md`](AGENTS.md) — contributor/agent guide: build system, GPU-adapter
   selection, testing policy, PR workflow.
 
