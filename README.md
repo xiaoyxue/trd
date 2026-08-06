@@ -204,13 +204,15 @@ then edits *that* object. Everything is **per-object**:
   object (or orbit the camera), with an optional **axis lock** (X/Y/Z) and numeric
   widgets kept in sync with the mouse;
 - **Render mode** — Filled / Wireframe / Textured / **PBR**, chosen per object;
-- **PBR material** — metallic / roughness / tone-map, edited live per object;
+- **PBR appearance** — typed Disney material, IBL intensity, and tone-map,
+  edited live per object;
 - **Diffuse texture** — each object skins its own albedo;
 - **Overlays** — smooth, thickness-controlled bounding boxes/grids and
   arrowheaded world/local axes.
 
-The browser loads multiple objects from **repeatable `?mesh=`** (+ positional
-`?texture=`, and `?env=` for PBR):
+The browser loads OBJ or single-primitive GLB objects from **repeatable
+`?mesh=`** (+ positional `?texture=`, and `?env=` for PBR). GLB uses its
+embedded base-color / metallic-roughness / normal maps and starts in PBR:
 `?mesh=a.obj&texture=a.jpg&mesh=b.obj&env=probe.hdr`. Full control reference + URL
 params: **[`docs/rendering.md`](docs/rendering.md#interactive-viewer--trd-gui)**.
 

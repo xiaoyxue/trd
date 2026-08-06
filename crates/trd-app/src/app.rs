@@ -13,7 +13,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-use trd_core::{EnvMapData, GridPlane, ImageTexture, Mesh, PbrConfig, PbrMaterial, RenderMode};
+use trd_core::{
+    DisneyMaterial, EnvMapData, GridPlane, ImageBasedLighting, ImageTexture, Lighting, Mesh,
+    PbrConfig, RenderMode, ToneMapping,
+};
 use winit::application::ApplicationHandler;
 #[cfg(not(target_os = "windows"))]
 use winit::dpi::LogicalSize;
@@ -302,7 +305,10 @@ impl ApplicationHandler for App {
             // Apply the Disney PBR material + env probe once the renderer exists.
             if !self.pbr_applied && gpu.renderer.is_some() {
                 if let Some(pbr) = self.pbr_config.take() {
-                    gpu.set_pbr_material(pbr.material);
+                    gpu.set_disney_material(pbr.material);
+                    gpu.set_lighting(pbr.lighting);
+                    gpu.set_image_based_lighting(pbr.ibl);
+                    gpu.set_tone_mapping(pbr.tone_mapping);
                     if let Some(env) = pbr.env_map {
                         gpu.set_env_map(env);
                     }
@@ -356,22 +362,36 @@ pub fn run() -> Result<(), AppError> {
     // `--pbr` is set. The `.hdr` file is decoded here so trd-core does no
     // file/codec I/O; it is downscaled to the renderer's portable 2048px limit.
     let pbr_config = if cli.pbr {
-        let material = PbrMaterial {
+        let material = DisneyMaterial {
             metallic: cli.metallic,
             roughness: cli.roughness,
             specular: cli.specular,
             clearcoat: cli.clearcoat,
-            env_intensity: cli.env_intensity,
-            exposure: cli.exposure,
-            ambient: cli.ambient,
-            tonemap: cli.tonemap.into(),
             ..Default::default()
+        };
+        let lighting = Lighting {
+            ambient: cli.ambient,
+            ..Default::default()
+        };
+        let ibl = ImageBasedLighting {
+            intensity: cli.env_intensity,
+            ..ImageBasedLighting::default()
+        };
+        let tone_mapping = ToneMapping {
+            operator: cli.tonemap.into(),
+            exposure: cli.exposure,
         };
         let env_map = match cli.env.as_ref() {
             Some(path) => Some(load_env_map(path)?),
             None => None,
         };
-        Some(PbrConfig { material, env_map })
+        Some(PbrConfig {
+            material,
+            lighting,
+            ibl,
+            tone_mapping,
+            env_map,
+        })
     } else {
         None
     };

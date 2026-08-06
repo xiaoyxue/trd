@@ -6,6 +6,7 @@
 
 mod camera;
 mod frame;
+mod gltf;
 mod math;
 mod mesh;
 mod output;
@@ -16,6 +17,7 @@ mod texture;
 
 pub use camera::{Camera, DEFAULT_FIT_MARGIN, DEFAULT_FOV_Y, DEFAULT_VIEW_DIR};
 pub use frame::{FrameError, InlineFrame, FRAME_BYTES_COLUMN, FRAME_PIXELS_COLUMN};
+pub use gltf::{import_glb, import_gltf_materials, GltfAsset, GltfImportError};
 pub use math::{
     Aabb2, Aabb3, Matrix3, Matrix4, Normal3, Point2, Point3, Point4, Rotation, Scalar, ToWgsl,
     Transform, Vector2, Vector3, Vector4, EPSILON,
@@ -29,10 +31,12 @@ pub use protocol::{
 };
 pub use render::{
     build_scene, create_instance, create_mesh_pipeline, plane_grid_overlays,
-    selection_aabb_overlay, CameraFormError, Draw, DrawableObject, EnvMapData, FrameFit,
-    FrameParams, GpuContext, GpuInitError, GpuRequest, GridPlane, LimitsPreset, Mesh, MeshRenderer,
-    OffscreenError, OffscreenTarget, OnscreenTarget, PbrMaterial, PickTarget, RenderMode, Scene,
-    Tonemap, TriangleRenderer, Vertex, Viewport, OFFSCREEN_FORMAT,
+    selection_aabb_overlay, AlphaMode, Auxiliary, CameraFormError, DisneyMaterial, Draw,
+    DrawableObject, EnvMapData, FrameFit, FrameParams, GpuContext, GpuInitError, GpuRequest,
+    GridPlane, ImageBasedLighting, Light, Lighting, LimitsPreset, Material, MaterialTextures, Mesh,
+    MeshRenderer, MeshShading, OffscreenError, OffscreenTarget, OnscreenTarget, PbrDebugView,
+    PickTarget, PointLight, RenderMode, Scene, ToneMapping, Tonemap, TriangleRenderer, Vertex,
+    Viewport, OFFSCREEN_FORMAT,
 };
 // The native-only headless batch harness, relocated from `stream` into `render`
 // (#134); the crate-root re-export path (`trd_core::BatchRenderer`) is unchanged.

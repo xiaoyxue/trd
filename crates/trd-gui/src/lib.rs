@@ -44,10 +44,10 @@ pub mod web_app;
 pub mod web_renderer;
 
 /// The browser entry point (Slice 4): builds the offscreen renderer and runs the
-/// eframe app on `canvas`. `mesh_obj`, `texture_bytes`, and `env_bytes` are the
+/// eframe app on `canvas`. `mesh_bytes`, `texture_bytes`, and `env_bytes` are the
 /// browser equivalents of the native `--mesh` / `--texture` / `--env` flags — an
-/// optional Wavefront OBJ **as text**, optional texture image **bytes**
-/// (PNG/JPEG), and an optional Radiance HDR environment probe **bytes**; the thin
+/// optional Wavefront OBJ or binary glTF **as bytes**, optional texture image
+/// **bytes** (PNG/JPEG), and an optional Radiance HDR environment probe **bytes**; the thin
 /// JS bootstrap fetches them from `?mesh=` / `?texture=` / `?env=` URLs and passes
 /// them in. `None`/absent falls back to the built-in cube / no texture / no probe.
 /// Supplying an env probe starts the viewer in Disney **PBR** mode (the material
@@ -57,7 +57,7 @@ pub mod web_renderer;
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub async fn start(
     canvas: web_sys::HtmlCanvasElement,
-    mesh_objs: Vec<String>,
+    mesh_bytes: js_sys::Array,
     texture_bytes: js_sys::Array,
     env_bytes: Option<Vec<u8>>,
     backend: Option<String>,
@@ -71,41 +71,84 @@ pub async fn start(
     let _ = eframe::WebLogger::init(log::LevelFilter::Warn);
 
     let to_js = |e: crate::error::GuiError| wasm_bindgen::JsValue::from_str(&e.to_string());
-    // One or more meshes (repeated `?mesh=`), each an object in the scene; an
-    // empty list falls back to the built-in cube.
-    let meshes: Vec<trd_core::Mesh> = if mesh_objs.is_empty() {
-        vec![assets::default_mesh()
-            .map_err(crate::error::GuiError::from)
-            .map_err(to_js)?]
+    struct LoadedMesh {
+        mesh: trd_core::Mesh,
+        material: trd_core::DisneyMaterial,
+        texture: Option<trd_core::ImageTexture>,
+        metallic_roughness: Option<trd_core::ImageTexture>,
+        normal: Option<trd_core::ImageTexture>,
+        is_gltf: bool,
+    }
+
+    // One or more meshes (repeated `?mesh=`), each an object in the scene. Rust
+    // sniffs GLB's `glTF` magic; every other payload is parsed as UTF-8 OBJ.
+    let mut loaded: Vec<LoadedMesh> = if mesh_bytes.length() == 0 {
+        vec![LoadedMesh {
+            mesh: assets::default_mesh()
+                .map_err(crate::error::GuiError::from)
+                .map_err(to_js)?,
+            material: trd_core::DisneyMaterial::default(),
+            texture: None,
+            metallic_roughness: None,
+            normal: None,
+            is_gltf: false,
+        }]
     } else {
-        mesh_objs
+        mesh_bytes
             .iter()
-            .map(|text| {
-                trd_core::Mesh::from_obj(text)
-                    .map_err(crate::error::GuiError::from)
-                    .map_err(to_js)
+            .map(|value| {
+                let bytes = js_sys::Uint8Array::new(&value).to_vec();
+                if bytes.starts_with(b"glTF") {
+                    let asset = trd_core::import_glb(&bytes)
+                        .map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()))?;
+                    Ok(LoadedMesh {
+                        mesh: asset.mesh,
+                        material: asset.material,
+                        texture: asset.base_color_texture,
+                        metallic_roughness: asset.metallic_roughness_texture,
+                        normal: asset.normal_texture,
+                        is_gltf: true,
+                    })
+                } else {
+                    let text = String::from_utf8(bytes)
+                        .map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()))?;
+                    Ok(LoadedMesh {
+                        mesh: trd_core::Mesh::from_obj(&text)
+                            .map_err(crate::error::GuiError::from)
+                            .map_err(to_js)?,
+                        material: trd_core::DisneyMaterial::default(),
+                        texture: None,
+                        metallic_roughness: None,
+                        normal: None,
+                        is_gltf: false,
+                    })
+                }
             })
-            .collect::<Result<_, _>>()?
+            .collect::<Result<_, wasm_bindgen::JsValue>>()?
     };
+    let has_gltf = loaded.iter().any(|asset| asset.is_gltf);
     // One optional albedo texture per mesh (positional: entry `i` skins mesh `i`);
     // an empty/absent entry leaves that object untextured (1×1 white). The JS
     // bootstrap passes an array of `Uint8Array` (one per mesh). Decoded in Rust so
     // trd-core stays I/O-free.
-    let mut textures: Vec<Option<trd_core::ImageTexture>> = Vec::with_capacity(meshes.len());
-    for i in 0..meshes.len() {
+    for (i, asset) in loaded.iter_mut().enumerate() {
         let entry = texture_bytes.get(i as u32);
         let bytes: Vec<u8> = if entry.is_undefined() || entry.is_null() {
             Vec::new()
         } else {
             js_sys::Uint8Array::new(&entry).to_vec()
         };
-        let decoded = if bytes.is_empty() {
-            None
-        } else {
-            Some(assets::decode_texture(&bytes).map_err(to_js)?)
-        };
-        textures.push(decoded);
+        if !bytes.is_empty() {
+            asset.texture = Some(assets::decode_texture(&bytes).map_err(to_js)?);
+        }
     }
+    let meshes: Vec<trd_core::Mesh> = loaded.iter().map(|asset| asset.mesh.clone()).collect();
+    let textures: Vec<Option<trd_core::ImageTexture>> =
+        loaded.iter().map(|asset| asset.texture.clone()).collect();
+    let material_maps: Vec<_> = loaded
+        .iter()
+        .map(|asset| (asset.metallic_roughness.clone(), asset.normal.clone()))
+        .collect();
     // The optional HDR env probe (browser `?env=`). Decoded in Rust so trd-core
     // stays I/O-free; when present, the viewer starts in PBR mode.
     let env = match env_bytes {
@@ -114,10 +157,26 @@ pub async fn start(
     };
     // Per-object mode: start every object in PBR when an env probe is supplied
     // (`?env=`), else Filled — each object's mode is then editable when selected.
-    let initial_mode = if env.is_some() {
+    let initial_mode = if env.is_some() || has_gltf {
         trd_core::RenderMode::Pbr
     } else {
         trd_core::RenderMode::Filled
+    };
+    let lighting = if has_gltf && env.is_some() {
+        trd_core::Lighting {
+            ambient: 0.0,
+            scale: 0.0,
+        }
+    } else {
+        trd_core::Lighting::default()
+    };
+    let tone_mapping = if has_gltf {
+        trd_core::ToneMapping {
+            operator: trd_core::Tonemap::Aces,
+            exposure: 1.0,
+        }
+    } else {
+        trd_core::ToneMapping::default()
     };
     let scene = SceneState {
         // One transform + mode + material per loaded mesh, so `draws()` lays them
@@ -125,7 +184,16 @@ pub async fn start(
         // PBR material (#141).
         objects: vec![ObjectTransform::default(); meshes.len()],
         modes: vec![initial_mode; meshes.len()],
-        materials: vec![trd_core::PbrMaterial::default(); meshes.len()],
+        materials: loaded.iter().map(|asset| asset.material.clone()).collect(),
+        image_based_lighting: loaded
+            .iter()
+            .map(|_| trd_core::ImageBasedLighting::default())
+            .collect(),
+        tone_mappings: vec![tone_mapping; meshes.len()],
+        pbr_debug_views: vec![trd_core::PbrDebugView::default(); meshes.len()],
+        lighting,
+        environment_available: env.is_some(),
+        show_environment_background: env.is_some(),
         ..SceneState::default()
     };
     // `?backend=arrow` selects the Arrow wire round-trip; anything else (or
@@ -139,9 +207,17 @@ pub async fn start(
     // instead of upscaling a small fixed buffer. Bounded (aspect-preserving) to
     // keep GPU + readback cost in check.
     let (render_w, render_h) = browser_render_size(&canvas);
-    let renderer = WebRenderer::new(&meshes, &textures, env, render_w, render_h, backend)
-        .await
-        .map_err(to_js)?;
+    let renderer = WebRenderer::new(
+        &meshes,
+        &textures,
+        &material_maps,
+        env,
+        render_w,
+        render_h,
+        backend,
+    )
+    .await
+    .map_err(to_js)?;
     let app = WebApp::new(InteractionController::new(scene), renderer);
 
     eframe::WebRunner::new()

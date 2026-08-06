@@ -13,7 +13,9 @@
 
 use std::ops::Range;
 
+use super::bound_material_maps::BoundMaterialMaps;
 use super::bound_texture::BoundTexture;
+use super::env_background::{EnvBackground, EnvBackgroundSettings};
 use super::frame_plane::FramePlane;
 use super::*;
 
@@ -81,6 +83,7 @@ struct MeshGpu {
     /// each object with its own diffuse (#141). Defaults to 1×1 white (identity
     /// albedo) until [`set`](BoundTexture::set) via `set_mesh_texture`.
     texture: BoundTexture,
+    material_maps: BoundMaterialMaps,
 }
 
 impl MeshGpu {
@@ -106,6 +109,7 @@ fn upload_mesh(
     mesh: &Mesh,
     base_model: Matrix4,
     texture_layout: &wgpu::BindGroupLayout,
+    material_maps_layout: &wgpu::BindGroupLayout,
 ) -> MeshGpu {
     use wgpu::util::DeviceExt;
 
@@ -121,15 +125,28 @@ fn upload_mesh(
     // PBR vertex buffer (#): derive area-weighted smooth normals (the assets have
     // no `vn`) and pack position + normal + UV for `disney.wgsl`, reusing the
     // triangle index buffer above.
-    let normals = compute_smooth_normals(&mesh.vertices, &mesh.indices);
+    let normals = mesh
+        .shading
+        .as_ref()
+        .filter(|shading| shading.normals.len() == mesh.vertices.len())
+        .map(|shading| shading.normals.clone())
+        .unwrap_or_else(|| compute_smooth_normals(&mesh.vertices, &mesh.indices));
+    let tangents = mesh
+        .shading
+        .as_ref()
+        .filter(|shading| shading.tangents.len() == mesh.vertices.len())
+        .map(|shading| shading.tangents.clone())
+        .unwrap_or_else(|| compute_tangents(&mesh.vertices, &mesh.indices, &normals));
     let pbr_vertices: Vec<PbrVertex> = mesh
         .vertices
         .iter()
         .zip(&normals)
-        .map(|(v, &normal)| PbrVertex {
+        .zip(&tangents)
+        .map(|((v, &normal), &tangent)| PbrVertex {
             position: v.position,
             normal,
             uv: v.uv,
+            tangent,
         })
         .collect();
     let pbr_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -152,6 +169,7 @@ fn upload_mesh(
         aabb: VertexGeometry::new(device, "trd mesh aabb line buffer", &aabb_vertices),
         base_model,
         texture: BoundTexture::with_layout(texture_layout.clone()),
+        material_maps: BoundMaterialMaps::with_layout(material_maps_layout.clone()),
     }
 }
 
@@ -227,6 +245,7 @@ struct Batches {
     instances: Vec<InstanceRaw>,
     commands: Vec<DrawCommand>,
     frame_fit: Option<FrameFit>,
+    environment_background: Option<([f32; 3], Tonemap)>,
 }
 
 /// Walks `scene` once into a flat draw list, stable-sorts by [`DrawKind`], then
@@ -238,6 +257,7 @@ fn build_batches(
 ) -> Batches {
     let mut draws: Vec<(DrawKind, InstanceRaw)> = Vec::with_capacity(scene.len());
     let mut frame_fit = None;
+    let mut environment_background = None;
 
     for object in scene {
         let (kind, model) = match *object {
@@ -271,6 +291,15 @@ fn build_batches(
             DrawableObject::CoordinateAxes { model } => (DrawKind::Axes, model),
             DrawableObject::PlaneGrid { plane, model } => (DrawKind::Grid(plane.index()), model),
             DrawableObject::BlobShadow { model } => (DrawKind::Shadow, model),
+            DrawableObject::EnvironmentBackground {
+                rotation,
+                exposure,
+                blur,
+                tonemap,
+            } => {
+                environment_background = Some(([rotation, exposure, blur], tonemap));
+                continue;
+            }
             DrawableObject::FramePlane { fit } => {
                 frame_fit = Some(fit);
                 continue;
@@ -297,6 +326,7 @@ fn build_batches(
         instances,
         commands,
         frame_fit,
+        environment_background,
     }
 }
 
@@ -332,6 +362,14 @@ struct MeshPass {
     gizmo_bind_group: wgpu::BindGroup,
 }
 
+struct PbrInputs<'a> {
+    materials: &'a [DisneyMaterial],
+    ibl: &'a [ImageBasedLighting],
+    tone_mappings: &'a [ToneMapping],
+    debug_views: &'a [PbrDebugView],
+    lighting: Lighting,
+}
+
 impl MeshPass {
     /// Constructs a `MeshPass` for `format`, building all pipelines over their
     /// bind-group layouts at `sample_count`× MSAA. `texture_layout` is the albedo
@@ -343,6 +381,7 @@ impl MeshPass {
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
         texture_layout: &wgpu::BindGroupLayout,
+        material_maps_layout: &wgpu::BindGroupLayout,
         env_layout: &wgpu::BindGroupLayout,
         sample_count: u32,
         mesh_count: usize,
@@ -408,7 +447,12 @@ impl MeshPass {
         let pbr_layout = create_pbr_bind_group_layout(device);
         let pbr_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("trd pbr pipeline layout"),
-            bind_group_layouts: &[Some(&pbr_layout), Some(texture_layout), Some(env_layout)],
+            bind_group_layouts: &[
+                Some(&pbr_layout),
+                Some(texture_layout),
+                Some(env_layout),
+                Some(material_maps_layout),
+            ],
             immediate_size: 0,
         });
         let pbr = create_pbr_pipeline(device, format, &pbr_pipeline_layout, sample_count);
@@ -490,13 +534,34 @@ impl MeshPass {
         queue: &wgpu::Queue,
         params: FrameParams,
         viewport: Viewport,
-        materials: &[PbrMaterial],
+        inputs: PbrInputs<'_>,
         use_env: bool,
     ) {
+        debug_assert_eq!(inputs.materials.len(), inputs.ibl.len());
+        debug_assert_eq!(inputs.materials.len(), inputs.tone_mappings.len());
+        debug_assert_eq!(inputs.materials.len(), inputs.debug_views.len());
         let view_proj = params.view_proj_matrix(viewport).to_cols_array();
         let camera_pos = params.camera_position();
-        for (i, material) in materials.iter().enumerate() {
-            let uniform = PbrUniform::new(view_proj, camera_pos, material, use_env);
+        for (i, (((material, ibl), tone_mapping), debug_view)) in inputs
+            .materials
+            .iter()
+            .zip(inputs.ibl)
+            .zip(inputs.tone_mappings)
+            .zip(inputs.debug_views)
+            .enumerate()
+        {
+            let uniform = PbrUniform::new(
+                view_proj,
+                camera_pos,
+                PbrUniformInputs {
+                    material,
+                    lighting: inputs.lighting,
+                    ibl: *ibl,
+                    tone_mapping: *tone_mapping,
+                    debug_view: *debug_view,
+                    use_env,
+                },
+            );
             queue.write_buffer(
                 &self.pbr_uniform,
                 i as u64 * self.pbr_stride,
@@ -535,13 +600,16 @@ impl MeshStore {
         meshes: &[Mesh],
         base_models: &[Matrix4],
         texture_layout: &wgpu::BindGroupLayout,
+        material_maps_layout: &wgpu::BindGroupLayout,
     ) -> Self {
         use wgpu::util::DeviceExt;
 
         let gpu_meshes = meshes
             .iter()
             .zip(base_models)
-            .map(|(mesh, &base)| upload_mesh(device, mesh, base, texture_layout))
+            .map(|(mesh, &base)| {
+                upload_mesh(device, mesh, base, texture_layout, material_maps_layout)
+            })
             .collect();
         let instance_capacity = (meshes.len() as u32).max(1);
         let instance_buffer = create_instance_buffer(device, instance_capacity);
@@ -624,11 +692,18 @@ pub struct MeshRenderer {
     pass: MeshPass,
     /// The bound HDR environment map reflected by [`RenderMode::Pbr`] draws.
     env: BoundEnv,
+    env_background: EnvBackground,
     /// The Disney material of **each** mesh (indexed by mesh id) applied to its
     /// [`RenderMode::Pbr`] draws (#141) — so a multi-object scene can give every
-    /// object its own metallic/roughness/base_color. [`set_pbr_material`] sets all
-    /// (the single-mesh / global default); [`set_mesh_pbr_material`] sets one.
-    pbr_materials: Vec<PbrMaterial>,
+    /// object its own metallic/roughness/base_color.
+    pbr_materials: Vec<DisneyMaterial>,
+    /// Per-object environment reflection gains, parallel to `pbr_materials`.
+    pbr_ibl: Vec<ImageBasedLighting>,
+    /// Per-object output transforms, parallel to `pbr_materials`.
+    pbr_tone_mappings: Vec<ToneMapping>,
+    pbr_debug_views: Vec<PbrDebugView>,
+    /// Scene light rig controls shared by every PBR object.
+    lighting: Lighting,
     store: MeshStore,
     frame_plane: FramePlane,
     /// The mesh pass's depth attachment, (re)created lazily in `encode` to match
@@ -729,16 +804,25 @@ impl MeshRenderer {
         // One shared group-1 albedo layout for the textured/PBR pipelines and
         // every per-mesh [`BoundTexture`] (each object skins with its own diffuse).
         let texture_layout = create_texture_bind_group_layout(device);
+        let material_maps_layout = BoundMaterialMaps::create_layout(device);
         let env = BoundEnv::new(device);
+        let env_background = EnvBackground::new(device, format, env.layout(), sample_count);
         let pass = MeshPass::new(
             device,
             format,
             &texture_layout,
+            &material_maps_layout,
             env.layout(),
             sample_count,
             meshes.len(),
         );
-        let store = MeshStore::new(device, meshes, base_models, &texture_layout);
+        let store = MeshStore::new(
+            device,
+            meshes,
+            base_models,
+            &texture_layout,
+            &material_maps_layout,
+        );
         let frame_plane = FramePlane::new(device, format, sample_count);
 
         // The picking pipeline: a group-0 camera uniform (structurally identical
@@ -761,7 +845,12 @@ impl MeshRenderer {
         Self {
             pass,
             env,
-            pbr_materials: vec![PbrMaterial::default(); meshes.len()],
+            env_background,
+            pbr_materials: vec![DisneyMaterial::default(); meshes.len()],
+            pbr_ibl: vec![ImageBasedLighting::default(); meshes.len()],
+            pbr_tone_mappings: vec![ToneMapping::default(); meshes.len()],
+            pbr_debug_views: vec![PbrDebugView::default(); meshes.len()],
+            lighting: Lighting::default(),
             store,
             frame_plane,
             depth: None,
@@ -800,23 +889,73 @@ impl MeshRenderer {
         }
     }
 
-    /// Sets the Disney [`PbrMaterial`] of **every** mesh — the single-mesh / global
+    /// Binds a glTF metallic-roughness map (G=roughness, B=metallic).
+    pub fn set_mesh_metallic_roughness_texture(&mut self, mesh_id: usize, texture: &dyn Texture) {
+        if let Some(mesh) = self.store.meshes.get_mut(mesh_id) {
+            mesh.material_maps.set_metallic_roughness(texture);
+        }
+    }
+
+    /// Binds a tangent-space glTF normal map.
+    pub fn set_mesh_normal_texture(&mut self, mesh_id: usize, texture: &dyn Texture) {
+        if let Some(mesh) = self.store.meshes.get_mut(mesh_id) {
+            mesh.material_maps.set_normal(texture);
+        }
+    }
+
+    /// Sets the [`DisneyMaterial`] of **every** mesh — the single-mesh / global
     /// default. For a multi-object scene, give each object its own material with
-    /// [`set_mesh_pbr_material`](Self::set_mesh_pbr_material). Takes effect on the
+    /// [`set_mesh_disney_material`](Self::set_mesh_disney_material). Takes effect on the
     /// next [`encode`](Self::encode).
-    pub fn set_pbr_material(&mut self, material: PbrMaterial) {
+    pub fn set_disney_material(&mut self, material: DisneyMaterial) {
         for m in &mut self.pbr_materials {
+            *m = material.clone();
+        }
+    }
+
+    /// Sets the [`DisneyMaterial`] of mesh `mesh_id` only (#141) — so each
+    /// object in a multi-object scene has its own metallic/roughness/base_color.
+    /// Out-of-range ids are ignored. Takes effect on the next
+    /// [`encode`](Self::encode).
+    pub fn set_mesh_disney_material(&mut self, mesh_id: usize, material: DisneyMaterial) {
+        if let Some(m) = self.pbr_materials.get_mut(mesh_id) {
             *m = material;
         }
     }
 
-    /// Sets the Disney [`PbrMaterial`] of mesh `mesh_id` only (#141) — so each
-    /// object in a multi-object scene has its own metallic/roughness/base_color.
-    /// Out-of-range ids are ignored. Takes effect on the next
-    /// [`encode`](Self::encode).
-    pub fn set_mesh_pbr_material(&mut self, mesh_id: usize, material: PbrMaterial) {
-        if let Some(m) = self.pbr_materials.get_mut(mesh_id) {
-            *m = material;
+    /// Sets scene lighting controls shared by every PBR object.
+    pub fn set_lighting(&mut self, lighting: Lighting) {
+        self.lighting = lighting;
+    }
+
+    /// Sets image-based-lighting controls for every PBR object.
+    pub fn set_image_based_lighting(&mut self, ibl: ImageBasedLighting) {
+        self.pbr_ibl.fill(ibl);
+    }
+
+    /// Sets image-based-lighting controls for one PBR object.
+    pub fn set_mesh_image_based_lighting(&mut self, mesh_id: usize, ibl: ImageBasedLighting) {
+        if let Some(current) = self.pbr_ibl.get_mut(mesh_id) {
+            *current = ibl;
+        }
+    }
+
+    /// Sets the per-object output transform of every PBR object.
+    pub fn set_tone_mapping(&mut self, tone_mapping: ToneMapping) {
+        self.pbr_tone_mappings.fill(tone_mapping);
+    }
+
+    /// Sets the output transform of one PBR object.
+    pub fn set_mesh_tone_mapping(&mut self, mesh_id: usize, tone_mapping: ToneMapping) {
+        if let Some(current) = self.pbr_tone_mappings.get_mut(mesh_id) {
+            *current = tone_mapping;
+        }
+    }
+
+    /// Selects a diagnostic PBR output for one mesh.
+    pub fn set_mesh_pbr_debug_view(&mut self, mesh_id: usize, debug_view: PbrDebugView) {
+        if let Some(current) = self.pbr_debug_views.get_mut(mesh_id) {
+            *current = debug_view;
         }
     }
 
@@ -879,7 +1018,13 @@ impl MeshRenderer {
             queue,
             params,
             viewport,
-            &self.pbr_materials,
+            PbrInputs {
+                materials: &self.pbr_materials,
+                ibl: &self.pbr_ibl,
+                tone_mappings: &self.pbr_tone_mappings,
+                debug_views: &self.pbr_debug_views,
+                lighting: self.lighting,
+            },
             self.env.has_env(),
         );
 
@@ -909,8 +1054,22 @@ impl MeshRenderer {
         //    the render loop below only *reads* each mesh's group-1 bind group.
         for mesh in &mut self.store.meshes {
             mesh.texture.ensure_uploaded(&self.device, queue);
+            mesh.material_maps.ensure_uploaded(&self.device, queue);
         }
         let env_bind_group = self.env.ensure_uploaded(&self.device, queue);
+        if let Some(([rotation, exposure, blur], tonemap)) = batches.environment_background {
+            self.env_background.write(
+                queue,
+                params,
+                viewport,
+                EnvBackgroundSettings {
+                    rotation,
+                    exposure,
+                    blur,
+                    tonemap,
+                },
+            );
+        }
 
         // 6. Record the pass. With MSAA (`sample_count > 1`) the mesh pass renders
         //    into the multisampled color attachment and resolves into the caller's
@@ -955,6 +1114,10 @@ impl MeshRenderer {
             multiview_mask: None,
         });
 
+        if batches.environment_background.is_some() {
+            self.env_background.draw(&mut pass, env_bind_group);
+        }
+
         // Draw the background frame plane first (#63): its own pipeline + group-0
         // bind, depth-write off, so the mesh scene composites on top. Only when
         // the scene requested one (and a frame texture is bound).
@@ -990,6 +1153,7 @@ impl MeshRenderer {
                     pass.set_bind_group(0, &self.pass.pbr_bind_group, &[offset]);
                     pass.set_bind_group(1, mesh.texture.bind_group(), &[]);
                     pass.set_bind_group(2, env_bind_group, &[]);
+                    pass.set_bind_group(3, mesh.material_maps.bind_group(), &[]);
                     draw_indexed(&mut pass, mesh.pbr(), range);
                     // Restore group 0 = camera for the following non-PBR draws
                     // (their pipelines' group-0 layout is the camera uniform).

@@ -139,10 +139,12 @@ pub(crate) struct PbrVertex {
     pub(crate) position: [f32; 3],
     pub(crate) normal: [f32; 3],
     pub(crate) uv: [f32; 2],
+    /// xyz = tangent, w = handedness used to reconstruct the bitangent.
+    pub(crate) tangent: [f32; 4],
 }
 
 impl PbrVertex {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 3] = [
+    const ATTRIBUTES: [wgpu::VertexAttribute; 4] = [
         wgpu::VertexAttribute {
             format: wgpu::VertexFormat::Float32x3,
             offset: 0,
@@ -157,6 +159,11 @@ impl PbrVertex {
             format: wgpu::VertexFormat::Float32x2,
             offset: 24,
             shader_location: 2,
+        },
+        wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Float32x4,
+            offset: 32,
+            shader_location: 7,
         },
     ];
 
@@ -285,9 +292,18 @@ impl PickInstanceRaw {
 
 /// Canonical indexed mesh container.
 #[derive(Debug, Clone, PartialEq)]
+pub struct MeshShading {
+    pub normals: Vec<[f32; 3]>,
+    /// Optional authored tangents. Empty means derive them from positions/UVs.
+    pub tangents: Vec<[f32; 4]>,
+}
+
+/// Canonical indexed mesh container.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Mesh {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
+    pub shading: Option<MeshShading>,
 }
 
 impl Mesh {
@@ -312,6 +328,7 @@ impl Mesh {
                 },
             ],
             indices: vec![0, 1, 2],
+            shading: None,
         }
     }
 }

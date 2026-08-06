@@ -226,11 +226,15 @@ controls. Everything is **per-object**: click an object to select it, then edit
 - **Render mode (per object).** The **Render mode** selector sets the selected
   object's mode — **Filled / Wireframe / Textured / PBR** — so objects can mix modes
   in one scene.
-- **PBR material (per object).** When the selected object is in **PBR** mode, the
-  **PBR material** panel edits *its* material live — **Metallic / Roughness /
-  Clearcoat / Env intensity / Exposure** and the **Reinhard/ACES** tone-map.
+- **PBR appearance (per object).** When the selected object is in **PBR** mode,
+  the panel edits its typed Disney surface, IBL intensity, and tone mapping live
+  — **Metallic / Roughness / Clearcoat / Env intensity / Exposure** and the
+  **Reinhard/ACES** operator. **PBR view** switches between Shaded, Roughness,
+  Metallic, and Normal diagnostics.
 - **Overlays.** Toggle the **Bounding box** (all objects), **World axes**, **Local
-  axes**, and the **XZ plane grid** (**World** floor / **Local** per-object).
+  axes**, **XZ plane grid** (**World** floor / **Local** per-object), and the
+  spherical HDR background; background blur and shared Background/IBL rotation
+  are adjustable.
 - **Reset view** restores the camera + every object's transform.
 
 ### Multi-object scenes & URL params (browser)
@@ -241,7 +245,7 @@ query params — the equivalents of the native `--mesh`/`--texture`/`--env`/
 
 | Param | Meaning |
 |-------|---------|
-| `?mesh=<url>` | An object's OBJ. **Repeatable** — each `?mesh=` adds an object laid out side-by-side. |
+| `?mesh=<url>` | An object's OBJ or single-primitive GLB. **Repeatable** — each `?mesh=` adds an object laid out side-by-side; GLB starts in PBR and uses its embedded base-color, metallic-roughness, normal maps, and material. |
 | `?texture=<url>` | **Positional** albedo: the *i*-th `?texture=` skins the *i*-th `?mesh=` (each object its own diffuse). |
 | `?env=<url>` | An equirectangular HDR probe; supplying it **starts every object in PBR** mode. |
 | `?backend=arrow` | Route frames through the Arrow wire round-trip (vs. the default in-process render). |
@@ -254,11 +258,11 @@ http://localhost:8080/?mesh=/assets/meshes/can/coke.obj&texture=/assets/meshes/c
 &env=/assets/envmap/uffizi-large.hdr
 ```
 
-> Each object carries its own **transform, render mode, PBR material, and albedo
-> texture**. The renderer binds one albedo texture + one material *per mesh* (via a
-> per-mesh bind group + a dynamic-offset PBR uniform), so per-object appearance is
-> real, not shared. On the headless RTX Linux box, reach the browser viewer over an
-> SSH port-forward (see [AGENTS.md](../AGENTS.md)).
+> Each object carries its own **transform, render mode, Disney material, PBR
+> maps, IBL intensity/rotation, tone mapping, and debug view**. The renderer
+> composes those typed values per mesh, so per-object appearance is real, not
+> shared. On the headless RTX Linux box, reach the browser viewer over an SSH
+> port-forward (see [AGENTS.md](../AGENTS.md)).
 
 
 ## Web (wasm)

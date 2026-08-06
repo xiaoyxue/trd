@@ -59,7 +59,8 @@ use std::sync::Mutex;
 use arrow::array::{Array, FixedSizeListArray, UInt8Array};
 use arrow::ipc::reader::StreamReader;
 use trd_core::{
-    run_stream, EnvMapData, Msaa, PbrConfig, PbrMaterial, RenderMode, RenderOptions, Tonemap,
+    run_stream, DisneyMaterial, EnvMapData, ImageBasedLighting, Lighting, Msaa, PbrConfig,
+    RenderMode, RenderOptions, ToneMapping, Tonemap,
 };
 
 /// Golden render resolution (16:9; the fixtures' CV `k` is rescaled to match).
@@ -164,17 +165,13 @@ fn synthetic_env() -> EnvMapData {
 /// (#116) where per-channel Reinhard desaturates the highlights toward grey and
 /// ACES retains the hue. Only the tone-map operator differs between the two
 /// PBR goldens, isolating the tone-map stage.
-fn pbr_material(tonemap: Tonemap) -> PbrMaterial {
-    PbrMaterial {
+fn pbr_material() -> DisneyMaterial {
+    DisneyMaterial {
         base_color: [0.20, 0.85, 0.35],
         metallic: 0.9,
         roughness: 0.30,
         specular: 0.6,
-        env_intensity: 1.0,
-        exposure: 1.4,
-        ambient: 0.05,
-        tonemap,
-        ..PbrMaterial::default()
+        ..DisneyMaterial::default()
     }
 }
 
@@ -190,7 +187,19 @@ fn pbr_options(tonemap: Tonemap) -> RenderOptions {
         show_local_grid: None,
         show_local_grid_mesh: None,
         pbr: Some(PbrConfig {
-            material: pbr_material(tonemap),
+            material: pbr_material(),
+            lighting: Lighting {
+                ambient: 0.05,
+                ..Lighting::default()
+            },
+            ibl: ImageBasedLighting {
+                intensity: 1.0,
+                ..ImageBasedLighting::default()
+            },
+            tone_mapping: ToneMapping {
+                operator: tonemap,
+                exposure: 1.4,
+            },
             env_map: Some(synthetic_env()),
         }),
         msaa: Msaa::X4,

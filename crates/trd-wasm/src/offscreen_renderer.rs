@@ -1,10 +1,12 @@
 use wasm_bindgen::prelude::*;
 
 use trd_core::{
-    build_scene, DecodedFrame, Draw, DrawableObject, EnvMapData, FrameBatch, FrameFit, FrameParams,
-    InputSession, MeshRenderer, OffscreenTarget, OutputSession, PbrMaterial, RenderMode, Tonemap,
-    OFFSCREEN_FORMAT,
+    build_scene, DecodedFrame, DisneyMaterial, Draw, DrawableObject, EnvMapData, FrameBatch,
+    FrameFit, FrameParams, ImageBasedLighting, InputSession, Lighting, MeshRenderer,
+    OffscreenTarget, OutputSession, RenderMode, ToneMapping, Tonemap, OFFSCREEN_FORMAT,
 };
+
+use crate::PbrState;
 
 fn error_message(context: &str, error: impl std::fmt::Display) -> String {
     format!("{context}: {error}")
@@ -44,10 +46,10 @@ pub struct OffscreenRenderer {
     /// [`DrawableObject::FramePlane`] (#63); a no-op until a background is
     /// uploaded via [`update_frame_texture_rgba`](Self::update_frame_texture_rgba).
     composite_frame: bool,
-    /// The global Disney [`PbrMaterial`] for [`RenderMode::Pbr`] draws, set via
+    /// The typed Disney PBR configuration for [`RenderMode::Pbr`] draws, set via
     /// [`set_pbr_material`](Self::set_pbr_material) before the first frame and
     /// applied when the renderer is built. `None` ⇒ the renderer's default.
-    pbr_material: Option<PbrMaterial>,
+    pbr: Option<PbrState>,
     /// The decoded equirectangular HDR environment probe reflected by
     /// [`RenderMode::Pbr`] draws, set via [`set_env_map_hdr`](Self::set_env_map_hdr).
     /// `None` ⇒ no probe reflection.
@@ -102,7 +104,7 @@ impl OffscreenRenderer {
             show_axes: false,
             show_local_axes: false,
             composite_frame: false,
-            pbr_material: None,
+            pbr: None,
             env_map: None,
             target,
             input: InputSession::new(),
@@ -186,7 +188,7 @@ impl OffscreenRenderer {
         };
     }
 
-    /// Sets the global Disney [`PbrMaterial`] applied to every
+    /// Sets the typed Disney PBR configuration applied to every
     /// [`RenderMode::Pbr`] draw — the browser twin of trd-cli's
     /// `--metallic/--roughness/--specular/--clearcoat/--env-intensity/--exposure/
     /// --ambient/--tonemap` flags. `tonemap` is `"aces"` (filmic) or anything
@@ -204,24 +206,33 @@ impl OffscreenRenderer {
         ambient: f32,
         tonemap: &str,
     ) {
-        let material = PbrMaterial {
+        let material = DisneyMaterial {
             metallic,
             roughness,
             specular,
             clearcoat,
-            env_intensity,
-            exposure,
+            ..DisneyMaterial::default()
+        };
+        let lighting = Lighting {
             ambient,
-            tonemap: match tonemap.to_ascii_lowercase().as_str() {
+            ..Lighting::default()
+        };
+        let ibl = ImageBasedLighting {
+            intensity: env_intensity,
+            ..ImageBasedLighting::default()
+        };
+        let tone_mapping = ToneMapping {
+            exposure,
+            operator: match tonemap.to_ascii_lowercase().as_str() {
                 "aces" => Tonemap::Aces,
                 _ => Tonemap::Reinhard,
             },
-            ..PbrMaterial::default()
         };
-        self.pbr_material = Some(material);
+        let pbr = PbrState::new(material, lighting, ibl, tone_mapping);
         if let Some(renderer) = self.renderer.as_mut() {
-            renderer.set_pbr_material(material);
+            pbr.apply(renderer);
         }
+        self.pbr = Some(pbr);
     }
 
     /// Decodes an equirectangular Radiance `.hdr` buffer and binds it as the
@@ -403,11 +414,8 @@ impl OffscreenRenderer {
 
             // Apply the Disney PBR material + HDR environment probe staged by the
             // JS shell before the first frame (RenderMode::Pbr draws only).
-            if let Some(material) = self.pbr_material {
-                self.renderer
-                    .as_mut()
-                    .expect("renderer just built")
-                    .set_pbr_material(material);
+            if let Some(pbr) = &self.pbr {
+                pbr.apply(self.renderer.as_mut().expect("renderer just built"));
             }
             if let Some(env) = self.env_map.clone() {
                 self.renderer

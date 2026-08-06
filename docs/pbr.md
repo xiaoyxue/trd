@@ -40,13 +40,24 @@ set.
 | `--ambient` | `0.12` | `≥ 0` | Constant ambient fill (× base color) so shadowed regions aren't pure black. |
 | `--tonemap` | `reinhard` | `reinhard`\|`aces` | Tone-map operator (see [Tone mapping](#tone-mapping)). |
 
-## The full material model
+## Typed PBR model
 
-The core material ([`trd_core::PbrMaterial`](../crates/trd-core/src/render/pbr.rs))
-carries the **complete Burley 2012 parameter set**; the CLI flags above drive the
-common subset, and the rest use neutral defaults. Every parameter is in `[0, 1]`
-except `base_color` (a linear-RGB tint on the albedo) and the non-negative gains
-(`env_intensity`, `exposure`, `ambient`, `light_scale`):
+The CPU model mirrors the inputs to the shader instead of folding them into one
+catch-all struct:
+
+- [`DisneyMaterial`](../crates/trd-core/src/render/material/disney.rs) owns only
+  the **11 Burley 2012 surface parameters**, plus unshaded import metadata.
+- [`Lighting`](../crates/trd-core/src/render/light.rs) owns ambient fill and the
+  fixed key/fill/rim rig gain; `Light` and `PointLight` give both uniform arrays
+  typed CPU representations.
+- [`ImageBasedLighting`](../crates/trd-core/src/render/ibl.rs) owns the
+  per-object environment-reflection gain; `EnvMapData` / `BoundEnv` own the HDR
+  probe data and GPU binding.
+- [`ToneMapping`](../crates/trd-core/src/render/tonemap.rs) owns the per-object
+  operator and exposure.
+
+`PbrUniform` composes these domains into the shader's unchanged 304-byte layout.
+The CLI flags drive the common subset, and the rest use neutral defaults:
 
 | Parameter | Default | CLI flag | Meaning |
 |---|---|---|---|
@@ -61,16 +72,27 @@ except `base_color` (a linear-RGB tint on the albedo) and the non-negative gains
 | `sheen_tint` | `0.5` | — | Tints the sheen toward the base-color hue. |
 | `clearcoat` | `0.0` | `--clearcoat` | Second colorless specular layer. |
 | `clearcoat_gloss` | `1.0` | — | Clearcoat glossiness (0 = satin, 1 = glossy). |
-| `env_intensity` | `1.0` | `--env-intensity` | Environment-probe reflection gain. |
-| `exposure` | `1.2` | `--exposure` | Tone-map exposure. |
-| `ambient` | `0.12` | `--ambient` | Constant ambient fill. |
-| `light_scale` | `2.5` | — | Scales every virtual light's contribution. |
-| `tonemap` | `Reinhard` | `--tonemap` | Tone-map operator. |
 
 ¹ The core default is `0.5`; `trd-cli`'s `--roughness` flag defaults to `0.35`.
 
-`PbrMaterial::metal()` is a shiny-metal preset (fully metallic, moderately smooth,
-env probe reflected) — the look used for the drink cans in the Olympic demo.
+`DisneyMaterial::metal()` is a shiny-metal preset (fully metallic and moderately
+smooth) — the look used for the drink cans in the Olympic demo.
+
+### Preserved glTF data
+
+`DisneyMaterial::auxiliary` preserves alpha mode/cutoff, opacity, double-sided,
+emissive strength, IOR, transmission, and core texture-slot presence. These
+fields are deliberately **not consumed by `disney.wgsl` yet**.
+`trd_core::import_gltf_materials` parses glTF material/KHR data from caller-owned
+bytes into this model without filesystem access; its per-parameter `sources` map
+records whether values came from glTF, an extension-derived mapping, or a
+default.
+
+`trd_core::import_glb` additionally imports one triangle primitive, authored
+normals, and its embedded base-color / metallic-roughness / normal textures.
+`trd-gui` web accepts the GLB directly through
+`?mesh=/assets/.../model.glb` and starts it in PBR mode. The glTF path uses
+`pbr.wgsl`; the original Disney-only `disney.wgsl` remains unchanged.
 
 ## Tone mapping
 
@@ -84,8 +106,9 @@ color target:
   gives a softer highlight roll-off and retains hue/saturation on bright, strongly
   lit albedo, where per-channel Reinhard desaturates toward grey.
 
-`--exposure` scales radiance **before** the curve; `--ambient` adds a constant fill
-so shadows aren't crushed to black.
+`ToneMapping` remains **per object**, matching the interactive multi-object
+viewer. `--exposure` scales radiance before the curve; `Lighting::ambient` adds a
+constant fill so shadows aren't crushed to black.
 
 ## HDR environment probe
 
@@ -96,12 +119,19 @@ does no file I/O) and downscaled to the renderer's 2048 px limit;
 [`assets/envmap/`](../assets/envmap/) (`uffizi-large.hdr`, `cathedral.hdr`,
 `museum.hdr`, `ballroom.hdr`, `grace-new.hdr`).
 
+For glTF PBR, trd precomputes a GGX-filtered PMREM mip chain, diffuse irradiance
+map, and split-sum BRDF integration LUT. This avoids view-dependent noise while
+preserving roughness-dependent reflections. The GUI can show/blur/rotate the
+camera-centered environment background independently; its rotation is shared
+with IBL.
+
 ## Interactive editing — `trd-gui`
 
-The interactive viewer starts in PBR mode with `--pbr` and exposes the material +
-lighting parameters as **live-editable controls** (metallic, roughness, specular,
-clearcoat, env-intensity, exposure, ambient, tone-map), so you can dial in a look
-before baking it into a `--cli` render:
+The interactive viewer starts in PBR mode with `--pbr` and exposes per-object
+surface, IBL, and tone-mapping controls (metallic, roughness, clearcoat,
+env-intensity, exposure, tone-map), plus Shaded / Roughness / Metallic / Normal
+diagnostic views, so you can dial in or inspect a look before baking it into a
+`--cli` render:
 
 ```sh
 cargo run -p trd-gui -- --pbr --env assets/envmap/uffizi-large.hdr \

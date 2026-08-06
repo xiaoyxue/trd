@@ -470,14 +470,17 @@ fn render_and_write_batch<W: Write>(
     Ok(())
 }
 
-/// The Disney PBR configuration threaded through [`RenderOptions`]: the global
-/// [`PbrMaterial`](crate::PbrMaterial) plus an optional equirectangular HDR
-/// environment map. When present (and the mode is [`RenderMode::Pbr`]), meshes
-/// are shaded with the physically-based `disney.wgsl` path.
+/// The typed Disney PBR configuration threaded through [`RenderOptions`].
 #[derive(Debug, Clone, Default)]
 pub struct PbrConfig {
     /// The Disney material applied to every PBR mesh.
-    pub material: crate::PbrMaterial,
+    pub material: crate::DisneyMaterial,
+    /// Scene light-rig controls.
+    pub lighting: crate::Lighting,
+    /// Image-based-lighting controls applied to every PBR mesh.
+    pub ibl: crate::ImageBasedLighting,
+    /// Per-object output transform seeded onto every PBR mesh.
+    pub tone_mapping: crate::ToneMapping,
     /// The HDR environment probe reflected by metallic surfaces (`None` ⇒ no
     /// environment reflection).
     pub env_map: Option<crate::EnvMapData>,
@@ -601,7 +604,10 @@ pub fn run_stream<R: Read, W: Write>(
             built.set_show_local_grid(options.show_local_grid);
             built.set_show_local_grid_mesh(options.show_local_grid_mesh);
             if let Some(pbr) = &options.pbr {
-                built.set_pbr_material(pbr.material);
+                built.set_disney_material(pbr.material.clone());
+                built.set_lighting(pbr.lighting);
+                built.set_image_based_lighting(pbr.ibl);
+                built.set_tone_mapping(pbr.tone_mapping);
                 if let Some(env) = &pbr.env_map {
                     built.set_env_map(env.clone());
                 }

@@ -8,7 +8,7 @@
 //! *how* to re-render — synchronously on native, asynchronously on wasm).
 
 use egui::{Color32, PointerButton, Sense, TextureHandle, Vec2};
-use trd_core::{RenderMode, Tonemap};
+use trd_core::{PbrDebugView, RenderMode, Tonemap};
 
 use crate::interaction::{
     AxisConstraint, InteractionController, InteractionEvent, InteractionTarget, TransformMode,
@@ -156,6 +156,37 @@ fn controls_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
             ui.label("Plane grid (XZ)");
             c |= ui.checkbox(&mut state.show_world_grid, "World grid").changed();
             c |= ui.checkbox(&mut state.show_local_grid, "Local grid").changed();
+            c |= ui
+                .add_enabled(
+                    state.environment_available,
+                    egui::Checkbox::new(
+                        &mut state.show_environment_background,
+                        "Environment background",
+                    ),
+                )
+                .changed();
+            if state.environment_available && state.show_environment_background {
+                ui.label("Background blur");
+                c |= ui
+                    .add(egui::Slider::new(
+                        &mut state.environment_background_blur,
+                        0.0..=1.0,
+                    ))
+                    .changed();
+            }
+            if state.environment_available {
+                ui.label("Background / IBL rotation");
+                if let Some(ibl) = state.image_based_lighting.first_mut() {
+                    let mut degrees = ibl.rotation.to_degrees().rem_euclid(360.0);
+                    if ui
+                        .add(egui::Slider::new(&mut degrees, 0.0..=360.0).suffix("°"))
+                        .changed()
+                    {
+                        ibl.rotation = degrees.to_radians();
+                        c = true;
+                    }
+                }
+            }
             c
         });
 
@@ -301,39 +332,67 @@ fn pbr_panel(ui: &mut egui::Ui, view: &mut View) -> bool {
     let mut changed = false;
     // The PBR material is per-object (#141): edit the *selected* object's
     // material; with nothing selected there is no material to edit.
-    let Some(pbr) = view.controller.state.selected_material_mut() else {
+    let Some((material, ibl, tone_mapping, debug_view)) = view.controller.state.selected_pbr_mut()
+    else {
         ui.weak("Select an object to edit its material");
         return false;
     };
+    ui.label("PBR view");
+    ui.horizontal_wrapped(|ui| {
+        changed |= ui
+            .selectable_value(debug_view, PbrDebugView::Shaded, "Shaded")
+            .changed();
+        changed |= ui
+            .selectable_value(debug_view, PbrDebugView::Roughness, "Roughness")
+            .changed();
+        changed |= ui
+            .selectable_value(debug_view, PbrDebugView::Metallic, "Metallic")
+            .changed();
+        changed |= ui
+            .selectable_value(debug_view, PbrDebugView::Normal, "Normal")
+            .changed();
+    });
     // Label each slider on its own line so the text never clips in a narrow
     // panel; the slider then spans the full panel width beneath it.
-    ui.label("Metallic");
+    let mapped_metallic_roughness = material.auxiliary.textures.metallic_roughness;
+    ui.label(if mapped_metallic_roughness {
+        "Metallic factor"
+    } else {
+        "Metallic"
+    });
     changed |= ui
-        .add(egui::Slider::new(&mut pbr.metallic, 0.0..=1.0))
+        .add(egui::Slider::new(&mut material.metallic, 0.0..=1.0))
         .changed();
-    ui.label("Roughness");
+    ui.label(if mapped_metallic_roughness {
+        "Roughness factor"
+    } else {
+        "Roughness"
+    });
     changed |= ui
-        .add(egui::Slider::new(&mut pbr.roughness, 0.0..=1.0))
+        .add(egui::Slider::new(&mut material.roughness, 0.0..=1.0))
         .changed();
+    if mapped_metallic_roughness {
+        ui.weak("Factors multiply the imported GLB metallic-roughness map");
+    }
     ui.label("Clearcoat");
     changed |= ui
-        .add(egui::Slider::new(&mut pbr.clearcoat, 0.0..=1.0))
+        .add(egui::Slider::new(&mut material.clearcoat, 0.0..=1.0))
         .changed();
     ui.label("Env intensity");
     changed |= ui
-        .add(egui::Slider::new(&mut pbr.env_intensity, 0.0..=4.0))
+        .add(egui::Slider::new(&mut ibl.intensity, 0.0..=4.0))
         .changed();
     ui.label("Exposure");
     changed |= ui
-        .add(egui::Slider::new(&mut pbr.exposure, 0.0..=4.0))
+        .add(egui::Slider::new(&mut tone_mapping.exposure, 0.0..=4.0))
         .changed();
     ui.label("Tonemap");
     ui.horizontal_wrapped(|ui| {
         changed |= ui
-            .selectable_value(&mut pbr.tonemap, Tonemap::Reinhard, "Reinhard")
+            .selectable_value(&mut tone_mapping.operator, Tonemap::Reinhard, "Reinhard")
             .changed();
         changed |= ui
-            .selectable_value(&mut pbr.tonemap, Tonemap::Aces, "ACES")
+            .selectable_value(&mut tone_mapping.operator, Tonemap::Aces, "ACES")
             .changed();
     });
     changed

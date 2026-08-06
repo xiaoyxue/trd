@@ -23,7 +23,7 @@ pub enum RenderMode {
     /// equirectangular HDR environment-map reflection, with smooth shading
     /// normals derived at upload. Metallic materials read as shiny reflective
     /// metal (e.g. the coke can). Configured globally via the renderer's
-    /// [`PbrMaterial`](crate::PbrMaterial) + bound environment map.
+    /// [`DisneyMaterial`](crate::DisneyMaterial) + bound environment map.
     Pbr,
     /// Not a mesh rasterization at all: draw a **contact / blob grounding
     /// shadow** ([`DrawableObject::BlobShadow`]) instead of the mesh. A per-draw
@@ -210,6 +210,13 @@ pub enum DrawableObject {
     /// and drawn *before* the opaque content mesh (depth-write off) so the mesh
     /// composites on top while the surrounding rim darkens the floor.
     BlobShadow { model: [f32; 16] },
+    /// Camera-centered spherical HDR environment drawn behind the scene.
+    EnvironmentBackground {
+        rotation: f32,
+        exposure: f32,
+        blur: f32,
+        tonemap: super::Tonemap,
+    },
     /// A screen-aligned **background frame plane** (#63): a fullscreen quad that
     /// samples the renderer's bound background frame texture (set via
     /// [`MeshRenderer::update_frame_texture_rgba`]), composited **under** the

@@ -167,22 +167,36 @@ fn main() -> Result<(), trd_core::StreamError> {
     // when `--pbr` is set. The `.hdr` file is decoded here so trd-core does no
     // file/codec I/O; it is downscaled to the renderer's portable 2048px limit.
     let pbr = if cli.pbr {
-        let material = trd_core::PbrMaterial {
+        let material = trd_core::DisneyMaterial {
             metallic: cli.metallic,
             roughness: cli.roughness,
             specular: cli.specular,
             clearcoat: cli.clearcoat,
-            env_intensity: cli.env_intensity,
-            exposure: cli.exposure,
-            ambient: cli.ambient,
-            tonemap: cli.tonemap.into(),
             ..Default::default()
+        };
+        let lighting = trd_core::Lighting {
+            ambient: cli.ambient,
+            ..Default::default()
+        };
+        let ibl = trd_core::ImageBasedLighting {
+            intensity: cli.env_intensity,
+            ..trd_core::ImageBasedLighting::default()
+        };
+        let tone_mapping = trd_core::ToneMapping {
+            operator: cli.tonemap.into(),
+            exposure: cli.exposure,
         };
         let env_map = match cli.env.as_ref() {
             Some(path) => Some(load_env_map(path)?),
             None => None,
         };
-        Some(trd_core::PbrConfig { material, env_map })
+        Some(trd_core::PbrConfig {
+            material,
+            lighting,
+            ibl,
+            tone_mapping,
+            env_map,
+        })
     } else {
         None
     };

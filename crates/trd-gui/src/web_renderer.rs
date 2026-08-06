@@ -31,6 +31,25 @@ fn scene_overlays(draws: &[trd_core::Draw], state: &SceneState) -> Vec<DrawableO
     let mut overlays =
         plane_grid_overlays(draws, xz(state.show_world_grid), xz(state.show_local_grid));
     overlays.extend(trd_core::selection_aabb_overlay(draws, state.selected));
+    if state.show_environment_background {
+        overlays.push(DrawableObject::EnvironmentBackground {
+            rotation: state
+                .image_based_lighting
+                .first()
+                .map_or(0.0, |ibl| ibl.rotation),
+            exposure: state
+                .tone_mappings
+                .first()
+                .map_or(1.0, |tone_mapping| tone_mapping.exposure),
+            blur: state.environment_background_blur,
+            tonemap: state
+                .tone_mappings
+                .first()
+                .map_or(trd_core::Tonemap::Reinhard, |tone_mapping| {
+                    tone_mapping.operator
+                }),
+        });
+    }
     overlays
 }
 
@@ -74,6 +93,7 @@ impl WebRenderer {
     pub async fn new(
         meshes: &[Mesh],
         textures: &[Option<ImageTexture>],
+        material_maps: &[(Option<ImageTexture>, Option<ImageTexture>)],
         env: Option<EnvMapData>,
         width: u32,
         height: u32,
@@ -102,6 +122,14 @@ impl WebRenderer {
         for (i, texture) in textures.iter().enumerate() {
             if let Some(texture) = texture {
                 renderer.set_mesh_texture(i, texture);
+            }
+            for (i, (metallic_roughness, normal)) in material_maps.iter().enumerate() {
+                if let Some(texture) = metallic_roughness {
+                    renderer.set_mesh_metallic_roughness_texture(i, texture);
+                }
+                if let Some(texture) = normal {
+                    renderer.set_mesh_normal_texture(i, texture);
+                }
             }
         }
         if let Some(env) = env {
@@ -174,8 +202,21 @@ impl WebRenderer {
     async fn render_direct(&mut self, state: &SceneState) -> Result<Vec<u8>, GuiError> {
         let aspect = self.width as f32 / self.height.max(1) as f32;
         let params = state.frame_params(aspect);
-        for (i, m) in state.materials.iter().enumerate() {
-            self.renderer.set_mesh_pbr_material(i, *m);
+        self.renderer.set_lighting(state.lighting);
+        for (i, ((material, ibl), tone_mapping)) in state
+            .materials
+            .iter()
+            .zip(&state.image_based_lighting)
+            .zip(&state.tone_mappings)
+            .enumerate()
+        {
+            self.renderer.set_mesh_disney_material(i, material.clone());
+            self.renderer.set_mesh_image_based_lighting(i, *ibl);
+            self.renderer.set_mesh_tone_mapping(i, *tone_mapping);
+            self.renderer.set_mesh_pbr_debug_view(
+                i,
+                state.pbr_debug_views.get(i).copied().unwrap_or_default(),
+            );
         }
         let mut scene = build_scene(
             &state.draws(),
@@ -227,8 +268,21 @@ impl WebRenderer {
         );
         let mut scene = scene;
         scene.extend(scene_overlays(&draws, state));
-        for (i, m) in state.materials.iter().enumerate() {
-            self.renderer.set_mesh_pbr_material(i, *m);
+        self.renderer.set_lighting(state.lighting);
+        for (i, ((material, ibl), tone_mapping)) in state
+            .materials
+            .iter()
+            .zip(&state.image_based_lighting)
+            .zip(&state.tone_mappings)
+            .enumerate()
+        {
+            self.renderer.set_mesh_disney_material(i, material.clone());
+            self.renderer.set_mesh_image_based_lighting(i, *ibl);
+            self.renderer.set_mesh_tone_mapping(i, *tone_mapping);
+            self.renderer.set_mesh_pbr_debug_view(
+                i,
+                state.pbr_debug_views.get(i).copied().unwrap_or_default(),
+            );
         }
         let rgba = self.render_scene(frame.params, &scene).await?;
 
