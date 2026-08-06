@@ -2,6 +2,10 @@
 
 First vertical slice of #163.
 
+Canonical user/developer documentation lives in
+[`docs/video-editing.md`](../../docs/video-editing.md); this package README keeps
+the local generation and launch recipe close to the bootstrap.
+
 The editor loads a separate `trd.video_edit.version = 0.1.0` authoring document
 whose rows contain:
 

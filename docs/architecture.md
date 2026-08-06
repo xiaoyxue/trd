@@ -5,8 +5,9 @@ in every front-end (headless CLI, native window, browser, interactive viewer) by
 drawing into whatever render target each one provides. JavaScript/TypeScript is a
 thin bootstrap only — the WebGPU API is never called from JS.
 
-Everything shares **one render function** and **one data format** (a mesh-first
-Arrow stream):
+Everything shares **one render function** and one mesh-first **render format**.
+The video editor additionally reads a separate versioned authoring timeline and
+derives ordinary render scenes from it in Rust:
 
 ```
 input-stream ─┬─ trd-cli  → trd-core → offscreen readback → image-stream   (headless)
@@ -15,6 +16,9 @@ input-stream ─┬─ trd-cli  → trd-core → offscreen readback → image-st
               └─ trd-gui  → trd-core → offscreen → egui image      (interactive, native + browser)
 
                   image-stream → scripts/encode.py → ffmpeg → GIF / WebP / MP4
+
+video-edit timeline + VideoFrame RGBA
+              → trd-placement + trd-gui → trd-core → egui image    (browser editor)
 ```
 
 ## The render core — `trd-core`
@@ -82,6 +86,7 @@ Each is a *thin shell* that only supplies a render target and calls the core:
 | **`trd-app`** | Arrow stream (stdin) | live window swapchain | frames on screen |
 | **`trd-wasm`** | Arrow stream (buffered via `loadIpc`) | live canvas (or offscreen texture) | frames in the browser |
 | **`trd-gui`** | a mesh + live gestures | offscreen texture → egui image | an interactive orbit/zoom viewer (native + browser) |
+| **video editor** | `0.1.0` timeline + external video | offscreen texture → egui image | quad-local 3D editing over video |
 
 - **`trd-cli`** — headless Arrow filter: renders each frame to an offscreen
   texture and writes the pixels as an Arrow image stream. It does **not** encode
@@ -107,6 +112,12 @@ Each is a *thin shell* that only supplies a render target and calls the core:
   an external producer would drive. Shared state/UI/render backends live in
   `crates/trd-gui`; `native/trd-gui-app` and `web/gui-viewer` are its thin
   delivery shells. Design notes: [`docs/gui-design.md`](gui-design.md).
+- **`web/video-editing`** — browser video editor: an external HTML video is the
+  playback clock; WebCodecs copies the current frame to Rust, which decodes the
+  independent `0.1.0` Arrow timeline, reconstructs its tracked quad through
+  `trd-placement`, applies persistent object-local edits, and renders the
+  video/mesh/editor overlays through `trd-core`. See
+  [`docs/video-editing.md`](video-editing.md).
 
 ## Source layout
 
@@ -115,6 +126,7 @@ Each is a *thin shell* that only supplies a render target and calls the core:
 | `crates/trd-core` | the unified render core (`render/` module tree, `*.wgsl` shaders, `stream.rs`, `protocol.rs`) |
 | `crates/trd-cli` | headless CLI: Arrow stream in → Arrow image out |
 | `crates/trd-gui` | reusable egui UI, scene/interaction state, native render backends, and browser wasm entry |
+| `crates/trd-placement` | GPU-free K + image-quad reconstruction and placement matrices |
 | `crates/trd-wasm` | `wasm-bindgen` browser bindings (`canvas_renderer`/`offscreen_renderer`); the `trd-wasm` npm library |
 | `native/trd-app` | native stream-playback window (winit + live wgpu surface) |
 | `native/trd-gui-app` | native eframe shell around the reusable `trd-gui` library |
@@ -122,6 +134,7 @@ Each is a *thin shell* that only supplies a render target and calls the core:
 | `web/gui-viewer` | browser eframe shell around the `trd-gui` wasm module |
 | `web/video-editing` | browser video-editing surface using the shared `trd-gui` wasm module |
 | `web/package.json` | shared Bun workspace for all browser delivery surfaces |
+| `scripts/fiba_video_editing_bundle.py` | FIBA video/parquet → `0.1.0` timeline document |
 | `examples/` | demo streams + `render.sh` / `render.ps1` wrappers + producer scripts |
 | `scripts/` | pyarrow producers (`obj`/`texture`/`jsonl`/perception `_to_arrow.py`), `encode.py`, `extract_frames.py`, `dev-env.ps1` |
 

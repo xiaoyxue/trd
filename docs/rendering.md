@@ -223,6 +223,7 @@ controls. Everything is **per-object**: click an object to select it, then edit
   with numeric **Translation** (x/y/z), **Rotation** (X/Y/Z°), and **Scale**
   (uniform + per-axis) — the widgets and the mouse stay in sync (dragging updates
   the numbers and vice-versa).
+
 - **Render mode (per object).** The **Render mode** selector sets the selected
   object's mode — **Filled / Wireframe / Textured / PBR** — so objects can mix modes
   in one scene.
@@ -264,6 +265,26 @@ http://localhost:8080/?mesh=/assets/meshes/can/coke.obj&texture=/assets/meshes/c
 > shared. On the headless RTX Linux box, reach the browser viewer over an SSH
 > port-forward (see [AGENTS.md](../AGENTS.md)).
 
+## Video editor — `web/video-editing`
+
+The dedicated FIBA editor is a sibling of the generic stream viewer and GUI
+viewer in the shared `web/` Bun workspace:
+
+```sh
+cd web
+bun install --frozen-lockfile
+bun run --cwd video-editing dev  # http://localhost:8085
+```
+
+Open the local `shot_0001.mp4` or an HTTP(S) video URL, select the tracked quad,
+then place/edit Coke, beer, or Dragon. HTML video owns playback; Rust maps each
+presented frame to the separate `0.1.0` Arrow timeline and renders the video,
+placed mesh, and editor overlays. This is not the `0.0.6` render protocol:
+edited-scene export to `[mesh][texture?][frames][params]` remains future work.
+
+See [`video-editing.md`](video-editing.md) for the document generation command,
+schema, quad basis, lighting defaults, playback visibility, SSH tunnel, and
+known tracking-jitter behavior.
 
 ## Web (wasm)
 
@@ -333,8 +354,9 @@ them by hash from `web/bun.lock`); regenerate it after changing
 `web/bun.lock` — see
 [`AGENTS.md`](../AGENTS.md) for the exact command.
 
-> **Windows:** `render.ps1 -Web` still builds the older `wasm-pack` demo bundle; the
-> config-driven `render.sh --web` flow above is the current Nix/Linux path.
+> **Windows:** `render.ps1 -Web` builds the same generic `web/viewer` delivery
+> surface with `wasm-pack` + Bun (no Nix); `render.sh --web` uses the Nix-built
+> package on Linux.
 
 ## Windows setup (without Nix)
 
