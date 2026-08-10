@@ -4050,6 +4050,7 @@ dependencies = [
  "image",
  "js-sys",
  "log",
+ "pollster",
  "thiserror 2.0.18",
  "trd-core",
  "trd-placement",
@@ -4068,6 +4069,21 @@ dependencies = [
  "egui",
  "env_logger",
  "log",
+ "trd-core",
+ "trd-gui",
+]
+
+[[package]]
+name = "trd-gui-video-editing"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "eframe",
+ "egui",
+ "env_logger",
+ "log",
+ "pollster",
+ "thiserror 2.0.18",
  "trd-core",
  "trd-gui",
 ]

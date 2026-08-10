@@ -68,6 +68,14 @@ bun run --cwd gui-video-editing dev
 These Bun commands run natively in PowerShell 7 on Windows as well as under
 Linux/Nix.
 
+The native media/timeline counterpart is:
+
+```sh
+cargo run -p trd-gui-video-editing -- \
+  --document web/gui-video-editing/data/fiba-shot1.arrow \
+  --video /path/to/shot_0001.mp4
+```
+
 Open the URL printed by Bun. The canvas stays blank until **Open video...**
 selects either a local file or an HTTP(S) URL. Choose the same
 `shot_0001.mp4` used to generate the Arrow document (for example the reference

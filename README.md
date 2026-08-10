@@ -139,6 +139,8 @@ Linux, the vendor driver on Windows).
 cargo build --workspace                                # shared crates + native delivery apps
 cargo run -p trd-cli -- --width 256 --height 256       # headless Arrow filter (stdin → stdout)
 cargo run -p trd-gui-app -- --mesh assets/meshes/bunny.obj # interactive viewer window
+cargo run -p trd-gui-video-editing -- --document web/gui-video-editing/data/fiba-shot1.arrow \
+  --video /path/to/shot_0001.mp4                    # native video timeline/player
 examples/render.sh --cli                               # end-to-end demo → output/out.gif
 ( cd web && bun run --cwd viewer dev )                 # stream viewer on :8080
 ( cd web && bun run --cwd gui-viewer dev )             # GUI viewer on :8082
@@ -152,6 +154,8 @@ examples/render.sh --cli                               # end-to-end demo → out
 cargo build --workspace
 cargo run -p trd-cli -- --width 256 --height 256       # headless Arrow filter (stdin → stdout)
 cargo run -p trd-gui-app -- --mesh assets\meshes\bunny.obj # interactive viewer window
+cargo run -p trd-gui-video-editing -- --document web\gui-video-editing\data\fiba-shot1.arrow `
+  --video C:\path\to\shot_0001.mp4                   # native video timeline/player
 examples\render.ps1 -CLI                               # end-to-end demo → output\out.gif
 cd web; bun run --cwd viewer dev                       # stream viewer on :8080
 # use `bun run --cwd gui-viewer dev` for :8082
@@ -248,6 +252,21 @@ Coca-Cola can, beer can, and Dragon; every PBR object uses
 `assets/envmap/uffizi-large.hdr` by default. Current behavior, document schema,
 placement conventions, generation command, and known limitations are in
 **[`docs/video-editing.md`](docs/video-editing.md)**.
+
+The native counterpart lives at `native/trd-gui-video-editing`. It uses
+ffmpeg/ffprobe to stream RGBA frames into the same Rust `VideoEditingApp` used
+by the browser, without temporary frame files:
+
+```sh
+cargo run -p trd-gui-video-editing -- \
+  --document web/gui-video-editing/data/fiba-shot1.arrow \
+  --video /path/to/shot_0001.mp4
+```
+
+The native and browser surfaces share the same panels, timeline, quad selection,
+catalog, object transforms, GPU picking, PBR/IBL controls, and three-layer
+composition. Only the media adapter differs: HTML video/WebCodecs in the
+browser, ffmpeg/ffprobe in the native shell.
 
 ## Documentation
 

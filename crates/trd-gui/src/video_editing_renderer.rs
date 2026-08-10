@@ -1,5 +1,3 @@
-#![cfg(target_arch = "wasm32")]
-
 use crate::assets;
 use crate::video_editing::CatalogAsset;
 
@@ -14,7 +12,7 @@ pub struct VideoPlacementRenderer {
 }
 
 impl VideoPlacementRenderer {
-    pub(crate) async fn new_empty(width: u32, height: u32) -> Result<Self, String> {
+    pub async fn new_empty(width: u32, height: u32) -> Result<Self, String> {
         let instance = trd_core::create_instance();
         let trd_core::GpuContext { device, queue, .. } = trd_core::GpuContext::request(
             &instance,
@@ -44,7 +42,7 @@ impl VideoPlacementRenderer {
         })
     }
 
-    pub(crate) async fn new(
+    pub async fn new(
         asset: CatalogAsset,
         model_bytes: &[u8],
         texture_bytes: &[u8],
@@ -63,7 +61,7 @@ impl VideoPlacementRenderer {
             }
             CatalogAsset::Dragon => {
                 let glb = trd_core::import_glb(model_bytes).map_err(|error| error.to_string())?;
-                ImportedAsset::Pbr(glb)
+                ImportedAsset::Pbr(Box::new(glb))
             }
         };
         let instance = trd_core::create_instance();
@@ -148,8 +146,9 @@ impl VideoPlacementRenderer {
     pub async fn render(
         &mut self,
         rgba: &[u8],
-        source_width: u32,
-        source_height: u32,
+        frame_width: u32,
+        frame_height: u32,
+        calibration_size: (u32, u32),
         background_frame: &trd_core::VideoEditingFrame,
         quad_model: Option<trd_core::Matrix4>,
         quad_axes: Option<trd_core::Matrix4>,
@@ -159,12 +158,12 @@ impl VideoPlacementRenderer {
         state: &crate::scene::SceneState,
     ) -> Result<Vec<u8>, String> {
         self.renderer
-            .update_frame_texture_rgba(&self.queue, rgba, source_width, source_height);
+            .update_frame_texture_rgba(&self.queue, rgba, frame_width, frame_height);
         let background_params = self
-            .frame_params(background_frame, (source_width, source_height))
+            .frame_params(background_frame, calibration_size)
             .unwrap_or(trd_core::FrameParams::IDENTITY);
         let foreground_params = placement_frame
-            .map(|frame| self.frame_params(frame, (source_width, source_height)))
+            .map(|frame| self.frame_params(frame, calibration_size))
             .transpose()?
             .unwrap_or(background_params);
         if self.renderer.mesh_count() > 0 {
@@ -278,7 +277,7 @@ enum ImportedAsset {
         mesh: trd_core::Mesh,
         texture: trd_core::ImageTexture,
     },
-    Pbr(trd_core::GltfAsset),
+    Pbr(Box<trd_core::GltfAsset>),
 }
 
 impl ImportedAsset {

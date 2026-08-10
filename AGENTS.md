@@ -42,10 +42,12 @@ Guidance for agents working in this repository.
   (video metadata/poster + per-frame K/quad/tracked state). It is deliberately
   independent of render `PROTOCOL_VERSION`; do not add editor-only columns to
   `0.0.6` or bump the render protocol for editor state. Rust maps each presented
-  browser `VideoFrame` to a timeline row, reconstructs the quad through
-  `crates/trd-placement`, and derives ordinary `DrawableObject`s. Current
-  catalog resources are loaded at runtime; protocol export remains a separate
-  later slice.
+  browser `VideoFrame` or native ffmpeg frame to a timeline row, reconstructs
+  the quad through `crates/trd-placement`, and derives ordinary
+  `DrawableObject`s. Browser and native delivery surfaces host the same
+  `VideoEditingApp`, renderer, catalog, placement, picking, and egui panels;
+  only their media adapters differ. Current catalog resources are loaded at
+  runtime; protocol export remains a separate later slice.
 - **The input protocol is NOT backward compatible.** Wire format is **mesh-first**
   `[mesh][texture?][frames?][params]`; only the current `PROTOCOL_VERSION`
   (`trd_core::protocol::PROTOCOL_VERSION`, currently `0.0.6`) is accepted — every
@@ -75,7 +77,7 @@ Guidance for agents working in this repository.
     wasm32), `cargo test`, `tsc --noEmit`, Biome.
   - `nix fmt` — formats nix files (`nixfmt`).
 - **Delivery surfaces are grouped by platform.** Native binaries live in
-  `native/{trd-app,trd-gui-app}`; reusable Rust stays in `crates/`. Browser apps
+  `native/{trd-app,trd-gui-app,trd-gui-video-editing}`; reusable Rust stays in `crates/`. Browser apps
   live as sibling packages in `web/{viewer,gui-viewer,gui-video-editing}`.
 - **`web/` is a Bun workspace** with sibling `viewer/`, `gui-viewer/`, and
   `gui-video-editing/` packages. Each package's lint/format gate is Biome; run all
@@ -226,6 +228,10 @@ not complete until these tiers pass; **record the results on the PR.**
      quad selection, all three catalog assets, object picking/editing,
      play/pause/seek, and the video-only 222–287 tail. Confirm PBR/IBL and colors
      match the other front-ends. The MP4 stays external/uncommitted.
+   - **native video editor:** run `trd-gui-video-editing --document ... --video
+     ...`; verify source validation, streaming RGBA playback, play/pause/seek,
+     timeline row identity, and the tracked/video-only transition. ffmpeg and
+     ffprobe are the native media adapter; no temporary frame directory is used.
 4. **Native window e2e — Windows:** the live-surface paths that need a display —
    `trd-app` playing a stream (`examples/render.ps1 -App`) and the interactive
    `trd-gui` window (`cargo run -p trd-gui-app -- --mesh …`, both `--backend inproc`
@@ -233,6 +239,9 @@ not complete until these tiers pass; **record the results on the PR.**
    This is a **Windows-only manual e2e gate**: mark it N/A/ignored on Linux, and
    include the exact Windows commands in the PR and issue handoff whenever the
    current platform cannot run it.
+   Include `cargo run -p trd-gui-video-editing -- --document
+   web\gui-video-editing\data\fiba-shot1.arrow --video <MP4>` for changes
+   touching the cross-platform editor.
 
 The non-GPU gates (`nix flake check`: `cargo fmt`, clippy native + wasm32,
 `cargo test`, `tsc`, Biome) must pass on both platforms as well.

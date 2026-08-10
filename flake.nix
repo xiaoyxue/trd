@@ -124,6 +124,25 @@
           }
         );
 
+        # Native video-editing eframe shell. ffmpeg/ffprobe provide the native
+        # demux/decode adapter; all editor document/state remains in Rust.
+        trd-gui-video-editing = craneLib.buildPackage (
+          commonArgs
+          // {
+            inherit cargoArtifacts;
+            pname = "trd-gui-video-editing";
+            cargoExtraArgs = "--package trd-gui-video-editing";
+            doCheck = false;
+            buildInputs = runtimeLibs;
+            nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ pkgs.makeWrapper ];
+            postInstall = ''
+              wrapProgram $out/bin/trd-gui-video-editing \
+                --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath runtimeLibs} \
+                --prefix PATH : ${lib.makeBinPath [ pkgs.ffmpeg ]}
+            '';
+          }
+        );
+
         # --- wasm build ------------------------------------------------------
         wasmArgs = commonArgs // {
           CARGO_BUILD_TARGET = "wasm32-unknown-unknown";
@@ -312,6 +331,7 @@
           inherit
             trd-cli
             trd-gui
+            trd-gui-video-editing
             trd-wasm
             web
             ;
@@ -327,6 +347,10 @@
             type = "app";
             program = "${trd-gui}/bin/trd-gui-app";
           };
+          trd-gui-video-editing = {
+            type = "app";
+            program = "${trd-gui-video-editing}/bin/trd-gui-video-editing";
+          };
           web = {
             type = "app";
             program = "${webServe}/bin/trd-web-serve";
@@ -338,6 +362,7 @@
           inherit
             trd-cli
             trd-gui
+            trd-gui-video-editing
             trd-wasm
             web
             ;

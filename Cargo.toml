@@ -8,6 +8,7 @@ members = [
     "crates/trd-wasm",
     "native/trd-app",
     "native/trd-gui-app",
+    "native/trd-gui-video-editing",
 ]
 
 [workspace.package]

@@ -292,6 +292,21 @@ See [`video-editing.md`](video-editing.md) for the document generation command,
 schema, quad basis, lighting defaults, playback visibility, SSH tunnel, and
 known tracking-jitter behavior.
 
+Native media/timeline shell:
+
+```sh
+cargo run -p trd-gui-video-editing -- \
+  --document web/gui-video-editing/data/fiba-shot1.arrow \
+  --video /path/to/shot_0001.mp4
+```
+
+The native adapter uses ffprobe for source validation and streams ffmpeg RGBA
+frames through a Rust channel. Play/pause/seek restarts or invalidates the
+decoder stream; it does not extract temporary JPEGs. This first native slice
+shows video/poster, timeline, and tracked/video-only status. Native 3D
+placement/editing parity remains #167 follow-up work.
+Use `--probe-only` for a headless metadata + frame-0 decode smoke test.
+
 ## Web (wasm)
 
 ```sh

@@ -191,6 +191,34 @@ ssh -N -L 8085:localhost:8085 xiaoyxue@10.32.84.63
 
 Open <http://localhost:8085> in a WebGPU browser and select the local MP4.
 
+### Native editor
+
+The native delivery surface replaces HTML video/WebCodecs with ffprobe plus an
+ffmpeg raw-RGBA stream while hosting the same Rust `VideoEditingApp`:
+
+```sh
+cargo run -p trd-gui-video-editing -- \
+  --document web/gui-video-editing/data/fiba-shot1.arrow \
+  --video /path/to/shot_0001.mp4
+```
+
+Add `--probe-only` to validate metadata and decode frame 0 without opening a
+native window.
+
+```powershell
+cargo run -p trd-gui-video-editing -- `
+  --document web\gui-video-editing\data\fiba-shot1.arrow `
+  --video C:\path\to\shot_0001.mp4
+```
+
+The native shell validates filename/size/dimensions/frame count and feeds
+decoded frames into the shared editor state. Its panels, timeline, quad
+selection, catalog, transforms, PBR/IBL controls, GPU picking, and layered
+composition are the same Rust implementation used by the browser. ffmpeg
+outputs RGBA directly to a Rust decoder thread/channel; no temporary frame
+files are created. The native **Open video** action reports the current
+`--video` source; changing sources remains a launch-time operation.
+
 ## Source map
 
 | Path | Responsibility |
@@ -198,9 +226,10 @@ Open <http://localhost:8085> in a WebGPU browser and select the local MP4.
 | `crates/trd-core/src/video_editing.rs` | versioned timeline decoder |
 | `crates/trd-placement/src/lib.rs` | K/quad frame and placement math |
 | `crates/trd-gui/src/video_editing.rs` | editor state, commands, UI |
-| `crates/trd-gui/src/video_editing_renderer.rs` | wasm composition and picking |
+| `crates/trd-gui/src/video_editing_renderer.rs` | shared native/wasm composition and picking |
 | `web/gui-video-editing/src/main.ts` | thin video/file/resource byte bridge |
 | `web/gui-video-editing/pkg` | editor-owned generated `trd-gui` wasm package |
+| `native/trd-gui-video-editing` | native ffmpeg-backed host for the shared editor |
 | `scripts/fiba_video_editing_bundle.py` | timeline generator |
 
 ## Remaining work

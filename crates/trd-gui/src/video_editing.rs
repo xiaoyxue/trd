@@ -1,24 +1,20 @@
-//! Browser video-editing example state and UI (#163).
+//! Shared browser/native video-editing state and UI (#163/#167).
 
-#[cfg(target_arch = "wasm32")]
 use std::cell::{Cell, RefCell};
-#[cfg(target_arch = "wasm32")]
 use std::rc::Rc;
 
-#[cfg(target_arch = "wasm32")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-pub(crate) enum CatalogAsset {
+pub enum CatalogAsset {
     CocaColaCan,
     BeerCan,
     Dragon,
 }
 
-#[cfg(target_arch = "wasm32")]
 impl CatalogAsset {
-    const ALL: [Self; 3] = [Self::CocaColaCan, Self::BeerCan, Self::Dragon];
+    pub const ALL: [Self; 3] = [Self::CocaColaCan, Self::BeerCan, Self::Dragon];
 
-    const fn label(self) -> &'static str {
+    pub const fn label(self) -> &'static str {
         match self {
             Self::CocaColaCan => "Coca-Cola can",
             Self::BeerCan => "Beer can",
@@ -26,7 +22,7 @@ impl CatalogAsset {
         }
     }
 
-    const fn from_code(code: u8) -> Option<Self> {
+    pub const fn from_code(code: u8) -> Option<Self> {
         match code {
             1 => Some(Self::CocaColaCan),
             2 => Some(Self::BeerCan),
@@ -35,21 +31,23 @@ impl CatalogAsset {
         }
     }
 
-    const fn code(self) -> u8 {
+    pub const fn code(self) -> u8 {
         self as u8 + 1
     }
 }
 
-#[cfg(target_arch = "wasm32")]
 const COMMAND_NONE: u8 = 0;
-#[cfg(target_arch = "wasm32")]
 const COMMAND_PICK_VIDEO: u8 = 1;
-#[cfg(target_arch = "wasm32")]
 const COMMAND_PLAY: u8 = 2;
-#[cfg(target_arch = "wasm32")]
 const COMMAND_PAUSE: u8 = 3;
 
-#[cfg(target_arch = "wasm32")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoEditingCommand {
+    OpenLocalVideo,
+    Play,
+    Pause,
+}
+
 #[derive(Clone)]
 struct IncomingVideoFrame {
     rgba: Vec<u8>,
@@ -58,7 +56,6 @@ struct IncomingVideoFrame {
     frame_index: u32,
 }
 
-#[cfg(target_arch = "wasm32")]
 pub struct VideoEditingShared {
     frame: RefCell<Option<IncomingVideoFrame>>,
     latest_video_frame: RefCell<Option<IncomingVideoFrame>>,
@@ -75,12 +72,11 @@ pub struct VideoEditingShared {
     pending_pick: Cell<Option<(u32, u32)>>,
     pick_in_flight: Cell<bool>,
     pick_result: RefCell<Option<Option<u32>>>,
-    pub(crate) renderer: RefCell<Option<crate::video_editing_renderer::VideoPlacementRenderer>>,
+    renderer: RefCell<Option<crate::video_editing_renderer::VideoPlacementRenderer>>,
     asset_defaults: RefCell<Option<(CatalogAsset, trd_core::RenderMode, trd_core::DisneyMaterial)>>,
     error: RefCell<Option<String>>,
 }
 
-#[cfg(target_arch = "wasm32")]
 impl Default for VideoEditingShared {
     fn default() -> Self {
         Self {
@@ -102,6 +98,94 @@ impl Default for VideoEditingShared {
             renderer: RefCell::new(None),
             asset_defaults: RefCell::new(None),
             error: RefCell::new(None),
+        }
+    }
+}
+
+impl VideoEditingShared {
+    pub fn update_video_frame_rgba(
+        &self,
+        rgba: Vec<u8>,
+        width: u32,
+        height: u32,
+        frame_index: u32,
+    ) -> Result<(), String> {
+        let expected = width as usize * height as usize * 4;
+        if rgba.len() != expected {
+            return Err(format!(
+                "video RGBA length {} != {width}x{height}x4",
+                rgba.len()
+            ));
+        }
+        self.frame.replace(Some(IncomingVideoFrame {
+            rgba,
+            width,
+            height,
+            frame_index,
+        }));
+        self.request_repaint();
+        Ok(())
+    }
+
+    pub fn set_video_status(&self, loaded: bool, playing: bool) {
+        self.video_loaded.set(loaded);
+        self.video_playing.set(playing);
+        if !loaded {
+            self.error.replace(None);
+        }
+        self.request_repaint();
+    }
+
+    pub fn set_error(&self, message: impl Into<String>) {
+        self.error.replace(Some(message.into()));
+        self.request_repaint();
+    }
+
+    pub fn clear_error(&self) {
+        self.error.replace(None);
+    }
+
+    pub fn take_command(&self) -> Option<VideoEditingCommand> {
+        match self.command.replace(COMMAND_NONE) {
+            COMMAND_PICK_VIDEO => Some(VideoEditingCommand::OpenLocalVideo),
+            COMMAND_PLAY => Some(VideoEditingCommand::Play),
+            COMMAND_PAUSE => Some(VideoEditingCommand::Pause),
+            _ => None,
+        }
+    }
+
+    pub fn take_asset_request(&self) -> Option<CatalogAsset> {
+        CatalogAsset::from_code(self.asset_request.replace(0))
+    }
+
+    pub fn take_video_url_request(&self) -> Option<String> {
+        self.video_url_request.borrow_mut().take()
+    }
+
+    pub fn take_seek_frame(&self) -> Option<u32> {
+        let frame = self.seek_frame.replace(-1);
+        (frame >= 0).then_some(frame as u32)
+    }
+
+    pub fn set_renderer(&self, renderer: crate::video_editing_renderer::VideoPlacementRenderer) {
+        self.renderer.replace(Some(renderer));
+        self.needs_overlay.set(true);
+        self.request_repaint();
+    }
+
+    pub fn set_catalog_renderer(
+        &self,
+        asset: CatalogAsset,
+        renderer: crate::video_editing_renderer::VideoPlacementRenderer,
+    ) {
+        let (mode, material) = renderer.defaults();
+        self.asset_defaults.replace(Some((asset, mode, material)));
+        self.set_renderer(renderer);
+    }
+
+    pub fn request_repaint(&self) {
+        if let Some(context) = self.context.borrow().as_ref() {
+            context.request_repaint();
         }
     }
 }
@@ -212,48 +296,24 @@ impl VideoEditingHandle {
         height: u32,
         frame_index: u32,
     ) -> Result<(), wasm_bindgen::JsValue> {
-        let expected = width as usize * height as usize * 4;
-        if rgba.len() != expected {
-            return Err(wasm_bindgen::JsValue::from_str(&format!(
-                "video RGBA length {} != {width}x{height}x4",
-                rgba.len()
-            )));
-        }
         if frame_index >= self.frame_count {
             return Err(wasm_bindgen::JsValue::from_str(
                 "video frame index out of range",
             ));
         }
-        self.shared.frame.replace(Some(IncomingVideoFrame {
-            rgba,
-            width,
-            height,
-            frame_index,
-        }));
-        if let Some(context) = self.shared.context.borrow().as_ref() {
-            context.request_repaint();
-        }
-        Ok(())
+        self.shared
+            .update_video_frame_rgba(rgba, width, height, frame_index)
+            .map_err(|error| wasm_bindgen::JsValue::from_str(&error))
     }
 
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = setVideoStatus)]
     pub fn set_video_status(&self, loaded: bool, playing: bool) {
-        self.shared.video_loaded.set(loaded);
-        self.shared.video_playing.set(playing);
-        if !loaded {
-            self.shared.error.replace(None);
-        }
-        if let Some(context) = self.shared.context.borrow().as_ref() {
-            context.request_repaint();
-        }
+        self.shared.set_video_status(loaded, playing);
     }
 
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = setVideoError)]
     pub fn set_video_error(&self, message: String) {
-        self.shared.error.replace(Some(message));
-        if let Some(context) = self.shared.context.borrow().as_ref() {
-            context.request_repaint();
-        }
+        self.shared.set_error(message);
     }
 
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = takeCommand)]
@@ -296,20 +356,11 @@ impl VideoEditingHandle {
         )
         .await
         .map_err(|error| wasm_bindgen::JsValue::from_str(&error))?;
-        let (mode, material) = renderer.defaults();
-        self.shared
-            .asset_defaults
-            .replace(Some((asset, mode, material)));
-        self.shared.renderer.replace(Some(renderer));
-        self.shared.needs_overlay.set(true);
-        if let Some(context) = self.shared.context.borrow().as_ref() {
-            context.request_repaint();
-        }
+        self.shared.set_catalog_renderer(asset, renderer);
         Ok(())
     }
 }
 
-#[cfg(target_arch = "wasm32")]
 pub struct VideoEditingApp {
     document: trd_core::VideoEditingDocument,
     display_image: egui::ColorImage,
@@ -329,7 +380,6 @@ pub struct VideoEditingApp {
     video_url: String,
 }
 
-#[cfg(target_arch = "wasm32")]
 impl VideoEditingApp {
     pub fn new(
         document: trd_core::VideoEditingDocument,
@@ -550,12 +600,13 @@ impl VideoEditingApp {
         let height = self.document.video.height;
         let show_quad_gizmo = self.show_quad_gizmo;
         let background_frame_index = video.frame_index;
-        wasm_bindgen_futures::spawn_local(async move {
+        let render = async move {
             let result = renderer
                 .render(
                     &video.rgba,
-                    width,
-                    height,
+                    video.width,
+                    video.height,
+                    (width, height),
                     &background_frame,
                     quad_model,
                     quad_axes,
@@ -583,7 +634,11 @@ impl VideoEditingApp {
             if let Some(context) = shared.context.borrow().as_ref() {
                 context.request_repaint();
             }
-        });
+        };
+        #[cfg(target_arch = "wasm32")]
+        wasm_bindgen_futures::spawn_local(render);
+        #[cfg(not(target_arch = "wasm32"))]
+        pollster::block_on(render);
     }
 
     fn schedule_pick(&self) {
@@ -616,7 +671,7 @@ impl VideoEditingApp {
         );
         self.shared.pick_in_flight.set(true);
         let shared = self.shared.clone();
-        wasm_bindgen_futures::spawn_local(async move {
+        let pick = async move {
             let hit = renderer
                 .pick(&frame, source_size, model, target_point)
                 .await;
@@ -626,7 +681,11 @@ impl VideoEditingApp {
             if let Some(context) = shared.context.borrow().as_ref() {
                 context.request_repaint();
             }
-        });
+        };
+        #[cfg(target_arch = "wasm32")]
+        wasm_bindgen_futures::spawn_local(pick);
+        #[cfg(not(target_arch = "wasm32"))]
+        pollster::block_on(pick);
     }
 
     fn quad_frame_at(&self, frame_index: u32) -> Option<trd_placement::QuadFrame> {
@@ -657,7 +716,6 @@ impl VideoEditingApp {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
 impl eframe::App for VideoEditingApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.shared.context.replace(Some(ui.ctx().clone()));
@@ -906,7 +964,6 @@ impl eframe::App for VideoEditingApp {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
 fn video_progress_bar(ui: &mut egui::Ui, frame: &mut u32, last_frame: u32, enabled: bool) -> bool {
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), 18.0),
@@ -955,13 +1012,11 @@ fn video_progress_bar(ui: &mut egui::Ui, frame: &mut u32, last_frame: u32, enabl
     changed
 }
 
-#[cfg(target_arch = "wasm32")]
 fn media_time_label(frame: u32, fps_num: u32, fps_den: u32) -> String {
     let seconds = u64::from(frame) * u64::from(fps_den) / u64::from(fps_num.max(1));
     format!("{:02}:{:02}", seconds / 60, seconds % 60)
 }
 
-#[cfg(target_arch = "wasm32")]
 fn point_in_quad(point: [f32; 2], quad: [[f32; 2]; 4]) -> bool {
     let mut inside = false;
     let mut previous = quad[3];

@@ -118,6 +118,11 @@ Each is a *thin shell* that only supplies a render target and calls the core:
   `trd-placement`, applies persistent object-local edits, and renders the
   video/mesh/editor overlays through `trd-core`. See
   [`docs/video-editing.md`](video-editing.md).
+- **`native/trd-gui-video-editing`** — native eframe media/timeline shell:
+  ffmpeg/ffprobe replace HTML video/WebCodecs and stream RGBA frames through a
+  Rust channel; the document decoder and frame-row semantics are shared. The
+  first slice exposes playback/timeline/tracking state; shared 3D edit parity is
+  tracked by #167.
 
 ## Source layout
 
@@ -130,6 +135,7 @@ Each is a *thin shell* that only supplies a render target and calls the core:
 | `crates/trd-wasm` | `wasm-bindgen` browser bindings (`canvas_renderer`/`offscreen_renderer`); the `trd-wasm` npm library |
 | `native/trd-app` | native stream-playback window (winit + live wgpu surface) |
 | `native/trd-gui-app` | native eframe shell around the reusable `trd-gui` library |
+| `native/trd-gui-video-editing` | native ffmpeg-backed video timeline/player shell |
 | `web/viewer` | config-driven browser stream player around `trd-wasm` |
 | `web/gui-viewer` | browser eframe shell around the `trd-gui` wasm module |
 | `web/gui-video-editing` | browser video-editing surface with its own generated `trd-gui` wasm package |
