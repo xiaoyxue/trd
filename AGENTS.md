@@ -38,14 +38,16 @@ Guidance for agents working in this repository.
   `wgpu::Surface` swapchain directly — there is **no** shared on-screen harness.
 - Major input data is columnar (Apache Arrow tables) with simple glue logic.
 - **Video editing uses a separate authoring document.**
-  `web/video-editing` reads `trd.video_edit.version = 0.1.0` timeline rows
+  `web/gui-video-editing` reads `trd.video_edit.version = 0.1.0` timeline rows
   (video metadata/poster + per-frame K/quad/tracked state). It is deliberately
   independent of render `PROTOCOL_VERSION`; do not add editor-only columns to
   `0.0.6` or bump the render protocol for editor state. Rust maps each presented
-  browser `VideoFrame` to a timeline row, reconstructs the quad through
-  `crates/trd-placement`, and derives ordinary `DrawableObject`s. Current
-  catalog resources are loaded at runtime; protocol export remains a separate
-  later slice.
+  browser `VideoFrame` or native ffmpeg frame to a timeline row, reconstructs
+  the quad through `crates/trd-placement`, and derives ordinary
+  `DrawableObject`s. Browser and native delivery surfaces host the same
+  `VideoEditingApp`, renderer, catalog, placement, picking, and egui panels;
+  only their media adapters differ. Current catalog resources are loaded at
+  runtime; protocol export remains a separate later slice.
 - **The input protocol is NOT backward compatible.** Wire format is **mesh-first**
   `[mesh][texture?][frames?][params]`; only the current `PROTOCOL_VERSION`
   (`trd_core::protocol::PROTOCOL_VERSION`, currently `0.0.6`) is accepted — every
@@ -75,20 +77,22 @@ Guidance for agents working in this repository.
     wasm32), `cargo test`, `tsc --noEmit`, Biome.
   - `nix fmt` — formats nix files (`nixfmt`).
 - **Delivery surfaces are grouped by platform.** Native binaries live in
-  `native/{trd-app,trd-gui-app}`; reusable Rust stays in `crates/`. Browser apps
-  live as sibling packages in `web/{viewer,gui-viewer,video-editing}`.
+  `native/{trd-app,trd-gui-app,trd-gui-video-editing}`; reusable Rust stays in `crates/`. Browser apps
+  live as sibling packages in `web/{viewer,gui-viewer,gui-video-editing}`.
 - **`web/` is a Bun workspace** with sibling `viewer/`, `gui-viewer/`, and
-  `video-editing/` packages. Each package's lint/format gate is Biome; run all
+  `gui-video-editing/` packages. Each package's lint/format gate is Biome; run all
   packages' checks from the workspace root
   with `bun run check`.
-  `gui-viewer` and `video-editing` share the generated `trd-gui` wasm package
-  under `web/gui-viewer/pkg`; do not generate a second package under the editor.
+  `gui-viewer` and `gui-video-editing` each own a generated `trd-gui` wasm
+  package under their own `pkg/`; neither delivery surface imports the other's
+  build output.
   Run `bun run check` / `format` / `typecheck` from `nix develop`, or directly on
   Windows — `@biomejs/biome` + `apache-arrow` are in
   `web/viewer/package.json`. On a clean non-Nix checkout, first run
   `bun run --cwd viewer build:wasm` and
-  `bun run --cwd gui-viewer build:wasm` from `web/` to stage both local wasm
-  packages, then `bun install --frozen-lockfile`; the workspace
+  `bun run --cwd gui-viewer build:wasm` and
+  `bun run --cwd gui-video-editing build:wasm` from `web/` to stage all local
+  wasm packages, then `bun install --frozen-lockfile`; the workspace
   `check`/`typecheck`/build scripts work without Nix.
 - **Nix web deps are installed offline via
   [bun2nix](https://github.com/nix-community/bun2nix).** `web/bun.nix`
@@ -220,10 +224,17 @@ not complete until these tiers pass; **record the results on the PR.**
      matching the CLI.
    - **trd-gui (wasm + web):** build the gui wasm, serve, and load a mesh
      (`?mesh=…&texture=…`) in the browser.
-   - **video editor:** serve `web/video-editing`, open the FIBA MP4, and exercise
+   - **video editor:** serve `web/gui-video-editing`, open the FIBA MP4, and exercise
      quad selection, all three catalog assets, object picking/editing,
      play/pause/seek, and the video-only 222–287 tail. Confirm PBR/IBL and colors
-     match the other front-ends. The MP4 stays external/uncommitted.
+     match the other front-ends. Open **Details** and confirm its displayed
+     frame identity does not jump ahead during rapid seek/render, and that the
+     Dragon reports its GLB material maps, raw tracking pose delta, zero direct
+     light/ambient, and Uffizi IBL. The MP4 stays external/uncommitted.
+   - **native video editor:** run `trd-gui-video-editing --document ... --video
+     ...`; verify source validation, streaming RGBA playback, play/pause/seek,
+     timeline row identity, and the tracked/video-only transition. ffmpeg and
+     ffprobe are the native media adapter; no temporary frame directory is used.
 4. **Native window e2e — Windows:** the live-surface paths that need a display —
    `trd-app` playing a stream (`examples/render.ps1 -App`) and the interactive
    `trd-gui` window (`cargo run -p trd-gui-app -- --mesh …`, both `--backend inproc`
@@ -231,6 +242,9 @@ not complete until these tiers pass; **record the results on the PR.**
    This is a **Windows-only manual e2e gate**: mark it N/A/ignored on Linux, and
    include the exact Windows commands in the PR and issue handoff whenever the
    current platform cannot run it.
+   Include `cargo run -p trd-gui-video-editing -- --document
+   web\gui-video-editing\data\fiba-shot1.arrow --video <MP4>` for changes
+   touching the cross-platform editor.
 
 The non-GPU gates (`nix flake check`: `cargo fmt`, clippy native + wasm32,
 `cargo test`, `tsc`, Biome) must pass on both platforms as well.

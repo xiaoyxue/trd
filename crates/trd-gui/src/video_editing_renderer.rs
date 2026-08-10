@@ -1,7 +1,25 @@
-#![cfg(target_arch = "wasm32")]
-
 use crate::assets;
 use crate::video_editing::CatalogAsset;
+
+#[derive(Debug, Clone)]
+pub struct ImportedAssetDiagnostics {
+    pub source_format: &'static str,
+    pub aabb_min: [f32; 3],
+    pub aabb_max: [f32; 3],
+    pub preview_scale: f32,
+    pub imported_material: trd_core::DisneyMaterial,
+}
+
+#[derive(Debug, Clone)]
+pub struct VideoRendererDiagnostics {
+    pub adapter_name: String,
+    pub backend: String,
+    pub device_type: String,
+    pub target_size: (u32, u32),
+    pub pick_target_size: Option<(u32, u32)>,
+    pub msaa_samples: u32,
+    pub asset: Option<ImportedAssetDiagnostics>,
+}
 
 pub struct VideoPlacementRenderer {
     device: wgpu::Device,
@@ -11,12 +29,20 @@ pub struct VideoPlacementRenderer {
     pick_target: Option<trd_core::PickTarget>,
     default_mode: trd_core::RenderMode,
     default_material: trd_core::DisneyMaterial,
+    adapter_name: String,
+    backend: String,
+    device_type: String,
+    asset_diagnostics: Option<ImportedAssetDiagnostics>,
 }
 
 impl VideoPlacementRenderer {
-    pub(crate) async fn new_empty(width: u32, height: u32) -> Result<Self, String> {
+    pub async fn new_empty(width: u32, height: u32) -> Result<Self, String> {
         let instance = trd_core::create_instance();
-        let trd_core::GpuContext { device, queue, .. } = trd_core::GpuContext::request(
+        let trd_core::GpuContext {
+            adapter,
+            device,
+            queue,
+        } = trd_core::GpuContext::request(
             &instance,
             &trd_core::GpuRequest {
                 label: "trd video editing wasm device",
@@ -25,6 +51,7 @@ impl VideoPlacementRenderer {
         )
         .await
         .map_err(|error| error.to_string())?;
+        let adapter_info = adapter.get_info();
         let placeholder = assets::default_mesh().map_err(|error| error.to_string())?;
         let renderer = trd_core::MeshRenderer::auto_fit(
             &device,
@@ -41,10 +68,14 @@ impl VideoPlacementRenderer {
             pick_target: None,
             default_mode: trd_core::RenderMode::Filled,
             default_material: trd_core::DisneyMaterial::default(),
+            adapter_name: adapter_info.name,
+            backend: format!("{:?}", adapter_info.backend),
+            device_type: format!("{:?}", adapter_info.device_type),
+            asset_diagnostics: None,
         })
     }
 
-    pub(crate) async fn new(
+    pub async fn new(
         asset: CatalogAsset,
         model_bytes: &[u8],
         texture_bytes: &[u8],
@@ -63,11 +94,15 @@ impl VideoPlacementRenderer {
             }
             CatalogAsset::Dragon => {
                 let glb = trd_core::import_glb(model_bytes).map_err(|error| error.to_string())?;
-                ImportedAsset::Pbr(glb)
+                ImportedAsset::Pbr(Box::new(glb))
             }
         };
         let instance = trd_core::create_instance();
-        let trd_core::GpuContext { device, queue, .. } = trd_core::GpuContext::request(
+        let trd_core::GpuContext {
+            adapter,
+            device,
+            queue,
+        } = trd_core::GpuContext::request(
             &instance,
             &trd_core::GpuRequest {
                 label: "trd video editing wasm device",
@@ -76,6 +111,8 @@ impl VideoPlacementRenderer {
         )
         .await
         .map_err(|error| error.to_string())?;
+        let adapter_info = adapter.get_info();
+        let asset_diagnostics = imported.diagnostics();
         let mesh = imported.mesh();
         let mut renderer = trd_core::MeshRenderer::auto_fit(
             &device,
@@ -95,6 +132,10 @@ impl VideoPlacementRenderer {
             pick_target: None,
             default_mode,
             default_material,
+            adapter_name: adapter_info.name,
+            backend: format!("{:?}", adapter_info.backend),
+            device_type: format!("{:?}", adapter_info.device_type),
+            asset_diagnostics: Some(asset_diagnostics),
         })
     }
 
@@ -104,6 +145,21 @@ impl VideoPlacementRenderer {
 
     pub fn size(&self) -> (u32, u32) {
         (self.target.width(), self.target.height())
+    }
+
+    pub fn diagnostics(&self) -> VideoRendererDiagnostics {
+        VideoRendererDiagnostics {
+            adapter_name: self.adapter_name.clone(),
+            backend: self.backend.clone(),
+            device_type: self.device_type.clone(),
+            target_size: self.size(),
+            pick_target_size: self
+                .pick_target
+                .as_ref()
+                .map(|_| (self.target.width(), self.target.height())),
+            msaa_samples: 4,
+            asset: self.asset_diagnostics.clone(),
+        }
     }
 
     pub fn resize(&mut self, width: u32, height: u32) -> Result<(), String> {
@@ -122,12 +178,12 @@ impl VideoPlacementRenderer {
         source_size: (u32, u32),
         model: trd_core::Matrix4,
         point: (u32, u32),
-    ) -> Option<u32> {
-        let params = self.frame_params(frame, source_size).ok()?;
+    ) -> Result<Option<u32>, String> {
+        let params = self.frame_params(frame, source_size)?;
         let target = self.pick_target.get_or_insert_with(|| {
             trd_core::PickTarget::new(&self.device, self.target.width(), self.target.height())
         });
-        target
+        Ok(target
             .pick(
                 &self.device,
                 &self.queue,
@@ -141,15 +197,16 @@ impl VideoPlacementRenderer {
                 point.0,
                 point.1,
             )
-            .await
+            .await)
     }
 
     #[allow(clippy::too_many_arguments)]
     pub async fn render(
         &mut self,
         rgba: &[u8],
-        source_width: u32,
-        source_height: u32,
+        frame_width: u32,
+        frame_height: u32,
+        calibration_size: (u32, u32),
         background_frame: &trd_core::VideoEditingFrame,
         quad_model: Option<trd_core::Matrix4>,
         quad_axes: Option<trd_core::Matrix4>,
@@ -159,12 +216,12 @@ impl VideoPlacementRenderer {
         state: &crate::scene::SceneState,
     ) -> Result<Vec<u8>, String> {
         self.renderer
-            .update_frame_texture_rgba(&self.queue, rgba, source_width, source_height);
+            .update_frame_texture_rgba(&self.queue, rgba, frame_width, frame_height);
         let background_params = self
-            .frame_params(background_frame, (source_width, source_height))
+            .frame_params(background_frame, calibration_size)
             .unwrap_or(trd_core::FrameParams::IDENTITY);
         let foreground_params = placement_frame
-            .map(|frame| self.frame_params(frame, (source_width, source_height)))
+            .map(|frame| self.frame_params(frame, calibration_size))
             .transpose()?
             .unwrap_or(background_params);
         if self.renderer.mesh_count() > 0 {
@@ -278,7 +335,7 @@ enum ImportedAsset {
         mesh: trd_core::Mesh,
         texture: trd_core::ImageTexture,
     },
-    Pbr(trd_core::GltfAsset),
+    Pbr(Box<trd_core::GltfAsset>),
 }
 
 impl ImportedAsset {
@@ -286,6 +343,43 @@ impl ImportedAsset {
         match self {
             Self::Textured { mesh, .. } => mesh,
             Self::Pbr(asset) => &asset.mesh,
+        }
+    }
+
+    fn diagnostics(&self) -> ImportedAssetDiagnostics {
+        let mesh = self.mesh();
+        let aabb = mesh.aabb();
+        let size = aabb.size();
+        let max_extent = size.x().max(size.y()).max(size.z());
+        let preview_scale = if max_extent > trd_core::EPSILON {
+            trd_core::DEFAULT_PREVIEW_TARGET / max_extent
+        } else {
+            1.0
+        };
+        let (source_format, imported_material) = match self {
+            Self::Textured { .. } => (
+                "OBJ",
+                trd_core::DisneyMaterial {
+                    metallic: 0.0,
+                    roughness: 0.35,
+                    auxiliary: trd_core::Auxiliary {
+                        textures: trd_core::MaterialTextures {
+                            base_color: true,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            ),
+            Self::Pbr(asset) => ("GLB", asset.material.clone()),
+        };
+        ImportedAssetDiagnostics {
+            source_format,
+            aabb_min: aabb.min().to_array(),
+            aabb_max: aabb.max().to_array(),
+            preview_scale,
+            imported_material,
         }
     }
 

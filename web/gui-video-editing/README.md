@@ -1,4 +1,4 @@
-# Video editing web
+# GUI video editing web
 
 First vertical slice of #163.
 
@@ -41,7 +41,7 @@ uv run --with pyarrow scripts/fiba_video_editing_bundle.py \
   --video /home/xiaoyxue/Asset/fiba-shot1/shot_0001.mp4 \
   --calibration assets/videos/fiba/per_frame_KVP_cube_best.parquet \
   --method 2VP_4510 \
-  -o web/video-editing/data/fiba-shot1.arrow
+  -o web/gui-video-editing/data/fiba-shot1.arrow
 ```
 
 PowerShell 7 (Windows native):
@@ -52,20 +52,29 @@ uv run --with pyarrow scripts\fiba_video_editing_bundle.py `
   --video $video `
   --calibration assets\videos\fiba\per_frame_KVP_cube_best.parquet `
   --method 2VP_4510 `
-  -o web\video-editing\data\fiba-shot1.arrow
+  -o web\gui-video-editing\data\fiba-shot1.arrow
 ```
 
 ## Run
 
 ```sh
 cd web
-bun run --cwd viewer build:wasm  # stage the local trd-wasm file dependency
+bun run --cwd viewer build:wasm  # stage the workspace's trd-wasm file dependency
+bun run --cwd gui-video-editing build:wasm
 bun install --frozen-lockfile
-bun run --cwd video-editing dev
+bun run --cwd gui-video-editing dev
 ```
 
 These Bun commands run natively in PowerShell 7 on Windows as well as under
 Linux/Nix.
+
+The native media/timeline counterpart is:
+
+```sh
+cargo run -p trd-gui-video-editing -- \
+  --document web/gui-video-editing/data/fiba-shot1.arrow \
+  --video /path/to/shot_0001.mp4
+```
 
 Open the URL printed by Bun. The canvas stays blank until **Open video...**
 selects either a local file or an HTTP(S) URL. Choose the same

@@ -1,6 +1,6 @@
 # Video editing
 
-`web/video-editing` is the browser editor from #163. It places and edits 3D
+`web/gui-video-editing` is the browser editor from #163. It places and edits 3D
 objects on a tracked court quad while the external FIBA MP4 plays. Rust owns
 Arrow, placement, state, picking, materials, and all WebGPU rendering;
 TypeScript only opens/fetches browser resources and copies decoded video pixels.
@@ -62,7 +62,7 @@ uv run --with pyarrow scripts/fiba_video_editing_bundle.py \
   --video /home/xiaoyxue/Asset/fiba-shot1/shot_0001.mp4 \
   --calibration assets/videos/fiba/per_frame_KVP_cube_best.parquet \
   --method 2VP_4510 \
-  -o web/video-editing/data/fiba-shot1.arrow
+  -o web/gui-video-editing/data/fiba-shot1.arrow
 ```
 
 PowerShell 7 (Windows native):
@@ -73,7 +73,7 @@ uv run --with pyarrow scripts\fiba_video_editing_bundle.py `
   --video $video `
   --calibration assets\videos\fiba\per_frame_KVP_cube_best.parquet `
   --method 2VP_4510 `
-  -o web\video-editing\data\fiba-shot1.arrow
+  -o web\gui-video-editing\data\fiba-shot1.arrow
 ```
 
 The generated Arrow file is ignored; regenerate it from the local MP4.
@@ -163,21 +163,51 @@ All editor gizmos are hidden during playback. The placed object remains visible
 on tracked rows. Rows 222–287 hide both quad and object while the original video
 continues.
 
+## Details and diagnostics
+
+The left pane's collapsed **Details** inspector is shared by browser and native
+delivery surfaces. UI code reads one immutable `VideoEditingDiagnostics`
+snapshot; tracking and scene facts are calculated in Rust rather than
+reconstructed in TypeScript or directly in egui widgets.
+
+The six sections cover:
+
+- expected/observed source metadata, media readiness, and the explicit
+  `not browser-verified yet` SHA-256 status;
+- requested, presented, displayed, and rendered frame identities plus source
+  generation, render revision, coalescing, seek, and render latency;
+- raw TL/TR/BR/BL tracking, K, reconstructed basis, orthogonality/handedness,
+  and unsmoothed pose delta from the previous tracked row;
+- catalog format, preview AABB/scale, Olympic preset, persistent local edit,
+  movement basis, visibility reason, and copyable `draw_model`;
+- imported maps/factors and current PBR, IBL, direct light, exposure, tone-map,
+  and debug-view state;
+- adapter/backend, render/pick targets, MSAA, layer drawable counts, upload
+  size, latest pick, and explicit render/pick errors.
+
+Completed renders retain the exact scene/material/asset/renderer facts used to
+produce their pixels. While a newer frame or scene revision is in flight,
+Details continues to describe the image on screen and separately reports the
+new pending/presented identities. Diagnostics JSON is serialized only when
+**Copy diagnostics JSON** is pressed. The Dragon view makes its metallic factor,
+metallic-roughness and normal maps, zero direct/ambient light, Uffizi IBL, and
+unsmoothed tracking inputs visible without log inspection.
+
 ## Build and run
 
 All browser delivery surfaces share the Bun workspace. The GUI viewer and video
-editor additionally share the generated `web/gui-viewer/pkg` `trd-gui` wasm
-package. Generate `fiba-shot1.arrow` first, then run:
+editor each generate `trd-gui` wasm into their own package directory; the editor
+does not import `web/gui-viewer/pkg`. Generate `fiba-shot1.arrow` first, then run:
 
 ```sh
 cd web
 bun run --cwd viewer build:wasm      # stage the local trd-wasm file dependency
-bun run --cwd gui-viewer build:wasm  # shared GUI/editor wasm package
+bun run --cwd gui-video-editing build:wasm
 bun install --frozen-lockfile
 bun run typecheck
 bun run check
 bun run build
-bun run --cwd video-editing dev
+bun run --cwd gui-video-editing dev
 ```
 
 The same Bun commands run natively in PowerShell 7 on Windows; WSL and Nix are
@@ -191,6 +221,39 @@ ssh -N -L 8085:localhost:8085 xiaoyxue@10.32.84.63
 
 Open <http://localhost:8085> in a WebGPU browser and select the local MP4.
 
+### Native editor
+
+The native delivery surface replaces HTML video/WebCodecs with ffprobe plus an
+ffmpeg raw-RGBA stream while hosting the same Rust `VideoEditingApp`:
+
+```sh
+cargo run -p trd-gui-video-editing -- \
+  --document web/gui-video-editing/data/fiba-shot1.arrow \
+  --video /path/to/shot_0001.mp4
+```
+
+Use `--video-url https://example.com/shot_0001.mp4` instead of `--video` to
+launch directly from HTTP(S); the two options are mutually exclusive.
+
+Add `--probe-only` to validate metadata and decode frame 0 without opening a
+native window.
+
+```powershell
+cargo run -p trd-gui-video-editing -- `
+  --document web\gui-video-editing\data\fiba-shot1.arrow `
+  --video C:\path\to\shot_0001.mp4
+```
+
+The native shell validates filename/size/dimensions/frame count and feeds
+decoded frames into the shared editor state. Its panels, timeline, quad
+selection, catalog, transforms, PBR/IBL controls, GPU picking, and layered
+composition are the same Rust implementation used by the browser. ffmpeg
+outputs RGBA directly to a Rust decoder thread/channel; no temporary frame
+files are created. Native **Open video** uses the operating-system file picker
+for local MP4s; HTTP(S) URLs are passed directly to ffprobe/ffmpeg and validated
+against the document's codec, dimensions, frame count (when reported), and
+duration before playback.
+
 ## Source map
 
 | Path | Responsibility |
@@ -198,9 +261,10 @@ Open <http://localhost:8085> in a WebGPU browser and select the local MP4.
 | `crates/trd-core/src/video_editing.rs` | versioned timeline decoder |
 | `crates/trd-placement/src/lib.rs` | K/quad frame and placement math |
 | `crates/trd-gui/src/video_editing.rs` | editor state, commands, UI |
-| `crates/trd-gui/src/video_editing_renderer.rs` | wasm composition and picking |
-| `web/video-editing/src/main.ts` | thin video/file/resource byte bridge |
-| `web/gui-viewer/pkg` | generated shared `trd-gui` wasm package |
+| `crates/trd-gui/src/video_editing_renderer.rs` | shared native/wasm composition and picking |
+| `web/gui-video-editing/src/main.ts` | thin video/file/resource byte bridge |
+| `web/gui-video-editing/pkg` | editor-owned generated `trd-gui` wasm package |
+| `native/trd-gui-video-editing` | native ffmpeg-backed host for the shared editor |
 | `scripts/fiba_video_editing_bundle.py` | timeline generator |
 
 ## Remaining work

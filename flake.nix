@@ -124,6 +124,25 @@
           }
         );
 
+        # Native video-editing eframe shell. ffmpeg/ffprobe provide the native
+        # demux/decode adapter; all editor document/state remains in Rust.
+        trd-gui-video-editing = craneLib.buildPackage (
+          commonArgs
+          // {
+            inherit cargoArtifacts;
+            pname = "trd-gui-video-editing";
+            cargoExtraArgs = "--package trd-gui-video-editing";
+            doCheck = false;
+            buildInputs = runtimeLibs;
+            nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ pkgs.makeWrapper ];
+            postInstall = ''
+              wrapProgram $out/bin/trd-gui-video-editing \
+                --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath runtimeLibs} \
+                --prefix PATH : ${lib.makeBinPath [ pkgs.ffmpeg ]}
+            '';
+          }
+        );
+
         # --- wasm build ------------------------------------------------------
         wasmArgs = commonArgs // {
           CARGO_BUILD_TARGET = "wasm32-unknown-unknown";
@@ -175,7 +194,8 @@
           }
         );
 
-        # wasm-bindgen package shared by web/gui-viewer and web/video-editing.
+        # One nix-built trd-gui wasm artifact, staged independently into each GUI
+        # web delivery surface's own pkg/ directory.
         trdGuiWasmArgs = commonArgs // {
           CARGO_BUILD_TARGET = "wasm32-unknown-unknown";
           cargoExtraArgs = "--package trd-gui";
@@ -238,8 +258,8 @@
 
         # Shared builder for the bun-driven web derivations (bundle + checks).
         # The bun2nix hook installs node_modules offline in `bunRoot`; the
-        # pre-install hook first materializes both nix-built wasm packages at the
-        # paths referenced by the three web workspace packages.
+        # pre-install hook materializes the nix-built wasm artifacts at the
+        # package-owned paths referenced by the three web workspace packages.
         mkWebDerivation =
           {
             pname,
@@ -266,6 +286,9 @@
               mkdir -p gui-viewer/pkg
               cp -r ${trd-gui-wasm}/. gui-viewer/pkg/
               chmod -R u+w gui-viewer/pkg
+              mkdir -p gui-video-editing/pkg
+              cp -r ${trd-gui-wasm}/. gui-video-editing/pkg/
+              chmod -R u+w gui-video-editing/pkg
             '';
 
             buildPhase = ''
@@ -308,6 +331,7 @@
           inherit
             trd-cli
             trd-gui
+            trd-gui-video-editing
             trd-wasm
             web
             ;
@@ -323,6 +347,10 @@
             type = "app";
             program = "${trd-gui}/bin/trd-gui-app";
           };
+          trd-gui-video-editing = {
+            type = "app";
+            program = "${trd-gui-video-editing}/bin/trd-gui-video-editing";
+          };
           web = {
             type = "app";
             program = "${webServe}/bin/trd-web-serve";
@@ -334,6 +362,7 @@
           inherit
             trd-cli
             trd-gui
+            trd-gui-video-editing
             trd-wasm
             web
             ;
@@ -395,7 +424,7 @@
                 chmod -R u+w web
                 (cd web/viewer && biome ci .)
                 (cd web/gui-viewer && biome ci .)
-                (cd web/video-editing && biome ci .)
+                (cd web/gui-video-editing && biome ci .)
                 touch $out
               '';
         };

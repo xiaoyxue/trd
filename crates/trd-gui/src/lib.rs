@@ -33,7 +33,6 @@ pub mod render_backend;
 pub mod scene;
 pub mod ui;
 pub mod video_editing;
-#[cfg(target_arch = "wasm32")]
 pub mod video_editing_renderer;
 
 #[cfg(target_arch = "wasm32")]
@@ -78,7 +77,7 @@ pub async fn start(
         is_gltf: bool,
     }
 
-    /// Starts the dedicated `web/video-editing/` poster/document example.
+    /// Starts the dedicated `web/gui-video-editing/` poster/document example.
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = startVideoEditing)]
     pub async fn start_video_editing(
@@ -98,10 +97,9 @@ pub async fn start(
         )
         .await
         .map_err(|error| wasm_bindgen::JsValue::from_str(&error))?;
-        shared.renderer.replace(Some(renderer));
+        shared.set_renderer(renderer);
         let handle = video_editing::VideoEditingHandle::new(&document, shared.clone());
-        let app = video_editing::VideoEditingApp::new(document, shared)
-            .map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()))?;
+        let app = video_editing::VideoEditingApp::new(document, shared);
         eframe::WebRunner::new()
             .start(
                 canvas,

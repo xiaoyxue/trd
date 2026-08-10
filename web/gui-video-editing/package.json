@@ -1,10 +1,10 @@
 {
-  "name": "trd-video-editing-web",
+  "name": "trd-gui-video-editing-web",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "build:wasm": "bun run --cwd ../gui-viewer build:wasm",
+    "build:wasm": "wasm-pack build ../../crates/trd-gui --mode no-install --target web --out-dir ../../web/gui-video-editing/pkg",
     "build:web": "bun build ./index.html --outdir dist",
     "build": "bun run build:wasm && bun run build:web",
     "dev": "bun run build:wasm && BUN_PORT=8085 bun ./index.html",

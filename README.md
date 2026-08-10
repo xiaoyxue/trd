@@ -139,10 +139,12 @@ Linux, the vendor driver on Windows).
 cargo build --workspace                                # shared crates + native delivery apps
 cargo run -p trd-cli -- --width 256 --height 256       # headless Arrow filter (stdin → stdout)
 cargo run -p trd-gui-app -- --mesh assets/meshes/bunny.obj # interactive viewer window
+cargo run -p trd-gui-video-editing -- --document web/gui-video-editing/data/fiba-shot1.arrow \
+  --video /path/to/shot_0001.mp4                    # native video timeline/player
 examples/render.sh --cli                               # end-to-end demo → output/out.gif
 ( cd web && bun run --cwd viewer dev )                 # stream viewer on :8080
 ( cd web && bun run --cwd gui-viewer dev )             # GUI viewer on :8082
-( cd web && bun run --cwd video-editing dev )          # editor on :8085; generate its timeline first
+( cd web && bun run --cwd gui-video-editing dev )      # editor on :8085; generate its timeline first
 ```
 
 **🪟 Windows** (PowerShell 7; `. .\scripts\dev-env.ps1` puts cargo / MSVC / ffmpeg / uv on PATH):
@@ -152,10 +154,12 @@ examples/render.sh --cli                               # end-to-end demo → out
 cargo build --workspace
 cargo run -p trd-cli -- --width 256 --height 256       # headless Arrow filter (stdin → stdout)
 cargo run -p trd-gui-app -- --mesh assets\meshes\bunny.obj # interactive viewer window
+cargo run -p trd-gui-video-editing -- --document web\gui-video-editing\data\fiba-shot1.arrow `
+  --video C:\path\to\shot_0001.mp4                   # native video timeline/player
 examples\render.ps1 -CLI                               # end-to-end demo → output\out.gif
 cd web; bun run --cwd viewer dev                       # stream viewer on :8080
 # use `bun run --cwd gui-viewer dev` for :8082
-# after generating the editor timeline, use `bun run --cwd video-editing dev` for :8085
+# after generating the editor timeline, use `bun run --cwd gui-video-editing dev` for :8085
 ```
 
 Full setup — Windows `dev-env.ps1`, GPU-driver notes (nixGL / `WGPU_BACKEND=gl`),
@@ -226,11 +230,14 @@ params: **[`docs/rendering.md`](docs/rendering.md#interactive-viewer--trd-gui)**
 
 ## [Video editing](docs/video-editing.md)
 
-`web/video-editing` is a Rust-owned WebGPU editor for placing catalog objects on
+`web/gui-video-editing` is a Rust-owned WebGPU editor for placing catalog objects on
 the tracked FIBA court quad while an external MP4 plays. The browser owns media
 decode and copies each presented `VideoFrame` to RGBA; Rust owns the separate
 `trd.video_edit.version = 0.1.0` Arrow timeline, quad reconstruction,
-quad/object-local transforms, GPU picking, PBR/IBL, and final composition.
+quad/object-local transforms, GPU picking, PBR/IBL, final composition, and a
+collapsed **Details** inspector. Its typed snapshot follows the displayed render
+and exposes source/synchronization, raw tracking pose deltas, placement,
+material/lighting, and renderer facts.
 
 Generate the ignored local timeline first using
 [`docs/video-editing.md`](docs/video-editing.md#generate-the-document), then:
@@ -238,8 +245,9 @@ Generate the ignored local timeline first using
 ```sh
 cd web
 bun run --cwd viewer build:wasm  # stage the local trd-wasm file dependency
+bun run --cwd gui-video-editing build:wasm
 bun install --frozen-lockfile
-bun run --cwd video-editing dev  # http://localhost:8085
+bun run --cwd gui-video-editing dev  # http://localhost:8085
 ```
 
 The MP4 remains local and uncommitted. The initial fixed catalog contains the
@@ -247,6 +255,25 @@ Coca-Cola can, beer can, and Dragon; every PBR object uses
 `assets/envmap/uffizi-large.hdr` by default. Current behavior, document schema,
 placement conventions, generation command, and known limitations are in
 **[`docs/video-editing.md`](docs/video-editing.md)**.
+
+The native counterpart lives at `native/trd-gui-video-editing`. It uses
+ffmpeg/ffprobe to stream RGBA frames into the same Rust `VideoEditingApp` used
+by the browser, without temporary frame files:
+
+```sh
+cargo run -p trd-gui-video-editing -- \
+  --document web/gui-video-editing/data/fiba-shot1.arrow \
+  --video /path/to/shot_0001.mp4
+```
+
+`--video-url https://example.com/shot_0001.mp4` launches the same native editor
+from an HTTP(S) source.
+
+The native and browser surfaces share the same panels, timeline, quad selection,
+catalog, object transforms, GPU picking, PBR/IBL controls, and three-layer
+composition. Only the media adapter differs: HTML video/WebCodecs in the
+browser, ffmpeg/ffprobe in the native shell. Native **Open video** supports both
+an OS file picker and HTTP(S) URLs.
 
 ## Documentation
 

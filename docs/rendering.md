@@ -265,18 +265,18 @@ http://localhost:8080/?mesh=/assets/meshes/can/coke.obj&texture=/assets/meshes/c
 > shared. On the headless RTX Linux box, reach the browser viewer over an SSH
 > port-forward (see [AGENTS.md](../AGENTS.md)).
 
-## Video editor — `web/video-editing`
+## Video editor — `web/gui-video-editing`
 
 The dedicated FIBA editor is a sibling of the generic stream viewer and GUI
 viewer in the shared `web/` Bun workspace. Generate the ignored
-`web/video-editing/data/fiba-shot1.arrow` document first using
+`web/gui-video-editing/data/fiba-shot1.arrow` document first using
 [`video-editing.md`](video-editing.md#generate-the-document), then:
 
 ```sh
 cd web
 bun run --cwd viewer build:wasm  # stage the local trd-wasm file dependency
 bun install --frozen-lockfile
-bun run --cwd video-editing dev  # http://localhost:8085
+bun run --cwd gui-video-editing dev  # http://localhost:8085
 ```
 
 The same commands run natively in PowerShell 7 on Windows; no WSL or Nix is
@@ -291,6 +291,21 @@ edited-scene export to `[mesh][texture?][frames][params]` remains future work.
 See [`video-editing.md`](video-editing.md) for the document generation command,
 schema, quad basis, lighting defaults, playback visibility, SSH tunnel, and
 known tracking-jitter behavior.
+
+Native media/timeline shell:
+
+```sh
+cargo run -p trd-gui-video-editing -- \
+  --document web/gui-video-editing/data/fiba-shot1.arrow \
+  --video /path/to/shot_0001.mp4
+```
+
+The native adapter uses ffprobe for source validation and streams ffmpeg RGBA
+frames through a Rust channel. Play/pause/seek restarts or invalidates the
+decoder stream; it does not extract temporary JPEGs. This first native slice
+shows video/poster, timeline, and tracked/video-only status. Native 3D
+placement/editing parity remains #167 follow-up work.
+Use `--probe-only` for a headless metadata + frame-0 decode smoke test.
 
 ## Web (wasm)
 
@@ -347,13 +362,14 @@ workspace rooted at `web/`:
 ```sh
 cd web
 bun run --cwd viewer build:wasm     # clean-checkout bootstrap for file: dependency
-bun run --cwd gui-viewer build:wasm # shared GUI/editor wasm package
+bun run --cwd gui-viewer build:wasm
+bun run --cwd gui-video-editing build:wasm
 bun install --frozen-lockfile
 bun run typecheck                    # all three packages
 bun run check                        # all three Biome gates
 bun run --cwd viewer dev             # stream viewer, :8080
 bun run --cwd gui-viewer dev         # interactive GUI viewer, :8082
-BUN_PORT=8085 bun run --cwd video-editing dev
+BUN_PORT=8085 bun run --cwd gui-video-editing dev
 ```
 
 `web/`'s npm deps are installed offline in the Nix sandbox via
