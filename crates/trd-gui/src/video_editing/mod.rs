@@ -2,27 +2,21 @@
 //!
 //! This module owns the editor state, the typed render/pick scheduler, and the
 //! wasm browser bridge. The surfaces built on top of it live alongside:
-//! [`editing_ui`] renders the editor panels and player, [`diagnostics`] holds
-//! the immutable Details snapshot, and [`diagnostics_ui`] presents it.
+//! [`editing_ui`] renders the editor panels and player, [`details_ui`] draws
+//! the Details inspector in immediate mode, and [`diagnostics`] holds the pure
+//! domain calculations both rely on.
 
+mod details_ui;
 mod diagnostics;
-mod diagnostics_ui;
 mod editing_ui;
 
-pub use diagnostics::{
-    MaterialLightingDiagnostics, PlacementDiagnostics, PoseDeltaDiagnostics, QuadFrameDiagnostics,
-    RendererDiagnostics, SourceDiagnostics, TimelineDiagnostics, TrackingDiagnostics,
-    TrackingPlacementError, VideoEditingDiagnostics,
-};
+pub use diagnostics::{PoseDeltaDiagnostics, QuadFrameDiagnostics, TrackingPlacementError};
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Instant;
 
-use diagnostics::{
-    dot3, pbr_debug_view_label, pose_delta, quad_frame_diagnostics, render_mode_label,
-    tone_map_label,
-};
+use diagnostics::{dot3, pose_delta};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -1061,22 +1055,13 @@ impl VideoEditingApp {
         Some(quad_basis * object_model)
     }
 
-    fn diagnostics(&self) -> VideoEditingDiagnostics {
-        let video = &self.document.video;
-        let source = self.shared.video_source.borrow().clone();
-        let metadata = self.shared.video_metadata.get();
-        let media = self.shared.video_media.get();
-        let renderer = self
-            .displayed_diagnostics
-            .as_ref()
-            .map(|displayed| displayed.renderer.clone())
-            .or_else(|| self.shared.renderer_diagnostics.borrow().clone());
-        let presented_frame_index = self
-            .shared
-            .latest_video_frame
-            .borrow()
-            .as_ref()
-            .map(|frame| frame.frame_index);
+    /// Resolves the values the Details panel cannot simply read off the app:
+    /// they need the displayed-frame pin plus a little domain math. Everything
+    /// else the panel shows — document metadata and live host observations — is
+    /// read directly at draw time, so nothing is copied twice.
+    ///
+    /// Computed once per Details draw, and only while the panel is open.
+    pub(super) fn displayed_facts(&self) -> DisplayedFacts {
         let displayed_frame_index = self
             .displayed_frame_ready
             .then_some(self.displayed_frame_index);
@@ -1084,7 +1069,7 @@ impl VideoEditingApp {
             displayed_frame_index.and_then(|index| self.document.frames.get(index as usize));
         // Media time rides with its own frame, so the timeline block describes
         // the frame actually on screen rather than a newer presented one.
-        let displayed_media_time = self
+        let media_time_seconds = self
             .displayed_frame_ready
             .then(|| {
                 self.displayed_diagnostics
@@ -1092,13 +1077,18 @@ impl VideoEditingApp {
                     .map(|displayed| displayed.media_time_seconds)
             })
             .flatten();
-        let render_count = self.shared.render_latency_count.get();
+        let presented_frame_index = self
+            .shared
+            .latest_video_frame
+            .borrow()
+            .as_ref()
+            .map(|frame| frame.frame_index);
         let in_flight_frame_index = self.shared.render_in_flight_frame.get();
         let coalesced_frame_index = in_flight_frame_index.and_then(|in_flight| {
             presented_frame_index.filter(|presented| *presented != in_flight)
         });
 
-        let (quad_frame, placement_error) = match displayed_frame_index {
+        let (quad, placement_error) = match displayed_frame_index {
             Some(index) if timeline_frame.is_some_and(|frame| frame.tracked) => {
                 match self.quad_frame_result_at(index) {
                     Ok(frame) => (Some(frame), None),
@@ -1120,40 +1110,23 @@ impl VideoEditingApp {
             })
         });
         let pose_delta =
-            quad_frame
-                .zip(previous_quad)
+            quad.zip(previous_quad)
                 .map(|(current, (previous_frame_index, previous))| {
                     pose_delta(previous_frame_index, previous, current)
                 });
-        let normal_sign_warning = quad_frame
+        let normal_sign_warning = quad
             .zip(previous_quad)
             .is_some_and(|(current, (_, previous))| dot3(current.e3, previous.e3) < 0.0);
-        let quad_frame_diagnostics = quad_frame.map(quad_frame_diagnostics);
 
-        let scene = self
-            .displayed_diagnostics
-            .as_ref()
-            .map_or(&self.controller.state, |displayed| &displayed.scene);
-        let selected_asset = self
-            .displayed_diagnostics
-            .as_ref()
-            .map_or(self.selected_asset, |displayed| displayed.selected_asset);
-        let selected_quad = self
-            .displayed_diagnostics
-            .as_ref()
-            .map_or(self.selected_quad, |displayed| displayed.selected_quad);
-        let playing = self
-            .displayed_diagnostics
-            .as_ref()
-            .is_some_and(|displayed| displayed.playing);
-        let object = scene.objects[0];
-        let asset = renderer.as_ref().and_then(|facts| facts.asset.as_ref());
-        let material = &scene.materials[0];
-        let imported_material = asset.map(|facts| &facts.imported_material);
-        let ibl = scene.image_based_lighting[0];
-        let tone_mapping = scene.tone_mappings[0];
-        let pbr_debug_view = scene.pbr_debug_views[0];
-        let render_mode = scene.modes[0];
+        let displayed = self.displayed_diagnostics.as_ref();
+        let scene = displayed.map_or(&self.controller.state, |displayed| &displayed.scene);
+        let selected_asset = displayed.map_or(self.selected_asset, |d| d.selected_asset);
+        let selected_quad = displayed.map_or(self.selected_quad, |d| d.selected_quad);
+        let playing = displayed.is_some_and(|d| d.playing);
+        let renderer = displayed
+            .map(|d| d.renderer.clone())
+            .or_else(|| self.shared.renderer_diagnostics.borrow().clone());
+
         let tracked = timeline_frame.is_some_and(|frame| frame.tracked);
         let visibility_reason = if playing {
             "playing"
@@ -1167,43 +1140,34 @@ impl VideoEditingApp {
             "tracked"
         };
         let object_visible = visibility_reason == "tracked";
-        let draw_model = self
-            .displayed_diagnostics
-            .as_ref()
-            .and_then(|displayed| displayed.draw_model)
+        let draw_model = displayed
+            .and_then(|d| d.draw_model)
             .or_else(|| {
                 displayed_frame_index
                     .filter(|_| object_visible)
                     .and_then(|index| self.placement_model_at(index))
             })
             .map(trd_core::Matrix4::to_cols_array);
-        let move_direction = self
-            .displayed_diagnostics
-            .as_ref()
-            .map_or(self.controller.move_direction, |displayed| {
-                displayed.move_direction
-            });
+        let move_direction = displayed.map_or(self.controller.move_direction, |d| d.move_direction);
         let movement_basis = match move_direction {
             crate::interaction::MoveDirection::LocalX
             | crate::interaction::MoveDirection::LocalY
             | crate::interaction::MoveDirection::LocalZ => ["object X", "object Y", "object Z"],
             _ => ["quad e1", "quad e2", "quad e3"],
         };
+        let imported_material = renderer
+            .as_ref()
+            .and_then(|facts| facts.asset.as_ref())
+            .map(|facts| &facts.imported_material);
         let reflective_tracking_warning = imported_material
             .is_some_and(|imported| imported.metallic >= 0.7 || imported.auxiliary.textures.normal)
             && pose_delta.as_ref().is_some_and(|delta| {
                 delta.rotation_degrees >= 1.0
-                    || quad_frame.is_some_and(|quad| delta.translation >= quad.axis_length * 0.02)
+                    || quad.is_some_and(|quad| delta.translation >= quad.axis_length * 0.02)
             });
 
-        let show_quad = self
-            .displayed_diagnostics
-            .as_ref()
-            .is_some_and(|displayed| displayed.show_quad);
-        let show_quad_gizmo = self
-            .displayed_diagnostics
-            .as_ref()
-            .is_some_and(|displayed| displayed.show_quad_gizmo);
+        let show_quad = displayed.is_some_and(|d| d.show_quad);
+        let show_quad_gizmo = displayed.is_some_and(|d| d.show_quad_gizmo);
         let background_drawables =
             1 + u32::from(show_quad) + if show_quad && show_quad_gizmo { 2 } else { 0 };
         let foreground_drawables = if object_visible {
@@ -1215,158 +1179,77 @@ impl VideoEditingApp {
             0
         };
         let selection_drawables =
-            if object_visible && (scene.show_aabb || scene.selected == Some(0)) {
-                1
-            } else {
-                0
-            };
+            u32::from(object_visible && (scene.show_aabb || scene.selected == Some(0)));
         let render_target_size = renderer
             .as_ref()
             .map(|facts| facts.target_size)
             .unwrap_or(self.display_size);
-        let upload_bytes = self
-            .shared
-            .latest_video_frame
-            .borrow()
-            .as_ref()
-            .map(|frame| frame.rgba.len() as u64);
 
-        VideoEditingDiagnostics {
-            source: SourceDiagnostics {
-                expected_name: video.source_name.clone(),
-                expected_byte_length: video.byte_length,
-                expected_mime: video.mime.clone(),
-                expected_codec: video.codec.clone(),
-                expected_size: [video.width, video.height],
-                expected_fps: [video.fps_num, video.fps_den],
-                expected_frame_count: video.frame_count,
-                expected_duration_seconds: video.duration_us as f64 / 1_000_000.0,
-                expected_sha256: video.sha256.clone(),
-                observed_kind: source.as_ref().map(|source| source.kind),
-                observed_name: source.as_ref().map(|source| source.name.clone()),
-                observed_byte_length: source.as_ref().and_then(|source| source.byte_length),
-                observed_size: metadata.map(|metadata| [metadata.width, metadata.height]),
-                observed_duration_seconds: metadata.map(|metadata| metadata.duration_seconds),
-                ready_state: media.ready_state,
-                loaded: self.shared.video_loaded.get(),
-                playing: self.shared.video_playing.get(),
-                ended: media.ended,
-                error: self.shared.error.borrow().clone(),
-                digest_status: "not browser-verified yet",
-            },
-            timeline: TimelineDiagnostics {
-                media_time_seconds: displayed_media_time,
-                requested_frame_index: self.current_frame_index,
-                presented_frame_index,
-                displayed_frame_index,
-                rendered_frame_index: self.last_rendered_frame_index,
-                arrow_video_frame_index: timeline_frame.map(|frame| frame.video_frame_index),
-                present_index: timeline_frame.map(|frame| frame.present_index),
-                timestamp_us: timeline_frame.map(|frame| frame.timestamp_us),
-                media_timestamp_delta_ms: displayed_media_time.zip(timeline_frame).map(
-                    |(media_time, frame)| {
-                        (media_time - frame.timestamp_us as f64 / 1_000_000.0) * 1_000.0
-                    },
-                ),
-                tracked: timeline_frame.map(|frame| frame.tracked),
-                source_size: [video.width, video.height],
-                render_size: [render_target_size.0, render_target_size.1],
-                source_generation: self.shared.source_generation.get(),
-                render_revision: self.shared.render_revision.get(),
-                pending_render_generation: self
-                    .shared
-                    .needs_overlay
-                    .get()
-                    .then_some(self.shared.render_revision.get()),
-                in_flight_frame_index,
-                coalesced_frame_index,
-                last_render_latency_ms: self.shared.last_render_latency_ms.get(),
-                average_render_latency_ms: (render_count > 0)
-                    .then(|| self.shared.render_latency_total_ms.get() / render_count as f64),
-                seek_target: self.pending_seek_target,
-                seek_pending: self.pending_seek_target.is_some(),
-            },
-            tracking: TrackingDiagnostics {
-                points_tl_tr_br_bl: timeline_frame.and_then(|frame| frame.placement_quad),
-                intrinsics_fx_fy_cx_cy: timeline_frame
-                    .and_then(|frame| frame.k)
-                    .map(|k| [k[0], k[4], k[2], k[5]]),
-                quad_frame: quad_frame_diagnostics,
-                pose_delta,
-                normal_sign_warning,
-                placement_error,
-                smoothing: "off",
-            },
-            placement: PlacementDiagnostics {
-                selected_quad,
-                selected_object: scene.selected,
-                catalog_asset: selected_asset.map(CatalogAsset::label),
-                source_format: asset.map(|facts| facts.source_format),
-                preview_aabb_min: asset.map(|facts| facts.aabb_min),
-                preview_aabb_max: asset.map(|facts| facts.aabb_max),
-                preview_scale: asset.map(|facts| facts.preview_scale),
-                preset_size_factor: 0.24,
-                preset_offset_e1: 1.3,
-                preset_offset_e2: -1.7,
-                preset_lift: 1.0,
-                object_translation: object.translation,
-                object_rotation_degrees: [
-                    object.yaw.to_degrees(),
-                    object.pitch.to_degrees(),
-                    object.roll.to_degrees(),
-                ],
-                object_scale: object.scale,
-                movement_basis,
-                draw_model,
-                visibility_reason,
-            },
-            material_lighting: MaterialLightingDiagnostics {
-                render_mode: render_mode_label(render_mode),
-                imported_metallic: imported_material.map(|material| material.metallic),
-                imported_roughness: imported_material.map(|material| material.roughness),
-                base_color_map: imported_material
-                    .is_some_and(|material| material.auxiliary.textures.base_color),
-                metallic_roughness_map: imported_material
-                    .is_some_and(|material| material.auxiliary.textures.metallic_roughness),
-                normal_map: imported_material
-                    .is_some_and(|material| material.auxiliary.textures.normal),
-                metallic: material.metallic,
-                roughness: material.roughness,
-                specular: material.specular,
-                clearcoat: material.clearcoat,
-                environment_name: scene.environment_available.then_some("uffizi-large.hdr"),
-                environment_intensity: ibl.intensity,
-                environment_rotation_degrees: ibl.rotation.to_degrees(),
-                direct_light_scale: scene.lighting.scale,
-                ambient: scene.lighting.ambient,
-                exposure: tone_mapping.exposure,
-                tone_map: tone_map_label(tone_mapping.operator),
-                pbr_debug_view: pbr_debug_view_label(pbr_debug_view),
-                tracking_warning: reflective_tracking_warning
-                    .then_some("reflective/normal-mapped material may amplify raw tracking jitter"),
-            },
-            renderer: RendererDiagnostics {
-                adapter_name: renderer.as_ref().map(|facts| facts.adapter_name.clone()),
-                backend: renderer.as_ref().map(|facts| facts.backend.clone()),
-                device_type: renderer.as_ref().map(|facts| facts.device_type.clone()),
-                source_size: [video.width, video.height],
-                render_target_size: [render_target_size.0, render_target_size.1],
-                mode: render_mode_label(render_mode),
-                msaa_samples: renderer.as_ref().map(|facts| facts.msaa_samples),
-                background_drawables,
-                foreground_drawables,
-                selection_drawables,
-                frame_texture_upload_bytes: upload_bytes,
-                pick_target_size: renderer
-                    .as_ref()
-                    .and_then(|facts| facts.pick_target_size)
-                    .map(|(width, height)| [width, height]),
-                latest_pick_result: self.last_pick_result,
-                last_render_error: self.shared.last_render_error.borrow().clone(),
-                last_pick_error: self.shared.last_pick_error.borrow().clone(),
-            },
+        DisplayedFacts {
+            frame_index: displayed_frame_index,
+            media_time_seconds,
+            timeline_frame: timeline_frame.cloned(),
+            presented_frame_index,
+            in_flight_frame_index,
+            coalesced_frame_index,
+            quad,
+            placement_error,
+            pose_delta,
+            normal_sign_warning,
+            scene: scene.clone(),
+            selected_asset,
+            selected_quad,
+            visibility_reason,
+            draw_model,
+            movement_basis,
+            reflective_tracking_warning,
+            background_drawables,
+            foreground_drawables,
+            selection_drawables,
+            render_target_size,
+            renderer,
+            requested_frame_index: self.current_frame_index,
+            rendered_frame_index: self.last_rendered_frame_index,
+            seek_target: self.pending_seek_target,
+            latest_pick_result: self.last_pick_result,
+            shared: self.shared.clone(),
         }
     }
+}
+
+/// The subset of Details values that must be derived rather than read.
+///
+/// Deliberately *not* a snapshot of everything the panel shows: static document
+/// metadata and live host observations are read straight from the app while
+/// drawing, so there is exactly one representation of each value.
+pub(super) struct DisplayedFacts {
+    pub frame_index: Option<u32>,
+    pub media_time_seconds: Option<f64>,
+    pub timeline_frame: Option<trd_core::VideoEditingFrame>,
+    pub presented_frame_index: Option<u32>,
+    pub in_flight_frame_index: Option<u32>,
+    pub coalesced_frame_index: Option<u32>,
+    pub quad: Option<trd_placement::QuadFrame>,
+    pub placement_error: Option<TrackingPlacementError>,
+    pub pose_delta: Option<PoseDeltaDiagnostics>,
+    pub normal_sign_warning: bool,
+    pub scene: crate::scene::SceneState,
+    pub selected_asset: Option<CatalogAsset>,
+    pub selected_quad: bool,
+    pub visibility_reason: &'static str,
+    pub draw_model: Option<[f32; 16]>,
+    pub movement_basis: [&'static str; 3],
+    pub reflective_tracking_warning: bool,
+    pub background_drawables: u32,
+    pub foreground_drawables: u32,
+    pub selection_drawables: u32,
+    pub render_target_size: (u32, u32),
+    pub renderer: Option<crate::video_editing_renderer::VideoRendererDiagnostics>,
+    pub requested_frame_index: u32,
+    pub rendered_frame_index: Option<u32>,
+    pub seek_target: Option<u32>,
+    pub latest_pick_result: Option<Option<u32>>,
+    pub shared: Rc<VideoEditingShared>,
 }
 
 /// Maps a media-clock time to the nearest zero-based video frame, clamped to
@@ -1627,24 +1510,27 @@ pub(super) mod tests {
         app.displayed_diagnostics = Some(rendered);
         app.controller.state.materials[0].metallic = 0.9;
 
-        let diagnostics = app.diagnostics();
-        assert_eq!(diagnostics.timeline.displayed_frame_index, Some(0));
-        assert_eq!(diagnostics.material_lighting.metallic, 0.25);
-        assert_eq!(diagnostics.material_lighting.imported_metallic, Some(1.0));
-        assert!(diagnostics.material_lighting.metallic_roughness_map);
-        assert!(diagnostics.material_lighting.normal_map);
-        assert_eq!(diagnostics.material_lighting.direct_light_scale, 0.0);
-        assert_eq!(
-            diagnostics.material_lighting.environment_name,
-            Some("uffizi-large.hdr")
-        );
+        let facts = app.displayed_facts();
+        let imported = facts
+            .renderer
+            .as_ref()
+            .and_then(|renderer| renderer.asset.as_ref())
+            .map(|asset| &asset.imported_material)
+            .unwrap();
+        assert_eq!(facts.frame_index, Some(0));
+        assert_eq!(facts.scene.materials[0].metallic, 0.25);
+        assert_eq!(imported.metallic, 1.0);
+        assert!(imported.auxiliary.textures.metallic_roughness);
+        assert!(imported.auxiliary.textures.normal);
+        assert_eq!(facts.scene.lighting.scale, 0.0);
+        assert!(facts.scene.environment_available);
     }
 
     #[test]
     fn diagnostics_media_time_tracks_the_displayed_frame_not_a_newer_one() {
         let shared = Rc::new(VideoEditingShared::default());
         let mut app = VideoEditingApp::new(document(), shared.clone());
-        assert_eq!(app.diagnostics().timeline.media_time_seconds, None);
+        assert_eq!(app.displayed_facts().media_time_seconds, None);
 
         let mut rendered = test_rendered_frame_diagnostics();
         rendered.media_time_seconds = 0.0;
@@ -1660,12 +1546,18 @@ pub(super) mod tests {
             .unwrap();
         shared.set_video_media_observation(4, false);
 
-        let diagnostics = app.diagnostics();
-        assert_eq!(diagnostics.timeline.presented_frame_index, None);
-        assert_eq!(diagnostics.timeline.displayed_frame_index, Some(0));
-        assert_eq!(diagnostics.timeline.media_time_seconds, Some(0.0));
-        assert_eq!(diagnostics.timeline.media_timestamp_delta_ms, Some(0.0));
-        assert_eq!(diagnostics.source.ready_state, 4);
+        let facts = app.displayed_facts();
+        assert_eq!(facts.presented_frame_index, None);
+        assert_eq!(facts.frame_index, Some(0));
+        assert_eq!(facts.media_time_seconds, Some(0.0));
+        assert_eq!(
+            facts
+                .timeline_frame
+                .as_ref()
+                .map(|frame| frame.timestamp_us),
+            Some(0)
+        );
+        assert_eq!(shared.video_media.get().ready_state, 4);
     }
 
     fn test_rendered_frame_diagnostics() -> RenderedFrameDiagnostics {
@@ -1680,9 +1572,11 @@ pub(super) mod tests {
             show_quad_gizmo: false,
             draw_model: None,
             renderer: crate::video_editing_renderer::VideoRendererDiagnostics {
-                adapter_name: "test".to_owned(),
-                backend: "test".to_owned(),
-                device_type: "test".to_owned(),
+                identity: Rc::new(crate::video_editing_renderer::RendererIdentity {
+                    adapter_name: "test".to_owned(),
+                    backend: "test".to_owned(),
+                    device_type: "test".to_owned(),
+                }),
                 target_size: (1, 1),
                 pick_target_size: None,
                 msaa_samples: 4,
