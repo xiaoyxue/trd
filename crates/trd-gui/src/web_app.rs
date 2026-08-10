@@ -174,18 +174,19 @@ impl eframe::App for WebApp {
             self.schedule_render(&ctx);
         }
 
-        let mut pick_request = None;
-        let mut view = ui::View {
-            controller: &mut self.controller,
-            texture: self.texture.as_ref(),
-            render_size: self.render_size,
-            last_render_ms: None,
-            pick_request: &mut pick_request,
-        };
-        self.needs_render |= ui::show(ui, &mut view);
+        let outcome = ui::show(
+            ui,
+            &mut ui::View {
+                controller: &mut self.controller,
+                texture: self.texture.as_ref(),
+                render_size: self.render_size,
+                last_render_ms: None,
+            },
+        );
+        self.needs_render |= outcome.needs_render;
 
         // A click queued a pick; run it when the renderer is free (retried while busy).
-        if let Some(xy) = pick_request {
+        if let Some(xy) = outcome.pick {
             self.pending_pick.set(Some(xy));
         }
         if self.pending_pick.get().is_some() {

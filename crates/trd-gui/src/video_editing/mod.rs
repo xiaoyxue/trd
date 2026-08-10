@@ -609,7 +609,6 @@ pub struct VideoEditingApp {
     video_url: String,
     pending_seek_target: Option<u32>,
     last_pick_result: Option<Option<u32>>,
-    details_open: bool,
 }
 
 impl VideoEditingApp {
@@ -643,7 +642,6 @@ impl VideoEditingApp {
             video_url: String::new(),
             pending_seek_target: None,
             last_pick_result: None,
-            details_open: false,
         }
     }
 
