@@ -10,9 +10,9 @@ import beerObjUrl from "../../../assets/meshes/qd_beer/source/3d66.com_JDH545587
 import beerTextureUrl from "../../../assets/meshes/qd_beer/textures/3d66-export-JDH5455878326-001.jpg" with {
   type: "file",
 };
-import init, { startVideoEditing } from "../../gui-viewer/pkg/trd_gui.js";
-import wasmUrl from "../../gui-viewer/pkg/trd_gui_bg.wasm" with { type: "file" };
 import editingDocumentUrl from "../data/fiba-shot1.arrow" with { type: "file" };
+import init, { startVideoEditing } from "../pkg/trd_gui.js";
+import wasmUrl from "../pkg/trd_gui_bg.wasm" with { type: "file" };
 
 async function main(): Promise<void> {
   await init({ module_or_path: wasmUrl });

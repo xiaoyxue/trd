@@ -142,7 +142,7 @@ cargo run -p trd-gui-app -- --mesh assets/meshes/bunny.obj # interactive viewer 
 examples/render.sh --cli                               # end-to-end demo → output/out.gif
 ( cd web && bun run --cwd viewer dev )                 # stream viewer on :8080
 ( cd web && bun run --cwd gui-viewer dev )             # GUI viewer on :8082
-( cd web && bun run --cwd video-editing dev )          # editor on :8085; generate its timeline first
+( cd web && bun run --cwd gui-video-editing dev )      # editor on :8085; generate its timeline first
 ```
 
 **🪟 Windows** (PowerShell 7; `. .\scripts\dev-env.ps1` puts cargo / MSVC / ffmpeg / uv on PATH):
@@ -155,7 +155,7 @@ cargo run -p trd-gui-app -- --mesh assets\meshes\bunny.obj # interactive viewer 
 examples\render.ps1 -CLI                               # end-to-end demo → output\out.gif
 cd web; bun run --cwd viewer dev                       # stream viewer on :8080
 # use `bun run --cwd gui-viewer dev` for :8082
-# after generating the editor timeline, use `bun run --cwd video-editing dev` for :8085
+# after generating the editor timeline, use `bun run --cwd gui-video-editing dev` for :8085
 ```
 
 Full setup — Windows `dev-env.ps1`, GPU-driver notes (nixGL / `WGPU_BACKEND=gl`),
@@ -226,7 +226,7 @@ params: **[`docs/rendering.md`](docs/rendering.md#interactive-viewer--trd-gui)**
 
 ## [Video editing](docs/video-editing.md)
 
-`web/video-editing` is a Rust-owned WebGPU editor for placing catalog objects on
+`web/gui-video-editing` is a Rust-owned WebGPU editor for placing catalog objects on
 the tracked FIBA court quad while an external MP4 plays. The browser owns media
 decode and copies each presented `VideoFrame` to RGBA; Rust owns the separate
 `trd.video_edit.version = 0.1.0` Arrow timeline, quad reconstruction,
@@ -238,8 +238,9 @@ Generate the ignored local timeline first using
 ```sh
 cd web
 bun run --cwd viewer build:wasm  # stage the local trd-wasm file dependency
+bun run --cwd gui-video-editing build:wasm
 bun install --frozen-lockfile
-bun run --cwd video-editing dev  # http://localhost:8085
+bun run --cwd gui-video-editing dev  # http://localhost:8085
 ```
 
 The MP4 remains local and uncommitted. The initial fixed catalog contains the

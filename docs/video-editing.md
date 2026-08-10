@@ -1,6 +1,6 @@
 # Video editing
 
-`web/video-editing` is the browser editor from #163. It places and edits 3D
+`web/gui-video-editing` is the browser editor from #163. It places and edits 3D
 objects on a tracked court quad while the external FIBA MP4 plays. Rust owns
 Arrow, placement, state, picking, materials, and all WebGPU rendering;
 TypeScript only opens/fetches browser resources and copies decoded video pixels.
@@ -62,7 +62,7 @@ uv run --with pyarrow scripts/fiba_video_editing_bundle.py \
   --video /home/xiaoyxue/Asset/fiba-shot1/shot_0001.mp4 \
   --calibration assets/videos/fiba/per_frame_KVP_cube_best.parquet \
   --method 2VP_4510 \
-  -o web/video-editing/data/fiba-shot1.arrow
+  -o web/gui-video-editing/data/fiba-shot1.arrow
 ```
 
 PowerShell 7 (Windows native):
@@ -73,7 +73,7 @@ uv run --with pyarrow scripts\fiba_video_editing_bundle.py `
   --video $video `
   --calibration assets\videos\fiba\per_frame_KVP_cube_best.parquet `
   --method 2VP_4510 `
-  -o web\video-editing\data\fiba-shot1.arrow
+  -o web\gui-video-editing\data\fiba-shot1.arrow
 ```
 
 The generated Arrow file is ignored; regenerate it from the local MP4.
@@ -166,18 +166,18 @@ continues.
 ## Build and run
 
 All browser delivery surfaces share the Bun workspace. The GUI viewer and video
-editor additionally share the generated `web/gui-viewer/pkg` `trd-gui` wasm
-package. Generate `fiba-shot1.arrow` first, then run:
+editor each generate `trd-gui` wasm into their own package directory; the editor
+does not import `web/gui-viewer/pkg`. Generate `fiba-shot1.arrow` first, then run:
 
 ```sh
 cd web
 bun run --cwd viewer build:wasm      # stage the local trd-wasm file dependency
-bun run --cwd gui-viewer build:wasm  # shared GUI/editor wasm package
+bun run --cwd gui-video-editing build:wasm
 bun install --frozen-lockfile
 bun run typecheck
 bun run check
 bun run build
-bun run --cwd video-editing dev
+bun run --cwd gui-video-editing dev
 ```
 
 The same Bun commands run natively in PowerShell 7 on Windows; WSL and Nix are
@@ -199,8 +199,8 @@ Open <http://localhost:8085> in a WebGPU browser and select the local MP4.
 | `crates/trd-placement/src/lib.rs` | K/quad frame and placement math |
 | `crates/trd-gui/src/video_editing.rs` | editor state, commands, UI |
 | `crates/trd-gui/src/video_editing_renderer.rs` | wasm composition and picking |
-| `web/video-editing/src/main.ts` | thin video/file/resource byte bridge |
-| `web/gui-viewer/pkg` | generated shared `trd-gui` wasm package |
+| `web/gui-video-editing/src/main.ts` | thin video/file/resource byte bridge |
+| `web/gui-video-editing/pkg` | editor-owned generated `trd-gui` wasm package |
 | `scripts/fiba_video_editing_bundle.py` | timeline generator |
 
 ## Remaining work

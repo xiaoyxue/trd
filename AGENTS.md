@@ -38,7 +38,7 @@ Guidance for agents working in this repository.
   `wgpu::Surface` swapchain directly — there is **no** shared on-screen harness.
 - Major input data is columnar (Apache Arrow tables) with simple glue logic.
 - **Video editing uses a separate authoring document.**
-  `web/video-editing` reads `trd.video_edit.version = 0.1.0` timeline rows
+  `web/gui-video-editing` reads `trd.video_edit.version = 0.1.0` timeline rows
   (video metadata/poster + per-frame K/quad/tracked state). It is deliberately
   independent of render `PROTOCOL_VERSION`; do not add editor-only columns to
   `0.0.6` or bump the render protocol for editor state. Rust maps each presented
@@ -76,19 +76,21 @@ Guidance for agents working in this repository.
   - `nix fmt` — formats nix files (`nixfmt`).
 - **Delivery surfaces are grouped by platform.** Native binaries live in
   `native/{trd-app,trd-gui-app}`; reusable Rust stays in `crates/`. Browser apps
-  live as sibling packages in `web/{viewer,gui-viewer,video-editing}`.
+  live as sibling packages in `web/{viewer,gui-viewer,gui-video-editing}`.
 - **`web/` is a Bun workspace** with sibling `viewer/`, `gui-viewer/`, and
-  `video-editing/` packages. Each package's lint/format gate is Biome; run all
+  `gui-video-editing/` packages. Each package's lint/format gate is Biome; run all
   packages' checks from the workspace root
   with `bun run check`.
-  `gui-viewer` and `video-editing` share the generated `trd-gui` wasm package
-  under `web/gui-viewer/pkg`; do not generate a second package under the editor.
+  `gui-viewer` and `gui-video-editing` each own a generated `trd-gui` wasm
+  package under their own `pkg/`; neither delivery surface imports the other's
+  build output.
   Run `bun run check` / `format` / `typecheck` from `nix develop`, or directly on
   Windows — `@biomejs/biome` + `apache-arrow` are in
   `web/viewer/package.json`. On a clean non-Nix checkout, first run
   `bun run --cwd viewer build:wasm` and
-  `bun run --cwd gui-viewer build:wasm` from `web/` to stage both local wasm
-  packages, then `bun install --frozen-lockfile`; the workspace
+  `bun run --cwd gui-viewer build:wasm` and
+  `bun run --cwd gui-video-editing build:wasm` from `web/` to stage all local
+  wasm packages, then `bun install --frozen-lockfile`; the workspace
   `check`/`typecheck`/build scripts work without Nix.
 - **Nix web deps are installed offline via
   [bun2nix](https://github.com/nix-community/bun2nix).** `web/bun.nix`
@@ -220,7 +222,7 @@ not complete until these tiers pass; **record the results on the PR.**
      matching the CLI.
    - **trd-gui (wasm + web):** build the gui wasm, serve, and load a mesh
      (`?mesh=…&texture=…`) in the browser.
-   - **video editor:** serve `web/video-editing`, open the FIBA MP4, and exercise
+   - **video editor:** serve `web/gui-video-editing`, open the FIBA MP4, and exercise
      quad selection, all three catalog assets, object picking/editing,
      play/pause/seek, and the video-only 222–287 tail. Confirm PBR/IBL and colors
      match the other front-ends. The MP4 stays external/uncommitted.

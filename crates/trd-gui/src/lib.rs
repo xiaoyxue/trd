@@ -78,7 +78,7 @@ pub async fn start(
         is_gltf: bool,
     }
 
-    /// Starts the dedicated `web/video-editing/` poster/document example.
+    /// Starts the dedicated `web/gui-video-editing/` poster/document example.
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = startVideoEditing)]
     pub async fn start_video_editing(

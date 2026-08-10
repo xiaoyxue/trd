@@ -175,7 +175,8 @@
           }
         );
 
-        # wasm-bindgen package shared by web/gui-viewer and web/video-editing.
+        # One nix-built trd-gui wasm artifact, staged independently into each GUI
+        # web delivery surface's own pkg/ directory.
         trdGuiWasmArgs = commonArgs // {
           CARGO_BUILD_TARGET = "wasm32-unknown-unknown";
           cargoExtraArgs = "--package trd-gui";
@@ -238,8 +239,8 @@
 
         # Shared builder for the bun-driven web derivations (bundle + checks).
         # The bun2nix hook installs node_modules offline in `bunRoot`; the
-        # pre-install hook first materializes both nix-built wasm packages at the
-        # paths referenced by the three web workspace packages.
+        # pre-install hook materializes the nix-built wasm artifacts at the
+        # package-owned paths referenced by the three web workspace packages.
         mkWebDerivation =
           {
             pname,
@@ -266,6 +267,9 @@
               mkdir -p gui-viewer/pkg
               cp -r ${trd-gui-wasm}/. gui-viewer/pkg/
               chmod -R u+w gui-viewer/pkg
+              mkdir -p gui-video-editing/pkg
+              cp -r ${trd-gui-wasm}/. gui-video-editing/pkg/
+              chmod -R u+w gui-video-editing/pkg
             '';
 
             buildPhase = ''
@@ -395,7 +399,7 @@
                 chmod -R u+w web
                 (cd web/viewer && biome ci .)
                 (cd web/gui-viewer && biome ci .)
-                (cd web/video-editing && biome ci .)
+                (cd web/gui-video-editing && biome ci .)
                 touch $out
               '';
         };

@@ -5,16 +5,16 @@
     "": {
       "name": "trd-web",
     },
-    "gui-viewer": {
-      "name": "trd-gui-web",
+    "gui-video-editing": {
+      "name": "trd-gui-video-editing-web",
       "version": "0.1.0",
       "devDependencies": {
         "@biomejs/biome": "2.4.16",
         "typescript": "^5.6.0",
       },
     },
-    "video-editing": {
-      "name": "trd-video-editing-web",
+    "gui-viewer": {
+      "name": "trd-gui-web",
       "version": "0.1.0",
       "devDependencies": {
         "@biomejs/biome": "2.4.16",
@@ -93,9 +93,9 @@
 
     "table-layout": ["table-layout@4.1.1", "", { "dependencies": { "array-back": "^6.2.2", "wordwrapjs": "^5.1.0" } }, "sha512-iK5/YhZxq5GO5z8wb0bY1317uDF3Zjpha0QFFLA8/trAoiLbQD0HUbMesEaxyzUgDxi2QlcbM8IvqOlEjgoXBA=="],
 
-    "trd-gui-web": ["trd-gui-web@workspace:gui-viewer"],
+    "trd-gui-video-editing-web": ["trd-gui-video-editing-web@workspace:gui-video-editing"],
 
-    "trd-video-editing-web": ["trd-video-editing-web@workspace:video-editing"],
+    "trd-gui-web": ["trd-gui-web@workspace:gui-viewer"],
 
     "trd-viewer-web": ["trd-viewer-web@workspace:viewer"],
 

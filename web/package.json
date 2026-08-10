@@ -1,14 +1,14 @@
 {
   "name": "trd-web",
   "private": true,
-  "workspaces": ["viewer", "gui-viewer", "video-editing"],
+  "workspaces": ["viewer", "gui-viewer", "gui-video-editing"],
   "scripts": {
     "build:viewer": "bun run --cwd viewer build",
     "build:gui-viewer": "bun run --cwd gui-viewer build",
-    "build:video-editing": "bun run --cwd video-editing build",
-    "build": "bun run build:viewer && bun run build:gui-viewer && bun run --cwd video-editing build:web",
-    "typecheck": "bun run --cwd viewer typecheck && bun run --cwd gui-viewer typecheck && bun run --cwd video-editing typecheck",
-    "check": "bun run --cwd viewer check && bun run --cwd gui-viewer check && bun run --cwd video-editing check",
-    "format": "bun run --cwd viewer format && bun run --cwd gui-viewer format && bun run --cwd video-editing format"
+    "build:gui-video-editing": "bun run --cwd gui-video-editing build",
+    "build": "bun run build:viewer && bun run build:gui-viewer && bun run build:gui-video-editing",
+    "typecheck": "bun run --cwd viewer typecheck && bun run --cwd gui-viewer typecheck && bun run --cwd gui-video-editing typecheck",
+    "check": "bun run --cwd viewer check && bun run --cwd gui-viewer check && bun run --cwd gui-video-editing check",
+    "format": "bun run --cwd viewer format && bun run --cwd gui-viewer format && bun run --cwd gui-video-editing format"
   }
 }
