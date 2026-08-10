@@ -1,5 +1,17 @@
+use std::rc::Rc;
+
 use crate::assets;
 use crate::video_editing::CatalogAsset;
+
+/// Adapter facts fixed at device creation. Held behind an [`Rc`] so the
+/// per-frame diagnostics clone is a refcount bump instead of three `String`
+/// allocations on every rendered frame.
+#[derive(Debug)]
+pub struct RendererIdentity {
+    pub adapter_name: String,
+    pub backend: String,
+    pub device_type: String,
+}
 
 #[derive(Debug, Clone)]
 pub struct ImportedAssetDiagnostics {
@@ -12,9 +24,7 @@ pub struct ImportedAssetDiagnostics {
 
 #[derive(Debug, Clone)]
 pub struct VideoRendererDiagnostics {
-    pub adapter_name: String,
-    pub backend: String,
-    pub device_type: String,
+    pub identity: Rc<RendererIdentity>,
     pub target_size: (u32, u32),
     pub pick_target_size: Option<(u32, u32)>,
     pub msaa_samples: u32,
@@ -29,9 +39,7 @@ pub struct VideoPlacementRenderer {
     pick_target: Option<trd_core::PickTarget>,
     default_mode: trd_core::RenderMode,
     default_material: trd_core::DisneyMaterial,
-    adapter_name: String,
-    backend: String,
-    device_type: String,
+    identity: Rc<RendererIdentity>,
     asset_diagnostics: Option<ImportedAssetDiagnostics>,
 }
 
@@ -68,9 +76,11 @@ impl VideoPlacementRenderer {
             pick_target: None,
             default_mode: trd_core::RenderMode::Filled,
             default_material: trd_core::DisneyMaterial::default(),
-            adapter_name: adapter_info.name,
-            backend: format!("{:?}", adapter_info.backend),
-            device_type: format!("{:?}", adapter_info.device_type),
+            identity: Rc::new(RendererIdentity {
+                adapter_name: adapter_info.name,
+                backend: format!("{:?}", adapter_info.backend),
+                device_type: format!("{:?}", adapter_info.device_type),
+            }),
             asset_diagnostics: None,
         })
     }
@@ -132,9 +142,11 @@ impl VideoPlacementRenderer {
             pick_target: None,
             default_mode,
             default_material,
-            adapter_name: adapter_info.name,
-            backend: format!("{:?}", adapter_info.backend),
-            device_type: format!("{:?}", adapter_info.device_type),
+            identity: Rc::new(RendererIdentity {
+                adapter_name: adapter_info.name,
+                backend: format!("{:?}", adapter_info.backend),
+                device_type: format!("{:?}", adapter_info.device_type),
+            }),
             asset_diagnostics: Some(asset_diagnostics),
         })
     }
@@ -149,9 +161,7 @@ impl VideoPlacementRenderer {
 
     pub fn diagnostics(&self) -> VideoRendererDiagnostics {
         VideoRendererDiagnostics {
-            adapter_name: self.adapter_name.clone(),
-            backend: self.backend.clone(),
-            device_type: self.device_type.clone(),
+            identity: self.identity.clone(),
             target_size: self.size(),
             pick_target_size: self
                 .pick_target

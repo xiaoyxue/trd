@@ -2,12 +2,12 @@
 //! the quad/catalog interaction wiring, and the player footer.
 //!
 //! This is the *editing* UI. The read-only Details inspector lives in
-//! [`super::diagnostics_ui`], and the shared viewer controls (Interaction,
+//! [`super::details_ui`], and the shared viewer controls (Interaction,
 //! Transform, Render mode, PBR material, Overlays, Selection) stay in
 //! [`crate::ui`]; this module composes them for the video editor and owns the
 //! playback widgets.
 
-use super::diagnostics_ui::video_editing_diagnostics_ui;
+use super::details_ui::details_ui;
 use super::{point_in_quad, CatalogAsset, VideoEditingApp, COMMAND_PAUSE, COMMAND_PLAY};
 
 impl eframe::App for VideoEditingApp {
@@ -49,7 +49,9 @@ impl eframe::App for VideoEditingApp {
         let video_playing = self.shared.video_playing.get();
         let video = &self.document.video;
         let error = self.shared.error.borrow().clone();
-        let diagnostics = self.details_open.then(|| self.diagnostics());
+        // Immediate mode already skips a collapsed body, so the facts are only
+        // derived while the panel is open; no "is it open?" flag is needed.
+        let details_facts = self.details_open.then(|| self.displayed_facts());
         let mut details_open = self.details_open;
         let mut requested_asset = None;
         let mut open_video_requested = false;
@@ -121,11 +123,10 @@ impl eframe::App for VideoEditingApp {
                     }
                 });
             });
-            let response = ui.collapsing("Details", |ui| {
-                if let Some(diagnostics) = diagnostics.as_ref() {
-                    video_editing_diagnostics_ui(ui, diagnostics);
-                } else {
-                    ui.weak("Loading diagnostics...");
+            let response = ui.collapsing("Details", |ui| match details_facts.as_ref() {
+                Some(facts) => details_ui(ui, video, facts),
+                None => {
+                    ui.weak("Loading details...");
                     ui.ctx().request_repaint();
                 }
             });
