@@ -276,16 +276,17 @@ impl VideoEditingHandle {
 
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = frameIndexAtMediaTime)]
     pub fn frame_index_at_media_time(&self, media_time_seconds: f64) -> u32 {
-        let frame = (media_time_seconds * f64::from(self.fps_num) / f64::from(self.fps_den))
-            .round()
-            .max(0.0) as u32;
-        frame.min(self.frame_count.saturating_sub(1))
+        frame_index_at_media_time(
+            media_time_seconds,
+            self.fps_num,
+            self.fps_den,
+            self.frame_count,
+        )
     }
 
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = mediaTimeAtFrame)]
     pub fn media_time_at_frame(&self, frame_index: u32) -> f64 {
-        let frame = frame_index.min(self.frame_count.saturating_sub(1));
-        f64::from(frame) * f64::from(self.fps_den) / f64::from(self.fps_num)
+        media_time_at_frame(frame_index, self.fps_num, self.fps_den, self.frame_count)
     }
 
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = updateVideoFrameRgba)]
@@ -997,6 +998,27 @@ fn media_time_label(frame: u32, fps_num: u32, fps_den: u32) -> String {
     format!("{:02}:{:02}", seconds / 60, seconds % 60)
 }
 
+/// Maps a media-clock time to the nearest zero-based video frame, clamped to
+/// the editing document's declared frame range.
+pub fn frame_index_at_media_time(
+    media_time_seconds: f64,
+    fps_num: u32,
+    fps_den: u32,
+    frame_count: u32,
+) -> u32 {
+    let frame = (media_time_seconds * f64::from(fps_num) / f64::from(fps_den.max(1)))
+        .round()
+        .max(0.0) as u32;
+    frame.min(frame_count.saturating_sub(1))
+}
+
+/// Maps a zero-based video frame to its media-clock time, clamped to the editing
+/// document's declared frame range.
+pub fn media_time_at_frame(frame_index: u32, fps_num: u32, fps_den: u32, frame_count: u32) -> f64 {
+    let frame = frame_index.min(frame_count.saturating_sub(1));
+    f64::from(frame) * f64::from(fps_den) / f64::from(fps_num.max(1))
+}
+
 fn player_status_label(loaded: bool, frame: u32, video: &trd_core::VideoInfo) -> String {
     if !loaded {
         return "00:00 / 00:00  ·  frame 0/0".to_owned();
@@ -1074,5 +1096,62 @@ mod tests {
             player_status_label(false, 42, &document.video),
             "00:00 / 00:00  ·  frame 0/0"
         );
+    }
+
+    #[test]
+    fn newest_incoming_frame_replaces_the_pending_frame() {
+        let shared = VideoEditingShared::default();
+        shared
+            .update_video_frame_rgba(vec![1, 2, 3, 4], 1, 1, 7)
+            .unwrap();
+        shared
+            .update_video_frame_rgba(vec![5, 6, 7, 8], 1, 1, 9)
+            .unwrap();
+
+        let frame = shared.frame.borrow_mut().take().unwrap();
+        assert_eq!(frame.frame_index, 9);
+        assert_eq!(frame.rgba, vec![5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn invalid_incoming_frame_does_not_replace_the_pending_frame() {
+        let shared = VideoEditingShared::default();
+        shared
+            .update_video_frame_rgba(vec![1, 2, 3, 4], 1, 1, 7)
+            .unwrap();
+        assert!(shared
+            .update_video_frame_rgba(vec![5, 6, 7], 1, 1, 9)
+            .is_err());
+
+        assert_eq!(
+            shared
+                .frame
+                .borrow()
+                .as_ref()
+                .map(|frame| frame.frame_index),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn one_slot_commands_and_seek_requests_keep_the_newest_value() {
+        let shared = VideoEditingShared::default();
+        shared.command.set(COMMAND_PLAY);
+        shared.command.set(COMMAND_PAUSE);
+        assert_eq!(shared.take_command(), Some(VideoEditingCommand::Pause));
+        assert_eq!(shared.take_command(), None);
+
+        shared.seek_frame.set(12);
+        shared.seek_frame.set(42);
+        assert_eq!(shared.take_seek_frame(), Some(42));
+        assert_eq!(shared.take_seek_frame(), None);
+    }
+
+    #[test]
+    fn media_time_frame_mapping_rounds_and_clamps_at_boundaries() {
+        assert_eq!(frame_index_at_media_time(-1.0, 24, 1, 288), 0);
+        assert_eq!(frame_index_at_media_time(1.0 / 48.0, 24, 1, 288), 1);
+        assert_eq!(frame_index_at_media_time(30.0, 24, 1, 288), 287);
+        assert_eq!(media_time_at_frame(288, 24, 1, 288), 287.0 / 24.0);
     }
 }
