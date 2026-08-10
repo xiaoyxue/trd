@@ -4081,6 +4081,8 @@ dependencies = [
  "js-sys",
  "log",
  "pollster",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "trd-core",
  "trd-placement",

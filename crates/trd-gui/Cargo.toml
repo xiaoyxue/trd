@@ -42,6 +42,8 @@ image = { version = "0.25", default-features = false, features = [
     "jpeg",
     "hdr",
 ] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 # The browser target (Slice 4, #97): eframe-on-canvas UI + trd-core rendering the
 # scene offscreen (wgpu 30) to RGBA shown as an egui texture (Strategy A). Mirrors

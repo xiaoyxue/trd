@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use crate::error::NativeVideoEditingError;
 use crate::media::{DecodedFrame, NativeVideo, NativeVideoSource};
 use trd_gui::video_editing::{
-    CatalogAsset, VideoEditingApp, VideoEditingCommand, VideoEditingShared,
+    CatalogAsset, VideoEditingApp, VideoEditingCommand, VideoEditingShared, VideoSourceKind,
 };
 use trd_gui::video_editing_renderer::VideoPlacementRenderer;
 
@@ -97,6 +97,15 @@ impl NativeVideoEditingApp {
             })?,
             env_bytes: None,
         };
+        if app.video_source.is_some() {
+            app.shared.set_video_status(false, false);
+            app.sync_source_observation();
+            app.shared.set_video_metadata_observation(
+                app.document.video.width,
+                app.document.video.height,
+                app.document.video.duration_us as f64 / 1_000_000.0,
+            );
+        }
         if let Some(frame) = initial_frame {
             app.submit_frame(frame);
         }
@@ -110,11 +119,18 @@ impl NativeVideoEditingApp {
             return;
         };
         self.frame_index = frame.index;
-        match self
-            .shared
-            .update_video_frame_rgba(frame.rgba, width, height, frame.index)
-        {
-            Ok(()) => self.shared.clear_error(),
+        let media_time_seconds = self.media_time_at(frame.index);
+        match self.shared.update_video_frame_rgba(
+            frame.rgba,
+            width,
+            height,
+            frame.index,
+            media_time_seconds,
+        ) {
+            Ok(()) => {
+                self.shared.clear_error();
+                self.shared.set_video_media_observation(4, false);
+            }
             Err(error) => {
                 self.shared.set_error(error);
                 self.stop_playback();
@@ -224,8 +240,15 @@ impl NativeVideoEditingApp {
                 return;
             }
         };
+        self.shared.set_video_status(false, false);
         self.video_source = Some(source);
         self.video = Some(video);
+        self.sync_source_observation();
+        self.shared.set_video_metadata_observation(
+            self.document.video.width,
+            self.document.video.height,
+            self.document.video.duration_us as f64 / 1_000_000.0,
+        );
         self.frame_index = 0;
         self.pending_frame = None;
         self.submit_frame(frame);
@@ -322,6 +345,45 @@ impl NativeVideoEditingApp {
     fn sync_video_status(&self) {
         self.shared
             .set_video_status(self.video.is_some(), self.playback.is_some());
+        let last_frame = self.document.video.frame_count.saturating_sub(1);
+        self.shared.set_video_media_observation(
+            if self.video.is_some() { 4 } else { 0 },
+            self.video.is_some() && self.playback.is_none() && self.frame_index >= last_frame,
+        );
+    }
+
+    /// Native media clock: the shell has no HTML media element, so a frame's
+    /// media time is its declared position in the document timeline.
+    fn media_time_at(&self, frame_index: u32) -> f64 {
+        trd_gui::video_editing::media_time_at_frame(
+            frame_index,
+            self.document.video.fps_num,
+            self.document.video.fps_den,
+            self.document.video.frame_count,
+        )
+    }
+
+    fn sync_source_observation(&self) {
+        let Some(source) = self.video_source.as_ref() else {
+            return;
+        };
+        match source {
+            NativeVideoSource::Local(path) => {
+                let name = path.file_name().map_or_else(
+                    || path.display().to_string(),
+                    |name| name.to_string_lossy().into(),
+                );
+                self.shared.set_video_source_observation(
+                    VideoSourceKind::LocalFile,
+                    name,
+                    Some(self.document.video.byte_length),
+                );
+            }
+            NativeVideoSource::Url(url) => {
+                self.shared
+                    .set_video_source_observation(VideoSourceKind::HttpUrl, url, None);
+            }
+        }
     }
 
     fn frame_duration(&self) -> Duration {

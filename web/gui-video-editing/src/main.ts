@@ -56,16 +56,30 @@ async function main(): Promise<void> {
   let sourceReady = false;
   let sourceGeneration = 0;
 
-  async function copyCurrentFrame(mediaTime: number): Promise<void> {
+  // Only media-element state transitions. `mediaTime` is not published here: it
+  // travels with its own frame through `updateVideoFrameRgba`, so the Details
+  // timeline always describes the frame that reached the screen.
+  function syncMediaState(): void {
+    editor.setVideoMediaState(video.readyState, video.ended);
+  }
+
+  async function copyCurrentFrame(mediaTime: number, generation = sourceGeneration): Promise<void> {
+    if (generation !== sourceGeneration) {
+      return;
+    }
     const frame = new VideoFrame(video, { timestamp: Math.round(mediaTime * 1_000_000) });
     try {
       const rgba = new Uint8Array(frame.allocationSize({ format: "RGBA" }));
       await frame.copyTo(rgba, { format: "RGBA" });
+      if (generation !== sourceGeneration) {
+        return;
+      }
       editor.updateVideoFrameRgba(
         rgba,
         frame.displayWidth,
         frame.displayHeight,
         editor.frameIndexAtMediaTime(mediaTime),
+        mediaTime,
       );
     } finally {
       frame.close();
@@ -78,9 +92,10 @@ async function main(): Promise<void> {
     }
     callbackActive = true;
     callbackId = video.requestVideoFrameCallback((_now, metadata) => {
+      const generation = sourceGeneration;
       callbackId = undefined;
       callbackActive = false;
-      void copyCurrentFrame(metadata.mediaTime)
+      void copyCurrentFrame(metadata.mediaTime, generation)
         .catch((error: unknown) => editor.setVideoError(String(error)))
         .finally(() => {
           if (!video.paused && !video.ended) {
@@ -92,13 +107,21 @@ async function main(): Promise<void> {
 
   video.addEventListener("play", () => {
     editor.setVideoStatus(sourceReady, sourceReady);
+    syncMediaState();
     scheduleVideoFrame();
   });
-  video.addEventListener("pause", () => editor.setVideoStatus(sourceReady, false));
-  video.addEventListener("ended", () => editor.setVideoStatus(sourceReady, false));
+  video.addEventListener("pause", () => {
+    editor.setVideoStatus(sourceReady, false);
+    syncMediaState();
+  });
+  video.addEventListener("ended", () => {
+    editor.setVideoStatus(sourceReady, false);
+    syncMediaState();
+  });
   video.addEventListener("error", () => {
     sourceReady = false;
     editor.setVideoStatus(false, false);
+    syncMediaState();
     editor.setVideoError(video.error?.message ?? "failed to load video");
   });
   video.addEventListener("seeked", () => {
@@ -125,6 +148,11 @@ async function main(): Promise<void> {
     video.pause();
     sourceReady = false;
     editor.setVideoStatus(false, false);
+    editor.setVideoSourceInfo(
+      localFile ? 1 : 2,
+      localFile?.filename ?? source,
+      localFile?.byteLength ?? -1,
+    );
     video.src = source;
     video.addEventListener(
       "loadeddata",
@@ -138,6 +166,7 @@ async function main(): Promise<void> {
           video.currentTime = 0;
           sourceReady = true;
           editor.setVideoStatus(true, false);
+          syncMediaState();
           void copyCurrentFrame(0).catch((error: unknown) => editor.setVideoError(String(error)));
         } catch (error) {
           sourceReady = false;

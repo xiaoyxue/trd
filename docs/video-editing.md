@@ -163,6 +163,36 @@ All editor gizmos are hidden during playback. The placed object remains visible
 on tracked rows. Rows 222–287 hide both quad and object while the original video
 continues.
 
+## Details and diagnostics
+
+The left pane's collapsed **Details** inspector is shared by browser and native
+delivery surfaces. UI code reads one immutable `VideoEditingDiagnostics`
+snapshot; tracking and scene facts are calculated in Rust rather than
+reconstructed in TypeScript or directly in egui widgets.
+
+The six sections cover:
+
+- expected/observed source metadata, media readiness, and the explicit
+  `not browser-verified yet` SHA-256 status;
+- requested, presented, displayed, and rendered frame identities plus source
+  generation, render revision, coalescing, seek, and render latency;
+- raw TL/TR/BR/BL tracking, K, reconstructed basis, orthogonality/handedness,
+  and unsmoothed pose delta from the previous tracked row;
+- catalog format, preview AABB/scale, Olympic preset, persistent local edit,
+  movement basis, visibility reason, and copyable `draw_model`;
+- imported maps/factors and current PBR, IBL, direct light, exposure, tone-map,
+  and debug-view state;
+- adapter/backend, render/pick targets, MSAA, layer drawable counts, upload
+  size, latest pick, and explicit render/pick errors.
+
+Completed renders retain the exact scene/material/asset/renderer facts used to
+produce their pixels. While a newer frame or scene revision is in flight,
+Details continues to describe the image on screen and separately reports the
+new pending/presented identities. Diagnostics JSON is serialized only when
+**Copy diagnostics JSON** is pressed. The Dragon view makes its metallic factor,
+metallic-roughness and normal maps, zero direct/ambient light, Uffizi IBL, and
+unsmoothed tracking inputs visible without log inspection.
+
 ## Build and run
 
 All browser delivery surfaces share the Bun workspace. The GUI viewer and video

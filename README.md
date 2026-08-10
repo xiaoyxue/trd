@@ -234,7 +234,10 @@ params: **[`docs/rendering.md`](docs/rendering.md#interactive-viewer--trd-gui)**
 the tracked FIBA court quad while an external MP4 plays. The browser owns media
 decode and copies each presented `VideoFrame` to RGBA; Rust owns the separate
 `trd.video_edit.version = 0.1.0` Arrow timeline, quad reconstruction,
-quad/object-local transforms, GPU picking, PBR/IBL, and final composition.
+quad/object-local transforms, GPU picking, PBR/IBL, final composition, and a
+collapsed **Details** inspector. Its typed snapshot follows the displayed render
+and exposes source/synchronization, raw tracking pose deltas, placement,
+material/lighting, and renderer facts.
 
 Generate the ignored local timeline first using
 [`docs/video-editing.md`](docs/video-editing.md#generate-the-document), then:

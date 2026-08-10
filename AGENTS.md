@@ -227,7 +227,10 @@ not complete until these tiers pass; **record the results on the PR.**
    - **video editor:** serve `web/gui-video-editing`, open the FIBA MP4, and exercise
      quad selection, all three catalog assets, object picking/editing,
      play/pause/seek, and the video-only 222–287 tail. Confirm PBR/IBL and colors
-     match the other front-ends. The MP4 stays external/uncommitted.
+     match the other front-ends. Open **Details** and confirm its displayed
+     frame identity does not jump ahead during rapid seek/render, and that the
+     Dragon reports its GLB material maps, raw tracking pose delta, zero direct
+     light/ambient, and Uffizi IBL. The MP4 stays external/uncommitted.
    - **native video editor:** run `trd-gui-video-editing --document ... --video
      ...`; verify source validation, streaming RGBA playback, play/pause/seek,
      timeline row identity, and the tracked/video-only transition. ffmpeg and

@@ -120,9 +120,9 @@ Each is a *thin shell* that only supplies a render target and calls the core:
   [`docs/video-editing.md`](video-editing.md).
 - **`native/trd-gui-video-editing`** — native eframe media/timeline shell:
   ffmpeg/ffprobe replace HTML video/WebCodecs and stream RGBA frames through a
-  Rust channel; the document decoder and frame-row semantics are shared. The
-  first slice exposes playback/timeline/tracking state; shared 3D edit parity is
-  tracked by #167.
+  Rust channel; document decoding, typed generation scheduling, displayed-frame
+  diagnostics, catalog import, picking, and the complete Rust editor UI are
+  shared with the browser. Only the media adapter and delivery bootstrap differ.
 
 ## Source layout
 
