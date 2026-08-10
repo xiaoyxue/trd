@@ -54,12 +54,33 @@ struct IncomingVideoFrame {
     width: u32,
     height: u32,
     frame_index: u32,
+    source_generation: u64,
+}
+
+struct RenderedVideoFrame {
+    frame: IncomingVideoFrame,
+    render_revision: u64,
+}
+
+#[derive(Clone, Copy)]
+struct PickRequest {
+    id: u64,
+    point: (u32, u32),
+    source_generation: u64,
+    render_revision: u64,
+}
+
+struct PickResult {
+    id: u64,
+    source_generation: u64,
+    render_revision: u64,
+    hit: Option<u32>,
 }
 
 pub struct VideoEditingShared {
     frame: RefCell<Option<IncomingVideoFrame>>,
     latest_video_frame: RefCell<Option<IncomingVideoFrame>>,
-    rendered_frame: RefCell<Option<IncomingVideoFrame>>,
+    rendered_frame: RefCell<Option<RenderedVideoFrame>>,
     context: RefCell<Option<egui::Context>>,
     command: Cell<u8>,
     asset_request: Cell<u8>,
@@ -67,11 +88,15 @@ pub struct VideoEditingShared {
     seek_frame: Cell<i32>,
     video_loaded: Cell<bool>,
     video_playing: Cell<bool>,
+    source_generation: Cell<u64>,
     needs_overlay: Cell<bool>,
+    render_revision: Cell<u64>,
     render_in_flight: Cell<bool>,
-    pending_pick: Cell<Option<(u32, u32)>>,
+    pending_pick: Cell<Option<PickRequest>>,
+    pick_revision: Cell<u64>,
     pick_in_flight: Cell<bool>,
-    pick_result: RefCell<Option<Option<u32>>>,
+    pick_result: RefCell<Option<PickResult>>,
+    renderer_generation: Cell<u64>,
     renderer: RefCell<Option<crate::video_editing_renderer::VideoPlacementRenderer>>,
     asset_defaults: RefCell<Option<(CatalogAsset, trd_core::RenderMode, trd_core::DisneyMaterial)>>,
     error: RefCell<Option<String>>,
@@ -90,11 +115,15 @@ impl Default for VideoEditingShared {
             seek_frame: Cell::new(-1),
             video_loaded: Cell::new(false),
             video_playing: Cell::new(false),
+            source_generation: Cell::new(0),
             needs_overlay: Cell::new(false),
+            render_revision: Cell::new(0),
             render_in_flight: Cell::new(false),
             pending_pick: Cell::new(None),
+            pick_revision: Cell::new(0),
             pick_in_flight: Cell::new(false),
             pick_result: RefCell::new(None),
+            renderer_generation: Cell::new(0),
             renderer: RefCell::new(None),
             asset_defaults: RefCell::new(None),
             error: RefCell::new(None),
@@ -122,12 +151,23 @@ impl VideoEditingShared {
             width,
             height,
             frame_index,
+            source_generation: self.source_generation.get(),
         }));
         self.request_repaint();
         Ok(())
     }
 
     pub fn set_video_status(&self, loaded: bool, playing: bool) {
+        if !loaded {
+            self.source_generation
+                .set(self.source_generation.get().wrapping_add(1));
+            self.frame.replace(None);
+            self.latest_video_frame.replace(None);
+            self.rendered_frame.replace(None);
+            self.pending_pick.set(None);
+            self.pick_result.replace(None);
+            self.needs_overlay.set(false);
+        }
         self.video_loaded.set(loaded);
         self.video_playing.set(playing);
         if !loaded {
@@ -168,8 +208,10 @@ impl VideoEditingShared {
     }
 
     pub fn set_renderer(&self, renderer: crate::video_editing_renderer::VideoPlacementRenderer) {
+        self.renderer_generation
+            .set(self.renderer_generation.get().wrapping_add(1));
         self.renderer.replace(Some(renderer));
-        self.needs_overlay.set(true);
+        self.request_overlay();
         self.request_repaint();
     }
 
@@ -187,6 +229,34 @@ impl VideoEditingShared {
         if let Some(context) = self.context.borrow().as_ref() {
             context.request_repaint();
         }
+    }
+
+    fn request_overlay(&self) {
+        self.render_revision
+            .set(self.render_revision.get().wrapping_add(1));
+        self.needs_overlay.set(true);
+    }
+
+    fn request_pick(&self, point: (u32, u32)) {
+        let id = self.pick_revision.get().wrapping_add(1);
+        self.pick_revision.set(id);
+        self.pending_pick.set(Some(PickRequest {
+            id,
+            point,
+            source_generation: self.source_generation.get(),
+            render_revision: self.render_revision.get(),
+        }));
+    }
+
+    fn accepts_render(&self, rendered: &RenderedVideoFrame) -> bool {
+        rendered.frame.source_generation == self.source_generation.get()
+            && rendered.render_revision == self.render_revision.get()
+    }
+
+    fn accepts_pick(&self, result: &PickResult) -> bool {
+        result.id == self.pick_revision.get()
+            && result.source_generation == self.source_generation.get()
+            && result.render_revision == self.render_revision.get()
     }
 }
 
@@ -481,16 +551,18 @@ impl VideoEditingApp {
         };
         self.current_frame_index = frame.frame_index;
         self.shared.latest_video_frame.replace(Some(frame));
-        self.shared.needs_overlay.set(true);
+        self.shared.request_overlay();
         self.schedule_overlay();
     }
 
     fn consume_rendered_frame(&mut self) {
-        let frame = self.shared.rendered_frame.borrow_mut().take();
-        let Some(frame) = frame else {
+        let rendered = self.shared.rendered_frame.borrow_mut().take();
+        let Some(rendered) = rendered else {
             return;
         };
-        self.set_display_frame(&frame);
+        if self.shared.accepts_render(&rendered) {
+            self.set_display_frame(&rendered.frame);
+        }
     }
 
     fn consume_asset_defaults(&mut self) {
@@ -509,17 +581,21 @@ impl VideoEditingApp {
                 CatalogAsset::CocaColaCan | CatalogAsset::BeerCan => trd_core::Lighting::default(),
             };
             self.controller.rebase_reset();
-            self.shared.needs_overlay.set(true);
+            self.shared.request_overlay();
         }
     }
 
     fn consume_pick_result(&mut self) {
-        let Some(hit) = self.shared.pick_result.borrow_mut().take() else {
+        let Some(result) = self.shared.pick_result.borrow_mut().take() else {
             return;
         };
+        if !self.shared.accepts_pick(&result) {
+            return;
+        }
+        let hit = result.hit;
         if hit != self.controller.state.selected {
             self.controller.state.selected = hit;
-            self.shared.needs_overlay.set(true);
+            self.shared.request_overlay();
         }
     }
 
@@ -587,6 +663,9 @@ impl VideoEditingApp {
         }
         self.shared.render_in_flight.set(true);
         let shared = self.shared.clone();
+        let render_revision = shared.render_revision.get();
+        let source_generation = video.source_generation;
+        let renderer_generation = shared.renderer_generation.get();
         let width = self.document.video.width;
         let height = self.document.video.height;
         let show_quad_gizmo = self.show_quad_gizmo;
@@ -607,19 +686,31 @@ impl VideoEditingApp {
                     &state,
                 )
                 .await;
+            if shared.renderer_generation.get() != renderer_generation {
+                shared.render_in_flight.set(false);
+                shared.request_repaint();
+                return;
+            }
             shared.renderer.replace(Some(renderer));
-            match result {
-                Ok(rgba) => {
-                    shared.rendered_frame.replace(Some(IncomingVideoFrame {
-                        rgba,
-                        width: render_size.0,
-                        height: render_size.1,
-                        frame_index: background_frame_index,
+            let current = source_generation == shared.source_generation.get()
+                && render_revision == shared.render_revision.get();
+            match (current, result) {
+                (true, Ok(rgba)) => {
+                    shared.rendered_frame.replace(Some(RenderedVideoFrame {
+                        frame: IncomingVideoFrame {
+                            rgba,
+                            width: render_size.0,
+                            height: render_size.1,
+                            frame_index: background_frame_index,
+                            source_generation,
+                        },
+                        render_revision,
                     }));
                 }
-                Err(error) => {
+                (true, Err(error)) => {
                     shared.error.replace(Some(error));
                 }
+                (false, _) => {}
             }
             shared.render_in_flight.set(false);
             if let Some(context) = shared.context.borrow().as_ref() {
@@ -636,7 +727,7 @@ impl VideoEditingApp {
         if self.shared.render_in_flight.get() || self.shared.pick_in_flight.get() {
             return;
         }
-        let Some(point) = self.shared.pending_pick.take() else {
+        let Some(request) = self.shared.pending_pick.take() else {
             return;
         };
         let Some(frame) = self
@@ -651,23 +742,34 @@ impl VideoEditingApp {
             return;
         };
         let Some(mut renderer) = self.shared.renderer.borrow_mut().take() else {
-            self.shared.pending_pick.set(Some(point));
+            self.shared.pending_pick.set(Some(request));
             return;
         };
         let source_size = (self.document.video.width, self.document.video.height);
         let render_size = renderer.size();
         let target_point = (
-            point.0 * render_size.0 / self.display_size.0.max(1),
-            point.1 * render_size.1 / self.display_size.1.max(1),
+            request.point.0 * render_size.0 / self.display_size.0.max(1),
+            request.point.1 * render_size.1 / self.display_size.1.max(1),
         );
         self.shared.pick_in_flight.set(true);
         let shared = self.shared.clone();
+        let renderer_generation = shared.renderer_generation.get();
         let pick = async move {
             let hit = renderer
                 .pick(&frame, source_size, model, target_point)
                 .await;
+            if shared.renderer_generation.get() != renderer_generation {
+                shared.pick_in_flight.set(false);
+                shared.request_repaint();
+                return;
+            }
             shared.renderer.replace(Some(renderer));
-            shared.pick_result.replace(Some(hit));
+            shared.pick_result.replace(Some(PickResult {
+                id: request.id,
+                source_generation: request.source_generation,
+                render_revision: request.render_revision,
+                hit,
+            }));
             shared.pick_in_flight.set(false);
             if let Some(context) = shared.context.borrow().as_ref() {
                 context.request_repaint();
@@ -720,7 +822,7 @@ impl eframe::App for VideoEditingApp {
         let playing = self.shared.video_playing.get();
         if playing && !self.was_playing {
             self.show_quad_gizmo = false;
-            self.shared.needs_overlay.set(true);
+            self.shared.request_overlay();
         }
         self.was_playing = playing;
         self.schedule_pick();
@@ -895,7 +997,7 @@ impl eframe::App for VideoEditingApp {
         {
             self.fitted_render_size = fitted_render_size;
             if self.selected_asset.is_some() {
-                self.shared.needs_overlay.set(true);
+                self.shared.request_overlay();
                 ui.ctx().request_repaint();
             }
         }
@@ -907,10 +1009,11 @@ impl eframe::App for VideoEditingApp {
             self.controller.target = crate::interaction::InteractionTarget::Object;
             self.shared.renderer.borrow_mut().take();
             self.shared.asset_request.set(asset.code());
-            self.shared.needs_overlay.set(true);
+            self.shared.request_overlay();
         }
 
         if let Some((x, y)) = pick_request {
+            let mut scene_changed = false;
             let clicked_quad = quad.is_some_and(|points| {
                 let source = [
                     x as f32 * video.width as f32 / self.display_size.0 as f32,
@@ -920,26 +1023,30 @@ impl eframe::App for VideoEditingApp {
             });
             if self.shared.video_playing.get() {
                 if self.selected_asset.is_some() && self.selected_quad {
-                    self.shared.pending_pick.set(Some((x, y)));
+                    self.shared.request_pick((x, y));
                 }
             } else if self.selected_asset.is_some() && self.selected_quad {
                 if clicked_quad && !self.show_quad_gizmo {
                     self.show_quad_gizmo = true;
+                    scene_changed = true;
                 } else {
-                    self.shared.pending_pick.set(Some((x, y)));
+                    self.shared.request_pick((x, y));
                 }
             } else {
                 self.selected_quad = clicked_quad;
                 self.show_quad_gizmo = clicked_quad;
+                scene_changed = true;
             }
             if self.selected_quad {
                 self.controller.target = crate::interaction::InteractionTarget::Object;
             }
-            self.shared.needs_overlay.set(true);
+            if scene_changed {
+                self.shared.request_overlay();
+            }
         }
 
         if changed {
-            self.shared.needs_overlay.set(true);
+            self.shared.request_overlay();
             ui.ctx().request_repaint();
         }
     }
@@ -1153,5 +1260,88 @@ mod tests {
         assert_eq!(frame_index_at_media_time(1.0 / 48.0, 24, 1, 288), 1);
         assert_eq!(frame_index_at_media_time(30.0, 24, 1, 288), 287);
         assert_eq!(media_time_at_frame(288, 24, 1, 288), 287.0 / 24.0);
+    }
+
+    #[test]
+    fn source_reset_invalidates_frames_renders_and_picks() {
+        let shared = VideoEditingShared::default();
+        shared.set_video_status(true, false);
+        shared
+            .update_video_frame_rgba(vec![1, 2, 3, 4], 1, 1, 7)
+            .unwrap();
+        let source_generation = shared.source_generation.get();
+        shared.request_overlay();
+        let render_revision = shared.render_revision.get();
+        shared.request_pick((3, 4));
+        let pick = shared.pending_pick.get().unwrap();
+        let rendered = RenderedVideoFrame {
+            frame: IncomingVideoFrame {
+                rgba: vec![1, 2, 3, 4],
+                width: 1,
+                height: 1,
+                frame_index: 7,
+                source_generation,
+            },
+            render_revision,
+        };
+        let pick_result = PickResult {
+            id: pick.id,
+            source_generation,
+            render_revision,
+            hit: Some(0),
+        };
+        assert!(shared.accepts_render(&rendered));
+        assert!(shared.accepts_pick(&pick_result));
+
+        shared.set_video_status(false, false);
+        assert!(!shared.accepts_render(&rendered));
+        assert!(!shared.accepts_pick(&pick_result));
+        assert!(shared.frame.borrow().is_none());
+        assert!(shared.latest_video_frame.borrow().is_none());
+        assert!(shared.pending_pick.get().is_none());
+    }
+
+    #[test]
+    fn newer_scene_revision_invalidates_render_and_pick_completions() {
+        let shared = VideoEditingShared::default();
+        shared.request_overlay();
+        let revision = shared.render_revision.get();
+        shared.request_pick((3, 4));
+        let pick = shared.pending_pick.get().unwrap();
+        let rendered = RenderedVideoFrame {
+            frame: IncomingVideoFrame {
+                rgba: vec![1, 2, 3, 4],
+                width: 1,
+                height: 1,
+                frame_index: 7,
+                source_generation: shared.source_generation.get(),
+            },
+            render_revision: revision,
+        };
+        let pick_result = PickResult {
+            id: pick.id,
+            source_generation: shared.source_generation.get(),
+            render_revision: revision,
+            hit: Some(0),
+        };
+        shared.request_overlay();
+        assert!(!shared.accepts_render(&rendered));
+        assert!(!shared.accepts_pick(&pick_result));
+    }
+
+    #[test]
+    fn newer_pick_request_invalidates_older_pick_completion() {
+        let shared = VideoEditingShared::default();
+        shared.request_pick((1, 2));
+        let first = shared.pending_pick.get().unwrap();
+        shared.request_pick((3, 4));
+        let result = PickResult {
+            id: first.id,
+            source_generation: first.source_generation,
+            render_revision: first.render_revision,
+            hit: Some(0),
+        };
+        assert!(!shared.accepts_pick(&result));
+        assert_eq!(shared.pending_pick.get().unwrap().point, (3, 4));
     }
 }
