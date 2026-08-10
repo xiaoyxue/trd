@@ -260,7 +260,10 @@ duration before playback.
 |---|---|
 | `crates/trd-core/src/video_editing.rs` | versioned timeline decoder |
 | `crates/trd-placement/src/lib.rs` | K/quad frame and placement math |
-| `crates/trd-gui/src/video_editing.rs` | editor state, commands, UI |
+| `crates/trd-gui/src/video_editing/mod.rs` | editor state, typed scheduler, browser bridge |
+| `crates/trd-gui/src/video_editing/editing_ui.rs` | editor panels, quad/catalog wiring, player footer |
+| `crates/trd-gui/src/video_editing/diagnostics.rs` | immutable Details snapshot + pure calculations |
+| `crates/trd-gui/src/video_editing/diagnostics_ui.rs` | Details inspector presentation |
 | `crates/trd-gui/src/video_editing_renderer.rs` | shared native/wasm composition and picking |
 | `web/gui-video-editing/src/main.ts` | thin video/file/resource byte bridge |
 | `web/gui-video-editing/pkg` | editor-owned generated `trd-gui` wasm package |
