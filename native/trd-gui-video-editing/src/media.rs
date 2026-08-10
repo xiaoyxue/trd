@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -13,8 +14,23 @@ pub struct DecodedFrame {
     pub rgba: Vec<u8>,
 }
 
+#[derive(Debug, Clone)]
+pub enum NativeVideoSource {
+    Local(PathBuf),
+    Url(String),
+}
+
+impl NativeVideoSource {
+    fn as_os_str(&self) -> &OsStr {
+        match self {
+            Self::Local(path) => path.as_os_str(),
+            Self::Url(url) => OsStr::new(url),
+        }
+    }
+}
+
 pub struct NativeVideo {
-    path: PathBuf,
+    source: NativeVideoSource,
     fps_num: u32,
     fps_den: u32,
     frame_count: u32,
@@ -25,18 +41,20 @@ pub struct NativeVideo {
 }
 
 impl NativeVideo {
-    pub fn new(
-        path: PathBuf,
+    pub fn open(
+        source: NativeVideoSource,
         info: &trd_core::VideoInfo,
         preview_width: u32,
     ) -> Result<Self, NativeVideoEditingError> {
-        validate_file(&path, info)?;
-        validate_probe(&path, info)?;
+        if let NativeVideoSource::Local(path) = &source {
+            validate_file(path, info)?;
+        }
+        validate_probe(&source, info)?;
         let width = preview_width.min(info.width).max(1);
         let height =
             ((u64::from(width) * u64::from(info.height)).div_ceil(u64::from(info.width))) as u32;
         Ok(Self {
-            path,
+            source,
             fps_num: info.fps_num,
             fps_den: info.fps_den,
             frame_count: info.frame_count,
@@ -51,7 +69,7 @@ impl NativeVideo {
         let index = index.min(self.frame_count.saturating_sub(1));
         let output = Command::new("ffmpeg")
             .args(["-v", "error", "-ss", &self.timestamp(index), "-i"])
-            .arg(&self.path)
+            .arg(self.source.as_os_str())
             .args([
                 "-frames:v",
                 "1",
@@ -93,7 +111,7 @@ impl NativeVideo {
         let index = index.min(self.frame_count.saturating_sub(1));
         let generation = self.generation.load(Ordering::SeqCst);
         let generation_counter = self.generation.clone();
-        let path = self.path.clone();
+        let source = self.source.clone();
         let timestamp = self.timestamp(index);
         let scale = self.scale_filter();
         let frame_bytes = self.frame_bytes();
@@ -103,7 +121,7 @@ impl NativeVideo {
             .name("trd-native-video-decoder".to_owned())
             .spawn(move || {
                 stream_frames(
-                    path,
+                    source,
                     timestamp,
                     scale,
                     index,
@@ -165,7 +183,7 @@ impl Drop for NativeVideo {
 
 #[allow(clippy::too_many_arguments)]
 fn stream_frames(
-    path: PathBuf,
+    source: NativeVideoSource,
     timestamp: String,
     scale: String,
     start_index: u32,
@@ -177,7 +195,7 @@ fn stream_frames(
 ) {
     let spawned = Command::new("ffmpeg")
         .args(["-v", "error", "-ss", &timestamp, "-i"])
-        .arg(path)
+        .arg(source.as_os_str())
         .args(["-vf", &scale, "-pix_fmt", "rgba", "-f", "rawvideo", "-"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -260,7 +278,10 @@ fn validate_file(path: &Path, info: &trd_core::VideoInfo) -> Result<(), NativeVi
     Ok(())
 }
 
-fn validate_probe(path: &Path, info: &trd_core::VideoInfo) -> Result<(), NativeVideoEditingError> {
+fn validate_probe(
+    source: &NativeVideoSource,
+    info: &trd_core::VideoInfo,
+) -> Result<(), NativeVideoEditingError> {
     let output = Command::new("ffprobe")
         .args([
             "-v",
@@ -272,7 +293,7 @@ fn validate_probe(path: &Path, info: &trd_core::VideoInfo) -> Result<(), NativeV
             "-of",
             "default=noprint_wrappers=1",
         ])
-        .arg(path)
+        .arg(source.as_os_str())
         .output()
         .map_err(|source| NativeVideoEditingError::Spawn {
             program: "ffprobe",

@@ -3,7 +3,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crate::error::NativeVideoEditingError;
-use crate::media::{DecodedFrame, NativeVideo};
+use crate::media::{DecodedFrame, NativeVideo, NativeVideoSource};
 use trd_gui::video_editing::{
     CatalogAsset, VideoEditingApp, VideoEditingCommand, VideoEditingShared,
 };
@@ -34,8 +34,9 @@ pub struct NativeVideoEditingApp {
     document: trd_core::VideoEditingDocument,
     shared: Rc<VideoEditingShared>,
     editor: VideoEditingApp,
-    video_path: Option<PathBuf>,
+    video_source: Option<NativeVideoSource>,
     video: Option<NativeVideo>,
+    preview_width: u32,
     frame_index: u32,
     playback: Option<PlaybackClock>,
     pending_frame: Option<DecodedFrame>,
@@ -46,12 +47,12 @@ pub struct NativeVideoEditingApp {
 impl NativeVideoEditingApp {
     pub fn new(
         document: trd_core::VideoEditingDocument,
-        video_path: Option<PathBuf>,
+        video_source: Option<NativeVideoSource>,
         preview_width: u32,
     ) -> Result<Self, NativeVideoEditingError> {
-        let mut video = video_path
+        let mut video = video_source
             .clone()
-            .map(|path| NativeVideo::new(path, &document.video, preview_width))
+            .map(|source| NativeVideo::open(source, &document.video, preview_width))
             .transpose()?;
         let initial_frame = video
             .as_ref()
@@ -82,8 +83,9 @@ impl NativeVideoEditingApp {
             document,
             shared,
             editor,
-            video_path,
+            video_source,
             video,
+            preview_width,
             frame_index: 0,
             playback: None,
             pending_frame: None,
@@ -174,24 +176,13 @@ impl NativeVideoEditingApp {
     fn service_editor_requests(&mut self) {
         if let Some(command) = self.shared.take_command() {
             match command {
-                VideoEditingCommand::OpenLocalVideo => {
-                    let source = self
-                        .video_path
-                        .as_ref()
-                        .map(|path| path.display().to_string())
-                        .unwrap_or_else(|| "none".to_owned());
-                    self.shared.set_error(format!(
-                        "native source is configured with --video (current: {source})"
-                    ));
-                }
+                VideoEditingCommand::OpenLocalVideo => self.open_local_video(),
                 VideoEditingCommand::Play => self.play(),
                 VideoEditingCommand::Pause => self.pause(),
             }
         }
         if let Some(url) = self.shared.take_video_url_request() {
-            self.shared.set_error(format!(
-                "HTTP(S) video sources are browser-only; use --video for native playback ({url})"
-            ));
+            self.open_video_source(NativeVideoSource::Url(url));
         }
         if let Some(index) = self.shared.take_seek_frame() {
             self.seek(index);
@@ -201,6 +192,44 @@ impl NativeVideoEditingApp {
                 self.shared.set_error(error);
             }
         }
+    }
+
+    fn open_local_video(&mut self) {
+        self.stop_playback();
+        let mut dialog = rfd::FileDialog::new().add_filter("MP4 video", &["mp4"]);
+        if let Some(NativeVideoSource::Local(path)) = &self.video_source {
+            if let Some(parent) = path.parent() {
+                dialog = dialog.set_directory(parent);
+            }
+        }
+        if let Some(path) = dialog.pick_file() {
+            self.open_video_source(NativeVideoSource::Local(path));
+        }
+    }
+
+    fn open_video_source(&mut self, source: NativeVideoSource) {
+        self.stop_playback();
+        let video =
+            match NativeVideo::open(source.clone(), &self.document.video, self.preview_width) {
+                Ok(video) => video,
+                Err(error) => {
+                    self.shared.set_error(error.to_string());
+                    return;
+                }
+            };
+        let frame = match video.decode_one(0) {
+            Ok(frame) => frame,
+            Err(error) => {
+                self.shared.set_error(error.to_string());
+                return;
+            }
+        };
+        self.video_source = Some(source);
+        self.video = Some(video);
+        self.frame_index = 0;
+        self.pending_frame = None;
+        self.submit_frame(frame);
+        self.sync_video_status();
     }
 
     fn play(&mut self) {

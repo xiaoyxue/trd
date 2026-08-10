@@ -32,9 +32,13 @@ fn run() -> Result<(), error::NativeVideoEditingError> {
             source,
         })?;
     let document = trd_core::decode_video_editing_document(&bytes)?;
+    let video_source = cli
+        .video
+        .map(media::NativeVideoSource::Local)
+        .or_else(|| cli.video_url.map(media::NativeVideoSource::Url));
     if cli.probe_only {
-        if let Some(video_path) = cli.video {
-            let video = media::NativeVideo::new(video_path, &document.video, cli.preview_width)?;
+        if let Some(source) = video_source {
+            let video = media::NativeVideo::open(source, &document.video, cli.preview_width)?;
             video.decode_one(0)?;
             println!("native video-editing source validated; decoded frame 0");
         } else {
@@ -42,7 +46,7 @@ fn run() -> Result<(), error::NativeVideoEditingError> {
         }
         return Ok(());
     }
-    let app = app::NativeVideoEditingApp::new(document, cli.video, cli.preview_width)?;
+    let app = app::NativeVideoEditingApp::new(document, video_source, cli.preview_width)?;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 800.0]),
         ..Default::default()

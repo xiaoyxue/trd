@@ -263,10 +263,14 @@ cargo run -p trd-gui-video-editing -- \
   --video /path/to/shot_0001.mp4
 ```
 
+`--video-url https://example.com/shot_0001.mp4` launches the same native editor
+from an HTTP(S) source.
+
 The native and browser surfaces share the same panels, timeline, quad selection,
 catalog, object transforms, GPU picking, PBR/IBL controls, and three-layer
 composition. Only the media adapter differs: HTML video/WebCodecs in the
-browser, ffmpeg/ffprobe in the native shell.
+browser, ffmpeg/ffprobe in the native shell. Native **Open video** supports both
+an OS file picker and HTTP(S) URLs.
 
 ## Documentation
 

@@ -202,6 +202,9 @@ cargo run -p trd-gui-video-editing -- \
   --video /path/to/shot_0001.mp4
 ```
 
+Use `--video-url https://example.com/shot_0001.mp4` instead of `--video` to
+launch directly from HTTP(S); the two options are mutually exclusive.
+
 Add `--probe-only` to validate metadata and decode frame 0 without opening a
 native window.
 
@@ -216,8 +219,10 @@ decoded frames into the shared editor state. Its panels, timeline, quad
 selection, catalog, transforms, PBR/IBL controls, GPU picking, and layered
 composition are the same Rust implementation used by the browser. ffmpeg
 outputs RGBA directly to a Rust decoder thread/channel; no temporary frame
-files are created. The native **Open video** action reports the current
-`--video` source; changing sources remains a launch-time operation.
+files are created. Native **Open video** uses the operating-system file picker
+for local MP4s; HTTP(S) URLs are passed directly to ffprobe/ffmpeg and validated
+against the document's codec, dimensions, frame count (when reported), and
+duration before playback.
 
 ## Source map
 
