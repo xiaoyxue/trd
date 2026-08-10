@@ -1,87 +1,7 @@
-//! Immutable diagnostic snapshot for the video editor (#167).
+//! Pure domain calculations behind the Details inspector (#167/#175).
 //!
-//! Pure domain data and calculations only: these types describe the frame that
-//! reached the screen and are built once per repaint by
-//! [`VideoEditingApp::diagnostics`](super::VideoEditingApp). Rendering them is
-//! [`super::diagnostics_ui`]'s job, so UI code never rederives domain math.
-
-use super::VideoSourceKind;
-
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
-pub struct VideoEditingDiagnostics {
-    pub source: SourceDiagnostics,
-    pub timeline: TimelineDiagnostics,
-    pub tracking: TrackingDiagnostics,
-    pub placement: PlacementDiagnostics,
-    pub material_lighting: MaterialLightingDiagnostics,
-    pub renderer: RendererDiagnostics,
-}
-
-impl VideoEditingDiagnostics {
-    pub(super) fn to_json(&self) -> Result<String, serde_json::Error> {
-        serde_json::to_string_pretty(self)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
-pub struct SourceDiagnostics {
-    pub expected_name: String,
-    pub expected_byte_length: u64,
-    pub expected_mime: String,
-    pub expected_codec: String,
-    pub expected_size: [u32; 2],
-    pub expected_fps: [u32; 2],
-    pub expected_frame_count: u32,
-    pub expected_duration_seconds: f64,
-    pub expected_sha256: String,
-    pub observed_kind: Option<VideoSourceKind>,
-    pub observed_name: Option<String>,
-    pub observed_byte_length: Option<u64>,
-    pub observed_size: Option<[u32; 2]>,
-    pub observed_duration_seconds: Option<f64>,
-    pub ready_state: u8,
-    pub loaded: bool,
-    pub playing: bool,
-    pub ended: bool,
-    pub error: Option<String>,
-    pub digest_status: &'static str,
-}
-
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
-pub struct TimelineDiagnostics {
-    pub media_time_seconds: Option<f64>,
-    pub requested_frame_index: u32,
-    pub presented_frame_index: Option<u32>,
-    pub displayed_frame_index: Option<u32>,
-    pub rendered_frame_index: Option<u32>,
-    pub arrow_video_frame_index: Option<u32>,
-    pub present_index: Option<u32>,
-    pub timestamp_us: Option<i64>,
-    pub media_timestamp_delta_ms: Option<f64>,
-    pub tracked: Option<bool>,
-    pub source_size: [u32; 2],
-    pub render_size: [u32; 2],
-    pub source_generation: u64,
-    pub render_revision: u64,
-    pub pending_render_generation: Option<u64>,
-    pub in_flight_frame_index: Option<u32>,
-    pub coalesced_frame_index: Option<u32>,
-    pub last_render_latency_ms: Option<f64>,
-    pub average_render_latency_ms: Option<f64>,
-    pub seek_target: Option<u32>,
-    pub seek_pending: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
-pub struct TrackingDiagnostics {
-    pub points_tl_tr_br_bl: Option<[[f32; 2]; 4]>,
-    pub intrinsics_fx_fy_cx_cy: Option<[f32; 4]>,
-    pub quad_frame: Option<QuadFrameDiagnostics>,
-    pub pose_delta: Option<PoseDeltaDiagnostics>,
-    pub normal_sign_warning: bool,
-    pub placement_error: Option<TrackingPlacementError>,
-    pub smoothing: &'static str,
-}
+//! There is no snapshot DTO: [`super::details_ui`] reads app state directly and
+//! calls these helpers at draw time, so the domain maths stays out of the UI.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, thiserror::Error)]
 #[serde(rename_all = "snake_case")]
@@ -133,67 +53,20 @@ pub struct PoseDeltaDiagnostics {
     pub axis_length_ratio: f32,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
-pub struct PlacementDiagnostics {
-    pub selected_quad: bool,
-    pub selected_object: Option<u32>,
-    pub catalog_asset: Option<&'static str>,
-    pub source_format: Option<&'static str>,
-    pub preview_aabb_min: Option<[f32; 3]>,
-    pub preview_aabb_max: Option<[f32; 3]>,
-    pub preview_scale: Option<f32>,
-    pub preset_size_factor: f32,
-    pub preset_offset_e1: f32,
-    pub preset_offset_e2: f32,
-    pub preset_lift: f32,
-    pub object_translation: [f32; 3],
-    pub object_rotation_degrees: [f32; 3],
-    pub object_scale: [f32; 3],
-    pub movement_basis: [&'static str; 3],
-    pub draw_model: Option<[f32; 16]>,
-    pub visibility_reason: &'static str,
-}
-
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
-pub struct MaterialLightingDiagnostics {
-    pub render_mode: &'static str,
-    pub imported_metallic: Option<f32>,
-    pub imported_roughness: Option<f32>,
-    pub base_color_map: bool,
-    pub metallic_roughness_map: bool,
-    pub normal_map: bool,
-    pub metallic: f32,
-    pub roughness: f32,
-    pub specular: f32,
-    pub clearcoat: f32,
-    pub environment_name: Option<&'static str>,
-    pub environment_intensity: f32,
-    pub environment_rotation_degrees: f32,
-    pub direct_light_scale: f32,
-    pub ambient: f32,
-    pub exposure: f32,
-    pub tone_map: &'static str,
-    pub pbr_debug_view: &'static str,
-    pub tracking_warning: Option<&'static str>,
-}
-
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
-pub struct RendererDiagnostics {
-    pub adapter_name: Option<String>,
-    pub backend: Option<String>,
-    pub device_type: Option<String>,
-    pub source_size: [u32; 2],
-    pub render_target_size: [u32; 2],
-    pub mode: &'static str,
-    pub msaa_samples: Option<u32>,
-    pub background_drawables: u32,
-    pub foreground_drawables: u32,
-    pub selection_drawables: u32,
-    pub frame_texture_upload_bytes: Option<u64>,
-    pub pick_target_size: Option<[u32; 2]>,
-    pub latest_pick_result: Option<Option<u32>>,
-    pub last_render_error: Option<String>,
-    pub last_pick_error: Option<String>,
+/// Renders a column-major 4x4 as four readable rows.
+pub(super) fn format_matrix(matrix: [f32; 16]) -> String {
+    (0..4)
+        .map(|row| {
+            format!(
+                "[{:.6}, {:.6}, {:.6}, {:.6}]",
+                matrix[row],
+                matrix[4 + row],
+                matrix[8 + row],
+                matrix[12 + row]
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 pub(super) fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
