@@ -381,31 +381,21 @@ pub struct VideoEditingApp {
 }
 
 impl VideoEditingApp {
-    pub fn new(
-        document: trd_core::VideoEditingDocument,
-        shared: Rc<VideoEditingShared>,
-    ) -> Result<Self, image::ImageError> {
-        let image = image::load_from_memory(&document.poster_bytes)?.to_rgba8();
-        let size = [image.width() as usize, image.height() as usize];
-        shared.latest_video_frame.replace(Some(IncomingVideoFrame {
-            rgba: image.as_raw().to_vec(),
-            width: image.width(),
-            height: image.height(),
-            frame_index: 0,
-        }));
+    pub fn new(document: trd_core::VideoEditingDocument, shared: Rc<VideoEditingShared>) -> Self {
+        let source_size = (document.video.width, document.video.height);
         let scene = crate::scene::SceneState::default();
         let mut controller = crate::interaction::InteractionController::new(scene);
         controller.target = crate::interaction::InteractionTarget::Object;
         controller.move_direction = crate::interaction::MoveDirection::Reference1;
         controller.move_reference_axes = [[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]];
         controller.state.camera.distance = 1.0;
-        Ok(Self {
+        Self {
             document,
-            display_image: egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw()),
+            display_image: egui::ColorImage::from_rgba_unmultiplied([1, 1], &[0, 0, 0, 0]),
             display_texture: None,
             current_frame_index: 0,
             displayed_frame_index: 0,
-            display_size: (image.width(), image.height()),
+            display_size: source_size,
             shared,
             controller,
             selected_quad: false,
@@ -413,10 +403,10 @@ impl VideoEditingApp {
             was_playing: false,
             selected_asset: None,
             image_sizing: crate::ui::ImageSizing::FitCanvas,
-            fitted_render_size: (image.width(), image.height()),
+            fitted_render_size: source_size,
             show_video_source_dialog: false,
             video_url: String::new(),
-        })
+        }
     }
 
     fn ensure_texture(&mut self, context: &egui::Context) {
@@ -723,7 +713,9 @@ impl eframe::App for VideoEditingApp {
         self.consume_rendered_frame();
         self.consume_asset_defaults();
         self.consume_pick_result();
-        self.ensure_texture(ui.ctx());
+        if self.shared.latest_video_frame.borrow().is_some() {
+            self.ensure_texture(ui.ctx());
+        }
         let playing = self.shared.video_playing.get();
         if playing && !self.was_playing {
             self.show_quad_gizmo = false;
@@ -848,19 +840,7 @@ impl eframe::App for VideoEditingApp {
                     .max_rect(row_rect)
                     .layout(egui::Layout::right_to_left(egui::Align::Center)),
                 |ui| {
-                    if video_loaded {
-                        let current =
-                            media_time_label(requested_frame, video.fps_num, video.fps_den);
-                        let total =
-                            media_time_label(video.frame_count, video.fps_num, video.fps_den);
-                        ui.monospace(format!(
-                            "{current} / {total}  ·  frame {}/{}",
-                            requested_frame.saturating_add(1),
-                            video.frame_count
-                        ));
-                    } else {
-                        ui.monospace("00:00 / 00:00  ·  frame 0/0");
-                    }
+                    ui.monospace(player_status_label(video_loaded, requested_frame, video));
                 },
             );
             ui.add_space(6.0);
@@ -1017,6 +997,19 @@ fn media_time_label(frame: u32, fps_num: u32, fps_den: u32) -> String {
     format!("{:02}:{:02}", seconds / 60, seconds % 60)
 }
 
+fn player_status_label(loaded: bool, frame: u32, video: &trd_core::VideoInfo) -> String {
+    if !loaded {
+        return "00:00 / 00:00  ·  frame 0/0".to_owned();
+    }
+    let current = media_time_label(frame, video.fps_num, video.fps_den);
+    let total = media_time_label(video.frame_count, video.fps_num, video.fps_den);
+    format!(
+        "{current} / {total}  ·  frame {}/{}",
+        frame.saturating_add(1),
+        video.frame_count
+    )
+}
+
 fn point_in_quad(point: [f32; 2], quad: [[f32; 2]; 4]) -> bool {
     let mut inside = false;
     let mut previous = quad[3];
@@ -1028,7 +1021,58 @@ fn point_in_quad(point: [f32; 2], quad: [[f32; 2]; 4]) -> bool {
         {
             inside = !inside;
         }
+
         previous = current;
     }
     inside
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn document() -> trd_core::VideoEditingDocument {
+        trd_core::VideoEditingDocument {
+            video: trd_core::VideoInfo {
+                source_name: "shot.mp4".to_owned(),
+                mime: "video/mp4".to_owned(),
+                codec: "h264".to_owned(),
+                sha256: "unused".to_owned(),
+                byte_length: 1,
+                width: 1920,
+                height: 1080,
+                fps_num: 24,
+                fps_den: 1,
+                frame_count: 288,
+                duration_us: 12_000_000,
+            },
+            poster_bytes: vec![1, 2, 3],
+            frames: vec![trd_core::VideoEditingFrame {
+                video_frame_index: 0,
+                present_index: 0,
+                timestamp_us: 0,
+                k: None,
+                placement_quad: None,
+                tracked: false,
+            }],
+        }
+    }
+
+    #[test]
+    fn unloaded_editor_starts_without_a_frame_or_texture() {
+        let shared = Rc::new(VideoEditingShared::default());
+        let app = VideoEditingApp::new(document(), shared.clone());
+        assert!(shared.latest_video_frame.borrow().is_none());
+        assert!(app.display_texture.is_none());
+        assert_eq!(app.display_size, (1920, 1080));
+    }
+
+    #[test]
+    fn unloaded_player_status_is_zeroed() {
+        let document = document();
+        assert_eq!(
+            player_status_label(false, 42, &document.video),
+            "00:00 / 00:00  ·  frame 0/0"
+        );
+    }
 }

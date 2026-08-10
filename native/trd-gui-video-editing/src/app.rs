@@ -77,8 +77,7 @@ impl NativeVideoEditingApp {
         ))
         .map_err(NativeVideoEditingError::Renderer)?;
         shared.set_renderer(renderer);
-        let editor = VideoEditingApp::new(document.clone(), shared.clone())
-            .map_err(|error| NativeVideoEditingError::Renderer(error.to_string()))?;
+        let editor = VideoEditingApp::new(document.clone(), shared.clone());
         let mut app = Self {
             document,
             shared,

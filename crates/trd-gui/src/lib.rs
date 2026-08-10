@@ -99,8 +99,7 @@ pub async fn start(
         .map_err(|error| wasm_bindgen::JsValue::from_str(&error))?;
         shared.set_renderer(renderer);
         let handle = video_editing::VideoEditingHandle::new(&document, shared.clone());
-        let app = video_editing::VideoEditingApp::new(document, shared)
-            .map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()))?;
+        let app = video_editing::VideoEditingApp::new(document, shared);
         eframe::WebRunner::new()
             .start(
                 canvas,
