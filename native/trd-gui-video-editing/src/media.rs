@@ -176,7 +176,7 @@ fn stream_frames(
     sender: SyncSender<Result<DecodedFrame, String>>,
 ) {
     let spawned = Command::new("ffmpeg")
-        .args(["-v", "error", "-re", "-ss", &timestamp, "-i"])
+        .args(["-v", "error", "-ss", &timestamp, "-i"])
         .arg(path)
         .args(["-vf", &scale, "-pix_fmt", "rgba", "-f", "rawvideo", "-"])
         .stdin(Stdio::null())
