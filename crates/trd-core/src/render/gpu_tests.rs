@@ -180,6 +180,85 @@ fn offscreen_target_reports_its_render_format_and_size() {
     assert_eq!(target.view_format(), OFFSCREEN_FORMAT);
 }
 
+/// `render_layers` must reproduce the fixed-arity passes exactly, and composite.
+///
+/// The video editor builds a frame from three passes through two different camera
+/// calibrations, which used to need a bespoke `render_three_pass` on the target.
+/// Generalising that to N layers (#180) is only safe if the loop clears, orders,
+/// and submits identically — so this renders the same content both ways and
+/// compares byte for byte — one layer against `render`, three against
+/// `render_three_pass` — and checks that layering actually composites.
+#[test]
+#[ignore = "requires a GPU adapter"]
+#[cfg(not(target_arch = "wasm32"))]
+fn render_layers_matches_the_fixed_arity_passes() {
+    use crate::render::SceneLayer;
+    use crate::OffscreenTarget;
+
+    let gpu = test_gpu();
+    let (width, height) = (64, 48);
+    let target = OffscreenTarget::new(&gpu.device, width, height).expect("target builds");
+    let mut renderer = single(OFFSCREEN_FORMAT, &Mesh::hello_triangle());
+
+    let at = |x: f32| DrawableObject::Mesh {
+        mesh_id: 0,
+        model: Matrix4::from_translation(Vector3::new(x, 0.0, 0.0)).to_cols_array(),
+        mode: RenderMode::Filled,
+    };
+    let background = [at(-0.4)];
+    let foreground = [at(0.0)];
+    let overlay = [DrawableObject::CoordinateAxes {
+        model: Matrix4::IDENTITY.to_cols_array(),
+    }];
+
+    // One layer must be exactly `render`.
+    let one_layer = pollster::block_on(target.render_layers(
+        &gpu,
+        &mut renderer,
+        &[SceneLayer::new(FrameParams::IDENTITY, &foreground)],
+    ))
+    .expect("one layer renders");
+    let single_pass =
+        pollster::block_on(target.render(&gpu, &mut renderer, FrameParams::IDENTITY, &foreground))
+            .expect("single pass renders");
+    assert_eq!(one_layer, single_pass, "one layer != render");
+    assert_eq!(one_layer.len(), (width * height * 4) as usize);
+    assert!(
+        one_layer.chunks_exact(4).any(|px| px[..3] != [0, 0, 0]),
+        "a single layer drew nothing"
+    );
+
+    let three_layers = pollster::block_on(target.render_layers(
+        &gpu,
+        &mut renderer,
+        &[
+            SceneLayer::new(FrameParams::IDENTITY, &background),
+            SceneLayer::new(FrameParams::IDENTITY, &foreground),
+            SceneLayer::new(FrameParams::IDENTITY, &overlay),
+        ],
+    ))
+    .expect("three layers render");
+    let three_pass = pollster::block_on(target.render_three_pass(
+        &gpu,
+        &mut renderer,
+        FrameParams::IDENTITY,
+        FrameParams::IDENTITY,
+        &background,
+        &foreground,
+        &overlay,
+    ))
+    .expect("three passes render");
+
+    assert_eq!(
+        three_layers, three_pass,
+        "render_layers and render_three_pass disagree"
+    );
+    assert_ne!(
+        three_layers, one_layer,
+        "layering did not composite anything extra"
+    );
+}
+
 /// The generic harness must work through its **target-agnostic** API.
 ///
 /// `Renderer<T: RenderTarget>` exists so the on-screen front-ends stop being

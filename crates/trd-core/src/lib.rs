@@ -41,8 +41,8 @@ pub use render::{
     FrameFit, FrameParams, GpuContext, GpuInitError, GpuRequest, GridPlane, ImageBasedLighting,
     Light, Lighting, LimitsPreset, Mesh, MeshShading, Msaa, OffscreenError, OffscreenTarget,
     OnscreenTarget, PbrConfig, PbrDebugView, PickTarget, PointLight, PresentOutcome, RenderMode,
-    RenderOptions, RenderTarget, Scene, SceneRenderer, SurfaceSkip, ToneMapping, Tonemap,
-    TriangleRenderer, Vertex, Viewport, OFFSCREEN_FORMAT,
+    RenderOptions, RenderTarget, Scene, SceneLayer, SceneRenderer, SurfaceSkip, ToneMapping,
+    Tonemap, TriangleRenderer, Vertex, Viewport, OFFSCREEN_FORMAT,
 };
 // The offscreen harness; available on both platforms since it became async
 // (#180) — the browser could not use it while it blocked on readback.

@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use super::{
     Draw, DrawableObject, FrameParams, GpuContext, Mesh, OffscreenTarget, OnscreenTarget,
-    PickTarget, RenderTarget, SceneRenderer, Viewport, OFFSCREEN_FORMAT,
+    PickTarget, RenderTarget, SceneLayer, SceneRenderer, Viewport, OFFSCREEN_FORMAT,
 };
 use crate::math::Matrix4;
 use thiserror::Error;
@@ -214,6 +214,24 @@ impl Renderer<OffscreenTarget> {
             .render(&self.gpu, &mut self.renderer, params, scene)
             .await?)
     }
+
+    /// Renders `layers` back-to-front, returning tightly-packed row-major RGBA.
+    ///
+    /// The first layer clears; every later one composites over the accumulated
+    /// color with depth cleared. Use this when one frame is not one camera's
+    /// scene — the video editor draws the video plane through the background
+    /// frame's calibration, the placed object through the placement frame's, then
+    /// its gizmos on top. A single layer is exactly
+    /// [`render_scene`](Self::render_scene).
+    pub async fn render_layers(
+        &mut self,
+        layers: &[SceneLayer<'_>],
+    ) -> Result<Vec<u8>, RenderError> {
+        Ok(self
+            .target
+            .render_layers(&self.gpu, &mut self.renderer, layers)
+            .await?)
+    }
 }
 
 /// The parts that do not care **where** the frame lands: uploads, materials,
@@ -255,6 +273,16 @@ impl<T: RenderTarget> Renderer<T> {
     /// surface — recreating the surface instead would lose the swapchain.
     pub fn into_target(self) -> T {
         self.target
+    }
+
+    /// The size of the object-id pick target, or `None` if nothing has been
+    /// picked yet (it is allocated on the first [`pick`](Self::pick)). Diagnostic
+    /// only — front-ends surface it in their debug panels.
+    pub fn pick_target_size(&self) -> Option<(u32, u32)> {
+        self.pick_target.as_ref().map(|_| {
+            let viewport = self.target.viewport();
+            (viewport.width, viewport.height)
+        })
     }
 
     /// The current render size in pixels.
