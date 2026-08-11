@@ -1,5 +1,14 @@
 # `trd-gui` design — interactive egui front-end
 
+> **Superseded in places.** The `SceneRenderer` trait and the
+> `ArrowRoundTripRenderer` backend described below were removed in #180: with
+> one concrete backend the trait abstracted nothing, and protocol `0.0.6`
+> cannot round-trip a `Scene` losslessly (it has no gizmo/overlay columns), so
+> the GUI round-trip was never the external-producer seam it is described as
+> here. The wire path is still exercised end-to-end by `run_stream` and pinned
+> by the golden suite. Sections below are kept as the design record.
+
+
 Status: **in progress** (in-process interaction loop implemented; Arrow
 round-trip + wasm pending) · Owner: @xiaoyxue · Branch: `feat/trd-gui-design`
 
@@ -25,7 +34,7 @@ Slices 0–3**; the Arrow round-trip and wasm land as their own follow-up PRs.
   "input → matrix → render → display" cycle. Modules mirror §7.2: `scene.rs`
   (orbit camera + object transform → `FrameParams`/`Draw`s), `interaction.rs`
   (`InteractionController`: events → scene, unit-tested, egui-free),
-  `render_backend.rs` (`SceneRenderer` trait + `InProcRenderer` over
+  `render_backend.rs` (`InProcRenderer` over
   `trd_core::Renderer`), `app.rs` (egui panels), `cli.rs` (`--mesh` /
   `--texture` / `--width` / `--height`, built-in default cube). Render modes
   Filled / Wireframe / **Textured** (`--texture` binds an albedo, downscaled to
@@ -220,8 +229,9 @@ trait SceneRenderer {
   sit in the loop. Higher latency (serialize + subprocess), so it re-renders
   on interaction *end* rather than every drag delta.
 
-Default = `InProcRenderer`; `--backend arrow` (or a UI toggle) selects the
-round-trip. Both share the `SceneRenderer` trait, so Strategy B (§4) can add a
+The GUI renders through `InProcRenderer` only; the Arrow round-trip backend was
+removed in #180 (protocol `0.0.6` cannot round-trip a `Scene` losslessly, so it
+was never the external-producer seam it was documented as).
 third `LiveSurfaceRenderer` later.
 
 ### 5.3 New piece of work: a Rust **input**-scene encoder
@@ -365,8 +375,7 @@ scene authoring, and the image-display texture. All pixels come from trd-core.
    (`Draw.model`) in process, plus Filled/Wireframe/**Textured** render modes
    (`--texture`) *(PR #98)*; ✅ the `ArrowRoundTripRenderer` (`trd_core::scene_encode`
    authors the `[mesh][params]` Arrow → `run_stream` → `read_image_stream`),
-   selected with `--backend arrow`, proven pixel-identical to the in-process
-   backend *(PR #99)*. The full "event → new arrow with computed model matrix →
+   removed in #180.
    render → gui" loop, and the seam for external producers.
 4. ✅ **wasm parity**: egui-on-canvas (eframe `WebRunner`) + `trd-core` offscreen
    (async wgpu 30 readback → egui texture, Strategy A). Shared `scene`/

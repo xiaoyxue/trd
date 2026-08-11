@@ -107,22 +107,7 @@ Each is a *thin shell* that only supplies a render target and calls the core:
   library.
 - **`trd-gui`** — interactive viewer (native + browser): turns orbit/zoom/pan
   gestures into an updated camera + model matrix and re-renders one mesh through
-  `trd-core`, offscreen, shown as an egui image. `--backend arrow` (or
-  `?backend=arrow`) round-trips each frame through the real Arrow wire — the seam
-  an external producer would drive. Shared state/UI/render backends live in
-  `crates/trd-gui`; `native/trd-gui-app` and `web/gui-viewer` are its thin
-  delivery shells. Design notes: [`docs/gui-design.md`](gui-design.md).
-- **`web/gui-video-editing`** — browser video editor: an external HTML video is the
-  playback clock; WebCodecs copies the current frame to Rust, which decodes the
-  independent `0.1.0` Arrow timeline, reconstructs its tracked quad through
-  `trd-placement`, applies persistent object-local edits, and renders the
-  video/mesh/editor overlays through `trd-core`. See
-  [`docs/video-editing.md`](video-editing.md).
-- **`native/trd-gui-video-editing`** — native eframe media/timeline shell:
-  ffmpeg/ffprobe replace HTML video/WebCodecs and stream RGBA frames through a
-  Rust channel; document decoding, typed generation scheduling, displayed-frame
-  diagnostics, catalog import, picking, and the complete Rust editor UI are
-  shared with the browser. Only the media adapter and delivery bootstrap differ.
+  `trd-core`, offscreen, shown as an egui image.
 
 ## Source layout
 

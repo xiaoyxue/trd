@@ -6,7 +6,7 @@
 //! The **input** stream is normally authored by the Python producers
 //! (`scripts/*_to_arrow.py`); this module authors the same
 //! `0.0.6` stream **in Rust** so an in-process front-end (the GUI's
-//! `ArrowRoundTripRenderer`) — or any Rust producer — can drive
+//! an external producer) — or any Rust producer — can drive
 //! [`crate::run_stream`] without shelling out to Python.
 //!
 //! It mirrors the decoders exactly (column names, nested Arrow types, and the

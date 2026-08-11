@@ -212,8 +212,7 @@ not complete until these tiers pass; **record the results on the PR.**
    Mandatory for any render-path change, on every platform with a GPU.
 2. **GPU-gated tests (must).** Every `#[ignore]` test, on a real GPU:
    `cargo test -p trd-core -- --ignored` (golden + `render::gpu_tests`) and
-   `cargo test -p trd-gui --test arrow_backend --test inproc_render -- --ignored`
-   (incl. the arrow↔inproc pixel-for-pixel parity check).
+   `cargo test -p trd-gui --test inproc_render -- --ignored`
 3. **End-to-end — Linux *and* Windows:**
    - **trd-core / trd-cli:** stream a real Arrow input through the CLI and read an
      image stream back — `nix run .#trd-cli -- …` / `examples/render.sh` (Linux),
@@ -237,8 +236,8 @@ not complete until these tiers pass; **record the results on the PR.**
      ffprobe are the native media adapter; no temporary frame directory is used.
 4. **Native window e2e — Windows:** the live-surface paths that need a display —
    `trd-app` playing a stream (`examples/render.ps1 -App`) and the interactive
-   `trd-gui` window (`cargo run -p trd-gui-app -- --mesh …`, both `--backend inproc`
-   and `--backend arrow`). Confirm the windows render and interaction works.
+   `trd-gui` window (`cargo run -p trd-gui-app -- --mesh …`). Confirm the windows
+   render and interaction works.
    This is a **Windows-only manual e2e gate**: mark it N/A/ignored on Linux, and
    include the exact Windows commands in the PR and issue handoff whenever the
    current platform cannot run it.
@@ -280,8 +279,8 @@ examples\render.ps1 -Native -Mesh assets\meshes\can\coke.obj -Texture assets\mes
   -Pbr -Metallic 0.0 -Roughness 0.35 -EnvIntensity 0.90 -Exposure 0.45 -Ambient 0.03 -Specular 0.6 `
   -Tonemap aces -Env assets\envmap\uffizi-large.hdr -Aabb -Axes `
   -InputPath examples\frames.qd_beer_dolly.cg.jsonl -Width 512 -Height 768
-# trd-gui native — run twice: --backend inproc and --backend arrow
-cargo run -p trd-gui-app -- --backend inproc --mesh assets\meshes\can\coke.obj `
+# trd-gui native
+cargo run -p trd-gui-app -- --mesh assets\meshes\can\coke.obj `
   --texture assets\meshes\can\can_around.jpg --pbr --env assets\envmap\uffizi-large.hdr `
   --metallic 0.0 --roughness 0.35 --env-intensity 0.90 --exposure 0.45 --ambient 0.03 `
   --specular 0.6 --tonemap aces
@@ -311,8 +310,8 @@ examples/render.sh --web --canvas-renderer --mesh assets/meshes/can/coke.obj \
   --texture assets/meshes/can/can_around.jpg --pbr --metallic 0.0 --roughness 0.35 --env-intensity 0.90 \
   --exposure 0.45 --ambient 0.03 --specular 0.6 --tonemap aces --env assets/envmap/uffizi-large.hdr \
   --aabb --axes examples/frames.qd_beer_dolly.cg.jsonl 512 768
-# trd-gui native — run twice: --backend inproc and --backend arrow
-cargo run -p trd-gui-app -- --backend inproc --mesh assets/meshes/can/coke.obj \
+# trd-gui native
+cargo run -p trd-gui-app -- --mesh assets/meshes/can/coke.obj \
   --texture assets/meshes/can/can_around.jpg --pbr --env assets/envmap/uffizi-large.hdr \
   --metallic 0.0 --roughness 0.35 --env-intensity 0.90 --exposure 0.45 --ambient 0.03 \
   --specular 0.6 --tonemap aces

@@ -33,7 +33,6 @@ enabled) for `trd-core`'s offscreen wgpu renderer.
 | *(default)* | `http://localhost:8082/` — built-in cube |
 | `--mesh assets/meshes/bunny.obj` | `?mesh=/assets/meshes/bunny.obj` |
 | `--mesh …bunny.obj --texture …map1.jpg` | `?mesh=/assets/meshes/bunny_with_texture/bunny.obj&texture=/assets/meshes/bunny_with_texture/bunny_uv_map1.jpg` |
-| `--backend arrow` | append `&backend=arrow` (the Arrow wire round-trip) |
 
 `?mesh=`/`?texture=` accept any URL the dev server can reach; `/assets/…` maps to
 the repo's `assets/` folder. Select **Textured** in the side panel to see a bound

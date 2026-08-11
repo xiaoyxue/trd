@@ -7,7 +7,7 @@
 //! on Linux, the MSVC toolchain on Windows) per the repo's dual-platform policy;
 //! CI skips it.
 
-use trd_gui::render_backend::{InProcRenderer, SceneRenderer};
+use trd_gui::render_backend::InProcRenderer;
 use trd_gui::scene::SceneState;
 
 /// A small origin-centered cube (matches the shape of the CLI's built-in mesh).
@@ -102,4 +102,50 @@ fn orbiting_the_camera_changes_the_image() {
     let moved = renderer.render(&orbited).expect("render succeeds").rgba;
 
     assert_ne!(base, moved, "orbiting the camera did not change the frame");
+}
+
+/// Overlay toggles must reach the rendered image.
+///
+/// The deleted `arrow_backend` test compared two GUI backends pixel-for-pixel;
+/// with one backend left there is nothing to compare against, so what is worth
+/// pinning instead is that the scene the GUI hands to `trd-core` still honours
+/// `SceneState`'s overlay flags — the path that changed when the renderer's nine
+/// retained overlay fields were replaced by `scene_with_overlays` (#180).
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn overlay_toggles_change_the_rendered_image() {
+    let (w, h) = (96, 96);
+    let mut renderer = InProcRenderer::new(
+        &[trd_core::Mesh::from_obj(CUBE_OBJ).expect("cube parses")],
+        None,
+        None,
+        w,
+        h,
+    )
+    .expect("in-process backend builds");
+
+    let plain = SceneState::default();
+    let base = renderer.render(&plain).expect("render without overlays");
+
+    let with_axes = SceneState {
+        show_axes: true,
+        ..SceneState::default()
+    };
+    let axes = renderer.render(&with_axes).expect("render with world axes");
+
+    assert_eq!(base.rgba.len(), axes.rgba.len());
+    assert_ne!(
+        base.rgba, axes.rgba,
+        "enabling the world-axes overlay must change the image"
+    );
+
+    let with_aabb = SceneState {
+        show_aabb: true,
+        ..SceneState::default()
+    };
+    let aabb = renderer.render(&with_aabb).expect("render with AABB");
+    assert_ne!(
+        base.rgba, aabb.rgba,
+        "enabling the bounding-box overlay must change the image"
+    );
 }

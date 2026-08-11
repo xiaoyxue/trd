@@ -61,11 +61,7 @@ async function main(): Promise<void> {
     envBytes = new Uint8Array(await res.arrayBuffer());
   }
 
-  // `?backend=arrow` is the browser equivalent of native `--backend arrow`
-  // (Arrow wire round-trip); absent → the direct in-process render.
-  const backend = params.get("backend") ?? undefined;
-
-  await start(canvas, meshBytes, textureBytes, envBytes, backend);
+  await start(canvas, meshBytes, textureBytes, envBytes);
 }
 
 main().catch((err) => {

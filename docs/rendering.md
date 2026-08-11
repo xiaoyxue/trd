@@ -12,7 +12,7 @@ anything they do, you can run by hand with `cargo run`.
 | `render.sh --cli  IN.jsonl OUT.gif W H FPS` | `obj_to_arrow.py MESH` + `jsonl_to_arrow.py IN.jsonl` piped to `cargo run -p trd-cli -- --width W --height H` piped to `encode.py --fps FPS -o OUT.gif` |
 | `render.sh --native` | same producers piped to `cargo run -p trd-app -- --fps FPS` |
 | `render.sh --web` | `nix build .#web` (or `cd web/viewer && bun run build`) then serve `dist/` |
-| *(interactive viewer)* | `cargo run -p trd-gui-app -- --mesh MESH [--texture IMG] [--backend arrow]` |
+| *(interactive viewer)* | `cargo run -p trd-gui-app -- --mesh MESH [--texture IMG]` |
 
 Run either wrapper with **no arguments** to print its full flag guidance. On
 Windows use `render.ps1` with `-CLI` / `-Native` / `-Web` and `-InputPath` /
@@ -194,8 +194,6 @@ needed:
 cargo run -p trd-gui-app -- --mesh assets/meshes/bunny_with_texture/bunny.obj \
   --texture assets/meshes/bunny_with_texture/bunny_uv_map1.jpg
 
-# --backend arrow round-trips each frame through the real Arrow wire (vs inproc).
-cargo run -p trd-gui-app -- --backend arrow --mesh assets/meshes/bunny.obj
 
 # Browser: build + serve, then load ?mesh=…&texture=… (WebGPU browser).
 cd web && bun run --cwd gui-viewer dev
@@ -249,7 +247,6 @@ query params — the equivalents of the native `--mesh`/`--texture`/`--env`/
 | `?mesh=<url>` | An object's OBJ or single-primitive GLB. **Repeatable** — each `?mesh=` adds an object laid out side-by-side; GLB starts in PBR and uses its embedded base-color, metallic-roughness, normal maps, and material. |
 | `?texture=<url>` | **Positional** albedo: the *i*-th `?texture=` skins the *i*-th `?mesh=` (each object its own diffuse). |
 | `?env=<url>` | An equirectangular HDR probe; supplying it **starts every object in PBR** mode. |
-| `?backend=arrow` | Route frames through the Arrow wire round-trip (vs. the default in-process render). |
 
 ```
 # Three objects (coke can, textured bunny, beer can), each with its own diffuse,

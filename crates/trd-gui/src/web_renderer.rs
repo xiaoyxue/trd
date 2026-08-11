@@ -13,9 +13,8 @@
 //! `async fn`; the app schedules it with `wasm_bindgen_futures::spawn_local`.
 
 use trd_core::{
-    build_scene, decode_params_stream, encode_params_stream, plane_grid_overlays,
-    read_image_stream, DrawableObject, EnvMapData, FrameParams, GridPlane, ImageTexture, Mesh,
-    OffscreenTarget, OutputSession, PickTarget, SceneRenderer, OFFSCREEN_FORMAT,
+    build_scene, plane_grid_overlays, DrawableObject, EnvMapData, FrameParams, GridPlane,
+    ImageTexture, Mesh, OffscreenTarget, PickTarget, SceneRenderer, OFFSCREEN_FORMAT,
 };
 
 use crate::error::GuiError;
@@ -53,23 +52,6 @@ fn scene_overlays(draws: &[trd_core::Draw], state: &SceneState) -> Vec<DrawableO
     overlays
 }
 
-/// How the browser renderer produces each frame.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum WebBackend {
-    /// Render the scene state directly on the persistent `SceneRenderer` (lowest
-    /// latency; the default) — the web twin of the native `InProcRenderer`.
-    #[default]
-    Inproc,
-    /// Round-trip the frame through the Arrow wire format: encode the scene to a
-    /// `[mesh][texture?][frames?][params]` stream, decode it back through the **wasm**
-    /// decoder (`InputSession`), render on the persistent device, then encode the
-    /// image to an Arrow stream and decode it back (`OutputSession` /
-    /// `read_image_stream`) — the web twin of the native `ArrowRoundTripRenderer`
-    /// and the seam an external producer would drive. Reuses the device, so only
-    /// the per-frame encode/decode is extra.
-    Arrow,
-}
-
 /// A browser offscreen renderer over a `trd-core` [`SceneRenderer`].
 pub struct WebRenderer {
     /// The shared GPU context, held as one value rather than cloned apart (#180).
@@ -81,7 +63,6 @@ pub struct WebRenderer {
     pick_target: Option<PickTarget>,
     width: u32,
     height: u32,
-    backend: WebBackend,
 }
 
 impl WebRenderer {
@@ -97,7 +78,6 @@ impl WebRenderer {
         env: Option<EnvMapData>,
         width: u32,
         height: u32,
-        backend: WebBackend,
     ) -> Result<Self, GuiError> {
         let instance = trd_core::create_instance();
         let gpu = trd_core::GpuContext::request(
@@ -150,7 +130,6 @@ impl WebRenderer {
             pick_target: None,
             width,
             height,
-            backend,
         })
     }
 
@@ -184,10 +163,7 @@ impl WebRenderer {
     /// Renders the current scene state to an RGBA image (async GPU readback),
     /// via the direct path or the Arrow round-trip per the configured backend.
     pub async fn render(&mut self, state: &SceneState) -> Result<ImageRgba, GuiError> {
-        let rgba = match self.backend {
-            WebBackend::Inproc => self.render_direct(state).await?,
-            WebBackend::Arrow => self.render_arrow(state).await?,
-        };
+        let rgba = self.render_direct(state).await?;
         Ok(ImageRgba {
             width: self.width,
             height: self.height,
@@ -228,75 +204,6 @@ impl WebRenderer {
         );
         scene.extend(scene_overlays(&state.draws(), state));
         self.render_scene(params, &scene).await
-    }
-
-    /// Arrow round-trip path: serialize **only** the per-frame params (the
-    /// computed matrix + draws) to the wire, decode it back through the wasm
-    /// decoder ([`decode_params_stream`]), render on the persistent device (the
-    /// mesh was uploaded once), then serialize the image and decode it back — the
-    /// full params + image wire round-trip, matching the native backend (the mesh
-    /// does **not** cross the wire per frame).
-    async fn render_arrow(&mut self, state: &SceneState) -> Result<Vec<u8>, GuiError> {
-        let aspect = self.width as f32 / self.height.max(1) as f32;
-
-        // 1. Serialize the params and decode them back through the wire decoder.
-        let params_bytes =
-            encode_params_stream(&[state.frame_params(aspect)], Some(&[state.draws()]))?;
-        let frame = decode_params_stream(&params_bytes)?
-            .into_iter()
-            .next()
-            .ok_or(GuiError::WasmRender("decoder produced no frame".to_owned()))?;
-
-        // 2. Build the scene from the decoded frame and render on the device.
-        //    The round-trip always encodes the state's draws, so a decoded empty
-        //    or absent list falls back to the live state's draws.
-        let draws = match &frame.draws {
-            Some(d) if !d.is_empty() => d.clone(),
-            _ => state.draws(),
-        };
-        let scene = build_scene(
-            &draws,
-            trd_core::RenderMode::Filled, // per-draw Some(mode) overrides; fallback only
-            state.show_aabb,
-            state.show_axes,
-            state.show_local_axes,
-            None,
-            None,
-            None,
-        );
-        let mut scene = scene;
-        scene.extend(scene_overlays(&draws, state));
-        self.renderer.set_lighting(state.lighting);
-        for (i, ((material, ibl), tone_mapping)) in state
-            .materials
-            .iter()
-            .zip(&state.image_based_lighting)
-            .zip(&state.tone_mappings)
-            .enumerate()
-        {
-            self.renderer.set_mesh_disney_material(i, material.clone());
-            self.renderer.set_mesh_image_based_lighting(i, *ibl);
-            self.renderer.set_mesh_tone_mapping(i, *tone_mapping);
-            self.renderer.set_mesh_pbr_debug_view(
-                i,
-                state.pbr_debug_views.get(i).copied().unwrap_or_default(),
-            );
-        }
-        let rgba = self.render_scene(frame.params, &scene).await?;
-
-        // 3. Serialize the image to an Arrow stream and decode it back — the
-        //    output half of the round-trip an external consumer would read.
-        let mut out = OutputSession::new(self.width, self.height)?;
-        let mut bytes = out.drain_new()?;
-        out.write_rgba_batch(&[rgba])?;
-        bytes.extend(out.drain_new()?);
-        out.finish()?;
-        bytes.extend(out.drain_new()?);
-        read_image_stream(std::io::Cursor::new(bytes), self.width, self.height)?
-            .pop()
-            .ok_or(GuiError::WasmRender(
-                "image decoder produced no frame".to_owned(),
-            ))
     }
 
     /// Encodes `scene` under `params` to the offscreen target and reads it back
