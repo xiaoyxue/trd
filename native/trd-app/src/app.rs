@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 use trd_core::{
-    DisneyMaterial, EnvMapData, GridPlane, ImageBasedLighting, ImageTexture, Lighting, Mesh,
-    PbrConfig, RenderMode, ToneMapping,
+    DisneyMaterial, EnvMapData, ImageBasedLighting, ImageTexture, Lighting, Mesh, PbrConfig,
+    RenderMode, RenderOptions, ToneMapping,
 };
 use winit::application::ApplicationHandler;
 #[cfg(not(target_os = "windows"))]
@@ -67,19 +67,9 @@ struct App {
     window_size: (u32, u32),
     /// Whether to lock presentation to the monitor refresh (vsync / Fifo).
     vsync: bool,
-    /// Render mode (filled / wireframe) applied to every mesh drawable.
-    mode: RenderMode,
-    /// Overlay each drawn mesh's axis-aligned bounding box (#42).
-    show_aabb: bool,
-    /// Overlay the origin coordinate-axes gizmo (#42).
-    show_axes: bool,
-    /// Overlay a coordinate-axes gizmo at each drawn object's local (model) frame.
-    show_local_axes: bool,
-    /// Overlay a coordinate-plane grid on each drawn object's local (model) frame.
-    show_local_grid: Option<GridPlane>,
-    /// Narrow the local grid to a single `mesh_id` (the placement quad) so a
-    /// wireframe content mesh doesn't also pick up a floor grid (#114).
-    show_local_grid_mesh: Option<u32>,
+    /// Draw mode + every overlay toggle, in the **one** type every front-end uses
+    /// to describe a frame's appearance (#180).
+    options: RenderOptions,
     /// The Disney PBR material + optional HDR env probe (`--pbr`), held until the
     /// renderer is built so it can be applied; `None` unless `--pbr` is set.
     pbr_config: Option<PbrConfig>,
@@ -88,19 +78,13 @@ struct App {
 }
 
 impl App {
-    #[allow(clippy::too_many_arguments)]
     fn new(
         rx: Receiver<StreamMsg>,
         window_size: (u32, u32),
         rate_override: Option<f64>,
         loop_playback: bool,
         vsync: bool,
-        mode: RenderMode,
-        show_aabb: bool,
-        show_axes: bool,
-        show_local_axes: bool,
-        show_local_grid: Option<GridPlane>,
-        show_local_grid_mesh: Option<u32>,
+        options: RenderOptions,
         pbr_config: Option<PbrConfig>,
     ) -> Self {
         Self {
@@ -119,12 +103,7 @@ impl App {
             stream_done: false,
             window_size,
             vsync,
-            mode,
-            show_aabb,
-            show_axes,
-            show_local_axes,
-            show_local_grid,
-            show_local_grid_mesh,
+            options,
             pbr_config,
             pbr_applied: false,
         }
@@ -268,15 +247,7 @@ impl ApplicationHandler for App {
                 gpu.resize(size);
                 gpu.window.request_redraw();
             }
-            WindowEvent::RedrawRequested => gpu.render(
-                self.current.as_ref(),
-                self.mode,
-                self.show_aabb,
-                self.show_axes,
-                self.show_local_axes,
-                self.show_local_grid,
-                self.show_local_grid_mesh,
-            ),
+            WindowEvent::RedrawRequested => gpu.render(self.current.as_ref(), &self.options),
             _ => {}
         }
     }
@@ -410,12 +381,15 @@ pub fn run() -> Result<(), AppError> {
         rate_override,
         !cli.once,
         cli.vsync,
-        mode,
-        cli.aabb,
-        cli.axes,
-        cli.axes_local,
-        cli.grid_local.map(Into::into),
-        cli.grid_mesh,
+        RenderOptions {
+            mode,
+            show_aabb: cli.aabb,
+            show_axes: cli.axes,
+            show_local_axes: cli.axes_local,
+            show_local_grid: cli.grid_local.map(Into::into),
+            show_local_grid_mesh: cli.grid_mesh,
+            ..RenderOptions::default()
+        },
         pbr_config,
     );
     event_loop.run_app(&mut app)?;

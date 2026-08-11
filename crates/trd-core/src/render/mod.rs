@@ -51,7 +51,7 @@ pub use render_target::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use renderer::check_dimensions;
-pub use renderer::{RenderError, Renderer};
+pub use renderer::{PresentOutcome, RenderError, Renderer, SurfaceSkip};
 pub use scene::{
     build_scene, plane_grid_overlays, scene_with_overlays, selection_aabb_overlay, Draw,
     DrawableObject, FrameFit, GridPlane, RenderMode, Scene,

@@ -40,9 +40,9 @@ pub use render::{
     selection_aabb_overlay, AdapterFacts, CameraFormError, Draw, DrawableObject, EnvMapData,
     FrameFit, FrameParams, GpuContext, GpuInitError, GpuRequest, GridPlane, ImageBasedLighting,
     Light, Lighting, LimitsPreset, Mesh, MeshShading, Msaa, OffscreenError, OffscreenTarget,
-    OnscreenTarget, PbrConfig, PbrDebugView, PickTarget, PointLight, RenderMode, RenderOptions,
-    RenderTarget, Scene, SceneRenderer, ToneMapping, Tonemap, TriangleRenderer, Vertex, Viewport,
-    OFFSCREEN_FORMAT,
+    OnscreenTarget, PbrConfig, PbrDebugView, PickTarget, PointLight, PresentOutcome, RenderMode,
+    RenderOptions, RenderTarget, Scene, SceneRenderer, SurfaceSkip, ToneMapping, Tonemap,
+    TriangleRenderer, Vertex, Viewport, OFFSCREEN_FORMAT,
 };
 // The offscreen harness; available on both platforms since it became async
 // (#180) — the browser could not use it while it blocked on readback.

@@ -28,12 +28,19 @@ Platform-agnostic wgpu logic, shared verbatim by every target:
 - **`render/` (module tree) + `shader/*.wgsl`** — `SceneRenderer`
   (`render/mesh_renderer.rs`) rasterizes a `Scene` of `DrawableObject`s into *any*
   `wgpu::TextureView`; that one renderer is why the same code targets an offscreen
-  texture, a window swapchain, or a browser canvas. The offscreen render target +
-  async pixel read-back is factored into a shared `OffscreenTarget` harness
-  (`render/offscreen.rs`), reused by every read-back front-end (`trd-cli`, the
-  browser `OffscreenRenderer`, and `trd-gui`). The live-present front-ends
-  (`trd-app`, `trd-wasm`'s `CanvasRenderer`) instead own their `wgpu::Surface`
-  swapchain directly and draw the same `Scene` into it. Gizmo segments use
+  texture, a window swapchain, or a browser canvas. That renderer is wrapped by one
+  harness, `Renderer<T: RenderTarget>` (`render/renderer.rs`), which owns *GPU
+  context + `SceneRenderer` + target* and is generic over **where the frame lands**
+  — the only thing the two kinds of front-end disagree about.
+  `Renderer<OffscreenTarget>` (the default) renders to a texture and reads it back
+  asynchronously to RGBA (`render_scene`), serving `trd-cli`, `trd-gui`, and the
+  browser `OffscreenRenderer`; `Renderer<OnscreenTarget>` renders into a swapchain
+  texture and presents it (`present_scene`), serving `trd-app` and `trd-wasm`'s
+  `CanvasRenderer`. Both targets live in `render/render_target.rs`. Live-surface
+  shells are **not** renderers: they create the `wgpu::Surface`, then apply their
+  own recovery policy to the `PresentOutcome` the harness reports (the native
+  window defers to the next redraw; the browser reconfigures or recreates the
+  surface in-call and retries once), reaching the swapchain via `target_mut()`. Gizmo segments use
   `gizmo_line.wgsl`: the vertex stage expands each model-space segment to a
   configurable pixel-width quad and the fragment stage feathers its rectangle
   distance, so axes/AABBs/grids remain anti-aliased without MSAA. Axis cone tips

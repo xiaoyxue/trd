@@ -31,11 +31,16 @@ Guidance for agents working in this repository.
   frame is the degenerate one-element scene. Add a primitive by adding a variant,
   not by bolting flags onto the renderer. Wireframe (and PBR) is a *mode* of
   `Mesh`, not a separate variant.
-- **Shared render harness.** The offscreen render-target + async pixel read-back
-  is factored into `OffscreenTarget` (`render/offscreen.rs`), reused by every
-  read-back consumer (`trd-cli`, the browser `OffscreenRenderer`, `trd-gui`).
-  Live-surface front-ends (`trd-app`, `trd-wasm`'s `CanvasRenderer`) own their
-  `wgpu::Surface` swapchain directly — there is **no** shared on-screen harness.
+- **One render harness, generic over its target.** `trd_core::Renderer<T: RenderTarget>`
+  (`render/renderer.rs`) owns *GPU context + `SceneRenderer` + target* for **every**
+  front-end; `render/render_target.rs` provides both targets. `Renderer<OffscreenTarget>`
+  (the default) renders to a texture and reads it back (`render_scene` → RGBA:
+  `trd-cli`, `trd-gui`, the browser `OffscreenRenderer`); `Renderer<OnscreenTarget>`
+  renders into a swapchain texture and presents it (`present_scene`: `trd-app`,
+  `trd-wasm`'s `CanvasRenderer`). Front-ends are **shells, not renderers** — they
+  create the surface and apply their own **surface-recovery policy** from the
+  returned `PresentOutcome` (native defers to the next redraw; the browser repairs
+  in-call and retries once), reaching the swapchain through `target_mut()`.
 - Major input data is columnar (Apache Arrow tables) with simple glue logic.
 - **Video editing uses a separate authoring document.**
   `web/gui-video-editing` reads `trd.video_edit.version = 0.1.0` timeline rows
