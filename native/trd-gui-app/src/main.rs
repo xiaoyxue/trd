@@ -11,12 +11,10 @@ mod cli;
 
 fn main() -> eframe::Result<()> {
     use crate::app::TrdGuiApp;
-    use crate::cli::{Backend, Cli};
+    use crate::cli::Cli;
     use clap::Parser;
     use trd_gui::interaction::InteractionController;
-    use trd_gui::render_backend::{
-        mesh_has_uvs, ArrowRoundTripRenderer, InProcRenderer, SceneRenderer,
-    };
+    use trd_gui::render_backend::{mesh_has_uvs, InProcRenderer};
 
     env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("warn,trd_gui=info,trd_core=info"),
@@ -58,25 +56,13 @@ fn main() -> eframe::Result<()> {
         );
     }
 
-    let renderer: Result<Box<dyn SceneRenderer>, _> = match cli.backend {
-        Backend::Inproc => InProcRenderer::new(
-            &[mesh],
-            texture.as_ref().map(|t| t as &dyn trd_core::Texture),
-            env,
-            cli.width,
-            cli.height,
-        )
-        .map(|r| Box::new(r) as Box<dyn SceneRenderer>),
-        Backend::Arrow => ArrowRoundTripRenderer::new(
-            &[mesh],
-            texture.as_ref().map(|t| t as &dyn trd_core::Texture),
-            env,
-            cli.width,
-            cli.height,
-        )
-        .map(|r| Box::new(r) as Box<dyn SceneRenderer>),
-    };
-    let renderer = match renderer {
+    let renderer = match InProcRenderer::new(
+        &[mesh],
+        texture.as_ref().map(|t| t as &dyn trd_core::Texture),
+        env,
+        cli.width,
+        cli.height,
+    ) {
         Ok(renderer) => renderer,
         Err(err) => {
             log::error!("failed to create renderer: {err}");

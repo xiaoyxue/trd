@@ -8,14 +8,14 @@
 //! scene is re-rendered — the "input → matrix → render → display" cycle. The side
 //! panel exposes the render mode, overlay toggles, the primary-drag target, and a
 //! reset. This crate holds **no rendering logic**; every pixel comes from
-//! `trd-core` via the [`SceneRenderer`].
+//! `trd-core` via the [`InProcRenderer`].
 
 use std::time::Instant;
 
 use egui::{TextureHandle, TextureOptions};
 
 use trd_gui::interaction::InteractionController;
-use trd_gui::render_backend::SceneRenderer;
+use trd_gui::render_backend::InProcRenderer;
 use trd_gui::ui;
 
 /// The interactive viewer application.
@@ -23,7 +23,7 @@ pub struct TrdGuiApp {
     /// Owns the scene and applies interaction gestures to it.
     controller: InteractionController,
     /// The (in-process) backend that renders the scene to RGBA.
-    renderer: Box<dyn SceneRenderer>,
+    renderer: InProcRenderer,
     /// The GPU texture the current frame is uploaded into (lazily created).
     texture: Option<TextureHandle>,
     /// Set when the scene changed and the frame must be re-rendered.
@@ -37,7 +37,7 @@ pub struct TrdGuiApp {
 impl TrdGuiApp {
     /// Builds the app around a controller (holding the initial scene) and a
     /// render backend. The first frame renders immediately.
-    pub fn new(controller: InteractionController, renderer: Box<dyn SceneRenderer>) -> Self {
+    pub fn new(controller: InteractionController, renderer: InProcRenderer) -> Self {
         Self {
             controller,
             renderer,
@@ -81,13 +81,9 @@ impl eframe::App for TrdGuiApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
 
-        // An expensive backend (e.g. a future Arrow round-trip variant) can ask to
-        // re-render only when a pointer interaction *ends*; cheap backends render
-        // every changed frame. The first frame (no texture yet) always renders.
-        let interacting = ctx.input(|i| i.pointer.any_down());
-        let defer = self.renderer.defer_expensive() && interacting;
-
-        if self.texture.is_none() || (self.needs_render && !defer) {
+        // The in-process renderer is cheap enough to run on every changed frame;
+        // the first frame (no texture yet) always renders.
+        if self.texture.is_none() || self.needs_render {
             self.render_scene(&ctx);
         }
 
@@ -110,12 +106,6 @@ impl eframe::App for TrdGuiApp {
                 self.controller.state.selected = hit;
                 self.needs_render = true;
             }
-        }
-
-        // While deferring, keep requesting repaints so the pending render fires as
-        // soon as the interaction ends.
-        if self.needs_render && defer {
-            ctx.request_repaint();
         }
     }
 }

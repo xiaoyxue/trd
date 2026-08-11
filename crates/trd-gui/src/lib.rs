@@ -57,12 +57,11 @@ pub async fn start(
     mesh_bytes: js_sys::Array,
     texture_bytes: js_sys::Array,
     env_bytes: Option<Vec<u8>>,
-    backend: Option<String>,
 ) -> Result<(), wasm_bindgen::JsValue> {
     use crate::interaction::InteractionController;
     use crate::scene::{SceneSeed, SceneState};
     use crate::web_app::WebApp;
-    use crate::web_renderer::{WebBackend, WebRenderer};
+    use crate::web_renderer::WebRenderer;
 
     console_error_panic_hook::set_once();
     let _ = eframe::WebLogger::init(log::LevelFilter::Warn);
@@ -219,28 +218,14 @@ pub async fn start(
         lighting,
         environment_available: env.is_some(),
     });
-    // `?backend=arrow` selects the Arrow wire round-trip; anything else (or
-    // absent) is the direct in-process render.
-    let backend = match backend.as_deref() {
-        Some("arrow") => WebBackend::Arrow,
-        _ => WebBackend::Inproc,
-    };
     // Render at a resolution suitable for the browser: the canvas's CSS size ×
     // the device pixel ratio, so the image is crisp on high-DPI / large displays
     // instead of upscaling a small fixed buffer. Bounded (aspect-preserving) to
     // keep GPU + readback cost in check.
     let (render_w, render_h) = browser_render_size(&canvas);
-    let renderer = WebRenderer::new(
-        &meshes,
-        &textures,
-        &material_maps,
-        env,
-        render_w,
-        render_h,
-        backend,
-    )
-    .await
-    .map_err(to_js)?;
+    let renderer = WebRenderer::new(&meshes, &textures, &material_maps, env, render_w, render_h)
+        .await
+        .map_err(to_js)?;
     let app = WebApp::new(InteractionController::new(scene), renderer);
 
     eframe::WebRunner::new()

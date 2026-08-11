@@ -350,7 +350,7 @@ pub fn tightly_pack_rgba(
 /// [`output_batch`]: it reads the four `r`/`g`/`b`/`a`
 /// `FixedSizeList<UInt8>[width*height]` channel columns and interleaves them.
 ///
-/// Lets a Rust consumer (e.g. the GUI's `ArrowRoundTripRenderer`) round-trip a
+/// Lets a Rust consumer round-trip a
 /// scene through `run_stream` in-process and read the frames back without going
 /// out to an external image encoder.
 pub fn read_image_stream<R: Read>(

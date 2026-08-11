@@ -14,18 +14,6 @@ use trd_core::{
 use trd_gui::error::GuiError;
 use trd_gui::scene::{SceneSeed, SceneState};
 
-/// Which render backend the viewer drives (design §5.2).
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Default, clap::ValueEnum)]
-pub enum Backend {
-    /// Call `trd-core`'s `Renderer` directly (lowest latency; the default).
-    #[default]
-    Inproc,
-    /// Author a `[mesh][params]` Arrow stream → `run_stream` → decode the image
-    /// stream back. Identical output to the batch CLI; the seam for external
-    /// producers. Higher latency, so it re-renders on interaction end.
-    Arrow,
-}
-
 /// PBR tone-map operator selector, mapped to [`trd_core::Tonemap`]. Kept in the
 /// CLI layer so `clap`'s `ValueEnum` derive stays out of `trd-core`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default, clap::ValueEnum)]
@@ -58,10 +46,6 @@ pub struct Cli {
     /// Render height in pixels (the display scales this to the window).
     #[arg(long, default_value_t = 512)]
     pub height: u32,
-
-    /// Which render backend to drive.
-    #[arg(long, value_enum, default_value_t = Backend::Inproc)]
-    pub backend: Backend,
 
     /// Path to a Wavefront OBJ mesh to view. Defaults to a built-in cube.
     #[arg(long)]
