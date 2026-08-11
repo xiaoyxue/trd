@@ -1,11 +1,17 @@
-//! GPU resources tied to a live window surface, plus the per-frame render path
-//! driving the shared [`trd_core::SceneRenderer`].
+//! The live window surface, plus the per-frame render path driving the shared
+//! [`trd_core::Renderer`] harness.
+//!
+//! This shell is **not** a renderer: `trd-core`'s harness is generic over its
+//! render target, so the on-screen path is `Renderer<OnscreenTarget>` and the only
+//! thing left here is what is genuinely window-specific — creating the surface
+//! from a `winit` window, and the platform's surface-recovery policy (#180).
 
 use std::sync::Arc;
 
 use trd_core::{
-    build_scene, DisneyMaterial, EnvMapData, FrameFit, GridPlane, ImageBasedLighting, ImageData,
-    ImageTexture, Lighting, Mesh, OnscreenTarget, RenderMode, SceneRenderer, ToneMapping,
+    scene_with_overlays, DisneyMaterial, EnvMapData, FrameFit, ImageBasedLighting, ImageData,
+    ImageTexture, Lighting, Mesh, OnscreenTarget, PresentOutcome, RenderOptions, Renderer,
+    ToneMapping,
 };
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
@@ -19,11 +25,12 @@ pub(crate) struct WindowRenderer {
     /// The shared GPU context (adapter + device + queue), held as one value
     /// instead of cloned apart into separate fields (#180).
     gpu: Arc<trd_core::GpuContext>,
-    /// The shared on-screen render harness (surface + config + sRGB view, #103).
-    target: OnscreenTarget,
-    /// The scene renderer, built lazily once the stream's mesh table (or the
-    /// legacy built-in fallback) has arrived from the reader thread.
-    pub(crate) renderer: Option<SceneRenderer>,
+    /// The surface, held until the stream's mesh table arrives and the harness
+    /// below can be built around it.
+    target: Option<OnscreenTarget>,
+    /// The shared render harness over the window surface, built lazily once the
+    /// stream's mesh table has arrived from the reader thread.
+    pub(crate) renderer: Option<Renderer<OnscreenTarget>>,
     /// CPU image backing the currently uploaded frame-plane texture. Inline
     /// frame reuse preserves the same Arc, so repeated IDs skip GPU writes.
     uploaded_frame_image: Option<Arc<ImageData>>,
@@ -77,7 +84,7 @@ impl WindowRenderer {
             wgpu::PresentMode::Fifo
         };
         log::info!("present mode: {:?} (vsync={vsync})", config.present_mode);
-        let target = OnscreenTarget::new(&gpu.device, surface, config);
+        let target = Some(OnscreenTarget::new(&gpu.device, surface, config));
 
         Ok(Self {
             window,
@@ -89,19 +96,30 @@ impl WindowRenderer {
     }
 
     pub(crate) fn resize(&mut self, size: PhysicalSize<u32>) {
-        self.target
-            .resize(&self.gpu.device, size.width, size.height);
+        match (self.renderer.as_mut(), self.target.as_mut()) {
+            (Some(renderer), _) => {
+                renderer
+                    .target_mut()
+                    .resize(&self.gpu.device, size.width, size.height)
+            }
+            (None, Some(target)) => target.resize(&self.gpu.device, size.width, size.height),
+            (None, None) => {}
+        }
     }
 
     /// Uploads the stream's meshes and builds the scene renderer (each mesh
     /// centered + scaled to fit via its preview base model). Idempotent per
     /// stream: called once when the mesh table first arrives.
     pub(crate) fn set_meshes(&mut self, meshes: &[Mesh]) {
-        self.renderer = Some(SceneRenderer::auto_fit(
-            self.gpu.clone(),
-            self.target.view_format(),
-            meshes,
-        ));
+        let target = match self.target.take() {
+            Some(target) => target,
+            // Re-meshing an existing stream: reuse the surface the old harness owns.
+            None => match self.renderer.take() {
+                Some(renderer) => renderer.into_target(),
+                None => return,
+            },
+        };
+        self.renderer = Some(Renderer::with_target(self.gpu.clone(), target, meshes));
         self.uploaded_frame_image = None;
     }
 
@@ -150,39 +168,16 @@ impl WindowRenderer {
 
     /// Renders one frame's [`Scene`](trd_core::Scene) to the window surface.
     /// No-op until the renderer is built and a frame is available.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn render(
-        &mut self,
-        frame: Option<&FrameData>,
-        mode: RenderMode,
-        show_aabb: bool,
-        show_axes: bool,
-        show_local_axes: bool,
-        show_local_grid: Option<GridPlane>,
-        show_local_grid_mesh: Option<u32>,
-    ) {
+    pub(crate) fn render(&mut self, frame: Option<&FrameData>, options: &RenderOptions) {
         let (Some(renderer), Some(frame)) = (self.renderer.as_mut(), frame) else {
             return;
         };
 
-        let texture = match self.target.acquire() {
-            wgpu::CurrentSurfaceTexture::Success(texture)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
-            // The surface config is stale (e.g. after a resize/minimise or a lost
-            // surface); reconfigure and try again on the next redraw.
-            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                self.target.reconfigure(&self.gpu.device);
-                self.window.request_redraw();
-                return;
-            }
-            // Transient (timeout/occluded/other): skip this frame.
-            _ => return,
-        };
-
         // Author the frame's Scene from its draw list + the render mode/overlay
-        // flags, then hand it to the shared SceneRenderer — the same Scene the
-        // headless CLI and wasm front-ends build. A per-frame background image
-        // (#63) is uploaded first, then composited beneath the scene.
+        // flags, then hand it to the shared harness — the same Scene, built by the
+        // same `scene_with_overlays`, that the headless CLI and the wasm front-ends
+        // render. A per-frame background image (#63) is uploaded first, then
+        // composited beneath the scene.
         let frame_fit = match frame.frame_image.as_ref() {
             Some(image) => {
                 let already_uploaded = self
@@ -200,17 +195,21 @@ impl WindowRenderer {
                 None
             }
         };
-        let scene = build_scene(
-            &frame.draws,
-            mode,
-            show_aabb,
-            show_axes,
-            show_local_axes,
-            show_local_grid,
-            show_local_grid_mesh,
-            frame_fit,
-        );
-        self.target
-            .present(&self.gpu, renderer, texture, frame.params, &scene);
+        let scene = scene_with_overlays(&frame.draws, options, frame_fit);
+
+        match renderer.present_scene(frame.params, &scene) {
+            PresentOutcome::Presented => {}
+            // The surface config is stale (e.g. after a resize/minimise), no longer
+            // optimal, or lost; reconfigure and try again on the next redraw. This
+            // recovery policy is the window's, not the harness's (#180).
+            PresentOutcome::PresentedSuboptimal
+            | PresentOutcome::Outdated
+            | PresentOutcome::Lost => {
+                renderer.target_mut().reconfigure(&self.gpu.device);
+                self.window.request_redraw();
+            }
+            // Transient (timeout/occluded/validation): skip this frame.
+            PresentOutcome::Skipped(_) => {}
+        }
     }
 }

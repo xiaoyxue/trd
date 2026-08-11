@@ -1,6 +1,7 @@
 use trd_core::{
-    build_scene, DecodedFrame, DisneyMaterial, Draw, EnvMapData, FrameFit, ImageBasedLighting,
-    Lighting, OnscreenTarget, RenderMode, SceneRenderer, ToneMapping, Tonemap,
+    scene_with_overlays, DecodedFrame, DisneyMaterial, Draw, DrawableObject, EnvMapData, FrameFit,
+    FrameParams, ImageBasedLighting, Lighting, OnscreenTarget, PresentOutcome, RenderMode,
+    RenderOptions, Renderer, SurfaceSkip, ToneMapping, Tonemap,
 };
 use wasm_bindgen::prelude::*;
 
@@ -13,11 +14,6 @@ enum CanvasState {
     Failed,
 }
 
-struct AcquiredFrame {
-    texture: wgpu::SurfaceTexture,
-    reconfigure_after_present: bool,
-}
-
 #[wasm_bindgen]
 pub struct CanvasRenderer {
     instance: wgpu::Instance,
@@ -25,20 +21,17 @@ pub struct CanvasRenderer {
     /// The shared GPU context, held as one value rather than cloned apart into
     /// separate `device` + `queue` fields (#180).
     gpu: std::sync::Arc<trd_core::GpuContext>,
-    /// The shared on-screen render harness (surface + config + sRGB view, #103).
-    target: OnscreenTarget,
-    /// Built lazily on the first rendered frame: a multi-mesh renderer over the
-    /// stream's leading mesh table, or the built-in hello-triangle for a legacy
-    /// params-only stream. `None` until the first frame arrives (the mesh table,
-    /// if any, has been decoded by then).
-    renderer: Option<SceneRenderer>,
-    mode: RenderMode,
-    show_aabb: bool,
-    show_axes: bool,
-    /// Per-draw *local* coordinate-axes gizmos (each object's own model frame,
-    /// e.g. #77's reconstructed quad basis). The browser twin of the native
-    /// `--axes-local` flag; toggled via [`set_show_local_axes`](Self::set_show_local_axes).
-    show_local_axes: bool,
+    /// The surface, held until the stream's mesh table arrives and the harness
+    /// below can be built around it.
+    target: Option<OnscreenTarget>,
+    /// The shared render harness over the canvas surface, built lazily on the
+    /// first rendered frame from the stream's leading mesh table. `None` until the
+    /// first frame arrives (the mesh table has been decoded by then).
+    renderer: Option<Renderer<OnscreenTarget>>,
+    /// Draw mode + every overlay toggle, in the **one** type every front-end uses
+    /// to describe a frame's appearance; [`scene_with_overlays`] turns it into the
+    /// scene. The renderer keeps no overlay state of its own (#180).
+    options: RenderOptions,
     /// Composite the uploaded background frame texture beneath the scene as a
     /// [`DrawableObject::FramePlane`] (#63). When `true`, later frames pass
     /// `Some(FrameFit::Stretch)` to [`build_scene`]; a [`FramePlane`] is a no-op
@@ -107,17 +100,14 @@ impl CanvasRenderer {
 
         Ok(Self {
             renderer: None,
-            mode: RenderMode::Filled,
-            show_aabb: false,
-            show_axes: false,
-            show_local_axes: false,
+            options: RenderOptions::default(),
             composite_frame: false,
             pbr: None,
             env_map: None,
             instance,
             canvas,
             gpu,
-            target,
+            target: Some(target),
             input: trd_core::InputSession::new(),
             frames: Vec::new(),
             last_inline_frame_id: None,
@@ -246,7 +236,7 @@ impl CanvasRenderer {
     /// Selects filled (`false`) or wireframe (`true`) rendering for later frames.
     #[wasm_bindgen(js_name = setWireframe)]
     pub fn set_wireframe(&mut self, enabled: bool) {
-        self.mode = if enabled {
+        self.options.mode = if enabled {
             RenderMode::Wireframe
         } else {
             RenderMode::Filled
@@ -258,7 +248,7 @@ impl CanvasRenderer {
     /// Textured meshes without a stream texture sample the default 1×1 white.
     #[wasm_bindgen(js_name = setTextured)]
     pub fn set_textured(&mut self, enabled: bool) {
-        self.mode = if enabled {
+        self.options.mode = if enabled {
             RenderMode::Textured
         } else {
             RenderMode::Filled
@@ -272,7 +262,7 @@ impl CanvasRenderer {
     /// probe from [`set_env_map_hdr`](Self::set_env_map_hdr).
     #[wasm_bindgen(js_name = setPbr)]
     pub fn set_pbr(&mut self, enabled: bool) {
-        self.mode = if enabled {
+        self.options.mode = if enabled {
             RenderMode::Pbr
         } else {
             RenderMode::Filled
@@ -345,13 +335,13 @@ impl CanvasRenderer {
     /// Toggles the per-instance AABB overlay box for later frames.
     #[wasm_bindgen(js_name = setShowAabb)]
     pub fn set_show_aabb(&mut self, enabled: bool) {
-        self.show_aabb = enabled;
+        self.options.show_aabb = enabled;
     }
 
     /// Toggles the origin coordinate-axes overlay gizmo for later frames.
     #[wasm_bindgen(js_name = setShowAxes)]
     pub fn set_show_axes(&mut self, enabled: bool) {
-        self.show_axes = enabled;
+        self.options.show_axes = enabled;
     }
 
     /// Toggles the per-draw **local** coordinate-axes gizmo for later frames — one
@@ -360,7 +350,7 @@ impl CanvasRenderer {
     /// native `--axes-local` flag.
     #[wasm_bindgen(js_name = setShowLocalAxes)]
     pub fn set_show_local_axes(&mut self, enabled: bool) {
-        self.show_local_axes = enabled;
+        self.options.show_local_axes = enabled;
     }
 
     /// Toggles compositing the uploaded background frame beneath the scene as a
@@ -408,10 +398,7 @@ impl CanvasRenderer {
                 "input is missing the required leading mesh table (protocol is mesh-first)",
             ));
         }
-        self.ensure_renderer();
-        self.renderer
-            .as_mut()
-            .expect("renderer built above")
+        self.ensure_renderer()?
             .update_frame_texture_rgba(rgba, width, height);
         self.last_inline_frame_id = None;
         self.external_frame_ready = true;
@@ -449,7 +436,7 @@ impl CanvasRenderer {
         // only); an absent draw list ⇒ one instance of mesh 0 placed by the
         // frame's own model (legacy single-object behavior).
         let draws: Vec<Draw> = frame.resolved_draws();
-        let mesh_count = self.ensure_renderer().mesh_count();
+        let mesh_count = self.ensure_renderer()?.mesh_count();
         for draw in &draws {
             if draw.mesh_id as usize >= mesh_count {
                 return Err(js_error(format!(
@@ -458,28 +445,93 @@ impl CanvasRenderer {
                 )));
             }
         }
-        let scene = build_scene(
+        let scene = scene_with_overlays(
             &draws,
-            self.mode,
-            self.show_aabb,
-            self.show_axes,
-            self.show_local_axes,
-            None,
-            None,
+            &self.options,
             (has_inline_frame || (self.composite_frame && has_external_frame))
                 .then_some(FrameFit::Stretch),
         );
 
-        measure("trd.canvas.render-submit", || {
-            let acquired = self.acquire_frame()?;
-            let renderer = self.renderer.as_mut().expect("renderer built above");
-            self.target
-                .present(&self.gpu, renderer, acquired.texture, params, &scene);
-            if acquired.reconfigure_after_present {
-                self.target.reconfigure(&self.gpu.device);
+        measure("trd.canvas.render-submit", || self.present(params, &scene))
+    }
+
+    /// Presents one frame, recovering from a stale or lost surface **in-call**.
+    ///
+    /// The browser cannot defer to "the next redraw" the way the native window
+    /// does — a `requestAnimationFrame` driver expects this call to have drawn —
+    /// so a recoverable outcome is repaired here and the frame retried exactly
+    /// once. That policy is the front-end's; the harness only reports what
+    /// happened (#180).
+    fn present(&mut self, params: FrameParams, scene: &[DrawableObject]) -> Result<(), JsValue> {
+        match self.present_once(params, scene) {
+            PresentOutcome::Presented => Ok(()),
+            // Presented, but the configuration no longer matches the canvas: the
+            // frame is on screen, so just repair before the next one.
+            PresentOutcome::PresentedSuboptimal => {
+                self.reconfigure();
+                Ok(())
             }
-            Ok(())
-        })
+            PresentOutcome::Outdated => {
+                self.reconfigure();
+                self.retry(params, scene, "reconfiguration")
+            }
+            PresentOutcome::Lost => {
+                let surface = self
+                    .instance
+                    .create_surface(wgpu::SurfaceTarget::Canvas(self.canvas.clone()))
+                    .map_err(|error| js_error(format!("surface recreation failed: {error}")))?;
+                let device = self.gpu.device.clone();
+                self.target_mut().replace_surface(&device, surface);
+                self.retry(params, scene, "recreation")
+            }
+            PresentOutcome::Skipped(skip) => Err(js_error(match skip {
+                SurfaceSkip::Timeout => "surface acquisition timed out",
+                SurfaceSkip::Occluded => "surface is occluded",
+                SurfaceSkip::Validation => "surface validation failed",
+            })),
+        }
+    }
+
+    fn retry(
+        &mut self,
+        params: FrameParams,
+        scene: &[DrawableObject],
+        recovery: &str,
+    ) -> Result<(), JsValue> {
+        match self.present_once(params, scene) {
+            PresentOutcome::Presented => Ok(()),
+            PresentOutcome::PresentedSuboptimal => {
+                self.reconfigure();
+                Ok(())
+            }
+            outcome => Err(js_error(format!(
+                "surface still unusable after {recovery}: {outcome:?}"
+            ))),
+        }
+    }
+
+    fn present_once(&mut self, params: FrameParams, scene: &[DrawableObject]) -> PresentOutcome {
+        self.renderer
+            .as_mut()
+            .expect("renderer built before present")
+            .present_scene(params, scene)
+    }
+
+    fn reconfigure(&mut self) {
+        let device = self.gpu.device.clone();
+        self.target_mut().reconfigure(&device);
+    }
+
+    /// The live surface, wherever it currently lives: inside the harness once the
+    /// meshes have arrived, in `target` before that.
+    fn target_mut(&mut self) -> &mut OnscreenTarget {
+        match self.renderer.as_mut() {
+            Some(renderer) => renderer.target_mut(),
+            None => self
+                .target
+                .as_mut()
+                .expect("surface held until the harness"),
+        }
     }
 
     fn upload_inline_frame(&mut self, frame_id: Option<u32>) -> Result<bool, JsValue> {
@@ -498,10 +550,7 @@ impl CanvasRenderer {
             .ok_or_else(|| js_error(format!("frame_id {frame_id} is out of range")))?
             .decode()
             .map_err(|error| js_error(format!("decode frame_id {frame_id}: {error}")))?;
-        self.ensure_renderer();
-        self.renderer
-            .as_mut()
-            .expect("renderer built above")
+        self.ensure_renderer()?
             .update_frame_texture_rgba(&image.rgba, image.width, image.height);
         self.last_inline_frame_id = Some(frame_id);
         Ok(true)
@@ -512,11 +561,14 @@ impl CanvasRenderer {
     /// produced; builds a multi-mesh renderer with each mesh's
     /// [`preview_transform`](trd_core::Mesh::preview_transform) base model,
     /// targeting the surface's sRGB view format.
-    fn ensure_renderer(&mut self) -> &mut SceneRenderer {
+    fn ensure_renderer(&mut self) -> Result<&mut Renderer<OnscreenTarget>, JsValue> {
         if self.renderer.is_none() {
+            let target = self
+                .target
+                .take()
+                .ok_or_else(|| js_error("the canvas surface is gone"))?;
             let meshes = self.input.meshes();
-            let renderer =
-                SceneRenderer::auto_fit(self.gpu.clone(), self.target.view_format(), meshes);
+            let renderer = Renderer::with_target(self.gpu.clone(), target, meshes);
             self.renderer = Some(renderer);
 
             // Bind the stream's texture (0.0.4) as the sampled albedo so
@@ -540,63 +592,7 @@ impl CanvasRenderer {
                     .set_env_map(env);
             }
         }
-        self.renderer.as_mut().expect("renderer just built")
-    }
-
-    fn acquire_frame(&mut self) -> Result<AcquiredFrame, JsValue> {
-        match self.target.acquire() {
-            wgpu::CurrentSurfaceTexture::Success(texture) => Ok(AcquiredFrame {
-                texture,
-                reconfigure_after_present: false,
-            }),
-            wgpu::CurrentSurfaceTexture::Suboptimal(texture) => Ok(AcquiredFrame {
-                texture,
-                reconfigure_after_present: true,
-            }),
-            wgpu::CurrentSurfaceTexture::Outdated => {
-                self.target.reconfigure(&self.gpu.device);
-                self.acquire_after_recovery("reconfiguration")
-            }
-            wgpu::CurrentSurfaceTexture::Lost => {
-                let surface = self
-                    .instance
-                    .create_surface(wgpu::SurfaceTarget::Canvas(self.canvas.clone()))
-                    .map_err(|error| js_error(format!("surface recreation failed: {error}")))?;
-                self.target.replace_surface(&self.gpu.device, surface);
-                self.acquire_after_recovery("recreation")
-            }
-            wgpu::CurrentSurfaceTexture::Timeout => Err(js_error("surface acquisition timed out")),
-            wgpu::CurrentSurfaceTexture::Occluded => Err(js_error("surface is occluded")),
-            wgpu::CurrentSurfaceTexture::Validation => Err(js_error("surface validation failed")),
-        }
-    }
-
-    fn acquire_after_recovery(&self, recovery: &str) -> Result<AcquiredFrame, JsValue> {
-        match self.target.acquire() {
-            wgpu::CurrentSurfaceTexture::Success(texture) => Ok(AcquiredFrame {
-                texture,
-                reconfigure_after_present: false,
-            }),
-            wgpu::CurrentSurfaceTexture::Suboptimal(texture) => Ok(AcquiredFrame {
-                texture,
-                reconfigure_after_present: true,
-            }),
-            wgpu::CurrentSurfaceTexture::Timeout => Err(js_error(format!(
-                "surface acquisition timed out after {recovery}"
-            ))),
-            wgpu::CurrentSurfaceTexture::Occluded => {
-                Err(js_error(format!("surface is occluded after {recovery}")))
-            }
-            wgpu::CurrentSurfaceTexture::Outdated => Err(js_error(format!(
-                "surface remains outdated after {recovery}"
-            ))),
-            wgpu::CurrentSurfaceTexture::Lost => {
-                Err(js_error(format!("surface remains lost after {recovery}")))
-            }
-            wgpu::CurrentSurfaceTexture::Validation => Err(js_error(format!(
-                "surface validation failed after {recovery}"
-            ))),
-        }
+        Ok(self.renderer.as_mut().expect("renderer just built"))
     }
 }
 

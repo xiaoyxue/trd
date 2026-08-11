@@ -14,8 +14,8 @@
 use std::sync::Arc;
 
 use super::{
-    Draw, DrawableObject, FrameParams, GpuContext, Mesh, OffscreenTarget, PickTarget,
-    SceneRenderer, OFFSCREEN_FORMAT,
+    Draw, DrawableObject, FrameParams, GpuContext, Mesh, OffscreenTarget, OnscreenTarget,
+    PickTarget, RenderTarget, SceneRenderer, Viewport, OFFSCREEN_FORMAT,
 };
 use crate::math::Matrix4;
 use thiserror::Error;
@@ -65,20 +65,34 @@ pub(crate) fn check_dimensions(width: u32, height: u32) -> Result<u32, RenderErr
     Ok(pixels)
 }
 
-/// A persistent GPU context that renders one [`FrameParams`] to tightly-packed
-/// row-major RGBA bytes (`width*height*4`) per call.
-pub struct Renderer {
+/// The render harness: a persistent GPU context plus a [`SceneRenderer`], drawing
+/// one [`FrameParams`] + [`Scene`](crate::Scene) per call into a [`RenderTarget`].
+///
+/// Generic over **where the frame lands**, because that is the only thing the two
+/// kinds of front-end disagree about (#180):
+///
+/// * `Renderer<OffscreenTarget>` — the default. Renders to a texture and reads it
+///   back to RGBA bytes ([`render_scene`](Self::render_scene)): the headless CLI,
+///   the GUI's egui texture, the browser's offscreen surface.
+/// * `Renderer<OnscreenTarget>` — renders straight into a swapchain texture and
+///   presents it ([`present_scene`](Self::present_scene)): the native window and
+///   the browser canvas.
+///
+/// Everything else — uploads, materials, lighting, mesh count, picking — is shared
+/// and lives in the `impl<T: RenderTarget>` block.
+pub struct Renderer<T = OffscreenTarget> {
     gpu: Arc<GpuContext>,
     renderer: SceneRenderer,
-    /// The shared offscreen render target + readback buffer (#103, Part B).
-    target: OffscreenTarget,
+    /// Where the frame lands: an offscreen texture + read-back buffer, or a
+    /// surface swapchain.
+    target: T,
     /// The object-id picking target (#141), created lazily on the first
     /// [`pick`](Self::pick) call and resized to track the render size. `None`
     /// until a front-end actually picks, so the headless CLI never allocates it.
     pick_target: Option<PickTarget>,
 }
 
-impl Renderer {
+impl Renderer<OffscreenTarget> {
     /// Builds the GPU context (instance/adapter/device/pipeline/target/readback)
     /// once for a fixed `width` x `height`, rendering the `meshes` of the stream's
     /// leading mesh table, applying each mesh's [`Mesh::preview_transform`]
@@ -181,6 +195,79 @@ impl Renderer {
             target,
             pick_target: None,
         })
+    }
+    /// Renders `scene` under `params`, returning tightly-packed row-major RGBA
+    /// bytes (`width * height * 4`).
+    ///
+    /// The caller assembles the scene — typically with
+    /// [`scene_with_overlays`](crate::scene_with_overlays), which turns a wire
+    /// draw list plus [`RenderOptions`](crate::RenderOptions) into exactly the
+    /// same `Scene` every other front-end renders. The renderer keeps no
+    /// mode/overlay state of its own (#180): what to draw is entirely the scene.
+    pub async fn render_scene(
+        &mut self,
+        params: FrameParams,
+        scene: &[DrawableObject],
+    ) -> Result<Vec<u8>, RenderError> {
+        Ok(self
+            .target
+            .render(&self.gpu, &mut self.renderer, params, scene)
+            .await?)
+    }
+}
+
+/// The parts that do not care **where** the frame lands: uploads, materials,
+/// mesh count, sizing, picking. Every target shares them.
+impl<T: RenderTarget> Renderer<T> {
+    /// Builds the harness around an **existing** device and render target,
+    /// building the scene renderer for whatever format that target wants.
+    ///
+    /// This is the on-screen constructor: a live-surface shell owns its
+    /// `wgpu::Surface` (it needs the window/canvas to create one) and wraps it in
+    /// an [`OnscreenTarget`](super::OnscreenTarget), then hands it here.
+    pub fn with_target(gpu: Arc<GpuContext>, target: T, meshes: &[Mesh]) -> Self {
+        let renderer = SceneRenderer::auto_fit(gpu.clone(), target.view_format(), meshes);
+        Self {
+            gpu,
+            renderer,
+            target,
+            pick_target: None,
+        }
+    }
+
+    /// The render target this renderer draws into.
+    pub fn target(&self) -> &T {
+        &self.target
+    }
+
+    /// The render target, mutably — the seam a live-surface front-end needs to
+    /// reconfigure or replace its swapchain. Surface recovery is a **front-end**
+    /// policy (native defers to a redraw, the browser recreates the surface from
+    /// its canvas), so the harness exposes the target instead of modelling every
+    /// platform's policy (#180).
+    pub fn target_mut(&mut self) -> &mut T {
+        &mut self.target
+    }
+
+    /// Unwraps the harness back into its render target, dropping the scene
+    /// renderer's mesh store. A streaming front-end calls this when a new stream's
+    /// mesh table arrives and the meshes must be rebuilt around the **same**
+    /// surface — recreating the surface instead would lose the swapchain.
+    pub fn into_target(self) -> T {
+        self.target
+    }
+
+    /// The current render size in pixels.
+    pub fn viewport(&self) -> Viewport {
+        self.target.viewport()
+    }
+
+    /// Resizes the render target to `width` x `height`. The pick target follows
+    /// on the next [`pick`](Self::pick).
+    pub fn resize(&mut self, width: u32, height: u32) -> Result<(), RenderError> {
+        check_dimensions(width, height)?;
+        self.target.resize(&self.gpu, width, height)?;
+        Ok(())
     }
 
     /// The number of loaded meshes; valid [`Draw::mesh_id`]s are `0..mesh_count`.
@@ -293,25 +380,6 @@ impl Renderer {
             .update_frame_texture_rgba(&image.rgba, image.width, image.height);
     }
 
-    /// Renders `scene` under `params`, returning tightly-packed row-major RGBA
-    /// bytes (`width * height * 4`).
-    ///
-    /// The caller assembles the scene — typically with
-    /// [`scene_with_overlays`](crate::scene_with_overlays), which turns a wire
-    /// draw list plus [`RenderOptions`](crate::RenderOptions) into exactly the
-    /// same `Scene` every other front-end renders. The renderer keeps no
-    /// mode/overlay state of its own (#180): what to draw is entirely the scene.
-    pub async fn render_scene(
-        &mut self,
-        params: FrameParams,
-        scene: &[DrawableObject],
-    ) -> Result<Vec<u8>, RenderError> {
-        Ok(self
-            .target
-            .render(&self.gpu, &mut self.renderer, params, scene)
-            .await?)
-    }
-
     /// **Object-id picking** (#141): renders `draws` through the flat id-color
     /// pass at the current render size and returns the **0-based index into
     /// `draws`** of the object under pixel `(x, y)`, or `None` for the background
@@ -326,7 +394,10 @@ impl Renderer {
         x: u32,
         y: u32,
     ) -> Option<u32> {
-        let (w, h) = (self.target.width(), self.target.height());
+        let Viewport {
+            width: w,
+            height: h,
+        } = self.target.viewport();
         match self.pick_target.as_mut() {
             Some(target) => target.resize(&self.gpu.device, w, h),
             None => self.pick_target = Some(PickTarget::new(&self.gpu.device, w, h)),
@@ -335,5 +406,79 @@ impl Renderer {
         target
             .pick(&self.gpu, &mut self.renderer, params, draws, x, y)
             .await
+    }
+}
+
+/// What one on-screen frame did.
+///
+/// wgpu's surface acquisition can fail in ways only the **front-end** knows how to
+/// recover from — the native window defers to the next redraw, while the browser
+/// recreates the surface from its canvas — so [`present_scene`] reports what
+/// happened instead of baking in a policy (#180).
+///
+/// [`present_scene`]: Renderer::present_scene
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresentOutcome {
+    /// The frame was drawn and presented.
+    Presented,
+    /// The frame was drawn and presented, but the surface no longer optimally
+    /// matches its configuration — wgpu still hands back a usable texture, so the
+    /// frame is **not** lost; reconfigure before the next one.
+    PresentedSuboptimal,
+    /// Nothing was drawn: the surface configuration is stale (a resize or a
+    /// minimise). Reconfigure, then draw again.
+    Outdated,
+    /// Nothing was drawn: the surface was lost. Recreate it, then draw again.
+    Lost,
+    /// Nothing was drawn, for a transient reason. Skipping the frame is correct;
+    /// the next one is expected to succeed.
+    Skipped(SurfaceSkip),
+}
+
+/// Why a frame was skipped without being drawn — the transient half of
+/// [`PresentOutcome`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceSkip {
+    /// Acquisition timed out.
+    Timeout,
+    /// The surface is not visible (e.g. an occluded or hidden window).
+    Occluded,
+    /// The surface failed validation.
+    Validation,
+}
+
+impl Renderer<OnscreenTarget> {
+    /// Acquires the surface's next texture, encodes `scene` under `params` into
+    /// it, submits, and presents — reporting the outcome so the caller applies its
+    /// own recovery policy.
+    ///
+    /// Nothing is drawn for [`Outdated`](PresentOutcome::Outdated),
+    /// [`Lost`](PresentOutcome::Lost) or [`Skipped`](PresentOutcome::Skipped); the
+    /// caller recovers through [`target_mut`](Self::target_mut) and draws again.
+    pub fn present_scene(
+        &mut self,
+        params: FrameParams,
+        scene: &[DrawableObject],
+    ) -> PresentOutcome {
+        let (texture, outcome) = match self.target.acquire() {
+            wgpu::CurrentSurfaceTexture::Success(texture) => (texture, PresentOutcome::Presented),
+            wgpu::CurrentSurfaceTexture::Suboptimal(texture) => {
+                (texture, PresentOutcome::PresentedSuboptimal)
+            }
+            wgpu::CurrentSurfaceTexture::Outdated => return PresentOutcome::Outdated,
+            wgpu::CurrentSurfaceTexture::Lost => return PresentOutcome::Lost,
+            wgpu::CurrentSurfaceTexture::Timeout => {
+                return PresentOutcome::Skipped(SurfaceSkip::Timeout)
+            }
+            wgpu::CurrentSurfaceTexture::Occluded => {
+                return PresentOutcome::Skipped(SurfaceSkip::Occluded)
+            }
+            wgpu::CurrentSurfaceTexture::Validation => {
+                return PresentOutcome::Skipped(SurfaceSkip::Validation)
+            }
+        };
+        self.target
+            .present(&self.gpu, &mut self.renderer, texture, params, scene);
+        outcome
     }
 }

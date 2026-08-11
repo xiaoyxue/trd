@@ -180,6 +180,67 @@ fn offscreen_target_reports_its_render_format_and_size() {
     assert_eq!(target.view_format(), OFFSCREEN_FORMAT);
 }
 
+/// The generic harness must work through its **target-agnostic** API.
+///
+/// `Renderer<T: RenderTarget>` exists so the on-screen front-ends stop being
+/// renderers (#180): they build one with [`Renderer::with_target`] over an
+/// `OnscreenTarget` and drive it through the same shared surface as the offscreen
+/// callers. A real swapchain needs a window, so this exercises that shared API —
+/// `with_target`, `viewport`, `resize`, `into_target` — over the offscreen target,
+/// which is the same code path with a different `T`.
+#[test]
+#[ignore = "requires a GPU adapter"]
+#[cfg(not(target_arch = "wasm32"))]
+fn with_target_builds_resizes_and_unwraps_the_harness() {
+    use crate::{OffscreenTarget, RenderTarget, Renderer};
+
+    let gpu = test_gpu();
+    let scene = vec![DrawableObject::Mesh {
+        mesh_id: 0,
+        model: Matrix4::IDENTITY.to_cols_array(),
+        mode: RenderMode::Filled,
+    }];
+
+    let target = OffscreenTarget::new(&gpu.device, 40, 24).expect("target builds");
+    let mut renderer = Renderer::with_target(gpu, target, &[Mesh::hello_triangle()]);
+    assert_eq!(
+        renderer.viewport(),
+        Viewport {
+            width: 40,
+            height: 24
+        }
+    );
+
+    let small = pollster::block_on(renderer.render_scene(FrameParams::IDENTITY, &scene))
+        .expect("renders at the initial size");
+    assert_eq!(small.len(), 40 * 24 * 4);
+
+    renderer.resize(64, 32).expect("resizes");
+    assert_eq!(
+        renderer.viewport(),
+        Viewport {
+            width: 64,
+            height: 32
+        }
+    );
+    let large = pollster::block_on(renderer.render_scene(FrameParams::IDENTITY, &scene))
+        .expect("renders at the new size");
+    assert_eq!(large.len(), 64 * 32 * 4);
+    assert!(
+        large.chunks_exact(4).any(|px| px[..3] != [0, 0, 0]),
+        "the resized harness drew nothing"
+    );
+
+    // A streaming front-end hands the surface back when a new mesh table arrives.
+    assert_eq!(
+        renderer.into_target().viewport(),
+        Viewport {
+            width: 64,
+            height: 32
+        }
+    );
+}
+
 /// [`Renderer::with_gpu`] must produce the same frame as [`Renderer::with_meshes`].
 ///
 /// The streaming browser front-end owns its device before it owns its meshes, so
