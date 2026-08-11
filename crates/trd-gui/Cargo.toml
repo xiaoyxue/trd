@@ -33,7 +33,6 @@ thiserror = "2"
 # egui/log are shared by the native window and the wasm (eframe-web) app.
 egui = "0.35"
 log = "0.4"
-wgpu = "30"
 # `std::time::Instant` panics on `wasm32-unknown-unknown`, so the shared
 # video-editing render-latency diagnostic uses `web-time`'s drop-in `Instant`:
 # std on native, `performance.now()` in the browser. Already in the tree via egui.
