@@ -12,16 +12,16 @@ mod env_background;
 mod frame_params;
 mod frame_plane;
 mod gizmo;
-mod gpu_context;
+mod gpu;
 mod gpu_types;
 mod ibl;
 mod light;
 mod mesh_renderer;
-mod offscreen;
-mod onscreen;
+mod options;
 mod pbr;
 mod picking;
 mod pipeline;
+mod render_target;
 mod scene;
 mod tonemap;
 mod triangle_renderer;
@@ -35,16 +35,16 @@ mod gpu_tests;
 #[cfg(not(target_arch = "wasm32"))]
 pub use batch_renderer::BatchRenderer;
 pub use frame_params::{CameraFormError, FrameParams, Viewport};
-pub use gpu_context::{create_instance, GpuContext, GpuInitError, GpuRequest, LimitsPreset};
+pub use gpu::{create_instance, GpuContext, GpuInitError, GpuRequest, LimitsPreset};
 pub use gpu_types::{Mesh, MeshShading, Vertex};
 pub use ibl::{EnvMapData, ImageBasedLighting};
 pub use light::{Light, Lighting, PointLight};
 pub use mesh_renderer::MeshRenderer;
-pub use offscreen::{OffscreenError, OffscreenTarget, OFFSCREEN_FORMAT};
-pub use onscreen::OnscreenTarget;
+pub use options::{Msaa, PbrConfig, RenderOptions};
 pub use pbr::PbrDebugView;
 pub use picking::PickTarget;
 pub use pipeline::create_mesh_pipeline;
+pub use render_target::{OffscreenError, OffscreenTarget, OnscreenTarget, OFFSCREEN_FORMAT};
 pub use scene::{
     build_scene, plane_grid_overlays, selection_aabb_overlay, Draw, DrawableObject, FrameFit,
     GridPlane, RenderMode, Scene,
