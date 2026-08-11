@@ -243,6 +243,11 @@ fn main() -> Result<(), trd_core::StreamError> {
             show_local_axes: cli.axes_local,
             show_local_grid: cli.grid_local.map(Into::into),
             show_local_grid_mesh: cli.grid_mesh,
+            // The CLI exposes no world/object grid or selection flags; those are
+            // interactive-only overlays.
+            show_world_grid: None,
+            show_object_grid: None,
+            selected: None,
             pbr,
             msaa: if cli.no_msaa {
                 trd_core::Msaa::Off

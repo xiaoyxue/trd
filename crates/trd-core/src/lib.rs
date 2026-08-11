@@ -36,7 +36,7 @@ pub use protocol::{
 // backend (#180). The public paths (`trd_core::DisneyMaterial`, ...) are unchanged.
 pub use material::{AlphaMode, Auxiliary, DisneyMaterial, Material, MaterialTextures};
 pub use render::{
-    build_scene, create_instance, create_mesh_pipeline, plane_grid_overlays,
+    build_scene, create_instance, create_mesh_pipeline, plane_grid_overlays, scene_with_overlays,
     selection_aabb_overlay, AdapterFacts, CameraFormError, Draw, DrawableObject, EnvMapData,
     FrameFit, FrameParams, GpuContext, GpuInitError, GpuRequest, GridPlane, ImageBasedLighting,
     Light, Lighting, LimitsPreset, Mesh, MeshShading, Msaa, OffscreenError, OffscreenTarget,

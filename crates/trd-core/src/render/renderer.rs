@@ -14,8 +14,8 @@
 use std::sync::Arc;
 
 use super::{
-    Draw, DrawableObject, FrameFit, FrameParams, GpuContext, GridPlane, Mesh, OffscreenTarget,
-    PickTarget, RenderMode, SceneRenderer, OFFSCREEN_FORMAT,
+    Draw, DrawableObject, FrameParams, GpuContext, Mesh, OffscreenTarget, PickTarget,
+    SceneRenderer, OFFSCREEN_FORMAT,
 };
 use crate::math::Matrix4;
 use crate::stream::{check_dimensions, StreamError};
@@ -27,34 +27,6 @@ pub struct Renderer {
     renderer: SceneRenderer,
     /// The shared offscreen render target + readback buffer (#103, Part B).
     target: OffscreenTarget,
-    /// Render mode (filled/wireframe) applied to every mesh drawable this
-    /// renderer builds into its per-frame [`Scene`](crate::Scene).
-    mode: RenderMode,
-    /// Whether to add a [`DrawableObject::AabbBox`] gizmo per drawn instance.
-    show_aabb: bool,
-    /// Whether to add a single origin [`DrawableObject::CoordinateAxes`] gizmo.
-    show_axes: bool,
-    /// Whether to add a [`DrawableObject::CoordinateAxes`] at *each* drawn
-    /// instance's own `model` — the object's local coordinate frame.
-    show_local_axes: bool,
-    /// If `Some(plane)`, add a [`DrawableObject::PlaneGrid`] on that coordinate
-    /// plane at *each* drawn instance's own `model` — a grid lattice in the
-    /// object's local frame (e.g. an `xy` grid tiling a placement quad).
-    show_local_grid: Option<GridPlane>,
-    /// If `Some(id)`, narrow the [`show_local_grid`](Self::show_local_grid)
-    /// overlay to draws of that `mesh_id` only (the placement quad), so a
-    /// wireframe *content* mesh doesn't also pick up a floor grid (#114).
-    show_local_grid_mesh: Option<u32>,
-    /// If `Some(plane)`, add one world-origin [`DrawableObject::PlaneGrid`] on
-    /// that plane (identity model — a world floor), ungated by render mode.
-    show_world_grid: Option<GridPlane>,
-    /// If `Some(plane)`, add a [`DrawableObject::PlaneGrid`] on that plane at
-    /// *each* drawn instance's own `model`, ungated by render mode (unlike
-    /// [`show_local_grid`](Self::show_local_grid), which is wireframe-scoped).
-    show_object_grid: Option<GridPlane>,
-    /// If `Some(index)`, highlight that draw's [`DrawableObject::AabbBox`] — the
-    /// **selected** object (#141) — regardless of the global `show_aabb` toggle.
-    selected_aabb: Option<u32>,
     /// The object-id picking target (#141), created lazily on the first
     /// [`pick`](Self::pick) call and resized to track the render size. `None`
     /// until a front-end actually picks, so the headless CLI never allocates it.
@@ -139,15 +111,6 @@ impl Renderer {
             gpu,
             renderer,
             target,
-            mode: RenderMode::Filled,
-            show_aabb: false,
-            show_axes: false,
-            show_local_axes: false,
-            show_local_grid: None,
-            show_local_grid_mesh: None,
-            show_world_grid: None,
-            show_object_grid: None,
-            selected_aabb: None,
             pick_target: None,
         })
     }
@@ -155,11 +118,6 @@ impl Renderer {
     /// The number of loaded meshes; valid [`Draw::mesh_id`]s are `0..mesh_count`.
     pub fn mesh_count(&self) -> usize {
         self.renderer.mesh_count()
-    }
-
-    /// Sets the [`RenderMode`] (filled or wireframe) applied to later `render`s.
-    pub fn set_mode(&mut self, mode: RenderMode) {
-        self.mode = mode;
     }
 
     /// Binds `texture` as the source sampled by [`RenderMode::Textured`] meshes
@@ -227,126 +185,34 @@ impl Renderer {
         self.renderer.set_env_map(env);
     }
 
-    /// Enables/disables the per-instance AABB overlay box: when on, each drawn
-    /// instance also contributes a [`DrawableObject::AabbBox`] to the scene.
-    pub fn set_show_aabb(&mut self, show: bool) {
-        self.show_aabb = show;
-    }
-
-    /// Enables/disables the origin coordinate-axes overlay gizmo: when on, the
-    /// scene gains a single [`DrawableObject::CoordinateAxes`] at the world
-    /// origin.
-    pub fn set_show_axes(&mut self, show: bool) {
-        self.show_axes = show;
-    }
-
-    /// Enables/disables the per-instance *local* coordinate-axes overlay: when
-    /// on, each drawn instance also gains a [`DrawableObject::CoordinateAxes`]
-    /// placed by its own `model`, visualizing that object's local frame (e.g.
-    /// #77's `(e1,e2,e3)` quad placement).
-    pub fn set_show_local_axes(&mut self, show: bool) {
-        self.show_local_axes = show;
-    }
-
-    /// Selects the per-instance *local* coordinate-plane grid overlay: when
-    /// `Some(plane)`, each drawn instance also gains a
-    /// [`DrawableObject::PlaneGrid`] on that plane placed by its own `model`,
-    /// laying a grid lattice across the object's local frame (e.g. an `xy` grid
-    /// tiling a placement quad's floor). `None` disables it.
-    pub fn set_show_local_grid(&mut self, plane: Option<GridPlane>) {
-        self.show_local_grid = plane;
-    }
-
-    /// Narrows the [`set_show_local_grid`](Self::set_show_local_grid) overlay to
-    /// draws of a single `mesh_id` (the placement quad). `Some(id)` lays the grid
-    /// only under that mesh — so a *content* mesh drawn wireframe (e.g. a
-    /// wireframe-reveal intro) doesn't also pick up a floor grid; `None` keeps the
-    /// grid on every wireframe draw (#114).
-    pub fn set_show_local_grid_mesh(&mut self, mesh: Option<u32>) {
-        self.show_local_grid_mesh = mesh;
-    }
-
-    /// Overlays a single **world-origin** [`DrawableObject::PlaneGrid`] on the
-    /// given plane (identity model — a world floor), ungated by render mode.
-    /// `None` disables it. Analogous to [`set_show_axes`](Self::set_show_axes).
-    pub fn set_show_world_grid(&mut self, plane: Option<GridPlane>) {
-        self.show_world_grid = plane;
-    }
-
-    /// Overlays a [`DrawableObject::PlaneGrid`] on the given plane at *each* drawn
-    /// object's own `model` frame, ungated by render mode (unlike
-    /// [`set_show_local_grid`](Self::set_show_local_grid), which is scoped to
-    /// wireframe placement quads). `None` disables it. Analogous to
-    /// [`set_show_local_axes`](Self::set_show_local_axes).
-    pub fn set_show_object_grid(&mut self, plane: Option<GridPlane>) {
-        self.show_object_grid = plane;
-    }
-
-    /// Highlights the **selected** object's [`DrawableObject::AabbBox`] (#141):
-    /// `Some(index)` boxes the draw at that 0-based index (regardless of the
-    /// global [`set_show_aabb`](Self::set_show_aabb) toggle); `None` clears it.
-    pub fn set_selected_aabb(&mut self, index: Option<u32>) {
-        self.selected_aabb = index;
-    }
-
     /// Uploads `image` as the **background frame texture** (#63) sampled by a
     /// [`DrawableObject::FramePlane`]. The GPU texture is reused across frames
     /// (grown only on a resolution change). Call before a
-    /// [`render_frame`](Self::render_frame) with a `Some(fit)` to composite the
+    /// [`render_scene`](Self::render_scene) with a `FramePlane` drawable to composite the
     /// image beneath the mesh scene.
     pub fn update_frame_texture(&mut self, image: &crate::texture::ImageData) {
         self.renderer
             .update_frame_texture_rgba(&image.rgba, image.width, image.height);
     }
 
-    /// Builds the per-frame [`Scene`](crate::Scene) from a wire `draws` list and
-    /// this renderer's mode/overlay flags (delegates to [`build_scene`]). A
-    /// `Some(fit)` prepends a background [`DrawableObject::FramePlane`] (#63).
-    fn build_scene(&self, draws: &[Draw], frame: Option<FrameFit>) -> Vec<DrawableObject> {
-        let mut scene = crate::render::build_scene(
-            draws,
-            self.mode,
-            self.show_aabb,
-            self.show_axes,
-            self.show_local_axes,
-            self.show_local_grid,
-            self.show_local_grid_mesh,
-            frame,
-        );
-        // World / object plane-grid overlays (#140) — ungated by render mode, so a
-        // filled/PBR object still gets a floor grid. `encode` buckets by primitive
-        // type, so appending here draws them in the grid pass regardless of order.
-        scene.extend(crate::render::plane_grid_overlays(
-            draws,
-            self.show_world_grid,
-            self.show_object_grid,
-        ));
-        // Selection highlight (#141): the selected object's AABB, drawn even when
-        // the global show-all-AABBs toggle is off.
-        scene.extend(crate::render::selection_aabb_overlay(
-            draws,
-            self.selected_aabb,
-        ));
-        scene
-    }
-
-    /// Renders `params` with the given per-frame instance `draws`, compositing a
-    /// background [`DrawableObject::FramePlane`] (#63) beneath the scene when
-    /// `frame` is `Some(fit)` and a frame texture has been uploaded via
-    /// [`update_frame_texture`](Self::update_frame_texture). Returns
-    /// tightly-packed row-major RGBA bytes (`width*height*4`).
-    pub fn render_frame(
+    /// Renders `scene` under `params`, returning tightly-packed row-major RGBA
+    /// bytes (`width * height * 4`).
+    ///
+    /// The caller assembles the scene — typically with
+    /// [`scene_with_overlays`](crate::scene_with_overlays), which turns a wire
+    /// draw list plus [`RenderOptions`](crate::RenderOptions) into exactly the
+    /// same `Scene` every other front-end renders. The renderer keeps no
+    /// mode/overlay state of its own (#180): what to draw is entirely the scene.
+    pub fn render_scene(
         &mut self,
         params: FrameParams,
-        draws: &[Draw],
-        frame: Option<FrameFit>,
+        scene: &[DrawableObject],
     ) -> Result<Vec<u8>, StreamError> {
-        let scene = self.build_scene(draws, frame);
         Ok(pollster::block_on(self.target.render(
             &self.gpu,
             &mut self.renderer,
             params,
-            &scene,
+            scene,
         ))?)
     }
 

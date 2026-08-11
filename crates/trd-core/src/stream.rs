@@ -426,8 +426,10 @@ fn resolve_inline_frame(
 /// beneath the scene via a [`DrawableObject`](crate::render::DrawableObject)`::FramePlane`.
 /// `last_frame_ref` tracks the currently uploaded background so consecutive
 /// frames sharing it skip the decode + re-upload.
+#[allow(clippy::too_many_arguments)]
 fn render_and_write_batch<W: Write>(
     renderer: &mut Renderer,
+    options: &RenderOptions,
     output_session: &mut OutputSession,
     batch: &crate::FrameBatch,
     inline_frames: &[crate::InlineFrame],
@@ -461,7 +463,11 @@ fn render_and_write_batch<W: Write>(
         } else {
             background_state.last_ref = None;
         }
-        planes.push(renderer.render_frame(frame.params, &draws, frame_fit)?);
+        // The scene is assembled here, from the wire draw list plus the CLI's
+        // appearance options — the same `scene_with_overlays` every other
+        // front-end uses, so they cannot drift apart (#180).
+        let scene = crate::render::scene_with_overlays(&draws, options, frame_fit);
+        planes.push(renderer.render_scene(frame.params, &scene)?);
     }
     output_session.write_rgba_batch(&planes)?;
     output.write_all(&output_session.drain_new()?)?;
@@ -523,12 +529,6 @@ pub fn run_stream<R: Read, W: Write>(
                 session.meshes(),
                 options.msaa.sample_count(),
             )?;
-            built.set_mode(options.mode);
-            built.set_show_aabb(options.show_aabb);
-            built.set_show_axes(options.show_axes);
-            built.set_show_local_axes(options.show_local_axes);
-            built.set_show_local_grid(options.show_local_grid);
-            built.set_show_local_grid_mesh(options.show_local_grid_mesh);
             if let Some(pbr) = &options.pbr {
                 built.set_disney_material(pbr.material.clone());
                 built.set_lighting(pbr.lighting);
@@ -554,6 +554,7 @@ pub fn run_stream<R: Read, W: Write>(
             for batch in &batches {
                 render_and_write_batch(
                     renderer,
+                    &options,
                     output_session,
                     batch,
                     session.frames(),

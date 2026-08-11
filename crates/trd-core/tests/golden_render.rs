@@ -186,6 +186,12 @@ fn pbr_options(tonemap: Tonemap) -> RenderOptions {
         show_local_axes: true,
         show_local_grid: None,
         show_local_grid_mesh: None,
+        show_world_grid: None,
+
+        show_object_grid: None,
+
+        selected: None,
+
         pbr: Some(PbrConfig {
             material: pbr_material(),
             lighting: Lighting {
@@ -385,6 +391,12 @@ fn golden_stage1_placement_quad() {
             show_local_axes: true,
             show_local_grid: None,
             show_local_grid_mesh: None,
+            show_world_grid: None,
+
+            show_object_grid: None,
+
+            selected: None,
+
             pbr: None,
             msaa: Msaa::X4,
         },
@@ -408,6 +420,12 @@ fn golden_stage1_placement_quad_no_msaa() {
             show_local_axes: true,
             show_local_grid: None,
             show_local_grid_mesh: None,
+            show_world_grid: None,
+
+            show_object_grid: None,
+
+            selected: None,
+
             pbr: None,
             msaa: Msaa::Off,
         },
@@ -433,6 +451,12 @@ fn golden_stage2_textured_bunny() {
             show_local_axes: true,
             show_local_grid: None,
             show_local_grid_mesh: None,
+            show_world_grid: None,
+
+            show_object_grid: None,
+
+            selected: None,
+
             pbr: None,
             msaa: Msaa::X4,
         },
@@ -456,6 +480,12 @@ fn golden_stage2_textured_bunny_no_msaa() {
             show_local_axes: true,
             show_local_grid: None,
             show_local_grid_mesh: None,
+            show_world_grid: None,
+
+            show_object_grid: None,
+
+            selected: None,
+
             pbr: None,
             msaa: Msaa::Off,
         },
