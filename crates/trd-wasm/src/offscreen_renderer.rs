@@ -1,9 +1,9 @@
 use wasm_bindgen::prelude::*;
 
 use trd_core::{
-    build_scene, DecodedFrame, DisneyMaterial, Draw, DrawableObject, EnvMapData, FrameBatch,
-    FrameFit, FrameParams, ImageBasedLighting, InputSession, Lighting, OffscreenTarget,
-    OutputSession, RenderMode, SceneRenderer, ToneMapping, Tonemap, OFFSCREEN_FORMAT,
+    scene_with_overlays, DecodedFrame, DisneyMaterial, Draw, DrawableObject, EnvMapData,
+    FrameBatch, FrameFit, FrameParams, ImageBasedLighting, InputSession, Lighting, OutputSession,
+    RenderMode, RenderOptions, Renderer, ToneMapping, Tonemap,
 };
 
 use crate::PbrState;
@@ -32,17 +32,19 @@ impl RendererState {
 #[wasm_bindgen]
 pub struct OffscreenRenderer {
     /// The shared GPU context, held as one value rather than cloned apart into
-    /// separate `device` + `queue` fields (#180).
+    /// separate `device` + `queue` fields (#180). Created eagerly by
+    /// [`create`](Self::create) so a JS caller learns immediately whether the
+    /// browser can render at all; the harness below waits for the stream's meshes.
     gpu: std::sync::Arc<trd_core::GpuContext>,
-    /// Built lazily on the first rendered frame from the stream's leading mesh
-    /// table, or the built-in hello-triangle for a legacy params-only stream.
-    renderer: Option<SceneRenderer>,
-    mode: RenderMode,
-    show_aabb: bool,
-    show_axes: bool,
-    /// Per-draw *local* coordinate-axes gizmos (each object's own model frame) —
-    /// the browser twin of the native `--axes-local` flag.
-    show_local_axes: bool,
+    /// The shared render harness (`trd-core`'s offscreen render + read-back),
+    /// built lazily on the first rendered frame from the stream's leading mesh
+    /// table — a streaming front-end owns the device long before it owns the
+    /// meshes, so the device above is eager and this is not (#180).
+    renderer: Option<Renderer>,
+    /// Draw mode + every overlay toggle, in the **one** type every front-end uses
+    /// to describe a frame's appearance; [`scene_with_overlays`] turns it into the
+    /// scene. The renderer keeps no overlay state of its own (#180).
+    options: RenderOptions,
     /// Composite the uploaded background frame texture beneath the scene as a
     /// [`DrawableObject::FramePlane`] (#63); a no-op until a background is
     /// uploaded via [`update_frame_texture_rgba`](Self::update_frame_texture_rgba).
@@ -55,8 +57,6 @@ pub struct OffscreenRenderer {
     /// [`RenderMode::Pbr`] draws, set via [`set_env_map_hdr`](Self::set_env_map_hdr).
     /// `None` ⇒ no probe reflection.
     env_map: Option<EnvMapData>,
-    /// The shared offscreen render target + readback buffer (#103, Part B).
-    target: OffscreenTarget,
     input: InputSession,
     /// Frames decoded by [`load_ipc`](Self::load_ipc) but not yet rendered,
     /// replayed on demand by [`render_index`](Self::render_index) (the generic
@@ -67,6 +67,8 @@ pub struct OffscreenRenderer {
     /// An external/manual upload waiting to be consumed by the next render.
     external_frame_ready: bool,
     output: OutputSession,
+    width: u32,
+    height: u32,
     state: RendererState,
 }
 
@@ -91,22 +93,15 @@ impl OffscreenRenderer {
         .await
         .map_err(|error| crate::js_error(error_message("GPU init failed", error)))?;
 
-        // The shared offscreen harness owns the render target + readback buffer
-        // and re-validates the size against the adapter's max dimension.
-        let target = OffscreenTarget::new(&gpu.device, width, height)
-            .map_err(|error| crate::js_error(error_message("OffscreenRenderer target", error)))?;
-
         Ok(Self {
             gpu,
             renderer: None,
-            mode: RenderMode::Filled,
-            show_aabb: false,
-            show_axes: false,
-            show_local_axes: false,
+            options: RenderOptions::default(),
+            width,
+            height,
             composite_frame: false,
             pbr: None,
             env_map: None,
-            target,
             input: InputSession::new(),
             frames: Vec::new(),
             last_inline_frame_id: None,
@@ -155,7 +150,7 @@ impl OffscreenRenderer {
     /// Selects filled (`false`) or wireframe (`true`) rendering for later frames.
     #[wasm_bindgen(js_name = setWireframe)]
     pub fn set_wireframe(&mut self, enabled: bool) {
-        self.mode = if enabled {
+        self.options.mode = if enabled {
             RenderMode::Wireframe
         } else {
             RenderMode::Filled
@@ -167,7 +162,7 @@ impl OffscreenRenderer {
     /// Textured meshes without a stream texture sample the default 1×1 white.
     #[wasm_bindgen(js_name = setTextured)]
     pub fn set_textured(&mut self, enabled: bool) {
-        self.mode = if enabled {
+        self.options.mode = if enabled {
             RenderMode::Textured
         } else {
             RenderMode::Filled
@@ -181,7 +176,7 @@ impl OffscreenRenderer {
     /// probe from [`set_env_map_hdr`](Self::set_env_map_hdr).
     #[wasm_bindgen(js_name = setPbr)]
     pub fn set_pbr(&mut self, enabled: bool) {
-        self.mode = if enabled {
+        self.options.mode = if enabled {
             RenderMode::Pbr
         } else {
             RenderMode::Filled
@@ -251,13 +246,13 @@ impl OffscreenRenderer {
     /// Toggles the per-instance AABB overlay box for later frames.
     #[wasm_bindgen(js_name = setShowAabb)]
     pub fn set_show_aabb(&mut self, enabled: bool) {
-        self.show_aabb = enabled;
+        self.options.show_aabb = enabled;
     }
 
     /// Toggles the origin coordinate-axes overlay gizmo for later frames.
     #[wasm_bindgen(js_name = setShowAxes)]
     pub fn set_show_axes(&mut self, enabled: bool) {
-        self.show_axes = enabled;
+        self.options.show_axes = enabled;
     }
 
     /// Toggles the per-draw **local** coordinate-axes gizmo for later frames — one
@@ -265,7 +260,7 @@ impl OffscreenRenderer {
     /// browser twin of the native `--axes-local` flag.
     #[wasm_bindgen(js_name = setShowLocalAxes)]
     pub fn set_show_local_axes(&mut self, enabled: bool) {
-        self.show_local_axes = enabled;
+        self.options.show_local_axes = enabled;
     }
 
     /// Toggles compositing the uploaded background frame beneath the scene as a
@@ -305,10 +300,8 @@ impl OffscreenRenderer {
                 "input is missing the required leading mesh table (protocol is mesh-first)",
             ));
         }
-        self.ensure_renderer();
-        self.renderer
-            .as_mut()
-            .expect("renderer built above")
+        self.ensure_renderer()
+            .map_err(crate::js_error)?
             .update_frame_texture_rgba(rgba, width, height);
         self.last_inline_frame_id = None;
         self.external_frame_ready = true;
@@ -396,10 +389,11 @@ impl OffscreenRenderer {
     /// the stream's (required) leading mesh table (each mesh under its
     /// `preview_transform` base model). The protocol is mesh-first, so the session
     /// always carries meshes by the time frames are produced.
-    fn ensure_renderer(&mut self) -> &mut SceneRenderer {
+    fn ensure_renderer(&mut self) -> Result<&mut Renderer, String> {
         if self.renderer.is_none() {
             let meshes = self.input.meshes();
-            let renderer = SceneRenderer::auto_fit(self.gpu.clone(), OFFSCREEN_FORMAT, meshes);
+            let renderer = Renderer::with_gpu(self.gpu.clone(), self.width, self.height, meshes)
+                .map_err(|error| error_message("OffscreenRenderer target", error))?;
             self.renderer = Some(renderer);
 
             // Bind the stream's texture (0.0.4) as the sampled albedo so
@@ -423,7 +417,7 @@ impl OffscreenRenderer {
                     .set_env_map(env);
             }
         }
-        self.renderer.as_mut().expect("renderer just built")
+        Ok(self.renderer.as_mut().expect("renderer just built"))
     }
 
     /// Resolves a decoded frame into its params + scene: defaults the draw list
@@ -451,7 +445,7 @@ impl OffscreenRenderer {
         // frame's own model (legacy single-object behavior).
         let draws: Vec<Draw> = frame.resolved_draws();
 
-        let mesh_count = self.ensure_renderer().mesh_count();
+        let mesh_count = self.ensure_renderer()?.mesh_count();
         for draw in &draws {
             if draw.mesh_id as usize >= mesh_count {
                 return Err(format!(
@@ -460,14 +454,9 @@ impl OffscreenRenderer {
                 ));
             }
         }
-        let scene = build_scene(
+        let scene = scene_with_overlays(
             &draws,
-            self.mode,
-            self.show_aabb,
-            self.show_axes,
-            self.show_local_axes,
-            None,
-            None,
+            &self.options,
             (has_inline_frame || (self.composite_frame && has_external_frame))
                 .then_some(FrameFit::Stretch),
         );
@@ -490,10 +479,7 @@ impl OffscreenRenderer {
             .ok_or_else(|| format!("frame_id {frame_id} is out of range"))?
             .decode()
             .map_err(|error| format!("decode frame_id {frame_id}: {error}"))?;
-        self.ensure_renderer();
-        self.renderer
-            .as_mut()
-            .expect("renderer built above")
+        self.ensure_renderer()?
             .update_frame_texture_rgba(&image.rgba, image.width, image.height);
         self.last_inline_frame_id = Some(frame_id);
         Ok(true)
@@ -528,12 +514,10 @@ impl OffscreenRenderer {
         params: FrameParams,
         scene: &[DrawableObject],
     ) -> Result<Vec<u8>, String> {
-        let renderer = self
-            .renderer
+        self.renderer
             .as_mut()
-            .expect("renderer built before render_frame");
-        self.target
-            .render(&self.gpu, renderer, params, scene)
+            .expect("renderer built before render_frame")
+            .render_scene(params, scene)
             .await
             .map_err(|error| error_message("offscreen render", error))
     }

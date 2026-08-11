@@ -159,6 +159,30 @@ impl Renderer {
         })
     }
 
+    /// Builds the harness on an **already-created** [`GpuContext`], for callers
+    /// that own the device before they own the meshes.
+    ///
+    /// A streaming front-end learns its meshes from the wire, long after it must
+    /// report whether the GPU is usable at all, so it creates the device eagerly
+    /// and the renderer lazily. [`with_meshes`](Self::with_meshes) requests its
+    /// own device and is the right constructor everywhere else.
+    pub fn with_gpu(
+        gpu: Arc<GpuContext>,
+        width: u32,
+        height: u32,
+        meshes: &[Mesh],
+    ) -> Result<Self, RenderError> {
+        check_dimensions(width, height)?;
+        let renderer = SceneRenderer::auto_fit(gpu.clone(), OFFSCREEN_FORMAT, meshes);
+        let target = OffscreenTarget::new(&gpu.device, width, height)?;
+        Ok(Self {
+            gpu,
+            renderer,
+            target,
+            pick_target: None,
+        })
+    }
+
     /// The number of loaded meshes; valid [`Draw::mesh_id`]s are `0..mesh_count`.
     pub fn mesh_count(&self) -> usize {
         self.renderer.mesh_count()
@@ -199,6 +223,13 @@ impl Renderer {
         texture: &dyn crate::texture::Texture,
     ) {
         self.renderer.set_mesh_normal_texture(mesh_id, texture);
+    }
+
+    /// Uploads the background image composited beneath the scene by a
+    /// [`DrawableObject::FramePlane`](crate::DrawableObject::FramePlane) draw
+    /// (#63). `rgba` is tightly packed row-major `width * height * 4`.
+    pub fn update_frame_texture_rgba(&mut self, rgba: &[u8], width: u32, height: u32) {
+        self.renderer.update_frame_texture_rgba(rgba, width, height);
     }
 
     /// Sets the [`DisneyMaterial`](crate::DisneyMaterial) applied to every PBR mesh.
