@@ -102,7 +102,14 @@ Each is a *thin shell* that only supplies a render target and calls the core:
 - **`trd-app`** — native window: a background thread reads the mesh-first stream
   from stdin; the window plays it at `--fps`, drawing each frame straight into the
   swapchain surface. No read-back, no file.
-- **`trd-wasm` / `web/`** — browser: `CanvasRenderer.create(canvas)` holds a
+- **`trd-wasm` / `web/`** — the **only** browser delivery surface: every
+  `#[wasm_bindgen]` export in the repo lives in `crates/trd-wasm`, both the
+  viewer's `CanvasRenderer`/`OffscreenRenderer` and the GUI's `start` /
+  `startVideoEditing` / `VideoEditingHandle` (`src/gui.rs`, `src/gui_web_app.rs`).
+  Every other crate — `trd-gui` included — is a plain `rlib` free of
+  `wasm-bindgen`, so one wasm build produces one JS package (`trd_wasm`) that all
+  three `web/` packages stage into their own `pkg/` (#180).
+  `CanvasRenderer.create(canvas)` holds a
   persistent `SceneRenderer` + `InputSession` and renders the **same** `Scene` as
   the CLI. There is **one** config-driven front-end: `render.sh --web` writes the
   demo's `stream.arrow` + `config.json`, and

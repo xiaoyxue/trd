@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build:wasm": "wasm-pack build ../../crates/trd-gui --mode no-install --target web --out-dir ../../web/gui-video-editing/pkg",
+    "build:wasm": "wasm-pack build ../../crates/trd-wasm --mode no-install --target web --out-dir ../../web/gui-video-editing/pkg",
     "build:web": "bun build ./index.html --outdir dist",
     "build": "bun run build:wasm && bun run build:web",
     "dev": "bun run build:wasm && BUN_PORT=8085 bun ./index.html",

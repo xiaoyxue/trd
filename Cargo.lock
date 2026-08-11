@@ -4074,11 +4074,9 @@ dependencies = [
 name = "trd-gui"
 version = "0.1.0"
 dependencies = [
- "console_error_panic_hook",
  "eframe",
  "egui",
  "image",
- "js-sys",
  "log",
  "pollster",
  "serde",
@@ -4086,7 +4084,6 @@ dependencies = [
  "thiserror 2.0.18",
  "trd-core",
  "trd-placement",
- "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
  "web-time",
@@ -4137,9 +4134,13 @@ name = "trd-wasm"
 version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
+ "eframe",
+ "egui",
  "image",
  "js-sys",
+ "log",
  "trd-core",
+ "trd-gui",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
