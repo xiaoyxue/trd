@@ -3,7 +3,7 @@
 //! The wasm twin of [`TrdGuiApp`](crate::app::TrdGuiApp): it draws the same shared
 //! [`ui`](crate::ui) (side controls + central image) but renders **asynchronously**.
 //! Because a GPU readback can't block the browser event loop, a changed scene is
-//! rendered by spawning the [`WebRenderer`]'s async `render` on the microtask
+//! rendered by spawning the [`GuiRenderer`]'s async `render` on the microtask
 //! queue (`wasm_bindgen_futures::spawn_local`); when it completes, the RGBA is
 //! stashed and a repaint is requested, and the next `ui` pass uploads it to the
 //! egui texture. A single-flight guard coalesces rapid interactions so at most one
@@ -15,9 +15,9 @@ use std::rc::Rc;
 use egui::{TextureHandle, TextureOptions};
 
 use crate::interaction::InteractionController;
-use crate::render_backend::ImageRgba;
+use crate::renderer::GuiRenderer;
+use crate::renderer::ImageRgba;
 use crate::ui;
-use crate::web_renderer::WebRenderer;
 
 /// The interactive viewer application (browser).
 pub struct WebApp {
@@ -26,7 +26,7 @@ pub struct WebApp {
     /// `Option` so the async task can **take** it out (single-flight guarantees
     /// exclusive access) and render on the owned value — avoiding a `RefCell`
     /// borrow held across the `.await`.
-    renderer: Rc<RefCell<Option<WebRenderer>>>,
+    renderer: Rc<RefCell<Option<GuiRenderer>>>,
     /// The display texture the latest frame is uploaded into.
     texture: Option<TextureHandle>,
     render_size: (u32, u32),
@@ -50,7 +50,7 @@ pub struct WebApp {
 impl WebApp {
     /// Builds the app around a controller and an (already-created) offscreen
     /// renderer. The first frame is scheduled on the first `ui` pass.
-    pub fn new(controller: InteractionController, renderer: WebRenderer) -> Self {
+    pub fn new(controller: InteractionController, renderer: GuiRenderer) -> Self {
         let render_size = renderer.size();
         Self {
             controller,

@@ -8,14 +8,14 @@
 //! scene is re-rendered — the "input → matrix → render → display" cycle. The side
 //! panel exposes the render mode, overlay toggles, the primary-drag target, and a
 //! reset. This crate holds **no rendering logic**; every pixel comes from
-//! `trd-core` via the [`InProcRenderer`].
+//! `trd-core` via the [`GuiRenderer`].
 
 use std::time::Instant;
 
 use egui::{TextureHandle, TextureOptions};
 
 use trd_gui::interaction::InteractionController;
-use trd_gui::render_backend::InProcRenderer;
+use trd_gui::renderer::GuiRenderer;
 use trd_gui::ui;
 
 /// The interactive viewer application.
@@ -23,7 +23,7 @@ pub struct TrdGuiApp {
     /// Owns the scene and applies interaction gestures to it.
     controller: InteractionController,
     /// The (in-process) backend that renders the scene to RGBA.
-    renderer: InProcRenderer,
+    renderer: GuiRenderer,
     /// The GPU texture the current frame is uploaded into (lazily created).
     texture: Option<TextureHandle>,
     /// Set when the scene changed and the frame must be re-rendered.
@@ -37,7 +37,7 @@ pub struct TrdGuiApp {
 impl TrdGuiApp {
     /// Builds the app around a controller (holding the initial scene) and a
     /// render backend. The first frame renders immediately.
-    pub fn new(controller: InteractionController, renderer: InProcRenderer) -> Self {
+    pub fn new(controller: InteractionController, renderer: GuiRenderer) -> Self {
         Self {
             controller,
             renderer,
@@ -53,7 +53,9 @@ impl TrdGuiApp {
     /// never crashes the UI.
     fn render_scene(&mut self, ctx: &egui::Context) {
         let start = self.clock.elapsed().as_secs_f32();
-        match self.renderer.render(&self.controller.state) {
+        // The renderer is async because GPU read-back is; natively the future is
+        // already complete when the map poll returns, so blocking is free.
+        match pollster::block_on(self.renderer.render(&self.controller.state)) {
             Ok(image) => {
                 let color = egui::ColorImage::from_rgba_unmultiplied(
                     [image.width as usize, image.height as usize],
@@ -101,7 +103,7 @@ impl eframe::App for TrdGuiApp {
         // A click requested a pick: resolve the object under the cursor via the
         // id pass, update the selection, and re-render so its AABB shows (#141).
         if let Some((x, y)) = outcome.pick {
-            let hit = self.renderer.pick(&self.controller.state, x, y);
+            let hit = pollster::block_on(self.renderer.pick(&self.controller.state, x, y));
             if hit != self.controller.state.selected {
                 self.controller.state.selected = hit;
                 self.needs_render = true;

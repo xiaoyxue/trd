@@ -4102,6 +4102,7 @@ dependencies = [
  "egui",
  "env_logger",
  "log",
+ "pollster",
  "trd-core",
  "trd-gui",
 ]

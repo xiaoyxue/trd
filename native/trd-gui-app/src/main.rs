@@ -14,7 +14,7 @@ fn main() -> eframe::Result<()> {
     use crate::cli::Cli;
     use clap::Parser;
     use trd_gui::interaction::InteractionController;
-    use trd_gui::render_backend::{mesh_has_uvs, InProcRenderer};
+    use trd_gui::renderer::{mesh_has_uvs, GuiRenderer};
 
     env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("warn,trd_gui=info,trd_core=info"),
@@ -56,13 +56,14 @@ fn main() -> eframe::Result<()> {
         );
     }
 
-    let renderer = match InProcRenderer::new(
+    let renderer = match pollster::block_on(GuiRenderer::new(
         &[mesh],
-        texture.as_ref().map(|t| t as &dyn trd_core::Texture),
+        &[texture.as_ref().map(|t| t as &dyn trd_core::Texture)],
+        &[],
         env,
         cli.width,
         cli.height,
-    ) {
+    )) {
         Ok(renderer) => renderer,
         Err(err) => {
             log::error!("failed to create renderer: {err}");

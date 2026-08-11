@@ -4,7 +4,7 @@
 //! raise is either a mesh-load problem (I/O + `trd-core` OBJ parse) or a render
 //! problem delegated to `trd-core`. Rendering lives entirely in `trd-core`, so
 //! the render arm only exists on native targets (where the in-process
-//! [`crate::render_backend`] is compiled).
+//! [`crate::renderer`] is compiled).
 
 use thiserror::Error;
 
