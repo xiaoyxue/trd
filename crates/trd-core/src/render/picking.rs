@@ -148,12 +148,8 @@ impl PickTarget {
         slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = sender.send(result);
         });
-        // Native blocks the calling thread until the map completes; wasm kicks the
-        // queue once and yields to the browser via `.await` (mirrors OffscreenTarget).
-        #[cfg(not(target_arch = "wasm32"))]
-        device.poll(wgpu::PollType::wait_indefinitely()).ok()?;
-        #[cfg(target_arch = "wasm32")]
-        device.poll(wgpu::PollType::Poll).ok()?;
+        // Same wait as the offscreen readback; see `platform::poll_for_map`.
+        super::platform::poll_for_map(device).ok()?;
         receiver.await.ok()?.ok()?;
 
         let id = {

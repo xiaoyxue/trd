@@ -21,6 +21,7 @@ mod options;
 mod pbr;
 mod picking;
 mod pipeline;
+mod platform;
 mod render_target;
 #[cfg(not(target_arch = "wasm32"))]
 mod renderer;
