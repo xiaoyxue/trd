@@ -1,12 +1,14 @@
 //! Shared, platform-agnostic mesh rendering.
 //!
-//! [`MeshRenderer`] rasterizes a [`Scene`] of [`DrawableObject`]s through the
+//! [`SceneRenderer`] rasterizes a [`Scene`] of [`DrawableObject`]s through the
 //! vertex/index-buffer path used by the native batch renderer and the browser.
 
+mod batch;
 #[cfg(not(target_arch = "wasm32"))]
 mod batch_renderer;
 mod bound_material_maps;
 mod bound_texture;
+mod buffer;
 mod color;
 mod env_background;
 mod frame_params;
@@ -16,13 +18,14 @@ mod gpu;
 mod gpu_types;
 mod ibl;
 mod light;
-mod mesh_renderer;
+mod mesh_store;
 mod options;
 mod pbr;
 mod picking;
 mod pipeline;
 mod render_target;
 mod scene;
+mod scene_renderer;
 mod tonemap;
 mod triangle_renderer;
 
@@ -39,7 +42,6 @@ pub use gpu::{create_instance, GpuContext, GpuInitError, GpuRequest, LimitsPrese
 pub use gpu_types::{Mesh, MeshShading, Vertex};
 pub use ibl::{EnvMapData, ImageBasedLighting};
 pub use light::{Light, Lighting, PointLight};
-pub use mesh_renderer::MeshRenderer;
 pub use options::{Msaa, PbrConfig, RenderOptions};
 pub use pbr::PbrDebugView;
 pub use picking::PickTarget;
@@ -49,6 +51,7 @@ pub use scene::{
     build_scene, plane_grid_overlays, selection_aabb_overlay, Draw, DrawableObject, FrameFit,
     GridPlane, RenderMode, Scene,
 };
+pub use scene_renderer::SceneRenderer;
 pub use tonemap::{ToneMapping, Tonemap};
 pub use triangle_renderer::TriangleRenderer;
 

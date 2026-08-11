@@ -16,7 +16,7 @@
 use futures_channel::oneshot;
 use thiserror::Error;
 
-use super::{DrawableObject, FrameParams, MeshRenderer, Viewport};
+use super::{DrawableObject, FrameParams, SceneRenderer, Viewport};
 use crate::tightly_pack_rgba;
 
 // ---------------------------------------------------------------------------
@@ -30,7 +30,7 @@ use crate::tightly_pack_rgba;
 // browser `WebRenderer`) used to own an identical copy of the same GPU
 // plumbing: a `Rgba8UnormSrgb` target texture, a `MAP_READ` staging buffer, and
 // the per-frame *encode → copy-to-buffer → map → readback → unpad* dance. This
-// module owns that once so a renderer is just *device + queue + [`MeshRenderer`]
+// module owns that once so a renderer is just *device + queue + [`SceneRenderer`]
 // + `OffscreenTarget`*.
 //
 // **One async core, two waits.** [`OffscreenTarget::render`] is `async` because
@@ -149,7 +149,7 @@ impl OffscreenTarget {
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        renderer: &mut MeshRenderer,
+        renderer: &mut SceneRenderer,
         params: FrameParams,
         scene: &[DrawableObject],
     ) -> Result<Vec<u8>, OffscreenError> {
@@ -164,7 +164,7 @@ impl OffscreenTarget {
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        renderer: &mut MeshRenderer,
+        renderer: &mut SceneRenderer,
         background_params: FrameParams,
         foreground_params: FrameParams,
         background: &[DrawableObject],
@@ -190,7 +190,7 @@ impl OffscreenTarget {
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        renderer: &mut MeshRenderer,
+        renderer: &mut SceneRenderer,
         background_params: FrameParams,
         foreground_params: FrameParams,
         background: &[DrawableObject],
@@ -215,7 +215,7 @@ impl OffscreenTarget {
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        renderer: &mut MeshRenderer,
+        renderer: &mut SceneRenderer,
         background_params: FrameParams,
         foreground_params: FrameParams,
         background: Option<&[DrawableObject]>,
@@ -246,7 +246,7 @@ impl OffscreenTarget {
                 viewport,
             );
             // Submit before `encode_overlay` uploads foreground instances into
-            // MeshRenderer's shared instance buffer.
+            // SceneRenderer's shared instance buffer.
             queue.submit(Some(background_encoder.finish()));
             renderer.encode_overlay(
                 queue,
@@ -348,8 +348,8 @@ impl OffscreenTarget {
 // windowed `trd-app` and `trd-wasm`'s browser `CanvasRenderer` — used to own an
 // identical copy of the same per-frame present dance: build an **sRGB view** of
 // the acquired surface texture, encode the frame's [`Scene`](crate::Scene) with
-// the shared [`MeshRenderer`], submit, and present. This module owns that once,
-// so a front-end is just *device + queue + [`MeshRenderer`] + `OnscreenTarget`*
+// the shared [`SceneRenderer`], submit, and present. This module owns that once,
+// so a front-end is just *device + queue + [`SceneRenderer`] + `OnscreenTarget`*
 // plus its own surface-acquire recovery policy.
 //
 // **sRGB, once.** The browser's preferred canvas format is non-sRGB (e.g.
@@ -359,7 +359,7 @@ impl OffscreenTarget {
 // special-casing this, [`OnscreenTarget`] always renders through the surface's
 // **sRGB view** ([`add_srgb_suffix`](wgpu::TextureFormat::add_srgb_suffix),
 // registered in `view_formats`), so both platforms match the CLI byte-for-byte.
-// Build the front-end's [`MeshRenderer`] with [`OnscreenTarget::view_format`].
+// Build the front-end's [`SceneRenderer`] with [`OnscreenTarget::view_format`].
 //
 // **What stays in each shell.** Device/adapter/surface creation (a winit window
 // vs a canvas, `downlevel_defaults` vs the adapter's real limits, the
@@ -375,13 +375,13 @@ impl OffscreenTarget {
 /// A live surface plus its configuration, rendered through an sRGB view so
 /// on-screen color matches the headless CLI's `Rgba8UnormSrgb` output. Owns the
 /// [`wgpu::Surface`] and its [`wgpu::SurfaceConfiguration`]; the front-end owns
-/// the device/queue, the [`MeshRenderer`], and its acquire-recovery policy.
+/// the device/queue, the [`SceneRenderer`], and its acquire-recovery policy.
 pub struct OnscreenTarget {
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
     /// The sRGB view format the frame is rendered through (the sRGB variant of
     /// `config.format`; equal to `config.format` when it is already sRGB). The
-    /// front-end's [`MeshRenderer`] pipeline must target this format.
+    /// front-end's [`SceneRenderer`] pipeline must target this format.
     view_format: wgpu::TextureFormat,
 }
 
@@ -408,7 +408,7 @@ impl OnscreenTarget {
     }
 
     /// The sRGB view format the frame is rendered through. Build the front-end's
-    /// [`MeshRenderer`] with this so its pipeline target matches the view.
+    /// [`SceneRenderer`] with this so its pipeline target matches the view.
     pub fn view_format(&self) -> wgpu::TextureFormat {
         self.view_format
     }
@@ -462,7 +462,7 @@ impl OnscreenTarget {
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        renderer: &mut MeshRenderer,
+        renderer: &mut SceneRenderer,
         texture: wgpu::SurfaceTexture,
         params: FrameParams,
         scene: &[DrawableObject],

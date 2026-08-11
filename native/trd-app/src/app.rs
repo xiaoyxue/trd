@@ -5,7 +5,7 @@
 //! input `trd-cli` consumes) via [`trd_core::read_scene_stream_with_meta`],
 //! forwarding the decoded mesh table then each frame's params + instanced draw
 //! list over a channel. The window plays them at a fixed rate, encoding each
-//! frame's [`trd_core::Scene`] with the shared [`trd_core::MeshRenderer`] — so
+//! frame's [`trd_core::Scene`] with the shared [`trd_core::SceneRenderer`] — so
 //! all rendering logic still lives in `trd-core`.
 
 use std::sync::mpsc::{self, Receiver, TryRecvError};

@@ -39,9 +39,10 @@ pub use render::{
     build_scene, create_instance, create_mesh_pipeline, plane_grid_overlays,
     selection_aabb_overlay, CameraFormError, Draw, DrawableObject, EnvMapData, FrameFit,
     FrameParams, GpuContext, GpuInitError, GpuRequest, GridPlane, ImageBasedLighting, Light,
-    Lighting, LimitsPreset, Mesh, MeshRenderer, MeshShading, Msaa, OffscreenError, OffscreenTarget,
+    Lighting, LimitsPreset, Mesh, MeshShading, Msaa, OffscreenError, OffscreenTarget,
     OnscreenTarget, PbrConfig, PbrDebugView, PickTarget, PointLight, RenderMode, RenderOptions,
-    Scene, ToneMapping, Tonemap, TriangleRenderer, Vertex, Viewport, OFFSCREEN_FORMAT,
+    Scene, SceneRenderer, ToneMapping, Tonemap, TriangleRenderer, Vertex, Viewport,
+    OFFSCREEN_FORMAT,
 };
 // The native-only headless batch harness, relocated from `stream` into `render`
 // (#134); the crate-root re-export path (`trd_core::BatchRenderer`) is unchanged.

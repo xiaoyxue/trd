@@ -2,8 +2,8 @@ use wasm_bindgen::prelude::*;
 
 use trd_core::{
     build_scene, DecodedFrame, DisneyMaterial, Draw, DrawableObject, EnvMapData, FrameBatch,
-    FrameFit, FrameParams, ImageBasedLighting, InputSession, Lighting, MeshRenderer,
-    OffscreenTarget, OutputSession, RenderMode, ToneMapping, Tonemap, OFFSCREEN_FORMAT,
+    FrameFit, FrameParams, ImageBasedLighting, InputSession, Lighting, OffscreenTarget,
+    OutputSession, RenderMode, SceneRenderer, ToneMapping, Tonemap, OFFSCREEN_FORMAT,
 };
 
 use crate::PbrState;
@@ -35,7 +35,7 @@ pub struct OffscreenRenderer {
     queue: wgpu::Queue,
     /// Built lazily on the first rendered frame from the stream's leading mesh
     /// table, or the built-in hello-triangle for a legacy params-only stream.
-    renderer: Option<MeshRenderer>,
+    renderer: Option<SceneRenderer>,
     mode: RenderMode,
     show_aabb: bool,
     show_axes: bool,
@@ -397,10 +397,10 @@ impl OffscreenRenderer {
     /// the stream's (required) leading mesh table (each mesh under its
     /// `preview_transform` base model). The protocol is mesh-first, so the session
     /// always carries meshes by the time frames are produced.
-    fn ensure_renderer(&mut self) -> &mut MeshRenderer {
+    fn ensure_renderer(&mut self) -> &mut SceneRenderer {
         if self.renderer.is_none() {
             let meshes = self.input.meshes();
-            let renderer = MeshRenderer::auto_fit(&self.device, OFFSCREEN_FORMAT, meshes);
+            let renderer = SceneRenderer::auto_fit(&self.device, OFFSCREEN_FORMAT, meshes);
             self.renderer = Some(renderer);
 
             // Bind the stream's texture (0.0.4) as the sampled albedo so

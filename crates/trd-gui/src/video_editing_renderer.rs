@@ -34,7 +34,7 @@ pub struct VideoRendererDiagnostics {
 pub struct VideoPlacementRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    renderer: trd_core::MeshRenderer,
+    renderer: trd_core::SceneRenderer,
     target: trd_core::OffscreenTarget,
     pick_target: Option<trd_core::PickTarget>,
     default_mode: trd_core::RenderMode,
@@ -61,7 +61,7 @@ impl VideoPlacementRenderer {
         .map_err(|error| error.to_string())?;
         let adapter_info = adapter.get_info();
         let placeholder = assets::default_mesh().map_err(|error| error.to_string())?;
-        let renderer = trd_core::MeshRenderer::auto_fit(
+        let renderer = trd_core::SceneRenderer::auto_fit(
             &device,
             trd_core::OFFSCREEN_FORMAT,
             std::slice::from_ref(&placeholder),
@@ -124,7 +124,7 @@ impl VideoPlacementRenderer {
         let adapter_info = adapter.get_info();
         let asset_diagnostics = imported.diagnostics();
         let mesh = imported.mesh();
-        let mut renderer = trd_core::MeshRenderer::auto_fit(
+        let mut renderer = trd_core::SceneRenderer::auto_fit(
             &device,
             trd_core::OFFSCREEN_FORMAT,
             std::slice::from_ref(mesh),
@@ -395,7 +395,7 @@ impl ImportedAsset {
 
     fn configure(
         self,
-        renderer: &mut trd_core::MeshRenderer,
+        renderer: &mut trd_core::SceneRenderer,
     ) -> (trd_core::RenderMode, trd_core::DisneyMaterial) {
         match self {
             Self::Textured { texture, .. } => {

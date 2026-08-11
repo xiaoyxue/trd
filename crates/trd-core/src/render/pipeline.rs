@@ -161,7 +161,7 @@ pub(crate) fn create_picking_pipeline(
     })
 }
 
-/// A depth attachment sized to a render target. The [`MeshRenderer`] owns one
+/// A depth attachment sized to a render target. The [`SceneRenderer`] owns one
 /// and recreates it when the viewport changes, so the mesh pass always has a
 /// matching depth buffer for solid occlusion. `sample_count` must match the
 /// pass's color attachment (MSAA depth is not resolved — it is discardable).
@@ -203,7 +203,7 @@ pub(crate) fn create_depth_target(
     }
 }
 
-/// A multisampled color attachment sized to a render target. The [`MeshRenderer`]
+/// A multisampled color attachment sized to a render target. The [`SceneRenderer`]
 /// owns one (mirroring [`DepthTarget`]) and recreates it when the viewport
 /// changes; each frame the mesh pass renders into it and resolves it into the
 /// caller's single-sample `view`. Only present when `sample_count > 1`.
@@ -510,7 +510,7 @@ pub(crate) fn create_frame_plane_pipeline(
 /// Creates the camera `P·V` uniform buffer + bind group over an **explicit**
 /// bind-group layout (shared by the filled and wireframe mesh pipelines),
 /// initialised to `params`'s view-projection for `viewport`. Used by
-/// [`MeshRenderer`], whose two pipelines must share one bind group.
+/// [`SceneRenderer`], whose two pipelines must share one bind group.
 pub(crate) fn create_view_proj_binding(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
@@ -536,7 +536,7 @@ pub(crate) fn create_view_proj_binding(
 
 /// Writes the camera-only `P · V` transform into an existing uniform buffer (the
 /// instanced mesh path supplies each model matrix per instance). Lets
-/// [`MeshRenderer`] reuse one uniform buffer across frames instead of rebuilding
+/// [`SceneRenderer`] reuse one uniform buffer across frames instead of rebuilding
 /// it.
 pub(crate) fn write_view_proj(
     queue: &wgpu::Queue,

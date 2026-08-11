@@ -14,7 +14,7 @@
 use std::fmt::Display;
 
 use trd_core::{
-    DisneyMaterial, EnvMapData, ImageBasedLighting, Lighting, MeshRenderer, ToneMapping,
+    DisneyMaterial, EnvMapData, ImageBasedLighting, Lighting, SceneRenderer, ToneMapping,
 };
 use wasm_bindgen::prelude::*;
 
@@ -47,7 +47,7 @@ impl PbrState {
         }
     }
 
-    pub(crate) fn apply(&self, renderer: &mut MeshRenderer) {
+    pub(crate) fn apply(&self, renderer: &mut SceneRenderer) {
         renderer.set_disney_material(self.material.clone());
         renderer.set_lighting(self.lighting);
         renderer.set_image_based_lighting(self.ibl);

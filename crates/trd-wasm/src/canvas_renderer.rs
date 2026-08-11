@@ -1,6 +1,6 @@
 use trd_core::{
     build_scene, DecodedFrame, DisneyMaterial, Draw, EnvMapData, FrameFit, ImageBasedLighting,
-    Lighting, MeshRenderer, OnscreenTarget, RenderMode, ToneMapping, Tonemap,
+    Lighting, OnscreenTarget, RenderMode, SceneRenderer, ToneMapping, Tonemap,
 };
 use wasm_bindgen::prelude::*;
 
@@ -30,7 +30,7 @@ pub struct CanvasRenderer {
     /// stream's leading mesh table, or the built-in hello-triangle for a legacy
     /// params-only stream. `None` until the first frame arrives (the mesh table,
     /// if any, has been decoded by then).
-    renderer: Option<MeshRenderer>,
+    renderer: Option<SceneRenderer>,
     mode: RenderMode,
     show_aabb: bool,
     show_axes: bool,
@@ -524,10 +524,10 @@ impl CanvasRenderer {
     /// produced; builds a multi-mesh renderer with each mesh's
     /// [`preview_transform`](trd_core::Mesh::preview_transform) base model,
     /// targeting the surface's sRGB view format.
-    fn ensure_renderer(&mut self) -> &mut MeshRenderer {
+    fn ensure_renderer(&mut self) -> &mut SceneRenderer {
         if self.renderer.is_none() {
             let meshes = self.input.meshes();
-            let renderer = MeshRenderer::auto_fit(&self.device, self.target.view_format(), meshes);
+            let renderer = SceneRenderer::auto_fit(&self.device, self.target.view_format(), meshes);
             self.renderer = Some(renderer);
 
             // Bind the stream's texture (0.0.4) as the sampled albedo so
