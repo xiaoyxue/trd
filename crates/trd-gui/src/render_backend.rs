@@ -66,7 +66,12 @@ mod native {
     /// The render options `trd-core`'s `run_stream` applies globally, derived from
     /// the interactive scene state (mode + overlay toggles). Shared by both backends
     /// so they stay in agreement.
+    /// The appearance options for `state`: draw mode plus **every** overlay
+    /// toggle, so `scene_with_overlays` produces exactly the scene the CLI and
+    /// the browser produce from the same inputs. The renderer keeps none of this
+    /// (#180).
     fn render_options(state: &SceneState) -> RenderOptions {
+        let xz = |on: bool| on.then_some(trd_core::GridPlane::Xz);
         RenderOptions {
             mode: trd_core::RenderMode::Filled, // per-draw Some(mode) overrides; this is only a fallback
             show_aabb: state.show_aabb,
@@ -74,18 +79,12 @@ mod native {
             show_local_axes: state.show_local_axes,
             show_local_grid: None,
             show_local_grid_mesh: None,
+            show_world_grid: xz(state.show_world_grid),
+            show_object_grid: xz(state.show_local_grid),
+            selected: state.selected,
             pbr: None,
             msaa: trd_core::Msaa::X4,
         }
-    }
-
-    /// Maps the scene's XZ grid overlay toggles to the `GridPlane` the
-    /// `Renderer` grid setters expect (`Some(Xz)` when on, `None` when off).
-    /// Shared by both native backends so the grids appear identically.
-    fn apply_grid_overlays(renderer: &mut Renderer, state: &SceneState) {
-        let xz = |on: bool| on.then_some(trd_core::GridPlane::Xz);
-        renderer.set_show_world_grid(xz(state.show_world_grid));
-        renderer.set_show_object_grid(xz(state.show_local_grid));
     }
 
     fn apply_pbr(renderer: &mut Renderer, state: &SceneState) {
@@ -154,16 +153,11 @@ mod native {
     impl SceneRenderer for InProcRenderer {
         fn render(&mut self, state: &SceneState) -> Result<ImageRgba, GuiError> {
             let aspect = self.width as f32 / self.height.max(1) as f32;
-            self.renderer.set_mode(trd_core::RenderMode::Filled); // per-draw modes override
             apply_pbr(&mut self.renderer, state);
-            self.renderer.set_show_aabb(state.show_aabb);
-            self.renderer.set_selected_aabb(state.selected);
-            self.renderer.set_show_axes(state.show_axes);
-            self.renderer.set_show_local_axes(state.show_local_axes);
-            apply_grid_overlays(&mut self.renderer, state);
-            let rgba =
-                self.renderer
-                    .render_frame(state.frame_params(aspect), &state.draws(), None)?;
+            let scene = trd_core::scene_with_overlays(&state.draws(), &render_options(state), None);
+            let rgba = self
+                .renderer
+                .render_scene(state.frame_params(aspect), &scene)?;
             Ok(ImageRgba {
                 width: self.width,
                 height: self.height,
@@ -248,17 +242,13 @@ mod native {
                 .ok_or(GuiError::NoFrame)?;
 
             // 3. Render on the persistent device.
-            let opts = render_options(state);
-            self.renderer.set_mode(opts.mode);
             apply_pbr(&mut self.renderer, state);
-            self.renderer.set_show_aabb(opts.show_aabb);
-            self.renderer.set_selected_aabb(state.selected);
-            self.renderer.set_show_axes(opts.show_axes);
-            self.renderer.set_show_local_axes(opts.show_local_axes);
-            apply_grid_overlays(&mut self.renderer, state);
-            let rgba = self
-                .renderer
-                .render_frame(frame.params, &frame.resolved_draws(), None)?;
+            let scene = trd_core::scene_with_overlays(
+                &frame.resolved_draws(),
+                &render_options(state),
+                None,
+            );
+            let rgba = self.renderer.render_scene(frame.params, &scene)?;
 
             // 4. Serialize the rendered image to an Arrow stream and decode it back —
             // the output half of the round-trip an external consumer would read.

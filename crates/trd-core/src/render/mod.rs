@@ -53,8 +53,8 @@ pub use render_target::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use renderer::Renderer;
 pub use scene::{
-    build_scene, plane_grid_overlays, selection_aabb_overlay, Draw, DrawableObject, FrameFit,
-    GridPlane, RenderMode, Scene,
+    build_scene, plane_grid_overlays, scene_with_overlays, selection_aabb_overlay, Draw,
+    DrawableObject, FrameFit, GridPlane, RenderMode, Scene,
 };
 pub use scene_renderer::SceneRenderer;
 pub use tonemap::{ToneMapping, Tonemap};

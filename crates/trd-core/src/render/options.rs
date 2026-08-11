@@ -74,6 +74,16 @@ pub struct RenderOptions {
     /// `mesh_id` (the placement quad), so a wireframe *content* mesh doesn't also
     /// pick up a floor grid. `None` keeps the grid on every wireframe draw (#114).
     pub show_local_grid_mesh: Option<u32>,
+    /// If `Some(plane)`, add one **world-origin** plane grid (a floor at the
+    /// world origin), ungated by render mode.
+    pub show_world_grid: Option<GridPlane>,
+    /// If `Some(plane)`, add a plane grid at *each* drawn instance's own model,
+    /// ungated by render mode — unlike [`show_local_grid`](Self::show_local_grid),
+    /// which is wireframe-scoped.
+    pub show_object_grid: Option<GridPlane>,
+    /// If `Some(index)`, highlight that draw's AABB — the **selected** object
+    /// (#141) — regardless of [`show_aabb`](Self::show_aabb).
+    pub selected: Option<u32>,
     /// Disney PBR material + environment map, applied when `mode` is
     /// [`RenderMode::Pbr`] (also honoured for any per-draw PBR-mode draws).
     pub pbr: Option<PbrConfig>,

@@ -265,6 +265,46 @@ pub type Scene = Vec<DrawableObject>;
 /// Shared by the native ([`crate::run_stream`]) and wasm front-ends so neither
 /// branches per primitive type: both author the same ordered `Scene` and hand
 /// it to [`SceneRenderer::encode`].
+/// The **one** place a frame's [`Scene`] is assembled from a wire draw list plus
+/// appearance options.
+///
+/// Every front-end used to do this itself — the headless `Renderer` from nine
+/// retained overlay flags, `trd-gui` through setters, the browser renderers from
+/// their own booleans — which is how native and web overlay assembly drifted
+/// apart. Composing [`build_scene`], [`plane_grid_overlays`] and
+/// [`selection_aabb_overlay`] here means all of them get the same scene from the
+/// same inputs (#180).
+///
+/// `frame` prepends a background [`DrawableObject::FramePlane`] (#63) when the
+/// caller has a frame texture bound.
+pub fn scene_with_overlays(
+    draws: &[Draw],
+    options: &super::RenderOptions,
+    frame: Option<FrameFit>,
+) -> Scene {
+    let mut scene = build_scene(
+        draws,
+        options.mode,
+        options.show_aabb,
+        options.show_axes,
+        options.show_local_axes,
+        options.show_local_grid,
+        options.show_local_grid_mesh,
+        frame,
+    );
+    // World / object plane grids (#140) are ungated by render mode, so a filled or
+    // PBR object still gets a floor. `encode` buckets by primitive type, so
+    // appending here still draws them in the grid pass.
+    scene.extend(plane_grid_overlays(
+        draws,
+        options.show_world_grid,
+        options.show_object_grid,
+    ));
+    // Selection highlight (#141): drawn even when the show-all-AABBs toggle is off.
+    scene.extend(selection_aabb_overlay(draws, options.selected));
+    scene
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn build_scene(
     draws: &[Draw],
