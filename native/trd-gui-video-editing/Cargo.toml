@@ -9,7 +9,8 @@ repository.workspace = true
 name = "trd-gui-video-editing"
 path = "src/main.rs"
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Native-only delivery surface; dependencies are plain, not target-gated.
+[dependencies]
 trd-core.workspace = true
 trd-gui = { path = "../../crates/trd-gui" }
 clap = { version = "4", features = ["derive"] }

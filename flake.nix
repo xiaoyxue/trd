@@ -377,10 +377,16 @@
             }
           );
 
+          # Lints **every** crate that is compiled to wasm, not just `trd-wasm`:
+          # `trd-gui` also ships a wasm library (the browser GUI + video editor),
+          # and it was previously only *built* for wasm by the `trd-gui-wasm`
+          # package, never linted — see #181, where `std::time::Instant` (which
+          # panics on `wasm32-unknown-unknown`) reached the browser unnoticed.
           clippy-wasm = craneLib.cargoClippy (
             wasmArgs
             // {
               cargoArtifacts = cargoArtifactsWasm;
+              cargoExtraArgs = "--package trd-wasm --package trd-gui --lib";
               cargoClippyExtraArgs = "-- -D warnings";
             }
           );

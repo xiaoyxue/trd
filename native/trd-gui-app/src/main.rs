@@ -2,16 +2,13 @@
 //! render backend, and run the eframe/egui window (issue #97).
 //!
 //! The interactive stack (eframe/egui + `trd-core`'s native `BatchRenderer`) is
-//! native-only; on wasm the crate compiles to an empty `main` so workspace-wide
-//! wasm builds skip it (mirroring `trd-app`). The browser delivery shell lives
-//! in `web/gui-viewer` and calls the wasm entry exported by `crates/trd-gui`.
+//! native-only, and nothing builds this binary for wasm. The browser delivery
+//! shell lives in `web/gui-viewer` and calls the wasm entry exported by
+//! `crates/trd-gui`.
 
-#[cfg(not(target_arch = "wasm32"))]
 mod app;
-#[cfg(not(target_arch = "wasm32"))]
 mod cli;
 
-#[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result<()> {
     use crate::app::TrdGuiApp;
     use crate::cli::{Backend, Cli};
@@ -96,6 +93,3 @@ fn main() -> eframe::Result<()> {
     };
     eframe::run_native("trd-gui", options, Box::new(|_cc| Ok(Box::new(app))))
 }
-
-#[cfg(target_arch = "wasm32")]
-fn main() {}
