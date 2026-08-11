@@ -39,240 +39,290 @@ impl eframe::App for VideoEditingApp {
         self.video_source_dialog(ui.ctx());
 
         let overlay_frame_index = self.displayed_frame_index;
-        let timeline_frame = &self.document.frames[overlay_frame_index as usize];
-        let quad = timeline_frame.placement_quad;
+        let quad = self.document.frames[overlay_frame_index as usize].placement_quad;
         let quad_frame = self.quad_frame_at(overlay_frame_index);
-        let selected_quad = self.selected_quad;
-        let show_quad_gizmo = self.show_quad_gizmo;
-        let selected_asset = self.selected_asset;
-        let video_loaded = self.shared.video_loaded.get();
-        let video_playing = self.shared.video_playing.get();
-        let video = &self.document.video;
-        let error = self.shared.error.borrow().clone();
-        // Immediate mode already skips a collapsed body, so the facts are only
-        // derived while the panel is open; no "is it open?" flag is needed.
-        let details_facts = self.details_open.then(|| self.displayed_facts());
-        let mut details_open = self.details_open;
-        let mut requested_asset = None;
-        let mut open_video_requested = false;
-        let mut top_controls = |ui: &mut egui::Ui| {
-            ui.heading("Video");
-            if ui.button("Open video...").clicked() {
-                open_video_requested = true;
-            }
-            ui.weak("Display: fit right pane (16:9)");
-            ui.collapsing("Source", |ui| {
-                ui.label(format!("Source: {}", video.source_name));
-                ui.label(format!(
-                    "{}x{} · {}/{} fps · {} frames",
-                    video.width, video.height, video.fps_num, video.fps_den, video.frame_count
-                ));
-                ui.label(if video_loaded {
-                    if video_playing {
-                        "Playing video"
-                    } else {
-                        "Video paused"
-                    }
-                } else {
-                    "No video loaded"
-                });
-                if let Some(error) = error.as_deref() {
-                    ui.colored_label(egui::Color32::LIGHT_RED, error);
-                }
-            });
-            false
-        };
-        let mut extra_controls = |ui: &mut egui::Ui| {
-            let mut changed = false;
-            ui.collapsing("Placement quad (standalone)", |ui| {
-                ui.label(format!("Frame {}", timeline_frame.video_frame_index));
-                ui.label(if timeline_frame.tracked {
-                    if video_playing {
-                        "Placement quad hidden during playback"
-                    } else if selected_quad {
-                        if show_quad_gizmo {
-                            "Placement quad selected; gizmo visible"
-                        } else {
-                            "Placement quad selected; click it to show gizmo"
-                        }
-                    } else {
-                        "Click the green quad to select it"
-                    }
-                } else {
-                    "Background-only row: quad and object hidden"
-                });
-                if let Some(local) = quad_frame {
-                    ui.label(format!("Local axis length: {:.4}", local.axis_length));
-                    ui.weak("RGB axes: e1 / e2 / e3");
-                    ui.weak("Quad overlay follows the displayed tracking row.");
-                    ui.weak("Object edit state persists; quad basis updates per frame.");
-                    ui.weak("Local X/Y/Z rotate with the placed object.");
-                    ui.weak("Initial can placement matches the Olympic upper-can preset.");
-                }
-            });
-            ui.add_enabled_ui(selected_quad, |ui| {
-                ui.collapsing("Object catalog", |ui| {
-                    for asset in CatalogAsset::ALL {
-                        if ui
-                            .selectable_label(selected_asset == Some(asset), asset.label())
-                            .clicked()
-                        {
-                            requested_asset = Some(asset);
-                            changed = true;
-                        }
-                    }
+        let mut needs_render = false;
+
+        egui::Panel::left("controls")
+            .resizable(true)
+            .default_size(264.0)
+            .min_size(240.0)
+            .max_size(420.0)
+            .show(ui, |ui| {
+                crate::ui::header(ui);
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    self.source_controls(ui);
+                    ui.separator();
+                    needs_render |= crate::ui::controls_sections(
+                        ui,
+                        &mut self.controller,
+                        crate::ui::Controls {
+                            camera_locked: true,
+                            move_reference_labels: Some(["e1", "e2", "e3"]),
+                        },
+                    );
+                    ui.separator();
+                    self.quad_controls(ui, overlay_frame_index, quad_frame);
+                    self.catalog_controls(ui);
+                    self.details_controls(ui);
+                    needs_render |= crate::ui::reset_button(ui, &mut self.controller);
+                    ui.separator();
+                    crate::ui::status(ui, self.display_size, None);
                 });
             });
-            let response = ui.collapsing("Details", |ui| match details_facts.as_ref() {
-                Some(facts) => details_ui(ui, video, facts),
-                None => {
-                    ui.weak("Loading details...");
-                    ui.ctx().request_repaint();
-                }
-            });
-            details_open = response.fully_open();
-            changed
-        };
-        let mut requested_frame = self.current_frame_index;
-        let mut playback_command = None;
-        let mut central_bottom = |ui: &mut egui::Ui| {
-            ui.add_space(4.0);
-            let (row_rect, _) = ui
-                .allocate_exact_size(egui::vec2(ui.available_width(), 28.0), egui::Sense::hover());
-            let button_rect =
-                egui::Rect::from_center_size(row_rect.center(), egui::vec2(64.0, 28.0));
-            ui.scope_builder(
-                egui::UiBuilder::new()
-                    .max_rect(button_rect)
-                    .layout(egui::Layout::top_down(egui::Align::Center)),
-                |ui| {
-                    if video_playing {
-                        if ui.button("Pause").clicked() {
-                            playback_command = Some(COMMAND_PAUSE);
-                        }
-                    } else if ui
-                        .add_enabled(video_loaded, egui::Button::new("Play"))
-                        .clicked()
-                    {
-                        playback_command = Some(COMMAND_PLAY);
-                    }
+
+        egui::Panel::bottom("video-editing-player")
+            .resizable(false)
+            .default_size(80.0)
+            .min_size(80.0)
+            .max_size(80.0)
+            .show(ui, |ui| self.player_controls(ui));
+
+        egui::CentralPanel::default().show(ui, |ui| {
+            let outcome = crate::ui::image_panel(
+                ui,
+                crate::ui::Image {
+                    controller: &mut self.controller,
+                    texture: self
+                        .shared
+                        .video_loaded
+                        .get()
+                        .then_some(self.display_texture.as_ref())
+                        .flatten(),
+                    render_size: self.display_size,
+                    sizing: self.image_sizing,
+                    camera_locked: true,
+                    hide_when_empty: true,
                 },
             );
-            ui.scope_builder(
-                egui::UiBuilder::new()
-                    .max_rect(row_rect)
-                    .layout(egui::Layout::right_to_left(egui::Align::Center)),
-                |ui| {
-                    ui.monospace(player_status_label(video_loaded, requested_frame, video));
-                },
-            );
-            ui.add_space(6.0);
-            let last = video.frame_count.saturating_sub(1);
-            video_progress_bar(ui, &mut requested_frame, last, video_loaded);
-        };
-        let mut pick_request = None;
-        let mut fitted_render_size = self.fitted_render_size;
-        let mut view = crate::ui::View {
-            controller: &mut self.controller,
-            texture: self
-                .shared
-                .video_loaded
-                .get()
-                .then_some(self.display_texture.as_ref())
-                .flatten(),
-            render_size: self.display_size,
-            last_render_ms: None,
-            pick_request: &mut pick_request,
-        };
-        let mut extensions = crate::ui::UiExtensions {
-            top_controls: Some(&mut top_controls),
-            extra_controls: Some(&mut extra_controls),
-            image_overlay: None,
-            camera_locked: true,
-            image_sizing: self.image_sizing,
-            move_reference_labels: Some(["e1", "e2", "e3"]),
-            hide_empty_image: true,
-            fitted_render_size: Some(&mut fitted_render_size),
-            central_bottom: Some(&mut central_bottom),
-            central_bottom_height: Some(80.0),
-        };
-        let changed = crate::ui::show_with_extensions(ui, &mut view, &mut extensions);
-        self.details_open = details_open;
-        if open_video_requested {
-            self.show_video_source_dialog = true;
-            ui.ctx().request_repaint();
-        }
-        if let Some(command) = playback_command {
-            self.shared.command.set(command);
-        }
-        if requested_frame != self.current_frame_index {
-            self.current_frame_index = requested_frame;
-            self.pending_seek_target = Some(requested_frame);
-            self.shared.seek_frame.set(requested_frame as i32);
-        }
-        let fitted_render_size = (
-            fitted_render_size.0.min(video.width).max(1),
-            fitted_render_size.1.min(video.height).max(1),
-        );
-        if self.image_sizing == crate::ui::ImageSizing::FitCanvas
-            && fitted_render_size != self.fitted_render_size
-        {
-            self.fitted_render_size = fitted_render_size;
-            if self.selected_asset.is_some() {
-                self.shared.request_overlay();
-                ui.ctx().request_repaint();
+            needs_render |= outcome.needs_render;
+            if let Some(fitted) = outcome.fitted_size {
+                self.resize_render_target(ui.ctx(), fitted);
             }
-        }
+            if let Some(point) = outcome.pick {
+                self.handle_pick(point, quad);
+            }
+        });
 
-        if let Some(asset) = requested_asset {
-            self.selected_asset = Some(asset);
-            self.controller.state.objects[0] = crate::scene::ObjectTransform::default();
-            self.controller.state.selected = Some(0);
-            self.controller.target = crate::interaction::InteractionTarget::Object;
-            self.shared.renderer.borrow_mut().take();
-            self.shared.asset_request.set(asset.code());
-            self.shared.request_overlay();
-        }
-
-        if let Some((x, y)) = pick_request {
-            let mut scene_changed = false;
-            let clicked_quad = quad.is_some_and(|points| {
-                let source = [
-                    x as f32 * video.width as f32 / self.display_size.0 as f32,
-                    y as f32 * video.height as f32 / self.display_size.1 as f32,
-                ];
-                point_in_quad(source, points)
-            });
-            if self.shared.video_playing.get() {
-                if self.selected_asset.is_some() && self.selected_quad {
-                    self.shared.request_pick((x, y));
-                }
-            } else if self.selected_asset.is_some() && self.selected_quad {
-                if clicked_quad && !self.show_quad_gizmo {
-                    self.show_quad_gizmo = true;
-                    scene_changed = true;
-                } else {
-                    self.shared.request_pick((x, y));
-                }
-            } else {
-                self.selected_quad = clicked_quad;
-                self.show_quad_gizmo = clicked_quad;
-                scene_changed = true;
-            }
-            if self.selected_quad {
-                self.controller.target = crate::interaction::InteractionTarget::Object;
-            }
-            if scene_changed {
-                self.shared.request_overlay();
-            }
-        }
-
-        if changed {
+        if needs_render {
             self.shared.request_overlay();
             ui.ctx().request_repaint();
         }
     }
 }
+
+impl VideoEditingApp {
+    /// Source heading, the Open button, and the loaded-source readout.
+    fn source_controls(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Video");
+        if ui.button("Open video...").clicked() {
+            self.show_video_source_dialog = true;
+            ui.ctx().request_repaint();
+        }
+        ui.weak("Display: fit right pane (16:9)");
+        ui.collapsing("Source", |ui| {
+            let video = &self.document.video;
+            ui.label(format!("Source: {}", video.source_name));
+            ui.label(format!(
+                "{}x{} · {}/{} fps · {} frames",
+                video.width, video.height, video.fps_num, video.fps_den, video.frame_count
+            ));
+            ui.label(
+                match (
+                    self.shared.video_loaded.get(),
+                    self.shared.video_playing.get(),
+                ) {
+                    (false, _) => "No video loaded",
+                    (true, true) => "Playing video",
+                    (true, false) => "Video paused",
+                },
+            );
+            if let Some(error) = self.shared.error.borrow().as_deref() {
+                ui.colored_label(egui::Color32::LIGHT_RED, error);
+            }
+        });
+    }
+
+    /// The standalone placement-quad readout.
+    fn quad_controls(
+        &mut self,
+        ui: &mut egui::Ui,
+        frame_index: u32,
+        quad_frame: Option<trd_placement::QuadFrame>,
+    ) {
+        ui.collapsing("Placement quad (standalone)", |ui| {
+            let frame = &self.document.frames[frame_index as usize];
+            ui.label(format!("Frame {}", frame.video_frame_index));
+            ui.label(if frame.tracked {
+                if self.shared.video_playing.get() {
+                    "Placement quad hidden during playback"
+                } else if !self.selected_quad {
+                    "Click the green quad to select it"
+                } else if self.show_quad_gizmo {
+                    "Placement quad selected; gizmo visible"
+                } else {
+                    "Placement quad selected; click it to show gizmo"
+                }
+            } else {
+                "Background-only row: quad and object hidden"
+            });
+            if let Some(local) = quad_frame {
+                ui.label(format!("Local axis length: {:.4}", local.axis_length));
+                ui.weak("RGB axes: e1 / e2 / e3");
+                ui.weak("Quad overlay follows the displayed tracking row.");
+                ui.weak("Object edit state persists; quad basis updates per frame.");
+                ui.weak("Local X/Y/Z rotate with the placed object.");
+                ui.weak("Initial can placement matches the Olympic upper-can preset.");
+            }
+        });
+    }
+
+    /// The fixed catalog. Selecting an asset loads it immediately.
+    fn catalog_controls(&mut self, ui: &mut egui::Ui) {
+        ui.add_enabled_ui(self.selected_quad, |ui| {
+            ui.collapsing("Object catalog", |ui| {
+                for asset in CatalogAsset::ALL {
+                    if ui
+                        .selectable_label(self.selected_asset == Some(asset), asset.label())
+                        .clicked()
+                    {
+                        self.select_catalog_asset(asset);
+                        ui.ctx().request_repaint();
+                    }
+                }
+            });
+        });
+    }
+
+    /// The Details inspector. Its body only runs while expanded, so the facts
+    /// are derived only when they are actually shown.
+    fn details_controls(&mut self, ui: &mut egui::Ui) {
+        ui.collapsing("Details", |ui| {
+            let facts = self.displayed_facts();
+            details_ui(ui, &self.document.video, &facts);
+        });
+    }
+
+    /// Play/pause, the time readout, and the scrub bar.
+    fn player_controls(&mut self, ui: &mut egui::Ui) {
+        let video_loaded = self.shared.video_loaded.get();
+        let video_playing = self.shared.video_playing.get();
+        ui.add_space(4.0);
+        let (row_rect, _) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), egui::Sense::hover());
+        let button_rect = egui::Rect::from_center_size(row_rect.center(), egui::vec2(64.0, 28.0));
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(button_rect)
+                .layout(egui::Layout::top_down(egui::Align::Center)),
+            |ui| {
+                if video_playing {
+                    if ui.button("Pause").clicked() {
+                        self.shared.command.set(COMMAND_PAUSE);
+                    }
+                } else if ui
+                    .add_enabled(video_loaded, egui::Button::new("Play"))
+                    .clicked()
+                {
+                    self.shared.command.set(COMMAND_PLAY);
+                }
+            },
+        );
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(row_rect)
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+            |ui| {
+                ui.monospace(player_status_label(
+                    video_loaded,
+                    self.current_frame_index,
+                    &self.document.video,
+                ));
+            },
+        );
+        ui.add_space(6.0);
+        let last = self.document.video.frame_count.saturating_sub(1);
+        let mut frame = self.current_frame_index;
+        if video_progress_bar(ui, &mut frame, last, video_loaded) {
+            self.seek_to(frame);
+        }
+    }
+
+    fn seek_to(&mut self, frame_index: u32) {
+        if frame_index == self.current_frame_index {
+            return;
+        }
+        self.current_frame_index = frame_index;
+        self.pending_seek_target = Some(frame_index);
+        self.shared.seek_frame.set(frame_index as i32);
+    }
+
+    fn select_catalog_asset(&mut self, asset: CatalogAsset) {
+        self.selected_asset = Some(asset);
+        self.controller.state.objects[0] = crate::scene::ObjectTransform::default();
+        self.controller.state.selected = Some(0);
+        self.controller.target = crate::interaction::InteractionTarget::Object;
+        self.shared.renderer.borrow_mut().take();
+        self.shared.asset_request.set(asset.code());
+        self.shared.request_overlay();
+    }
+
+    /// Adopts the letterboxed image size the panel just drew at.
+    fn resize_render_target(&mut self, ctx: &egui::Context, fitted: (u32, u32)) {
+        let video = &self.document.video;
+        let fitted = (
+            fitted.0.min(video.width).max(1),
+            fitted.1.min(video.height).max(1),
+        );
+        if self.image_sizing != crate::ui::ImageSizing::FitCanvas
+            || fitted == self.fitted_render_size
+        {
+            return;
+        }
+        self.fitted_render_size = fitted;
+        if self.selected_asset.is_some() {
+            self.shared.request_overlay();
+            ctx.request_repaint();
+        }
+    }
+
+    /// Resolves a click on the image into a quad selection, a gizmo reveal, or a
+    /// GPU pick request.
+    fn handle_pick(&mut self, (x, y): (u32, u32), quad: Option<[[f32; 2]; 4]>) {
+        let video = &self.document.video;
+        let clicked_quad = quad.is_some_and(|points| {
+            let source = [
+                x as f32 * video.width as f32 / self.display_size.0 as f32,
+                y as f32 * video.height as f32 / self.display_size.1 as f32,
+            ];
+            point_in_quad(source, points)
+        });
+        let mut scene_changed = false;
+        if self.shared.video_playing.get() {
+            if self.selected_asset.is_some() && self.selected_quad {
+                self.shared.request_pick((x, y));
+            }
+        } else if self.selected_asset.is_some() && self.selected_quad {
+            if clicked_quad && !self.show_quad_gizmo {
+                self.show_quad_gizmo = true;
+                scene_changed = true;
+            } else {
+                self.shared.request_pick((x, y));
+            }
+        } else {
+            self.selected_quad = clicked_quad;
+            self.show_quad_gizmo = clicked_quad;
+            scene_changed = true;
+        }
+        if self.selected_quad {
+            self.controller.target = crate::interaction::InteractionTarget::Object;
+        }
+        if scene_changed {
+            self.shared.request_overlay();
+        }
+    }
+}
+
 fn video_progress_bar(ui: &mut egui::Ui, frame: &mut u32, last_frame: u32, enabled: bool) -> bool {
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), 18.0),
