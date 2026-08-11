@@ -1,17 +1,17 @@
 //! Headless GPU batch render harness (#134).
 //!
 //! [`BatchRenderer`] is trd-core's persistent offscreen render context: it owns
-//! the wgpu `device`/`queue`, a [`MeshRenderer`], and the shared
+//! the wgpu `device`/`queue`, a [`SceneRenderer`], and the shared
 //! [`OffscreenTarget`] readback plumbing, plus the CLI overlay toggles
 //! (`show_aabb`/`show_axes`/`show_local_axes`/`show_local_grid`) and the mesh-pass
 //! MSAA sample count, rendering one [`FrameParams`] to tightly-packed row-major
 //! RGBA bytes per call. Relocated out of `stream.rs` (which keeps only the
 //! decode->render->encode orchestration) so it sits beside its siblings
-//! [`OffscreenTarget`] and [`MeshRenderer`] under `render/` (#134, #82).
+//! [`OffscreenTarget`] and [`SceneRenderer`] under `render/` (#134, #82).
 
 use super::{
-    Draw, DrawableObject, FrameFit, FrameParams, GridPlane, Mesh, MeshRenderer, OffscreenTarget,
-    PickTarget, RenderMode, OFFSCREEN_FORMAT,
+    Draw, DrawableObject, FrameFit, FrameParams, GridPlane, Mesh, OffscreenTarget, PickTarget,
+    RenderMode, SceneRenderer, OFFSCREEN_FORMAT,
 };
 use crate::math::Matrix4;
 use crate::stream::{check_dimensions, StreamError};
@@ -21,7 +21,7 @@ use crate::stream::{check_dimensions, StreamError};
 pub struct BatchRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    renderer: MeshRenderer,
+    renderer: SceneRenderer,
     /// The shared offscreen render target + readback buffer (#103, Part B).
     target: OffscreenTarget,
     /// Render mode (filled/wireframe) applied to every mesh drawable this
@@ -123,7 +123,7 @@ impl BatchRenderer {
 
         let format = OFFSCREEN_FORMAT;
         let renderer =
-            MeshRenderer::with_sample_count(&device, format, meshes, base_models, sample_count);
+            SceneRenderer::with_sample_count(&device, format, meshes, base_models, sample_count);
 
         // The shared offscreen harness owns the render target + readback buffer
         // and re-validates the size against the adapter's max dimension.
@@ -158,7 +158,7 @@ impl BatchRenderer {
     }
 
     /// Binds `texture` as the source sampled by [`RenderMode::Textured`] meshes
-    /// (`0.0.4`). Delegates to [`MeshRenderer::set_texture`]; the image is
+    /// (`0.0.4`). Delegates to [`SceneRenderer::set_texture`]; the image is
     /// (re)uploaded on the next `render`.
     pub fn set_texture(&mut self, texture: &dyn crate::texture::Texture) {
         self.renderer.set_texture(texture);
@@ -166,7 +166,7 @@ impl BatchRenderer {
 
     /// Binds `texture` as the albedo of mesh `mesh_id` — a **per-object** diffuse
     /// for multi-object scenes (#141). Delegates to
-    /// [`MeshRenderer::set_mesh_texture`]; out-of-range ids are ignored.
+    /// [`SceneRenderer::set_mesh_texture`]; out-of-range ids are ignored.
     pub fn set_mesh_texture(&mut self, mesh_id: usize, texture: &dyn crate::texture::Texture) {
         self.renderer.set_mesh_texture(mesh_id, texture);
     }
@@ -216,7 +216,7 @@ impl BatchRenderer {
     }
 
     /// Binds `env` as the equirectangular HDR environment map reflected by
-    /// [`RenderMode::Pbr`] meshes. Delegates to [`MeshRenderer::set_env_map`]; the
+    /// [`RenderMode::Pbr`] meshes. Delegates to [`SceneRenderer::set_env_map`]; the
     /// probe is (re)uploaded on the next `render`.
     pub fn set_env_map(&mut self, env: crate::EnvMapData) {
         self.renderer.set_env_map(env);

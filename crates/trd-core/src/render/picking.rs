@@ -1,6 +1,6 @@
 //! [`PickTarget`] — the object-id ("color index") picking harness (#141).
 //!
-//! A small render target dedicated to [`MeshRenderer::encode_picking`]: a
+//! A small render target dedicated to [`SceneRenderer::encode_picking`]: a
 //! single-sample **linear** [`PICK_FORMAT`] color texture + a depth attachment,
 //! into which each drawn object is rasterized in a flat id color. After the pass,
 //! the **one** texel under the cursor is copied back and decoded to a 0-based
@@ -13,7 +13,7 @@
 use futures_channel::oneshot;
 
 use super::{
-    create_depth_target, DepthTarget, Draw, FrameParams, MeshRenderer, PickInstanceRaw, Viewport,
+    create_depth_target, DepthTarget, Draw, FrameParams, PickInstanceRaw, SceneRenderer, Viewport,
     PICK_FORMAT,
 };
 
@@ -94,7 +94,7 @@ impl PickTarget {
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        renderer: &mut MeshRenderer,
+        renderer: &mut SceneRenderer,
         params: FrameParams,
         draws: &[Draw],
         x: u32,

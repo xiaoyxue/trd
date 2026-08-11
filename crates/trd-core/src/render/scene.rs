@@ -3,7 +3,7 @@
 
 use crate::math::Matrix4;
 
-/// How a [`MeshRenderer`] rasterizes its meshes: solid filled triangles, or an
+/// How a [`SceneRenderer`] rasterizes its meshes: solid filled triangles, or an
 /// edge **wireframe** (`LineList` over the derived [`crate::Mesh::edge_indices`]
 /// buffer). Default is [`RenderMode::Filled`]; wireframe (#38) is opt-in via
 /// [`BatchRenderer::set_mode`].
@@ -222,7 +222,7 @@ pub enum DrawableObject {
     },
     /// A screen-aligned **background frame plane** (#63): a fullscreen quad that
     /// samples the renderer's bound background frame texture (set via
-    /// [`MeshRenderer::update_frame_texture_rgba`]), composited **under** the
+    /// [`SceneRenderer::update_frame_texture_rgba`]), composited **under** the
     /// mesh scene. `fit` selects how the image maps to the viewport. Carries no
     /// model — it is authored directly in clip space and ignores the camera.
     /// Drawn only when a background texture is bound (else skipped), so an absent
@@ -264,7 +264,7 @@ pub type Scene = Vec<DrawableObject>;
 ///
 /// Shared by the native ([`crate::run_stream`]) and wasm front-ends so neither
 /// branches per primitive type: both author the same ordered `Scene` and hand
-/// it to [`MeshRenderer::encode`].
+/// it to [`SceneRenderer::encode`].
 #[allow(clippy::too_many_arguments)]
 pub fn build_scene(
     draws: &[Draw],

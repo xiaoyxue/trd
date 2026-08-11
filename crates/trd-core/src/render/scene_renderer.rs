@@ -1,9 +1,9 @@
-//! The persistent [`MeshRenderer`]: a decode-once GPU mesh store, instance
+//! The persistent [`SceneRenderer`]: a decode-once GPU mesh store, instance
 //! batching, and [`Scene`](super::Scene) encoding.
 //!
 //! The renderer is a composition of a few cohesive parts, each with a single
 //! job, so no one struct is a grab-bag of wgpu handles:
-//! - [`MeshPass`] — the three mesh pipelines (filled/wireframe/textured) and the
+//! - [`SceneRenderPipelines`] — the three mesh pipelines (filled/wireframe/textured) and the
 //!   camera `P·V` uniform they share.
 //! - [`MeshStore`] — the uploaded [`MeshGpu`]s, the shared axes gizmo, and the
 //!   growable per-instance model buffer; also walks a [`Scene`] into draw batches.
@@ -11,335 +11,22 @@
 //!   draws (#20).
 //! - [`FramePlane`](super::FramePlane) — the background video frame plane (#63).
 
-use std::ops::Range;
-
+use super::batch::{build_batches, DrawKind};
 use super::bound_material_maps::BoundMaterialMaps;
-use super::bound_texture::BoundTexture;
+use super::buffer::{draw_indexed, draw_vertices};
 use super::env_background::{EnvBackground, EnvBackgroundSettings};
 use super::frame_plane::FramePlane;
+use super::mesh_store::MeshStore;
+use super::pbr::PbrBatchInputs;
 use super::*;
-
 use crate::material::DisneyMaterial;
 use crate::math::Matrix4;
 use crate::texture::Texture;
 
-/// An index buffer plus its element count — one `draw_indexed` range.
-struct IndexBuf {
-    buffer: wgpu::Buffer,
-    count: u32,
-}
-
-impl IndexBuf {
-    fn new(device: &wgpu::Device, label: &str, indices: &[u32]) -> Self {
-        use wgpu::util::DeviceExt;
-        let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some(label),
-            contents: bytemuck::cast_slice(indices),
-            usage: wgpu::BufferUsages::INDEX,
-        });
-        let count = u32::try_from(indices.len()).expect("index count exceeds u32::MAX");
-        Self { buffer, count }
-    }
-}
-
-/// A self-contained non-indexed draw.
-struct VertexGeometry {
-    vertex_buffer: wgpu::Buffer,
-    vertex_count: u32,
-}
-
-impl VertexGeometry {
-    fn new<T: bytemuck::Pod>(device: &wgpu::Device, label: &str, vertices: &[T]) -> Self {
-        use wgpu::util::DeviceExt;
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some(label),
-            contents: bytemuck::cast_slice(vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let vertex_count = u32::try_from(vertices.len()).expect("vertex count exceeds u32::MAX");
-        Self {
-            vertex_buffer,
-            vertex_count,
-        }
-    }
-}
-
-/// A mesh uploaded to the GPU. Its `vertex_buffer` feeds both the filled
-/// `triangles` and the deduped wireframe `edges` (#38); the `aabb` overlay (#42)
-/// is a standalone box of 12 screen-space-expanded edge quads. `base_model` is
-/// the base (preview) transform pre-multiplied beneath every per-frame instance
-/// model (`effective = model · base`).
-struct MeshGpu {
-    vertex_buffer: wgpu::Buffer,
-    /// Parallel vertex buffer for the Disney PBR path (`pbr.wgsl`): the same
-    /// positions + UVs as `vertex_buffer`, but with a derived smooth shading
-    /// **normal** in place of the vertex color. Reuses the `triangles` index
-    /// buffer. Built once per mesh; only bound by [`RenderMode::Pbr`] draws.
-    pbr_vertex_buffer: wgpu::Buffer,
-    triangles: IndexBuf,
-    edges: IndexBuf,
-    aabb: VertexGeometry,
-    base_model: Matrix4,
-    /// This mesh's **own** albedo texture (group 1), so a multi-object scene skins
-    /// each object with its own diffuse (#141). Defaults to 1×1 white (identity
-    /// albedo) until [`set`](BoundTexture::set) via `set_mesh_texture`.
-    texture: BoundTexture,
-    material_maps: BoundMaterialMaps,
-}
-
-impl MeshGpu {
-    fn filled(&self) -> (&wgpu::Buffer, &IndexBuf) {
-        (&self.vertex_buffer, &self.triangles)
-    }
-
-    fn pbr(&self) -> (&wgpu::Buffer, &IndexBuf) {
-        (&self.pbr_vertex_buffer, &self.triangles)
-    }
-
-    fn wireframe(&self) -> (&wgpu::Buffer, &IndexBuf) {
-        (&self.vertex_buffer, &self.edges)
-    }
-
-    fn aabb(&self) -> &VertexGeometry {
-        &self.aabb
-    }
-}
-
-fn upload_mesh(
-    device: &wgpu::Device,
-    mesh: &Mesh,
-    base_model: Matrix4,
-    texture_layout: &wgpu::BindGroupLayout,
-    material_maps_layout: &wgpu::BindGroupLayout,
-) -> MeshGpu {
-    use wgpu::util::DeviceExt;
-
-    let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("trd mesh vertex buffer"),
-        contents: bytemuck::cast_slice(&mesh.vertices),
-        usage: wgpu::BufferUsages::VERTEX,
-    });
-    let triangles = IndexBuf::new(device, "trd mesh index buffer", &mesh.indices);
-    let edges = mesh.edge_indices();
-    let edges = IndexBuf::new(device, "trd mesh edge buffer", &edges);
-
-    // PBR vertex buffer (#): derive area-weighted smooth normals (the assets have
-    // no `vn`) and pack position + normal + UV for `pbr.wgsl`, reusing the
-    // triangle index buffer above.
-    let normals = mesh
-        .shading
-        .as_ref()
-        .filter(|shading| shading.normals.len() == mesh.vertices.len())
-        .map(|shading| shading.normals.clone())
-        .unwrap_or_else(|| compute_smooth_normals(&mesh.vertices, &mesh.indices));
-    let tangents = mesh
-        .shading
-        .as_ref()
-        .filter(|shading| shading.tangents.len() == mesh.vertices.len())
-        .map(|shading| shading.tangents.clone())
-        .unwrap_or_else(|| compute_tangents(&mesh.vertices, &mesh.indices, &normals));
-    let pbr_vertices: Vec<PbrVertex> = mesh
-        .vertices
-        .iter()
-        .zip(&normals)
-        .zip(&tangents)
-        .map(|((v, &normal), &tangent)| PbrVertex {
-            position: v.position,
-            normal,
-            uv: v.uv,
-            tangent,
-        })
-        .collect();
-    let pbr_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("trd mesh pbr vertex buffer"),
-        contents: bytemuck::cast_slice(&pbr_vertices),
-        usage: wgpu::BufferUsages::VERTEX,
-    });
-
-    // AABB overlay box: the mesh's own bounding box (mesh-local coords) as 8
-    // colored corner vertices + a 12-edge line list. Built once per mesh; drawn
-    // only when the scene contains an `AabbBox` for this mesh.
-    let aabb_corners = mesh.aabb().corners().map(|corner| corner.to_array());
-    let aabb_vertices = aabb_line_vertices(&aabb_corners);
-
-    MeshGpu {
-        vertex_buffer,
-        pbr_vertex_buffer,
-        triangles,
-        edges,
-        aabb: VertexGeometry::new(device, "trd mesh aabb line buffer", &aabb_vertices),
-        base_model,
-        texture: BoundTexture::with_layout(texture_layout.clone()),
-        material_maps: BoundMaterialMaps::with_layout(material_maps_layout.clone()),
-    }
-}
-
-fn create_instance_buffer(device: &wgpu::Device, capacity: u32) -> wgpu::Buffer {
-    device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("trd mesh instance buffer"),
-        size: capacity as u64 * std::mem::size_of::<InstanceRaw>() as u64,
-        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    })
-}
-
-/// Binds `vertex_buffer` at slot 0 and `index`, then draws it over `instances`
-/// (the per-instance model buffer stays bound at slot 1). Pipeline + group
-/// bindings are the caller's responsibility.
-fn draw_indexed(
-    pass: &mut wgpu::RenderPass,
-    (vertex_buffer, index): (&wgpu::Buffer, &IndexBuf),
-    instances: Range<u32>,
-) {
-    pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-    pass.set_index_buffer(index.buffer.slice(..), wgpu::IndexFormat::Uint32);
-    pass.draw_indexed(0..index.count, 0, instances);
-}
-
-fn draw_vertices(pass: &mut wgpu::RenderPass, geometry: &VertexGeometry, instances: Range<u32>) {
-    pass.set_vertex_buffer(0, geometry.vertex_buffer.slice(..));
-    pass.draw(0..geometry.vertex_count, instances);
-}
-
-/// Which geometry a [`DrawCommand`] binds. The `usize` is a mesh id (index into
-/// [`MeshStore::meshes`]) for the mesh kinds, or a [`GridPlane::index`] for
-/// `Grid`; `Axes` uses the shared gizmo geometry. Variants are declared in their
-/// layered draw order; the derived ordering is the batching order.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum DrawKind {
-    /// A contact / blob **grounding shadow** (the shared shadow quad geometry,
-    /// non-indexed triangle draw, alpha-blended over the frame plane).
-    Shadow,
-    /// Filled triangles of a mesh (its triangle index buffer + filled pipeline).
-    Filled(usize),
-    /// Textured triangles of a mesh (triangle index buffer + textured pipeline,
-    /// sampling the bound texture at each vertex UV) (#20).
-    Textured(usize),
-    /// Disney **PBR** triangles of a mesh (its dedicated position+normal+UV
-    /// vertex buffer + `pbr.wgsl` pipeline, lit by the virtual light rig and
-    /// the bound HDR environment map). Reuses the triangle index buffer.
-    Pbr(usize),
-    /// A coordinate-plane grid (the shared per-plane grid vertex buffer indexed
-    /// by [`GridPlane::index`], non-indexed line draw).
-    Grid(usize),
-    /// Green/yellow placement-quad outline.
-    QuadOutline(usize),
-    /// Edge lines of a mesh (its deduped edge index buffer + line pipeline).
-    Wireframe(usize),
-    /// A mesh's AABB box (its precomputed corner geometry + line pipeline).
-    Aabb(usize),
-    /// The coordinate-axes gizmo (shared vertex buffer, non-indexed line draw).
-    Axes,
-}
-
-/// One instanced draw recorded while walking a [`Scene`]: the geometry to bind
-/// ([`DrawKind`]) and the contiguous instance-buffer range to draw it over.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct DrawCommand {
-    kind: DrawKind,
-    start: u32,
-    count: u32,
-}
-
-/// The result of walking a [`Scene`] once: the flattened per-instance models,
-/// the [`DrawCommand`]s over them (already in draw order), and the singleton
-/// background frame-plane fit (if any).
-struct Batches {
-    instances: Vec<InstanceRaw>,
-    commands: Vec<DrawCommand>,
-    frame_fit: Option<FrameFit>,
-    environment_background: Option<([f32; 3], Tonemap)>,
-}
-
-/// Walks `scene` once into a flat draw list, stable-sorts by [`DrawKind`], then
-/// groups equal runs into instanced commands. Out-of-range mesh ids are skipped;
-/// the last background frame plane wins.
-fn build_batches(
-    scene: &[DrawableObject],
-    mut mesh_base_model: impl FnMut(usize) -> Option<Matrix4>,
-) -> Batches {
-    let mut draws: Vec<(DrawKind, InstanceRaw)> = Vec::with_capacity(scene.len());
-    let mut frame_fit = None;
-    let mut environment_background = None;
-
-    for object in scene {
-        let (kind, model) = match *object {
-            DrawableObject::Mesh {
-                mesh_id,
-                model,
-                mode,
-            } => {
-                let mesh_id = mesh_id as usize;
-                let Some(base_model) = mesh_base_model(mesh_id) else {
-                    continue;
-                };
-                let kind = match mode {
-                    RenderMode::Filled => DrawKind::Filled(mesh_id),
-                    RenderMode::Textured => DrawKind::Textured(mesh_id),
-                    RenderMode::Pbr => DrawKind::Pbr(mesh_id),
-                    RenderMode::Wireframe => DrawKind::Wireframe(mesh_id),
-                    RenderMode::Shadow => continue,
-                };
-                let effective = Matrix4::from_cols_array(&model) * base_model;
-                (kind, effective.to_cols_array())
-            }
-            DrawableObject::AabbBox { mesh_id, model } => {
-                let mesh_id = mesh_id as usize;
-                let Some(base_model) = mesh_base_model(mesh_id) else {
-                    continue;
-                };
-                let effective = Matrix4::from_cols_array(&model) * base_model;
-                (DrawKind::Aabb(mesh_id), effective.to_cols_array())
-            }
-            DrawableObject::CoordinateAxes { model } => (DrawKind::Axes, model),
-            DrawableObject::PlaneGrid { plane, model } => (DrawKind::Grid(plane.index()), model),
-            DrawableObject::QuadOutline { model, selected } => {
-                (DrawKind::QuadOutline(usize::from(selected)), model)
-            }
-            DrawableObject::BlobShadow { model } => (DrawKind::Shadow, model),
-            DrawableObject::EnvironmentBackground {
-                rotation,
-                exposure,
-                blur,
-                tonemap,
-            } => {
-                environment_background = Some(([rotation, exposure, blur], tonemap));
-                continue;
-            }
-            DrawableObject::FramePlane { fit } => {
-                frame_fit = Some(fit);
-                continue;
-            }
-        };
-        draws.push((kind, InstanceRaw { model }));
-    }
-
-    draws.sort_by_key(|(kind, _)| *kind);
-
-    let mut instances = Vec::with_capacity(draws.len());
-    let mut commands = Vec::new();
-    for run in draws.chunk_by(|a, b| a.0 == b.0) {
-        let start = instances.len() as u32;
-        instances.extend(run.iter().map(|(_, instance)| *instance));
-        commands.push(DrawCommand {
-            kind: run[0].0,
-            start,
-            count: run.len() as u32,
-        });
-    }
-
-    Batches {
-        instances,
-        commands,
-        frame_fit,
-        environment_background,
-    }
-}
-
 /// The mesh and gizmo pipelines plus their camera/material bindings. Filled,
 /// wireframe, arrowheads, and textured rendering share the camera layout;
 /// expanded gizmo lines use a viewport-aware group-0 uniform.
-struct MeshPass {
+struct SceneRenderPipelines {
     filled: wgpu::RenderPipeline,
     wireframe: wgpu::RenderPipeline,
     /// Screen-space expanded, alpha-feathered AABB/axes/grid line pipeline.
@@ -368,16 +55,8 @@ struct MeshPass {
     gizmo_bind_group: wgpu::BindGroup,
 }
 
-struct PbrInputs<'a> {
-    materials: &'a [DisneyMaterial],
-    ibl: &'a [ImageBasedLighting],
-    tone_mappings: &'a [ToneMapping],
-    debug_views: &'a [PbrDebugView],
-    lighting: Lighting,
-}
-
-impl MeshPass {
-    /// Constructs a `MeshPass` for `format`, building all pipelines over their
+impl SceneRenderPipelines {
+    /// Constructs a `SceneRenderPipelines` for `format`, building all pipelines over their
     /// bind-group layouts at `sample_count`× MSAA. `texture_layout` is the albedo
     /// texture's group-1 layout (from [`BoundTexture::layout`]), shared by the
     /// textured and PBR pipelines; `env_layout` is the PBR pipeline's group-2
@@ -540,7 +219,7 @@ impl MeshPass {
         queue: &wgpu::Queue,
         params: FrameParams,
         viewport: Viewport,
-        inputs: PbrInputs<'_>,
+        inputs: PbrBatchInputs<'_>,
         use_env: bool,
     ) {
         debug_assert_eq!(inputs.materials.len(), inputs.ibl.len());
@@ -577,139 +256,17 @@ impl MeshPass {
     }
 }
 
-/// The decode-once geometry store: the uploaded [`MeshGpu`]s (referenced by a
-/// scene's mesh ids), the shared coordinate-axes gizmo vertices, and the
-/// growable per-instance model-matrix buffer.
-struct MeshStore {
-    meshes: Vec<MeshGpu>,
-    /// The coordinate-axis shafts and cone arrowheads.
-    axes_lines: VertexGeometry,
-    axes_heads: VertexGeometry,
-    /// The coordinate-plane grid geometry, one expanded-line buffer per
-    /// [`GridPlane`] (indexed by [`GridPlane::index`]): XY, XZ, YZ. Each
-    /// [`DrawableObject::PlaneGrid`] draws the buffer for its plane under its own
-    /// model, supplied through the shared instance buffer.
-    grid_lines: [VertexGeometry; 3],
-    quad_lines: [VertexGeometry; 2],
-    /// The contact / blob **grounding-shadow** quad geometry (six `TriangleList`
-    /// vertices, a unit XY quad); each [`DrawableObject::BlobShadow`] draws it
-    /// under its own model through the shared instance buffer, alpha-blended.
-    shadow_vertex_buffer: wgpu::Buffer,
-    instance_buffer: wgpu::Buffer,
-    instance_capacity: u32,
-}
-
-impl MeshStore {
-    /// Constructs a `MeshStore`, uploading each mesh with its base (preview)
-    /// model and sizing the instance buffer to at least one instance.
-    fn new(
-        device: &wgpu::Device,
-        meshes: &[Mesh],
-        base_models: &[Matrix4],
-        texture_layout: &wgpu::BindGroupLayout,
-        material_maps_layout: &wgpu::BindGroupLayout,
-    ) -> Self {
-        use wgpu::util::DeviceExt;
-
-        let gpu_meshes = meshes
-            .iter()
-            .zip(base_models)
-            .map(|(mesh, &base)| {
-                upload_mesh(device, mesh, base, texture_layout, material_maps_layout)
-            })
-            .collect();
-        let instance_capacity = (meshes.len() as u32).max(1);
-        let instance_buffer = create_instance_buffer(device, instance_capacity);
-
-        let axes_lines = VertexGeometry::new(device, "trd axes line buffer", &axes_line_vertices());
-        let axes_heads =
-            VertexGeometry::new(device, "trd axes arrow buffer", &axes_arrow_vertices());
-
-        // Coordinate-plane grids: one expanded-line vertex buffer per plane
-        // (XY/XZ/YZ), drawn under each PlaneGrid object's model.
-        let grid_lines = [
-            VertexGeometry::new(
-                device,
-                "trd xy grid line buffer",
-                &grid_line_vertices(GridPlane::Xy),
-            ),
-            VertexGeometry::new(
-                device,
-                "trd xz grid line buffer",
-                &grid_line_vertices(GridPlane::Xz),
-            ),
-            VertexGeometry::new(
-                device,
-                "trd yz grid line buffer",
-                &grid_line_vertices(GridPlane::Yz),
-            ),
-        ];
-        let quad_lines = [
-            VertexGeometry::new(
-                device,
-                "trd placement quad line buffer",
-                &quad_outline_vertices(false),
-            ),
-            VertexGeometry::new(
-                device,
-                "trd selected placement quad line buffer",
-                &quad_outline_vertices(true),
-            ),
-        ];
-
-        // Contact / blob grounding-shadow quad: six TriangleList vertices (a unit
-        // XY quad). Each BlobShadow drawable draws them under its own model via
-        // the shared instance buffer, alpha-blended over the frame plane.
-        let shadow_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("trd shadow vertex buffer"),
-            contents: bytemuck::cast_slice(&blob_shadow_vertices()),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-
-        Self {
-            meshes: gpu_meshes,
-            axes_lines,
-            axes_heads,
-            grid_lines,
-            quad_lines,
-            shadow_vertex_buffer,
-            instance_buffer,
-            instance_capacity,
-        }
-    }
-
-    fn len(&self) -> usize {
-        self.meshes.len()
-    }
-
-    /// Uploads the flattened instance models, growing the buffer (to the next
-    /// power of two) when the frame needs more instances than it holds.
-    fn upload_instances(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        instances: &[InstanceRaw],
-    ) {
-        if instances.len() as u32 > self.instance_capacity {
-            self.instance_capacity = (instances.len() as u32).next_power_of_two();
-            self.instance_buffer = create_instance_buffer(device, self.instance_capacity);
-        }
-        if !instances.is_empty() {
-            queue.write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(instances));
-        }
-    }
-}
-
-/// Persistent indexed mesh renderer. A composition of a [`MeshPass`] (pipelines
-/// and camera uniform), a [`MeshStore`] (decode-once geometry and instance
-/// buffer), a [`BoundTexture`] (mesh albedo, #20), and a [`FramePlane`]
-/// (background video frame, #63), plus a viewport-sized depth attachment. Each
-/// [`encode`](Self::encode) draws a frame's [`Scene`] — an ordered list of
-/// [`DrawableObject`]s — grouping instances by geometry so each buffer is drawn
-/// once over a contiguous instance range. The renderer holds no mode/overlay
-/// state; what to draw is entirely the scene.
-pub struct MeshRenderer {
-    pass: MeshPass,
+/// Persistent indexed scene renderer. A composition of a
+/// [`SceneRenderPipelines`] (pipelines and camera uniform), a
+/// [`MeshStore`] (decode-once geometry and instance buffer), a `BoundTexture`
+/// (mesh albedo, #20), and a [`FramePlane`] (background video frame, #63), plus
+/// a viewport-sized depth attachment. Each [`encode`](Self::encode) draws a
+/// frame's [`Scene`] — an ordered list of [`DrawableObject`]s — grouping
+/// instances by geometry so each buffer is drawn once over a contiguous instance
+/// range. The renderer holds no mode/overlay state; what to draw is entirely the
+/// scene.
+pub struct SceneRenderer {
+    pipelines: SceneRenderPipelines,
     /// The bound HDR environment map reflected by [`RenderMode::Pbr`] draws.
     env: BoundEnv,
     env_background: EnvBackground,
@@ -758,8 +315,8 @@ pub struct MeshRenderer {
     pick_instance_capacity: u32,
 }
 
-impl MeshRenderer {
-    /// Constructs a `MeshRenderer` that derives each mesh's base (preview) model
+impl SceneRenderer {
+    /// Constructs a `SceneRenderer` that derives each mesh's base (preview) model
     /// automatically via [`Mesh::preview_transform`]
     /// ([`crate::DEFAULT_PREVIEW_TARGET`]) — center + uniform scale-to-fit — so an
     /// arbitrary-unit asset renders centered at a reasonable size. A convenience
@@ -776,7 +333,7 @@ impl MeshRenderer {
         Self::new(device, format, meshes, &base_models)
     }
 
-    /// Constructs a `MeshRenderer` over one or more meshes, each paired with an
+    /// Constructs a `SceneRenderer` over one or more meshes, each paired with an
     /// explicit base (preview) model that is pre-multiplied beneath every
     /// per-frame instance model (`effective = model · base`). This is the primary
     /// constructor; [`auto_fit`](Self::auto_fit) derives the base models for you.
@@ -812,7 +369,7 @@ impl MeshRenderer {
     ) -> Self {
         assert!(
             !meshes.is_empty(),
-            "MeshRenderer requires at least one mesh"
+            "SceneRenderer requires at least one mesh"
         );
         assert_eq!(
             meshes.len(),
@@ -827,7 +384,7 @@ impl MeshRenderer {
         let material_maps_layout = BoundMaterialMaps::create_layout(device);
         let env = BoundEnv::new(device);
         let env_background = EnvBackground::new(device, format, env.layout(), sample_count);
-        let pass = MeshPass::new(
+        let pass = SceneRenderPipelines::new(
             device,
             format,
             &texture_layout,
@@ -863,7 +420,7 @@ impl MeshRenderer {
         });
 
         Self {
-            pass,
+            pipelines: pass,
             env,
             env_background,
             pbr_materials: vec![DisneyMaterial::default(); meshes.len()],
@@ -1058,15 +615,15 @@ impl MeshRenderer {
         load_color: bool,
     ) {
         // 1. Camera P·V for this frame.
-        self.pass.write_camera(queue, params, viewport);
+        self.pipelines.write_camera(queue, params, viewport);
         // 1b. Disney PBR uniform slots for this frame — one per mesh (each carries
         //     the shared camera/lights + that mesh's material, #141). Written
         //     unconditionally so a PBR draw always has a current material slot.
-        self.pass.write_pbr(
+        self.pipelines.write_pbr(
             queue,
             params,
             viewport,
-            PbrInputs {
+            PbrBatchInputs {
                 materials: &self.pbr_materials,
                 ibl: &self.pbr_ibl,
                 tone_mappings: &self.pbr_tone_mappings,
@@ -1181,72 +738,72 @@ impl MeshRenderer {
         // The instance buffer (slot 1) stays bound across every draw. Most
         // commands use the camera bind group; expanded lines briefly swap in the
         // viewport-aware gizmo bind group.
-        pass.set_bind_group(0, &self.pass.camera_bind_group, &[]);
+        pass.set_bind_group(0, &self.pipelines.camera_bind_group, &[]);
         pass.set_vertex_buffer(1, self.store.instance_buffer.slice(..));
         for command in &batches.commands {
             let range = command.start..command.start + command.count;
             match command.kind {
                 DrawKind::Filled(id) => {
                     let mesh = &self.store.meshes[id];
-                    pass.set_pipeline(&self.pass.filled);
+                    pass.set_pipeline(&self.pipelines.filled);
                     draw_indexed(&mut pass, mesh.filled(), range);
                 }
                 DrawKind::Textured(id) => {
                     let mesh = &self.store.meshes[id];
-                    pass.set_pipeline(&self.pass.textured);
+                    pass.set_pipeline(&self.pipelines.textured);
                     pass.set_bind_group(1, mesh.texture.bind_group(), &[]);
                     draw_indexed(&mut pass, mesh.filled(), range);
                 }
                 DrawKind::Pbr(id) => {
                     let mesh = &self.store.meshes[id];
-                    pass.set_pipeline(&self.pass.pbr);
+                    pass.set_pipeline(&self.pipelines.pbr);
                     // group 0 = this mesh's PbrUniform slot (selected by a dynamic
                     // offset), group 1 = this mesh's albedo, group 2 = HDR env map.
-                    let offset = (id as u64 * self.pass.pbr_stride) as u32;
-                    pass.set_bind_group(0, &self.pass.pbr_bind_group, &[offset]);
+                    let offset = (id as u64 * self.pipelines.pbr_stride) as u32;
+                    pass.set_bind_group(0, &self.pipelines.pbr_bind_group, &[offset]);
                     pass.set_bind_group(1, mesh.texture.bind_group(), &[]);
                     pass.set_bind_group(2, env_bind_group, &[]);
                     pass.set_bind_group(3, mesh.material_maps.bind_group(), &[]);
                     draw_indexed(&mut pass, mesh.pbr(), range);
                     // Restore group 0 = camera for the following non-PBR draws
                     // (their pipelines' group-0 layout is the camera uniform).
-                    pass.set_bind_group(0, &self.pass.camera_bind_group, &[]);
+                    pass.set_bind_group(0, &self.pipelines.camera_bind_group, &[]);
                 }
                 DrawKind::Wireframe(id) => {
                     let mesh = &self.store.meshes[id];
-                    pass.set_pipeline(&self.pass.wireframe);
+                    pass.set_pipeline(&self.pipelines.wireframe);
                     draw_indexed(&mut pass, mesh.wireframe(), range);
                 }
                 DrawKind::Aabb(id) => {
                     let mesh = &self.store.meshes[id];
-                    pass.set_pipeline(&self.pass.gizmo_line);
-                    pass.set_bind_group(0, &self.pass.gizmo_bind_group, &[]);
+                    pass.set_pipeline(&self.pipelines.gizmo_line);
+                    pass.set_bind_group(0, &self.pipelines.gizmo_bind_group, &[]);
                     draw_vertices(&mut pass, mesh.aabb(), range);
-                    pass.set_bind_group(0, &self.pass.camera_bind_group, &[]);
+                    pass.set_bind_group(0, &self.pipelines.camera_bind_group, &[]);
                 }
                 DrawKind::Grid(plane) => {
-                    pass.set_pipeline(&self.pass.gizmo_line);
-                    pass.set_bind_group(0, &self.pass.gizmo_bind_group, &[]);
+                    pass.set_pipeline(&self.pipelines.gizmo_line);
+                    pass.set_bind_group(0, &self.pipelines.gizmo_bind_group, &[]);
                     draw_vertices(&mut pass, &self.store.grid_lines[plane], range);
-                    pass.set_bind_group(0, &self.pass.camera_bind_group, &[]);
+                    pass.set_bind_group(0, &self.pipelines.camera_bind_group, &[]);
                 }
                 DrawKind::QuadOutline(selected) => {
-                    pass.set_pipeline(&self.pass.gizmo_line);
-                    pass.set_bind_group(0, &self.pass.gizmo_bind_group, &[]);
+                    pass.set_pipeline(&self.pipelines.gizmo_line);
+                    pass.set_bind_group(0, &self.pipelines.gizmo_bind_group, &[]);
                     draw_vertices(&mut pass, &self.store.quad_lines[selected], range);
-                    pass.set_bind_group(0, &self.pass.camera_bind_group, &[]);
+                    pass.set_bind_group(0, &self.pipelines.camera_bind_group, &[]);
                 }
                 DrawKind::Shadow => {
-                    pass.set_pipeline(&self.pass.shadow);
+                    pass.set_pipeline(&self.pipelines.shadow);
                     pass.set_vertex_buffer(0, self.store.shadow_vertex_buffer.slice(..));
                     pass.draw(0..SHADOW_VERTEX_COUNT, range);
                 }
                 DrawKind::Axes => {
-                    pass.set_pipeline(&self.pass.gizmo_line);
-                    pass.set_bind_group(0, &self.pass.gizmo_bind_group, &[]);
+                    pass.set_pipeline(&self.pipelines.gizmo_line);
+                    pass.set_bind_group(0, &self.pipelines.gizmo_bind_group, &[]);
                     draw_vertices(&mut pass, &self.store.axes_lines, range.clone());
-                    pass.set_pipeline(&self.pass.gizmo_solid);
-                    pass.set_bind_group(0, &self.pass.camera_bind_group, &[]);
+                    pass.set_pipeline(&self.pipelines.gizmo_solid);
+                    pass.set_bind_group(0, &self.pipelines.camera_bind_group, &[]);
                     draw_vertices(&mut pass, &self.store.axes_heads, range);
                 }
             }
@@ -1275,7 +832,7 @@ impl MeshRenderer {
     ) {
         // Camera P·V for this frame (writes the shared camera uniform bound by
         // `camera_bind_group`, which is layout-compatible with the pick pipeline).
-        self.pass.write_camera(queue, params, viewport);
+        self.pipelines.write_camera(queue, params, viewport);
 
         // Build one pick instance per drawable object, carrying its index color.
         // Keep the draw index as the id even when an entry is skipped, so a decoded
@@ -1339,7 +896,7 @@ impl MeshRenderer {
         });
 
         pass.set_pipeline(&self.pick_pipeline);
-        pass.set_bind_group(0, &self.pass.camera_bind_group, &[]);
+        pass.set_bind_group(0, &self.pipelines.camera_bind_group, &[]);
         pass.set_vertex_buffer(1, self.pick_instances.slice(..));
         for (mesh_id, slot) in records {
             let mesh = &self.store.meshes[mesh_id];

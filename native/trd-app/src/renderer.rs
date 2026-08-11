@@ -1,11 +1,11 @@
 //! GPU resources tied to a live window surface, plus the per-frame render path
-//! driving the shared [`trd_core::MeshRenderer`].
+//! driving the shared [`trd_core::SceneRenderer`].
 
 use std::sync::Arc;
 
 use trd_core::{
     build_scene, DisneyMaterial, EnvMapData, FrameFit, GridPlane, ImageBasedLighting, ImageData,
-    ImageTexture, Lighting, Mesh, MeshRenderer, OnscreenTarget, RenderMode, ToneMapping,
+    ImageTexture, Lighting, Mesh, OnscreenTarget, RenderMode, SceneRenderer, ToneMapping,
 };
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
@@ -22,7 +22,7 @@ pub(crate) struct WindowRenderer {
     target: OnscreenTarget,
     /// The scene renderer, built lazily once the stream's mesh table (or the
     /// legacy built-in fallback) has arrived from the reader thread.
-    pub(crate) renderer: Option<MeshRenderer>,
+    pub(crate) renderer: Option<SceneRenderer>,
     /// CPU image backing the currently uploaded frame-plane texture. Inline
     /// frame reuse preserves the same Arc, so repeated IDs skip GPU writes.
     uploaded_frame_image: Option<Arc<ImageData>>,
@@ -100,7 +100,7 @@ impl WindowRenderer {
     /// centered + scaled to fit via its preview base model). Idempotent per
     /// stream: called once when the mesh table first arrives.
     pub(crate) fn set_meshes(&mut self, meshes: &[Mesh]) {
-        self.renderer = Some(MeshRenderer::auto_fit(
+        self.renderer = Some(SceneRenderer::auto_fit(
             &self.device,
             self.target.view_format(),
             meshes,
@@ -183,7 +183,7 @@ impl WindowRenderer {
         };
 
         // Author the frame's Scene from its draw list + the render mode/overlay
-        // flags, then hand it to the shared MeshRenderer — the same Scene the
+        // flags, then hand it to the shared SceneRenderer — the same Scene the
         // headless CLI and wasm front-ends build. A per-frame background image
         // (#63) is uploaded first, then composited beneath the scene.
         let frame_fit = match frame.frame_image.as_ref() {

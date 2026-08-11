@@ -5,7 +5,7 @@
 //! mesh [`BoundTexture`](super::BoundTexture) albedo): the frame image is
 //! uploaded at the boundary from `frame_path`/`frame_url`, reused across frames,
 //! and sampled by a [`DrawableObject::FramePlane`](super::DrawableObject). All
-//! of the old `update_frame_texture_rgba` machinery lives here so `MeshRenderer`
+//! of the old `update_frame_texture_rgba` machinery lives here so `SceneRenderer`
 //! only has to delegate to it.
 
 use super::{
@@ -79,7 +79,7 @@ impl FramePlane {
     }
 
     /// Uploads `rgba` (tightly-packed, row-major `height`×`width`×4) as the
-    /// background frame texture (formerly `MeshRenderer::update_frame_texture_rgba`).
+    /// background frame texture (formerly `SceneRenderer::update_frame_texture_rgba`).
     /// The GPU texture is **reused** across frames — recreated only when the
     /// dimensions change, so streaming a fixed-resolution video allocates once and
     /// every later frame is a plain `queue.write_texture`. The texture is

@@ -1,7 +1,7 @@
 //! [`WebRenderer`] — the browser render backend (#97, Slice 4).
 //!
 //! The web twin of the native [`InProcRenderer`](crate::render_backend::InProcRenderer):
-//! it builds a `trd-core` [`MeshRenderer`] once (its own wgpu 30 device, no
+//! it builds a `trd-core` [`SceneRenderer`] once (its own wgpu 30 device, no
 //! surface), then renders the interactive [`SceneState`] to an **offscreen**
 //! texture and reads it back to RGBA — the pixels the eframe app uploads as an
 //! egui texture (Strategy A: only CPU RGBA crosses, so egui's WebGL backend stays
@@ -15,7 +15,7 @@
 use trd_core::{
     build_scene, decode_params_stream, encode_params_stream, plane_grid_overlays,
     read_image_stream, DrawableObject, EnvMapData, FrameParams, GridPlane, ImageTexture, Mesh,
-    MeshRenderer, OffscreenTarget, OutputSession, PickTarget, OFFSCREEN_FORMAT,
+    OffscreenTarget, OutputSession, PickTarget, SceneRenderer, OFFSCREEN_FORMAT,
 };
 
 use crate::error::GuiError;
@@ -56,7 +56,7 @@ fn scene_overlays(draws: &[trd_core::Draw], state: &SceneState) -> Vec<DrawableO
 /// How the browser renderer produces each frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WebBackend {
-    /// Render the scene state directly on the persistent `MeshRenderer` (lowest
+    /// Render the scene state directly on the persistent `SceneRenderer` (lowest
     /// latency; the default) — the web twin of the native `InProcRenderer`.
     #[default]
     Inproc,
@@ -70,11 +70,11 @@ pub enum WebBackend {
     Arrow,
 }
 
-/// A browser offscreen renderer over a `trd-core` [`MeshRenderer`].
+/// A browser offscreen renderer over a `trd-core` [`SceneRenderer`].
 pub struct WebRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    renderer: MeshRenderer,
+    renderer: SceneRenderer,
     /// The shared offscreen render target + readback buffer (#103, Part B).
     target: OffscreenTarget,
     /// The object-id picking target (#141), created lazily on first pick.
@@ -117,7 +117,7 @@ impl WebRenderer {
             )));
         }
 
-        let mut renderer = MeshRenderer::auto_fit(&device, OFFSCREEN_FORMAT, meshes);
+        let mut renderer = SceneRenderer::auto_fit(&device, OFFSCREEN_FORMAT, meshes);
         // Skin each object with its **own** albedo (#141): texture `i` → mesh `i`.
         for (i, texture) in textures.iter().enumerate() {
             if let Some(texture) = texture {

@@ -5,13 +5,13 @@ use super::*;
 use crate::math::{Matrix4, Point3, Vector3};
 use glam::{Mat4, Vec3};
 
-/// Test convenience constructor: a [`MeshRenderer`] over a single mesh with an
+/// Test convenience constructor: a [`SceneRenderer`] over a single mesh with an
 /// identity base model (vertices drawn in their own coordinates). Replaces the
-/// former single-mesh `MeshRenderer::new`/`with_base_model` production helpers,
+/// former single-mesh `SceneRenderer::new`/`with_base_model` production helpers,
 /// which only the GPU tests used.
 #[cfg(not(target_arch = "wasm32"))]
-fn single(device: &wgpu::Device, format: wgpu::TextureFormat, mesh: &Mesh) -> MeshRenderer {
-    MeshRenderer::new(
+fn single(device: &wgpu::Device, format: wgpu::TextureFormat, mesh: &Mesh) -> SceneRenderer {
+    SceneRenderer::new(
         device,
         format,
         std::slice::from_ref(mesh),
@@ -258,7 +258,7 @@ fn mesh_renderer_depth_buffer_occludes_far_behind_near() {
         shading: None,
     };
     // mesh 0 = red (drawn first), mesh 1 = green (drawn last).
-    let mut mesh = MeshRenderer::new(
+    let mut mesh = SceneRenderer::new(
         &device,
         format,
         &[quad([1.0, 0.0, 0.0]), quad([0.0, 1.0, 0.0])],
@@ -626,7 +626,7 @@ fn gizmo_lines_and_arrowheads_stay_smooth_without_msaa() {
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (128, 128);
     let mesh_data = Mesh::hello_triangle();
-    let mut renderer = MeshRenderer::with_sample_count(
+    let mut renderer = SceneRenderer::with_sample_count(
         &device,
         format,
         std::slice::from_ref(&mesh_data),
@@ -1331,7 +1331,7 @@ fn triangle_renderer_draws_gradient_triangle() {
 /// pixel hit. Two quads are placed side by side (a gap between them) under the
 /// identity camera; clicking the left one returns object index 0, the right one
 /// index 1, and the gap / a corner returns `None` (background). Exercises
-/// `MeshRenderer::encode_picking` + `PickTarget` end-to-end on a real GPU.
+/// `SceneRenderer::encode_picking` + `PickTarget` end-to-end on a real GPU.
 #[test]
 #[ignore = "requires a GPU adapter"]
 #[cfg(not(target_arch = "wasm32"))]

@@ -39,6 +39,20 @@ pub(crate) struct PbrUniformInputs<'a> {
     pub use_env: bool,
 }
 
+/// The **batched** twin of [`PbrUniformInputs`]: the same five inputs, pluralized
+/// per mesh, as `SceneRenderer::encode` receives them for a whole frame.
+/// `write_pbr` slices one `PbrUniformInputs` out of it per mesh id.
+///
+/// `lighting` is singular because the light rig is scene-level, not per mesh —
+/// a layering wart tracked in #182.
+pub(crate) struct PbrBatchInputs<'a> {
+    pub materials: &'a [DisneyMaterial],
+    pub ibl: &'a [ImageBasedLighting],
+    pub tone_mappings: &'a [ToneMapping],
+    pub debug_views: &'a [PbrDebugView],
+    pub lighting: Lighting,
+}
+
 /// GPU byte layout matching `pbr.wgsl`'s `PbrUniform` (std140-compatible: all
 /// members are 16-byte-aligned `vec4`/`mat4`). 304 bytes, uploaded per frame
 /// (the camera terms change; the material + light rig are constant per render).
