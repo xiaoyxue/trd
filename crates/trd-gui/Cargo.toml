@@ -33,6 +33,10 @@ thiserror = "2"
 egui = "0.35"
 log = "0.4"
 wgpu = "30"
+# `std::time::Instant` panics on `wasm32-unknown-unknown`, so the shared
+# video-editing render-latency diagnostic uses `web-time`'s drop-in `Instant`:
+# std on native, `performance.now()` in the browser. Already in the tree via egui.
+web-time = "1"
 # Decode + downscale the optional texture image in Rust (native `--texture` /
 # browser `?texture=`) and the optional HDR env probe (native `--env` / browser
 # `?env=`), keeping trd-core I/O-free. Pure-Rust png/jpeg/hdr decoders compile on
