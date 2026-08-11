@@ -47,7 +47,7 @@ pub use pbr::PbrDebugView;
 pub use picking::PickTarget;
 pub use pipeline::create_mesh_pipeline;
 pub use render_target::{
-    OffscreenError, OffscreenTarget, OnscreenTarget, RenderTarget, OFFSCREEN_FORMAT,
+    OffscreenError, OffscreenTarget, OnscreenTarget, RenderTarget, SceneLayer, OFFSCREEN_FORMAT,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use renderer::check_dimensions;

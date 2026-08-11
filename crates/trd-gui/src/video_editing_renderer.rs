@@ -32,10 +32,10 @@ pub struct VideoRendererDiagnostics {
 }
 
 pub struct VideoPlacementRenderer {
-    gpu: std::sync::Arc<trd_core::GpuContext>,
-    renderer: trd_core::SceneRenderer,
-    target: trd_core::OffscreenTarget,
-    pick_target: Option<trd_core::PickTarget>,
+    /// The shared render harness. This type is a **placement** front-end, not a
+    /// renderer: it turns the editor's timeline state into layered scenes and hands
+    /// them to `trd-core` like every other front-end (#180).
+    renderer: trd_core::Renderer,
     default_mode: trd_core::RenderMode,
     default_material: trd_core::DisneyMaterial,
     identity: Rc<RendererIdentity>,
@@ -56,18 +56,11 @@ impl VideoPlacementRenderer {
         .map_err(|error| error.to_string())?;
         let facts = gpu.adapter_facts();
         let placeholder = assets::default_mesh().map_err(|error| error.to_string())?;
-        let renderer = trd_core::SceneRenderer::auto_fit(
-            gpu.clone(),
-            trd_core::OFFSCREEN_FORMAT,
-            std::slice::from_ref(&placeholder),
-        );
-        let target = trd_core::OffscreenTarget::new(&gpu.device, width, height)
-            .map_err(|error| error.to_string())?;
+        let renderer =
+            trd_core::Renderer::with_gpu(gpu, width, height, std::slice::from_ref(&placeholder))
+                .map_err(|error| error.to_string())?;
         Ok(Self {
-            gpu,
             renderer,
-            target,
-            pick_target: None,
             default_mode: trd_core::RenderMode::Filled,
             default_material: trd_core::DisneyMaterial::default(),
             identity: Rc::new(RendererIdentity {
@@ -114,21 +107,14 @@ impl VideoPlacementRenderer {
         let facts = gpu.adapter_facts();
         let asset_diagnostics = imported.diagnostics();
         let mesh = imported.mesh();
-        let mut renderer = trd_core::SceneRenderer::auto_fit(
-            gpu.clone(),
-            trd_core::OFFSCREEN_FORMAT,
-            std::slice::from_ref(mesh),
-        );
+        let mut renderer =
+            trd_core::Renderer::with_gpu(gpu, width, height, std::slice::from_ref(mesh))
+                .map_err(|error| error.to_string())?;
         let (default_mode, default_material) = imported.configure(&mut renderer);
         let env = assets::decode_env_hdr(env_bytes).map_err(|error| error.to_string())?;
         renderer.set_env_map(env);
-        let target = trd_core::OffscreenTarget::new(&gpu.device, width, height)
-            .map_err(|error| error.to_string())?;
         Ok(Self {
-            gpu,
             renderer,
-            target,
-            pick_target: None,
             default_mode,
             default_material,
             identity: Rc::new(RendererIdentity {
@@ -145,17 +131,15 @@ impl VideoPlacementRenderer {
     }
 
     pub fn size(&self) -> (u32, u32) {
-        (self.target.width(), self.target.height())
+        let viewport = self.renderer.viewport();
+        (viewport.width, viewport.height)
     }
 
     pub fn diagnostics(&self) -> VideoRendererDiagnostics {
         VideoRendererDiagnostics {
             identity: self.identity.clone(),
             target_size: self.size(),
-            pick_target_size: self
-                .pick_target
-                .as_ref()
-                .map(|_| (self.target.width(), self.target.height())),
+            pick_target_size: self.renderer.pick_target_size(),
             msaa_samples: 4,
             asset: self.asset_diagnostics.clone(),
         }
@@ -165,10 +149,9 @@ impl VideoPlacementRenderer {
         if self.size() == (width, height) {
             return Ok(());
         }
-        self.target = trd_core::OffscreenTarget::new(&self.gpu.device, width, height)
-            .map_err(|error| error.to_string())?;
-        self.pick_target = None;
-        Ok(())
+        self.renderer
+            .resize(width, height)
+            .map_err(|error| error.to_string())
     }
 
     pub async fn pick(
@@ -179,13 +162,9 @@ impl VideoPlacementRenderer {
         point: (u32, u32),
     ) -> Result<Option<u32>, String> {
         let params = self.frame_params(frame, source_size)?;
-        let target = self.pick_target.get_or_insert_with(|| {
-            trd_core::PickTarget::new(&self.gpu.device, self.target.width(), self.target.height())
-        });
-        Ok(target
+        Ok(self
+            .renderer
             .pick(
-                &self.gpu,
-                &mut self.renderer,
                 params,
                 &[trd_core::Draw {
                     mesh_id: 0,
@@ -234,70 +213,21 @@ impl VideoPlacementRenderer {
             self.renderer.set_lighting(state.lighting);
         }
 
-        let mut background = vec![trd_core::DrawableObject::FramePlane {
-            fit: trd_core::FrameFit::Stretch,
-        }];
-        if let Some(quad_model) = quad_model {
-            background.push(trd_core::DrawableObject::QuadOutline {
-                model: quad_model.to_cols_array(),
-                selected: selected_quad,
-            });
-            if selected_quad {
-                background.push(trd_core::DrawableObject::PlaneGrid {
-                    plane: trd_core::GridPlane::Xy,
-                    model: quad_model.to_cols_array(),
-                });
-                if let Some(axes) = quad_axes {
-                    background.push(trd_core::DrawableObject::CoordinateAxes {
-                        model: axes.to_cols_array(),
-                    });
-                }
-            }
-        }
+        let has_mesh = self.renderer.mesh_count() > 0;
+        let (background, foreground, selection_overlay) = placement_scenes(
+            quad_model,
+            quad_axes,
+            selected_quad,
+            model.filter(|_| has_mesh),
+            state,
+        );
 
-        let mut foreground = Vec::new();
-        let mut selection_overlay = Vec::new();
-        let model = model.map(|model| model.to_cols_array());
-        if let Some(model) = model.filter(|_| self.renderer.mesh_count() > 0) {
-            foreground.push(trd_core::DrawableObject::Mesh {
-                mesh_id: 0,
-                model,
-                mode: state.modes[0],
-            });
-            if state.show_aabb || state.selected == Some(0) {
-                selection_overlay.push(trd_core::DrawableObject::AabbBox { mesh_id: 0, model });
-            }
-            if state.show_local_axes {
-                foreground.push(trd_core::DrawableObject::CoordinateAxes { model });
-            }
-            if state.show_axes {
-                foreground.push(trd_core::DrawableObject::CoordinateAxes {
-                    model: trd_core::Matrix4::IDENTITY.to_cols_array(),
-                });
-            }
-            if state.show_local_grid {
-                foreground.push(trd_core::DrawableObject::PlaneGrid {
-                    plane: trd_core::GridPlane::Xz,
-                    model,
-                });
-            }
-            if state.show_world_grid {
-                foreground.push(trd_core::DrawableObject::PlaneGrid {
-                    plane: trd_core::GridPlane::Xz,
-                    model: trd_core::Matrix4::IDENTITY.to_cols_array(),
-                });
-            }
-        }
-        self.target
-            .render_three_pass(
-                &self.gpu,
-                &mut self.renderer,
-                background_params,
-                foreground_params,
-                &background,
-                &foreground,
-                &selection_overlay,
-            )
+        self.renderer
+            .render_layers(&[
+                trd_core::SceneLayer::new(background_params, &background),
+                trd_core::SceneLayer::new(foreground_params, &foreground),
+                trd_core::SceneLayer::new(foreground_params, &selection_overlay),
+            ])
             .await
             .map_err(|error| error.to_string())
     }
@@ -308,8 +238,9 @@ impl VideoPlacementRenderer {
         source_size: (u32, u32),
     ) -> Result<trd_core::FrameParams, String> {
         let k = frame.k.ok_or("selected video frame has no quad/K")?;
-        let sx = self.target.width() as f32 / source_size.0 as f32;
-        let sy = self.target.height() as f32 / source_size.1 as f32;
+        let (width, height) = self.size();
+        let sx = width as f32 / source_size.0 as f32;
+        let sy = height as f32 / source_size.1 as f32;
         Ok(trd_core::FrameParams {
             k: Some([
                 k[0] * sx,
@@ -382,7 +313,7 @@ impl ImportedAsset {
 
     fn configure(
         self,
-        renderer: &mut trd_core::SceneRenderer,
+        renderer: &mut trd_core::Renderer,
     ) -> (trd_core::RenderMode, trd_core::DisneyMaterial) {
         match self {
             Self::Textured { texture, .. } => {
@@ -409,5 +340,150 @@ impl ImportedAsset {
                 (trd_core::RenderMode::Pbr, asset.material)
             }
         }
+    }
+}
+
+/// Authors the three layers of an editor frame from the timeline + scene state.
+///
+/// * **background** — the video plane, plus the placement quad's outline and (when
+///   selected) its floor grid and basis axes. Seen through the *background*
+///   frame's calibration.
+/// * **foreground** — the placed object and its world/local gizmos, seen through
+///   the *placement* frame's calibration.
+/// * **selection overlay** — the selection AABB, drawn last so it is never
+///   occluded by the object it outlines.
+///
+/// Free function rather than a method: this is placement logic, not rendering, and
+/// keeping it out of the renderer makes it testable without a GPU (#180).
+pub fn placement_scenes(
+    quad_model: Option<trd_core::Matrix4>,
+    quad_axes: Option<trd_core::Matrix4>,
+    selected_quad: bool,
+    model: Option<trd_core::Matrix4>,
+    state: &crate::scene::SceneState,
+) -> (
+    Vec<trd_core::DrawableObject>,
+    Vec<trd_core::DrawableObject>,
+    Vec<trd_core::DrawableObject>,
+) {
+    let mut background = vec![trd_core::DrawableObject::FramePlane {
+        fit: trd_core::FrameFit::Stretch,
+    }];
+    if let Some(quad_model) = quad_model {
+        background.push(trd_core::DrawableObject::QuadOutline {
+            model: quad_model.to_cols_array(),
+            selected: selected_quad,
+        });
+        if selected_quad {
+            background.push(trd_core::DrawableObject::PlaneGrid {
+                plane: trd_core::GridPlane::Xy,
+                model: quad_model.to_cols_array(),
+            });
+            if let Some(axes) = quad_axes {
+                background.push(trd_core::DrawableObject::CoordinateAxes {
+                    model: axes.to_cols_array(),
+                });
+            }
+        }
+    }
+
+    let mut foreground = Vec::new();
+    let mut selection_overlay = Vec::new();
+    if let Some(model) = model.map(|model| model.to_cols_array()) {
+        foreground.push(trd_core::DrawableObject::Mesh {
+            mesh_id: 0,
+            model,
+            mode: state.modes[0],
+        });
+        if state.show_aabb || state.selected == Some(0) {
+            selection_overlay.push(trd_core::DrawableObject::AabbBox { mesh_id: 0, model });
+        }
+        if state.show_local_axes {
+            foreground.push(trd_core::DrawableObject::CoordinateAxes { model });
+        }
+        if state.show_axes {
+            foreground.push(trd_core::DrawableObject::CoordinateAxes {
+                model: trd_core::Matrix4::IDENTITY.to_cols_array(),
+            });
+        }
+        if state.show_local_grid {
+            foreground.push(trd_core::DrawableObject::PlaneGrid {
+                plane: trd_core::GridPlane::Xz,
+                model,
+            });
+        }
+        if state.show_world_grid {
+            foreground.push(trd_core::DrawableObject::PlaneGrid {
+                plane: trd_core::GridPlane::Xz,
+                model: trd_core::Matrix4::IDENTITY.to_cols_array(),
+            });
+        }
+    }
+    (background, foreground, selection_overlay)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scene::SceneState;
+
+    fn is_axes(d: &trd_core::DrawableObject) -> bool {
+        matches!(d, trd_core::DrawableObject::CoordinateAxes { .. })
+    }
+
+    /// The video plane is always the first background drawable, so everything else
+    /// composites over it.
+    #[test]
+    fn the_video_plane_is_always_drawn_first() {
+        let (background, _, _) = placement_scenes(None, None, false, None, &SceneState::default());
+        assert!(matches!(
+            background.first(),
+            Some(trd_core::DrawableObject::FramePlane { .. })
+        ));
+    }
+
+    /// Selecting the quad reveals its floor grid + basis axes; deselecting hides
+    /// them but keeps the outline.
+    #[test]
+    fn selecting_the_quad_adds_its_grid_and_axes() {
+        let quad = trd_core::Matrix4::IDENTITY;
+        let state = SceneState::default();
+
+        let (unselected, _, _) = placement_scenes(Some(quad), Some(quad), false, None, &state);
+        assert_eq!(unselected.len(), 2, "video plane + quad outline only");
+
+        let (selected, _, _) = placement_scenes(Some(quad), Some(quad), true, None, &state);
+        assert_eq!(selected.len(), 4, "+ floor grid + basis axes");
+        assert!(selected.iter().any(is_axes));
+    }
+
+    /// The selection AABB goes in its own layer, so it is drawn over the object it
+    /// outlines rather than z-fighting with it.
+    #[test]
+    fn the_selection_aabb_is_its_own_layer() {
+        let state = SceneState {
+            selected: Some(0),
+            ..SceneState::default()
+        };
+        let (_, foreground, overlay) =
+            placement_scenes(None, None, false, Some(trd_core::Matrix4::IDENTITY), &state);
+        assert!(matches!(
+            overlay.as_slice(),
+            [trd_core::DrawableObject::AabbBox { mesh_id: 0, .. }]
+        ));
+        assert!(!foreground
+            .iter()
+            .any(|d| matches!(d, trd_core::DrawableObject::AabbBox { .. })));
+    }
+
+    /// Without a placed object there is no foreground at all — the editor still
+    /// shows the video and the quad.
+    #[test]
+    fn a_video_only_frame_has_an_empty_foreground() {
+        let (background, foreground, overlay) =
+            placement_scenes(None, None, false, None, &SceneState::default());
+        assert_eq!(background.len(), 1);
+        assert!(foreground.is_empty());
+        assert!(overlay.is_empty());
     }
 }

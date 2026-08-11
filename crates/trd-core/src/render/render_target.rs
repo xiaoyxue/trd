@@ -101,6 +101,27 @@ pub enum OffscreenError {
 /// An offscreen render target: an owned [`OFFSCREEN_FORMAT`] texture plus the
 /// `MAP_READ` staging buffer used to read it back to tightly-packed RGBA. Built
 /// once for a fixed size; [`render`](Self::render) reuses both every frame.
+/// One pass of a layered render: a scene plus the camera it is seen through.
+///
+/// Layers exist because a composited frame is not one camera's scene — the video
+/// editor draws the video plane through the *background* frame's calibration, then
+/// the placed object through the *placement* frame's, then its selection gizmos on
+/// top. Each layer keeps the accumulated color and clears depth.
+#[derive(Debug, Clone, Copy)]
+pub struct SceneLayer<'a> {
+    /// The camera/projection this layer is rendered through.
+    pub params: FrameParams,
+    /// What this layer draws.
+    pub scene: &'a [DrawableObject],
+}
+
+impl<'a> SceneLayer<'a> {
+    /// A layer drawing `scene` through `params`.
+    pub fn new(params: FrameParams, scene: &'a [DrawableObject]) -> Self {
+        Self { params, scene }
+    }
+}
+
 pub struct OffscreenTarget {
     texture: wgpu::Texture,
     staging: wgpu::Buffer,
@@ -233,6 +254,44 @@ impl OffscreenTarget {
         .await
     }
 
+    /// Renders `layers` back-to-front into the target, then reads it back.
+    ///
+    /// The **first** layer clears; every later one preserves the accumulated color
+    /// while clearing depth, so it composites *over* what came before rather than
+    /// z-fighting with it — that is what "layer" means here (an overlay pass), not
+    /// a general depth-sorted scene split. Each layer is submitted separately,
+    /// because [`SceneRenderer`] uploads instances into one shared buffer and the
+    /// next layer's upload must not race the previous layer's draw.
+    ///
+    /// An empty `layers` renders nothing and reads the cleared target back.
+    pub async fn render_layers(
+        &self,
+        gpu: &GpuContext,
+        renderer: &mut SceneRenderer,
+        layers: &[SceneLayer<'_>],
+    ) -> Result<Vec<u8>, OffscreenError> {
+        let (device, queue) = (&gpu.device, &gpu.queue);
+        let view = self
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let viewport = Viewport {
+            width: self.width,
+            height: self.height,
+        };
+        for (index, layer) in layers.iter().enumerate() {
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("trd offscreen layer"),
+            });
+            if index == 0 {
+                renderer.encode(&mut encoder, &view, layer.params, layer.scene, viewport);
+            } else {
+                renderer.encode_overlay(&mut encoder, &view, layer.params, layer.scene, viewport);
+            }
+            queue.submit(Some(encoder.finish()));
+        }
+        self.read_back(gpu).await
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn render_passes(
         &self,
@@ -281,6 +340,18 @@ impl OffscreenTarget {
             });
             renderer.encode_overlay(&mut encoder, &view, foreground_params, overlay, viewport);
         }
+        queue.submit(Some(encoder.finish()));
+        self.read_back(gpu).await
+    }
+
+    /// Copies the target texture into the staging buffer and maps it back to
+    /// tightly-packed row-major RGBA. The shared read-back tail of every render
+    /// path on this target.
+    async fn read_back(&self, gpu: &GpuContext) -> Result<Vec<u8>, OffscreenError> {
+        let (device, queue) = (&gpu.device, &gpu.queue);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("trd offscreen readback"),
+        });
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.texture,
