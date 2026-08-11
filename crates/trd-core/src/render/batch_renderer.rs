@@ -341,8 +341,7 @@ impl BatchRenderer {
     ) -> Result<Vec<u8>, StreamError> {
         let scene = self.build_scene(draws, frame);
         Ok(pollster::block_on(self.target.render(
-            &self.gpu.device,
-            &self.gpu.queue,
+            &self.gpu,
             &mut self.renderer,
             params,
             &scene,
@@ -363,14 +362,6 @@ impl BatchRenderer {
             None => self.pick_target = Some(PickTarget::new(&self.gpu.device, w, h)),
         }
         let target = self.pick_target.as_ref()?;
-        pollster::block_on(target.pick(
-            &self.gpu.device,
-            &self.gpu.queue,
-            &mut self.renderer,
-            params,
-            draws,
-            x,
-            y,
-        ))
+        pollster::block_on(target.pick(&self.gpu, &mut self.renderer, params, draws, x, y))
     }
 }

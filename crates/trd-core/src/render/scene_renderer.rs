@@ -559,8 +559,7 @@ impl SceneRenderer {
     ///
     /// Panics if `rgba.len() != width * height * 4` or either dimension is zero.
     pub fn update_frame_texture_rgba(&mut self, rgba: &[u8], width: u32, height: u32) {
-        self.frame_plane
-            .upload_rgba(&self.gpu.device, &self.gpu.queue, rgba, width, height);
+        self.frame_plane.upload_rgba(&self.gpu, rgba, width, height);
     }
 
     /// Whether a background frame texture is currently bound (so a
@@ -638,8 +637,7 @@ impl SceneRenderer {
         let batches = build_batches(scene, |mesh_id| {
             self.store.meshes.get(mesh_id).map(|mesh| mesh.base_model)
         });
-        self.store
-            .upload_instances(&self.gpu.device, &self.gpu.queue, &batches.instances);
+        self.store.upload_instances(&self.gpu, &batches.instances);
 
         // 3. Match the depth + (when MSAA is on) color attachments to the viewport
         //    (solid meshes z-occlude; the multisampled color, if any, is resolved

@@ -8,6 +8,7 @@
 //! of the old `update_frame_texture_rgba` machinery lives here so `SceneRenderer`
 //! only has to delegate to it.
 
+use super::GpuContext;
 use super::{
     create_frame_bind_group_layout, create_frame_plane_pipeline, frame_fit_uv_scale, FrameFit,
     Viewport,
@@ -87,14 +88,8 @@ impl FramePlane {
     /// near-fullscreen background samples ~1:1).
     ///
     /// Panics if `rgba.len() != width * height * 4` or either dimension is zero.
-    pub(super) fn upload_rgba(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        rgba: &[u8],
-        width: u32,
-        height: u32,
-    ) {
+    pub(super) fn upload_rgba(&mut self, gpu: &GpuContext, rgba: &[u8], width: u32, height: u32) {
+        let (device, queue) = (&gpu.device, &gpu.queue);
         assert!(
             width > 0 && height > 0,
             "frame texture dimensions must be non-zero"

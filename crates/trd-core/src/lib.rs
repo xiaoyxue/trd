@@ -41,7 +41,7 @@ pub use render::{
     FrameFit, FrameParams, GpuContext, GpuInitError, GpuRequest, GridPlane, ImageBasedLighting,
     Light, Lighting, LimitsPreset, Mesh, MeshShading, Msaa, OffscreenError, OffscreenTarget,
     OnscreenTarget, PbrConfig, PbrDebugView, PickTarget, PointLight, RenderMode, RenderOptions,
-    Scene, SceneRenderer, ToneMapping, Tonemap, TriangleRenderer, Vertex, Viewport,
+    RenderTarget, Scene, SceneRenderer, ToneMapping, Tonemap, TriangleRenderer, Vertex, Viewport,
     OFFSCREEN_FORMAT,
 };
 // The native-only headless batch harness, relocated from `stream` into `render`

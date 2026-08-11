@@ -210,13 +210,7 @@ impl WindowRenderer {
             show_local_grid_mesh,
             frame_fit,
         );
-        self.target.present(
-            &self.gpu.device,
-            &self.gpu.queue,
-            renderer,
-            texture,
-            frame.params,
-            &scene,
-        );
+        self.target
+            .present(&self.gpu, renderer, texture, frame.params, &scene);
     }
 }

@@ -32,14 +32,14 @@ impl BoundTexture {
             height: 1,
             rgba: vec![255, 255, 255, 255],
         };
-        let bind_group = upload_texture(&gpu.device, &gpu.queue, &layout, &image);
+        let bind_group = upload_texture(gpu, &layout, &image);
         Self { layout, bind_group }
     }
 
     /// Replaces the source image, uploading it immediately.
     pub(super) fn set(&mut self, gpu: &GpuContext, texture: &dyn Texture) {
         let image = texture.to_image();
-        self.bind_group = upload_texture(&gpu.device, &gpu.queue, &self.layout, &image);
+        self.bind_group = upload_texture(gpu, &self.layout, &image);
     }
 
     /// The group-1 bind group. Always valid: it is uploaded at construction and

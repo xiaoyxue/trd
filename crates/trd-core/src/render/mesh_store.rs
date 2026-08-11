@@ -237,12 +237,8 @@ impl MeshStore {
 
     /// Uploads the flattened instance models, growing the buffer (to the next
     /// power of two) when the frame needs more instances than it holds.
-    pub(super) fn upload_instances(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        instances: &[InstanceRaw],
-    ) {
+    pub(super) fn upload_instances(&mut self, gpu: &GpuContext, instances: &[InstanceRaw]) {
+        let (device, queue) = (&gpu.device, &gpu.queue);
         if instances.len() as u32 > self.instance_capacity {
             self.instance_capacity = (instances.len() as u32).next_power_of_two();
             self.instance_buffer = create_instance_buffer(device, self.instance_capacity);

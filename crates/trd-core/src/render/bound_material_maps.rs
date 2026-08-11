@@ -69,10 +69,9 @@ fn build_bind_group(
     mr_image: &ImageData,
     normal_image: &ImageData,
 ) -> wgpu::BindGroup {
-    let (device, queue) = (&gpu.device, &gpu.queue);
-    let metallic_roughness =
-        upload_linear_view(device, queue, "trd metallic-roughness", mr_image, false);
-    let normal = upload_linear_view(device, queue, "trd normal map", normal_image, true);
+    let device = &gpu.device;
+    let metallic_roughness = upload_linear_view(gpu, "trd metallic-roughness", mr_image, false);
+    let normal = upload_linear_view(gpu, "trd normal map", normal_image, true);
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
         label: Some("trd PBR material map sampler"),
         address_mode_u: wgpu::AddressMode::Repeat,
@@ -125,12 +124,12 @@ fn pixel(rgba: [u8; 4]) -> ImageData {
 }
 
 fn upload_linear_view(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
+    gpu: &GpuContext,
     label: &str,
     image: &ImageData,
     normal_map: bool,
 ) -> wgpu::TextureView {
+    let (device, queue) = (&gpu.device, &gpu.queue);
     let size = wgpu::Extent3d {
         width: image.width,
         height: image.height,
