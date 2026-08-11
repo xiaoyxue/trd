@@ -39,9 +39,9 @@ pub use render::{
     build_scene, create_instance, create_mesh_pipeline, plane_grid_overlays,
     selection_aabb_overlay, CameraFormError, Draw, DrawableObject, EnvMapData, FrameFit,
     FrameParams, GpuContext, GpuInitError, GpuRequest, GridPlane, ImageBasedLighting, Light,
-    Lighting, LimitsPreset, Mesh, MeshRenderer, MeshShading, OffscreenError, OffscreenTarget,
-    OnscreenTarget, PbrDebugView, PickTarget, PointLight, RenderMode, Scene, ToneMapping, Tonemap,
-    TriangleRenderer, Vertex, Viewport, OFFSCREEN_FORMAT,
+    Lighting, LimitsPreset, Mesh, MeshRenderer, MeshShading, Msaa, OffscreenError, OffscreenTarget,
+    OnscreenTarget, PbrConfig, PbrDebugView, PickTarget, PointLight, RenderMode, RenderOptions,
+    Scene, ToneMapping, Tonemap, TriangleRenderer, Vertex, Viewport, OFFSCREEN_FORMAT,
 };
 // The native-only headless batch harness, relocated from `stream` into `render`
 // (#134); the crate-root re-export path (`trd_core::BatchRenderer`) is unchanged.
@@ -65,8 +65,7 @@ pub use video_editing::{
 mod stream;
 #[cfg(not(target_arch = "wasm32"))]
 pub use stream::{
-    decode_frames, read_scene_stream_with_meta, run_stream, FrameResolver, Msaa, PbrConfig,
-    RenderOptions, StreamError,
+    decode_frames, read_scene_stream_with_meta, run_stream, FrameResolver, StreamError,
 };
 
 /// Returns the project greeting used by the CLI and web entry points.

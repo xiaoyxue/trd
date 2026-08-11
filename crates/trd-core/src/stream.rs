@@ -30,7 +30,7 @@ use arrow::datatypes::Schema;
 // `Matrix4` is referenced only by the `#[cfg(test)]` unit tests (imported there).
 use crate::protocol::{ProtocolError, PROTOCOL_VERSION};
 use crate::render::{
-    BatchRenderer, Draw, FrameFit, FrameParams, GridPlane, Mesh, OffscreenError, RenderMode,
+    BatchRenderer, Draw, FrameFit, FrameParams, Mesh, OffscreenError, RenderOptions,
 };
 use crate::texture::ImageTexture;
 use crate::OutputSession;
@@ -470,78 +470,6 @@ fn render_and_write_batch<W: Write>(
     Ok(())
 }
 
-/// The typed Disney PBR configuration threaded through [`RenderOptions`].
-#[derive(Debug, Clone, Default)]
-pub struct PbrConfig {
-    /// The Disney material applied to every PBR mesh.
-    pub material: crate::DisneyMaterial,
-    /// Scene light-rig controls.
-    pub lighting: crate::Lighting,
-    /// Image-based-lighting controls applied to every PBR mesh.
-    pub ibl: crate::ImageBasedLighting,
-    /// Per-object output transform seeded onto every PBR mesh.
-    pub tone_mapping: crate::ToneMapping,
-    /// The HDR environment probe reflected by metallic surfaces (`None` ⇒ no
-    /// environment reflection).
-    pub env_map: Option<crate::EnvMapData>,
-}
-
-/// The mesh-pass multisample anti-aliasing setting threaded through
-/// [`RenderOptions`]. [`Msaa::X4`] (the default) renders the 4×-multisampled mesh
-/// pass — smooth wireframe / gizmo / AABB / silhouette edges; [`Msaa::Off`]
-/// renders single-sampled (aliased edges, the raw rasterized coverage). Both are
-/// covered by the golden-render test.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Msaa {
-    /// 4× multisampling — the default anti-aliased mesh pass.
-    #[default]
-    X4,
-    /// No multisampling: render the mesh pass single-sampled (aliased edges).
-    Off,
-}
-
-impl Msaa {
-    /// The wgpu sample count for this setting (`4` for [`Msaa::X4`], `1` for
-    /// [`Msaa::Off`]).
-    pub(crate) fn sample_count(self) -> u32 {
-        match self {
-            Msaa::X4 => crate::render::MSAA_SAMPLE_COUNT,
-            Msaa::Off => 1,
-        }
-    }
-}
-
-/// Appearance options for [`run_stream`]: the mesh draw [`RenderMode`] plus the
-/// optional AABB / coordinate-axes gizmo overlays. Bundled into one value so the
-/// entry point threads a single struct instead of many positional flags (and
-/// stays within clippy's argument budget). [`Default`] is filled, no overlays,
-/// 4× MSAA.
-#[derive(Debug, Clone, Default)]
-pub struct RenderOptions {
-    /// How meshes are drawn (filled / wireframe / textured / PBR).
-    pub mode: RenderMode,
-    /// Overlay each drawn mesh instance's axis-aligned bounding box (#42).
-    pub show_aabb: bool,
-    /// Overlay a world-origin coordinate-axes gizmo (#42).
-    pub show_axes: bool,
-    /// Overlay a coordinate-axes gizmo at *each* drawn object's local (model)
-    /// frame — its model-space X/Y/Z axes as placed (e.g. #77's `(e1,e2,e3)`).
-    pub show_local_axes: bool,
-    /// Overlay a coordinate-plane grid lattice on the given plane at *each*
-    /// drawn object's local (model) frame — e.g. `Some(GridPlane::Xy)` tiles a
-    /// grid across a placement quad's local floor. `None` disables it.
-    pub show_local_grid: Option<GridPlane>,
-    /// Narrows [`show_local_grid`](Self::show_local_grid) to draws of a single
-    /// `mesh_id` (the placement quad), so a wireframe *content* mesh doesn't also
-    /// pick up a floor grid. `None` keeps the grid on every wireframe draw (#114).
-    pub show_local_grid_mesh: Option<u32>,
-    /// Disney PBR material + environment map, applied when `mode` is
-    /// [`RenderMode::Pbr`] (also honoured for any per-draw PBR-mode draws).
-    pub pbr: Option<PbrConfig>,
-    /// Mesh-pass multisample anti-aliasing (default [`Msaa::X4`]).
-    pub msaa: Msaa,
-}
-
 /// Reads a trd input stream, renders each frame, and writes an Arrow IPC stream
 /// of `fixed_shape_tensor` images to `output`. Output batch boundaries mirror
 /// input batches (one batch in flight).
@@ -655,7 +583,7 @@ mod tests {
     use crate::protocol::{
         MESH_TABLE_KIND, PARAMS_TABLE_KIND, PROTOCOL_VERSION_KEY, TABLE_KIND_KEY,
     };
-    use crate::render::{build_scene, DrawableObject};
+    use crate::render::{build_scene, DrawableObject, RenderMode};
     use arrow::array::{
         Array, ArrayRef, FixedSizeListArray, FixedSizeListArray as U8List, Float32Array, ListArray,
         StringArray, UInt32Array, UInt8Array,
