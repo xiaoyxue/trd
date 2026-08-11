@@ -18,19 +18,9 @@ use thiserror::Error;
 
 /// Builds the platform-appropriate [`wgpu::Instance`].
 ///
-/// Native uses `new_without_display_handle_from_env()` so `WGPU_BACKEND`
-/// (e.g. `gl` on WSL2, per `AGENTS.md`) is honoured; wasm uses
-/// [`wgpu::Instance::default`].
-pub fn create_instance() -> wgpu::Instance {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env())
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        wgpu::Instance::default()
-    }
-}
+/// Re-exported from [`platform`](super::platform), where the native/wasm split
+/// lives; see there for why the two differ.
+pub use super::platform::create_instance;
 
 /// Which device limits to request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -309,18 +309,9 @@ impl OffscreenTarget {
         slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = sender.send(result);
         });
-        // The single genuinely target-specific line: native blocks the calling
-        // thread until the map completes (so `block_on` returns a finished
-        // future); wasm can't block the event loop, so it kicks the queue once
-        // and lets `.await` yield to the browser.
-        #[cfg(not(target_arch = "wasm32"))]
-        device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .map_err(|e| OffscreenError::Gpu(e.to_string()))?;
-        #[cfg(target_arch = "wasm32")]
-        device
-            .poll(wgpu::PollType::Poll)
-            .map_err(|e| OffscreenError::Gpu(e.to_string()))?;
+        // Native blocks until the mapping completes; the browser kicks the queue
+        // and lets the `.await` below yield. See `platform::poll_for_map`.
+        super::platform::poll_for_map(device).map_err(|e| OffscreenError::Gpu(e.to_string()))?;
         receiver
             .await
             .map_err(|_| OffscreenError::Gpu("readback callback cancelled".to_owned()))?
