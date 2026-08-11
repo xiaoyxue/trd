@@ -47,13 +47,48 @@ impl PbrState {
         }
     }
 
-    pub(crate) fn apply(&self, renderer: &mut SceneRenderer) {
+    pub(crate) fn apply(&self, renderer: &mut impl PbrSink) {
         renderer.set_disney_material(self.material.clone());
         renderer.set_lighting(self.lighting);
         renderer.set_image_based_lighting(self.ibl);
         renderer.set_tone_mapping(self.tone_mapping);
     }
 }
+
+/// The scene-wide PBR setters [`PbrState`] writes.
+///
+/// Two implementors only because the offscreen surface already renders through
+/// `trd-core`'s [`Renderer`](trd_core::Renderer) harness while the canvas surface
+/// still drives a bare [`SceneRenderer`]; slice 12 of #180 gives the canvas the
+/// harness too, and this trait goes away with it.
+pub(crate) trait PbrSink {
+    fn set_disney_material(&mut self, material: DisneyMaterial);
+    fn set_lighting(&mut self, lighting: Lighting);
+    fn set_image_based_lighting(&mut self, ibl: ImageBasedLighting);
+    fn set_tone_mapping(&mut self, tone_mapping: ToneMapping);
+}
+
+macro_rules! impl_pbr_sink {
+    ($t:ty) => {
+        impl PbrSink for $t {
+            fn set_disney_material(&mut self, material: DisneyMaterial) {
+                <$t>::set_disney_material(self, material);
+            }
+            fn set_lighting(&mut self, lighting: Lighting) {
+                <$t>::set_lighting(self, lighting);
+            }
+            fn set_image_based_lighting(&mut self, ibl: ImageBasedLighting) {
+                <$t>::set_image_based_lighting(self, ibl);
+            }
+            fn set_tone_mapping(&mut self, tone_mapping: ToneMapping) {
+                <$t>::set_tone_mapping(self, tone_mapping);
+            }
+        }
+    };
+}
+
+impl_pbr_sink!(SceneRenderer);
+impl_pbr_sink!(trd_core::Renderer);
 
 /// Wraps any `Display` message as a JS `Error` (for a rejected `Promise` or a
 /// thrown exception). Shared by both renderers.

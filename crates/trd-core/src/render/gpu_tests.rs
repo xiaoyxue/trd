@@ -180,6 +180,46 @@ fn offscreen_target_reports_its_render_format_and_size() {
     assert_eq!(target.view_format(), OFFSCREEN_FORMAT);
 }
 
+/// [`Renderer::with_gpu`] must produce the same frame as [`Renderer::with_meshes`].
+///
+/// The streaming browser front-end owns its device before it owns its meshes, so
+/// it builds the harness on an existing [`GpuContext`] instead of letting the
+/// harness request one (#180). That second constructor is only safe if it is a
+/// pure "bring your own device" variant — same auto-fit preview transforms, same
+/// offscreen target, same pixels — so this renders one scene through both and
+/// compares them byte for byte.
+#[test]
+#[ignore = "requires a GPU adapter"]
+#[cfg(not(target_arch = "wasm32"))]
+fn with_gpu_renders_identically_to_with_meshes() {
+    use crate::Renderer;
+
+    let (width, height) = (64, 64);
+    let meshes = [Mesh::hello_triangle()];
+    let scene = vec![DrawableObject::Mesh {
+        mesh_id: 0,
+        model: Matrix4::IDENTITY.to_cols_array(),
+        mode: RenderMode::Filled,
+    }];
+
+    let mut owned = pollster::block_on(Renderer::with_meshes(width, height, &meshes))
+        .expect("the harness requests its own device");
+    let expected =
+        pollster::block_on(owned.render_scene(FrameParams::IDENTITY, &scene)).expect("renders");
+
+    let mut borrowed = Renderer::with_gpu(test_gpu(), width, height, &meshes)
+        .expect("the harness accepts an existing device");
+    let actual =
+        pollster::block_on(borrowed.render_scene(FrameParams::IDENTITY, &scene)).expect("renders");
+
+    assert_eq!(borrowed.mesh_count(), 1);
+    assert_eq!(actual.len(), (width * height * 4) as usize);
+    assert_eq!(
+        actual, expected,
+        "with_gpu and with_meshes disagree about the same scene"
+    );
+}
+
 /// A freshly constructed renderer must be able to draw **without any setter
 /// call at all**: no texture, no material maps, no environment probe.
 ///
