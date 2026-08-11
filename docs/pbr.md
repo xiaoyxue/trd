@@ -45,7 +45,7 @@ set.
 The CPU model mirrors the inputs to the shader instead of folding them into one
 catch-all struct:
 
-- [`DisneyMaterial`](../crates/trd-core/src/render/material/disney.rs) owns only
+- [`DisneyMaterial`](../crates/trd-core/src/material/disney.rs) owns only
   the **11 Burley 2012 surface parameters**, plus unshaded import metadata.
 - [`Lighting`](../crates/trd-core/src/render/light.rs) owns ambient fill and the
   fixed key/fill/rim rig gain; `Light` and `PointLight` give both uniform arrays

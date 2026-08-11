@@ -19,6 +19,7 @@ use super::env_background::{EnvBackground, EnvBackgroundSettings};
 use super::frame_plane::FramePlane;
 use super::*;
 
+use crate::material::DisneyMaterial;
 use crate::math::Matrix4;
 use crate::texture::Texture;
 

@@ -7,6 +7,7 @@
 mod camera;
 mod frame;
 mod gltf;
+mod material;
 mod math;
 mod mesh;
 mod output;
@@ -30,14 +31,17 @@ pub use protocol::{
     ProtocolError, DEFAULT_FRAME_RATE, FRAME_RATE_KEY, PROTOCOL_VERSION, PROTOCOL_VERSION_KEY,
     TABLE_KIND_KEY,
 };
+// Material models are plain data (no wgpu, no bytemuck), so they sit beside
+// `mesh`/`texture`/`camera` at the crate root rather than inside the render
+// backend (#180). The public paths (`trd_core::DisneyMaterial`, ...) are unchanged.
+pub use material::{AlphaMode, Auxiliary, DisneyMaterial, Material, MaterialTextures};
 pub use render::{
     build_scene, create_instance, create_mesh_pipeline, plane_grid_overlays,
-    selection_aabb_overlay, AlphaMode, Auxiliary, CameraFormError, DisneyMaterial, Draw,
-    DrawableObject, EnvMapData, FrameFit, FrameParams, GpuContext, GpuInitError, GpuRequest,
-    GridPlane, ImageBasedLighting, Light, Lighting, LimitsPreset, Material, MaterialTextures, Mesh,
-    MeshRenderer, MeshShading, OffscreenError, OffscreenTarget, OnscreenTarget, PbrDebugView,
-    PickTarget, PointLight, RenderMode, Scene, ToneMapping, Tonemap, TriangleRenderer, Vertex,
-    Viewport, OFFSCREEN_FORMAT,
+    selection_aabb_overlay, CameraFormError, Draw, DrawableObject, EnvMapData, FrameFit,
+    FrameParams, GpuContext, GpuInitError, GpuRequest, GridPlane, ImageBasedLighting, Light,
+    Lighting, LimitsPreset, Mesh, MeshRenderer, MeshShading, OffscreenError, OffscreenTarget,
+    OnscreenTarget, PbrDebugView, PickTarget, PointLight, RenderMode, Scene, ToneMapping, Tonemap,
+    TriangleRenderer, Vertex, Viewport, OFFSCREEN_FORMAT,
 };
 // The native-only headless batch harness, relocated from `stream` into `render`
 // (#134); the crate-root re-export path (`trd_core::BatchRenderer`) is unchanged.
