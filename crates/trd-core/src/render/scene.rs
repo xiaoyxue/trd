@@ -18,7 +18,7 @@ pub enum RenderMode {
     /// Draw triangles filled, sampling the renderer's bound texture at each
     /// vertex UV instead of the vertex color (#20).
     Textured,
-    /// Physically-based **Disney principled BRDF** shading (`disney.wgsl`): the
+    /// Physically-based **Disney principled BRDF** shading (`pbr.wgsl`): the
     /// bound albedo lit by a small virtual light rig plus an optional
     /// equirectangular HDR environment-map reflection, with smooth shading
     /// normals derived at upload. Metallic materials read as shiny reflective

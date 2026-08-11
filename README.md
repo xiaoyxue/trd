@@ -198,7 +198,7 @@ choice, **not** a wire column, so the same stream renders any way.
 
 ## [Material (PBR)](docs/pbr.md)
 
-`--pbr` shades meshes with the **Disney principled BRDF** (`disney.wgsl`) — the
+`--pbr` shades meshes with the **Disney principled BRDF** (`shader/pbr.wgsl`) — the
 bound albedo lit by a virtual key/fill/rim light rig plus an optional HDR
 environment probe, with filmic tone mapping. The material + lighting are tunable
 from the CLI: `--metallic` / `--roughness` / `--specular` / `--clearcoat`,

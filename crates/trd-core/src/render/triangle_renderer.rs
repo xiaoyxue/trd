@@ -121,7 +121,7 @@ impl TriangleRenderer {
             bind_group_layouts: &[Some(&tint_layout)],
             immediate_size: 0,
         });
-        let shader = device.create_shader_module(wgpu::include_wgsl!("../triangle.wgsl"));
+        let shader = device.create_shader_module(wgpu::include_wgsl!("../shader/triangle.wgsl"));
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("trd triangle pipeline"),
             layout: Some(&pipeline_layout),

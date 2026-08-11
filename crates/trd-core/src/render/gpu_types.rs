@@ -127,7 +127,7 @@ impl GizmoLineVertex {
     }
 }
 
-/// A mesh vertex for the Disney PBR path (`disney.wgsl`): position + smooth
+/// A mesh vertex for the Disney PBR path (`pbr.wgsl`): position + smooth
 /// shading **normal** (loc 1) + UV. Mirrors [`Vertex`]'s 32-byte stride, but the
 /// second attribute is a normal rather than a color — the assets carry no `vn`,
 /// so [`compute_smooth_normals`](super::pbr::compute_smooth_normals) derives it
@@ -167,7 +167,7 @@ impl PbrVertex {
         },
     ];
 
-    /// Returns the vertex buffer layout expected by `disney.wgsl`.
+    /// Returns the vertex buffer layout expected by `pbr.wgsl`.
     pub(crate) const fn layout() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,

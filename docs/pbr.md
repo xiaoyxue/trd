@@ -2,7 +2,7 @@
 
 `--pbr` shades meshes with the **Disney principled BRDF** (Burley 2012) instead of
 flat per-vertex color or a plain textured lookup. The BRDF lives in
-[`crates/trd-core/src/disney.wgsl`](../crates/trd-core/src/disney.wgsl) (reference:
+[`crates/trd-core/src/shader/pbr.wgsl`](../crates/trd-core/src/shader/pbr.wgsl) (reference:
 [`ref/DisneyPBR/shader.frag`](../ref/DisneyPBR/shader.frag)); it lights the bound
 albedo with a fixed **virtual light rig** (three directional lights — key, fill,
 rim, in world space, so a spinning object is lit from changing angles) plus an
@@ -82,7 +82,7 @@ smooth) — the look used for the drink cans in the Olympic demo.
 
 `DisneyMaterial::auxiliary` preserves alpha mode/cutoff, opacity, double-sided,
 emissive strength, IOR, transmission, and core texture-slot presence. These
-fields are deliberately **not consumed by `disney.wgsl` yet**.
+fields are deliberately **not consumed by `pbr.wgsl` yet**.
 `trd_core::import_gltf_materials` parses glTF material/KHR data from caller-owned
 bytes into this model without filesystem access; its per-parameter `sources` map
 records whether values came from glTF, an extension-derived mapping, or a
@@ -92,7 +92,8 @@ default.
 normals, and its embedded base-color / metallic-roughness / normal textures.
 `trd-gui` web accepts the GLB directly through
 `?mesh=/assets/.../model.glb` and starts it in PBR mode. The glTF path uses
-`pbr.wgsl`; the original Disney-only `disney.wgsl` remains unchanged.
+`pbr.wgsl`, the live PBR shader. The original Disney-only `shader/disney.wgsl`
+is kept as reference material and is no longer compiled.
 
 ## Tone mapping
 
