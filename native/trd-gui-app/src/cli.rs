@@ -196,7 +196,12 @@ impl Cli {
             image_based_lighting: self.image_based_lighting(),
             tone_mapping: self.tone_mapping(),
             lighting: self.lighting(),
-            environment_available: false,
+            // `--env` is what makes the probe available, exactly as the browser
+            // seeds it from its `?env=` asset. Hardcoding `false` here left the
+            // side panel's "Environment background" checkbox permanently
+            // disabled, so #196's shared `scene_for` fix was unreachable
+            // natively.
+            environment_available: self.env.is_some(),
         })
     }
 }
@@ -233,5 +238,22 @@ mod tests {
     fn no_pbr_flag_keeps_filled_mode() {
         let cli = Cli::parse_from(["trd-gui"]);
         assert_eq!(cli.scene_state().modes[0], RenderMode::Filled);
+    }
+
+    /// `--env` is the native counterpart of the browser's `?env=`: it must seed
+    /// `environment_available` so the side panel's "Environment background"
+    /// checkbox is enabled (it was hardcoded `false`, leaving the native toggle
+    /// permanently greyed out).
+    #[test]
+    fn env_flag_makes_the_environment_background_available() {
+        let cli = Cli::parse_from(["trd-gui", "--env", "probe.hdr"]);
+        let state = cli.scene_state();
+        assert!(state.environment_available);
+        assert!(state.show_environment_background);
+
+        let cli = Cli::parse_from(["trd-gui"]);
+        let state = cli.scene_state();
+        assert!(!state.environment_available);
+        assert!(!state.show_environment_background);
     }
 }
