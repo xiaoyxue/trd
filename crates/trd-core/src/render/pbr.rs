@@ -1,9 +1,9 @@
 //! GPU packing and smooth-normal derivation for the Disney PBR path.
 
 use super::{
-    DisneyMaterial, ImageBasedLighting, Lighting, ToneMapping, Vertex, DEFAULT_LIGHTS,
-    DEFAULT_POINT_LIGHTS,
+    ImageBasedLighting, Lighting, ToneMapping, Vertex, DEFAULT_LIGHTS, DEFAULT_POINT_LIGHTS,
 };
+use crate::material::DisneyMaterial;
 use crate::math::Vector3;
 
 /// Diagnostic output of one PBR material input.

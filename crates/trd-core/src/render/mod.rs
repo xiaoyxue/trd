@@ -16,7 +16,6 @@ mod gpu_context;
 mod gpu_types;
 mod ibl;
 mod light;
-mod material;
 mod mesh_renderer;
 mod offscreen;
 mod onscreen;
@@ -40,7 +39,6 @@ pub use gpu_context::{create_instance, GpuContext, GpuInitError, GpuRequest, Lim
 pub use gpu_types::{Mesh, MeshShading, Vertex};
 pub use ibl::{EnvMapData, ImageBasedLighting};
 pub use light::{Light, Lighting, PointLight};
-pub use material::{AlphaMode, Auxiliary, DisneyMaterial, Material, MaterialTextures};
 pub use mesh_renderer::MeshRenderer;
 pub use offscreen::{OffscreenError, OffscreenTarget, OFFSCREEN_FORMAT};
 pub use onscreen::OnscreenTarget;
