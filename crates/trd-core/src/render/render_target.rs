@@ -53,7 +53,7 @@ pub trait RenderTarget {
 
 // [`OffscreenTarget`] — the shared **offscreen** render harness (#103, Part B).
 //
-// Every front-end that renders headless to pixels (the native [`BatchRenderer`]
+// Every front-end that renders headless to pixels (the native [`Renderer`]
 // behind the CLI + GUI, `trd-wasm`'s browser `OffscreenRenderer`, `trd-gui`'s
 // browser `WebRenderer`) used to own an identical copy of the same GPU
 // plumbing: a `Rgba8UnormSrgb` target texture, a `MAP_READ` staging buffer, and

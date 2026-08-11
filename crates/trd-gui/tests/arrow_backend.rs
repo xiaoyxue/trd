@@ -3,7 +3,7 @@
 //! The Arrow backend authors the scene as a `[mesh][params]` Arrow stream, runs
 //! it through `trd-core`'s `run_stream`, and decodes the image back — the same
 //! pipeline the headless CLI uses. Because both backends ultimately drive the
-//! same `BatchRenderer` with the same decoded mesh / camera / draws, their output
+//! same `Renderer` with the same decoded mesh / camera / draws, their output
 //! must be **pixel-identical**. Needs a GPU adapter, so it is `#[ignore]`d and run
 //! locally (MSVC on Windows, nixGL on Linux); CI skips it.
 

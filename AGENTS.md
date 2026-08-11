@@ -26,7 +26,7 @@ Guidance for agents working in this repository.
   for every primitive. Geometry is owned once (decode-once mesh store + shared
   gizmo buffers); a drawable is a light handle naming *which* primitive + its
   per-frame model. Every front-end hands the same `Scene`
-  (`= Vec<DrawableObject>`, rebuilt per frame) to `MeshRenderer::encode` without
+  (`= Vec<DrawableObject>`, rebuilt per frame) to `SceneRenderer::encode` without
   per-type branching; the render core batches it by draw kind. A single-object
   frame is the degenerate one-element scene. Add a primitive by adding a variant,
   not by bolting flags onto the renderer. Wireframe (and PBR) is a *mode* of

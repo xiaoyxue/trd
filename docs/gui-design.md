@@ -26,7 +26,7 @@ Slices 0–3**; the Arrow round-trip and wasm land as their own follow-up PRs.
   (orbit camera + object transform → `FrameParams`/`Draw`s), `interaction.rs`
   (`InteractionController`: events → scene, unit-tested, egui-free),
   `render_backend.rs` (`SceneRenderer` trait + `InProcRenderer` over
-  `trd_core::BatchRenderer`), `app.rs` (egui panels), `cli.rs` (`--mesh` /
+  `trd_core::Renderer`), `app.rs` (egui panels), `cli.rs` (`--mesh` /
   `--texture` / `--width` / `--height`, built-in default cube). Render modes
   Filled / Wireframe / **Textured** (`--texture` binds an albedo, downscaled to
   the renderer's 2048² limit). Deps: `eframe`/`egui` 0.35 (glow), `trd-core`,
@@ -64,7 +64,7 @@ record — the locked decisions and the full plan live in issue #97.
 
 | Crate | Role | Render path |
 |-------|------|-------------|
-| `trd-core` | **single** wgpu rendering core (`wgpu = "30"`) | headless `BatchRenderer::render_frame` → RGBA bytes; live `MeshRenderer::encode` → surface view |
+| `trd-core` | **single** wgpu rendering core (`wgpu = "30"`) | headless `Renderer::render_frame` → RGBA bytes; live `SceneRenderer::encode` → surface view |
 | `trd-cli` | headless filter | Arrow scene stream **in** → Arrow image stream **out** |
 | `trd-app` | native winit viewer | plays a stream (resize/close only — **no scene interaction**) |
 | `trd-wasm` | browser | `canvas_renderer` (live) + `arrow_renderer` (offscreen), driven by thin TS |
@@ -146,7 +146,7 @@ updated frame. Both are acceptable (we only re-render on change).
 ### Strategy B — shared-surface egui overlay  ⏳ future
 
 When egui releases a wgpu-30-compatible version, trd-gui can share one device:
-trd-core's `MeshRenderer::encode` paints the scene into the swapchain view, then
+trd-core's `SceneRenderer::encode` paints the scene into the swapchain view, then
 `egui-wgpu` paints the UI on top in the same command encoder — zero-copy, live.
 Track upstream egui and migrate then. The §5 design keeps the render backend
 behind a trait so this is a drop-in later.
@@ -207,8 +207,8 @@ trait SceneRenderer {
 ```
 
 * **`InProcRenderer`** (native default): builds `Draw`/`Scene` in memory and
-  calls trd-core directly — reuse `BatchRenderer::render_frame` (headless RGBA)
-  or a live `MeshRenderer`. No serialization; lowest latency. Good for smooth
+  calls trd-core directly — reuse `Renderer::render_frame` (headless RGBA)
+  or a live `SceneRenderer`. No serialization; lowest latency. Good for smooth
   drag.
 * **`ArrowRoundTripRenderer`** (the literal request): serializes the updated
   scene state to a **new Arrow `[mesh][texture?][frames?][params]` stream**, feeds it to
@@ -401,7 +401,7 @@ scene authoring, and the image-display texture. All pixels come from trd-core.
 * `trd-core` = `wgpu = "30"`; egui/egui-wgpu/eframe **0.35.0** (latest) depend on
   `wgpu ^29`, egui-winit 0.35 on `winit ^0.30.13` (crates.io, this session).
 * Render values (`Scene`, `DrawableObject`, `Draw`, `FrameParams`,
-  `build_scene`, `MeshRenderer::encode`, `BatchRenderer::render_frame`,
+  `build_scene`, `SceneRenderer::encode`, `Renderer::render_frame`,
   `run_stream`, `RenderOptions`, `OutputSession`) — `crates/trd-core/src/{render,stream,output}.rs`.
 * Protocol 0.0.6 `[mesh][texture?][frames?][params]`, model per `Draw.model` —
   `docs/protocol/0.0.6.md`, AGENTS.md.

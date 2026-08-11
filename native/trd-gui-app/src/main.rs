@@ -1,7 +1,7 @@
 //! trd-gui native binary: parse args, load the mesh, build the in-process
 //! render backend, and run the eframe/egui window (issue #97).
 //!
-//! The interactive stack (eframe/egui + `trd-core`'s native `BatchRenderer`) is
+//! The interactive stack (eframe/egui + `trd-core`'s native `Renderer`) is
 //! native-only, and nothing builds this binary for wasm. The browser delivery
 //! shell lives in `web/gui-viewer` and calls the wasm entry exported by
 //! `crates/trd-gui`.

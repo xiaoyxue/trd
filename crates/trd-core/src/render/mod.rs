@@ -1,11 +1,9 @@
 //! Shared, platform-agnostic mesh rendering.
 //!
 //! [`SceneRenderer`] rasterizes a [`Scene`] of [`DrawableObject`]s through the
-//! vertex/index-buffer path used by the native batch renderer and the browser.
+//! vertex/index-buffer path used by the native `Renderer` and the browser.
 
 mod batch;
-#[cfg(not(target_arch = "wasm32"))]
-mod batch_renderer;
 mod bound_material_maps;
 mod bound_texture;
 mod buffer;
@@ -24,6 +22,8 @@ mod pbr;
 mod picking;
 mod pipeline;
 mod render_target;
+#[cfg(not(target_arch = "wasm32"))]
+mod renderer;
 mod scene;
 mod scene_renderer;
 mod tonemap;
@@ -33,10 +33,8 @@ mod triangle_renderer;
 mod gpu_tests;
 
 // Public API surface (re-exported unchanged by `crate::lib`).
-// The headless batch harness is native-only (drives wgpu under
+// The headless offscreen harness is native-only (drives wgpu under
 // `pollster::block_on`), so it and its re-export are gated off wasm.
-#[cfg(not(target_arch = "wasm32"))]
-pub use batch_renderer::BatchRenderer;
 pub use frame_params::{CameraFormError, FrameParams, Viewport};
 pub use gpu_context::{
     create_instance, AdapterFacts, GpuContext, GpuInitError, GpuRequest, LimitsPreset,
@@ -51,6 +49,8 @@ pub use pipeline::create_mesh_pipeline;
 pub use render_target::{
     OffscreenError, OffscreenTarget, OnscreenTarget, RenderTarget, OFFSCREEN_FORMAT,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use renderer::Renderer;
 pub use scene::{
     build_scene, plane_grid_overlays, selection_aabb_overlay, Draw, DrawableObject, FrameFit,
     GridPlane, RenderMode, Scene,

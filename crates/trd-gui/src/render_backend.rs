@@ -8,7 +8,7 @@
 //! buffer, so the two toolkits stay independent of `trd-core`'s `wgpu 30`.
 //!
 //! [`InProcRenderer`] is the native default — it calls `trd-core`'s
-//! [`BatchRenderer`] directly (no serialization, lowest latency). The
+//! [`Renderer`] directly (no serialization, lowest latency). The
 //! `ArrowRoundTripRenderer` (author a `[mesh][params]` stream → `run_stream` →
 //! image stream) and the wasm offscreen backend are the design's later slices;
 //! both slot behind this same trait.
@@ -22,7 +22,7 @@ pub struct ImageRgba {
     pub rgba: Vec<u8>,
 }
 
-// The native `BatchRenderer`-based backends (in-process + Arrow round-trip) and
+// The native `Renderer`-based backends (in-process + Arrow round-trip) and
 // the `SceneRenderer` trait are native-only; on wasm the offscreen renderer is
 // `crate::web_renderer` (async) instead, so only `ImageRgba` above is shared.
 #[cfg(not(target_arch = "wasm32"))]
@@ -32,8 +32,8 @@ pub use native::*;
 mod native {
     use super::ImageRgba;
     use trd_core::{
-        decode_params_stream, encode_params_stream, read_image_stream, BatchRenderer, EnvMapData,
-        Mesh, OutputSession, RenderOptions, Texture,
+        decode_params_stream, encode_params_stream, read_image_stream, EnvMapData, Mesh,
+        OutputSession, RenderOptions, Renderer, Texture,
     };
 
     use crate::error::GuiError;
@@ -80,15 +80,15 @@ mod native {
     }
 
     /// Maps the scene's XZ grid overlay toggles to the `GridPlane` the
-    /// `BatchRenderer` grid setters expect (`Some(Xz)` when on, `None` when off).
+    /// `Renderer` grid setters expect (`Some(Xz)` when on, `None` when off).
     /// Shared by both native backends so the grids appear identically.
-    fn apply_grid_overlays(renderer: &mut BatchRenderer, state: &SceneState) {
+    fn apply_grid_overlays(renderer: &mut Renderer, state: &SceneState) {
         let xz = |on: bool| on.then_some(trd_core::GridPlane::Xz);
         renderer.set_show_world_grid(xz(state.show_world_grid));
         renderer.set_show_object_grid(xz(state.show_local_grid));
     }
 
-    fn apply_pbr(renderer: &mut BatchRenderer, state: &SceneState) {
+    fn apply_pbr(renderer: &mut Renderer, state: &SceneState) {
         renderer.set_lighting(state.lighting);
         for (i, ((material, ibl), tone_mapping)) in state
             .materials
@@ -107,13 +107,13 @@ mod native {
         }
     }
 
-    /// The native in-process backend: builds a `trd-core` [`BatchRenderer`] once at a
+    /// The native in-process backend: builds a `trd-core` [`Renderer`] once at a
     /// fixed resolution and re-renders the scene on demand. The GUI displays the
     /// output scaled to the panel, so the render resolution is stable (no GPU
     /// device churn on window resize) and the interaction maps to the fixed image
     /// rect.
     pub struct InProcRenderer {
-        renderer: BatchRenderer,
+        renderer: Renderer,
         width: u32,
         height: u32,
     }
@@ -136,7 +136,7 @@ mod native {
             width: u32,
             height: u32,
         ) -> Result<Self, GuiError> {
-            let mut renderer = BatchRenderer::with_meshes(width, height, meshes)?;
+            let mut renderer = Renderer::with_meshes(width, height, meshes)?;
             if let Some(texture) = texture {
                 renderer.set_texture(texture);
             }
@@ -192,14 +192,14 @@ mod native {
     /// out-of-process producer would drive.
     ///
     /// Unlike the headless CLI's `run_stream` (which rebuilds the GPU device on every
-    /// call), this holds a **persistent** [`BatchRenderer`] built once from the
+    /// call), this holds a **persistent** [`Renderer`] built once from the
     /// static mesh/texture (decode-once, matching the real protocol where the mesh is
     /// uploaded once and only the per-frame params cross the wire). That keeps the
     /// full serialize→render→serialize round-trip while rendering at interactive
     /// speed, so it no longer needs to defer to interaction end.
     pub struct ArrowRoundTripRenderer {
         /// The persistent renderer (device + uploaded mesh/texture built once).
-        renderer: BatchRenderer,
+        renderer: Renderer,
         width: u32,
         height: u32,
     }
@@ -219,7 +219,7 @@ mod native {
             width: u32,
             height: u32,
         ) -> Result<Self, GuiError> {
-            let mut renderer = BatchRenderer::with_meshes(width, height, meshes)?;
+            let mut renderer = Renderer::with_meshes(width, height, meshes)?;
             if let Some(texture) = texture {
                 renderer.set_texture(texture);
             }

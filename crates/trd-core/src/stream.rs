@@ -29,9 +29,7 @@ use arrow::datatypes::Schema;
 
 // `Matrix4` is referenced only by the `#[cfg(test)]` unit tests (imported there).
 use crate::protocol::{ProtocolError, PROTOCOL_VERSION};
-use crate::render::{
-    BatchRenderer, Draw, FrameFit, FrameParams, Mesh, OffscreenError, RenderOptions,
-};
+use crate::render::{Draw, FrameFit, FrameParams, Mesh, OffscreenError, RenderOptions, Renderer};
 use crate::texture::ImageTexture;
 use crate::OutputSession;
 
@@ -193,7 +191,7 @@ impl From<ProtocolError> for StreamError {
 }
 
 /// Maps the shared offscreen render harness's [`OffscreenError`] onto this
-/// module's [`StreamError`], so [`BatchRenderer`] keeps its flat error surface
+/// module's [`StreamError`], so [`Renderer`] keeps its flat error surface
 /// while the target/readback plumbing lives in [`crate::render::OffscreenTarget`].
 impl From<OffscreenError> for StreamError {
     fn from(error: OffscreenError) -> Self {
@@ -429,7 +427,7 @@ fn resolve_inline_frame(
 /// `last_frame_ref` tracks the currently uploaded background so consecutive
 /// frames sharing it skip the decode + re-upload.
 fn render_and_write_batch<W: Write>(
-    renderer: &mut BatchRenderer,
+    renderer: &mut Renderer,
     output_session: &mut OutputSession,
     batch: &crate::FrameBatch,
     inline_frames: &[crate::InlineFrame],
@@ -494,12 +492,12 @@ pub fn run_stream<R: Read, W: Write>(
     frame_resolver: Option<FrameResolver>,
 ) -> Result<(), StreamError> {
     // Validate dimensions up front so schema construction (which multiplies
-    // width*height) can't overflow before BatchRenderer's guard runs.
+    // width*height) can't overflow before Renderer's guard runs.
     check_dimensions(width, height)?;
 
     let mut session = crate::InputSession::new();
     // Built once the params schema is reached (meshes + texture + fps known).
-    let mut renderer: Option<BatchRenderer> = None;
+    let mut renderer: Option<Renderer> = None;
     let mut output_session: Option<OutputSession> = None;
     // The background currently uploaded, so consecutive frames sharing it skip
     // the decode + re-upload.
@@ -519,7 +517,7 @@ pub fn run_stream<R: Read, W: Write>(
             if session.meshes().is_empty() {
                 return Err(StreamError::MissingMeshStream);
             }
-            let mut built = BatchRenderer::with_meshes_sample_count(
+            let mut built = Renderer::with_meshes_sample_count(
                 width,
                 height,
                 session.meshes(),

@@ -45,9 +45,9 @@ pub use render::{
     OFFSCREEN_FORMAT,
 };
 // The native-only headless batch harness, relocated from `stream` into `render`
-// (#134); the crate-root re-export path (`trd_core::BatchRenderer`) is unchanged.
+// (#134); the crate-root re-export path (`trd_core::Renderer`) is unchanged.
 #[cfg(not(target_arch = "wasm32"))]
-pub use render::BatchRenderer;
+pub use render::Renderer;
 pub use scene_encode::{
     encode_frames_stream, encode_mesh_stream, encode_params_stream,
     encode_params_stream_with_frame_ids, encode_scene, encode_scene_with_frames,

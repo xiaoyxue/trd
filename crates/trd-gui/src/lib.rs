@@ -23,7 +23,7 @@
 //! `scene`/`interaction`/`ui`/`assets`/`error` are **platform-agnostic** (the
 //! scene + controller are unit-tested without egui or a GPU; `ui` is the shared
 //! egui layout). The render path is target-split: `native/trd-gui-app` drives the
-//! synchronous `render_backend` (`BatchRenderer`); wasm uses the asynchronous
+//! synchronous `render_backend` (`Renderer`); wasm uses the asynchronous
 //! offscreen `web_renderer` driven by `web_app`, started via [`start`].
 
 pub mod assets;

@@ -6,7 +6,7 @@ use crate::math::Matrix4;
 /// How a [`SceneRenderer`] rasterizes its meshes: solid filled triangles, or an
 /// edge **wireframe** (`LineList` over the derived [`crate::Mesh::edge_indices`]
 /// buffer). Default is [`RenderMode::Filled`]; wireframe (#38) is opt-in via
-/// [`BatchRenderer::set_mode`].
+/// [`Renderer::set_mode`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RenderMode {
     /// Draw triangles filled with the per-vertex color (the mesh's triangle
