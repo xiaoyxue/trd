@@ -19,7 +19,21 @@ console_error_panic_hook = "0.1"
 image = { version = "0.25", default-features = false, features = ["hdr"] }
 js-sys = "0.3"
 trd-core.workspace = true
+# The GUI entry points live here too: `trd-gui` is a plain rlib holding the UI,
+# interaction, and scene authoring; this crate owns its JS ABI (#180).
+trd-gui = { path = "../trd-gui" }
+egui = "0.35"
+eframe = { version = "0.35", default-features = false, features = [
+    "glow",
+    "default_fonts",
+] }
+log = "0.4"
 wasm-bindgen = "=0.2.121"
 wasm-bindgen-futures = "0.4"
-web-sys = { version = "0.3", features = ["HtmlCanvasElement", "Performance", "Window"] }
+web-sys = { version = "0.3", features = [
+    "HtmlCanvasElement",
+    "Element",
+    "Performance",
+    "Window",
+] }
 wgpu = "30"

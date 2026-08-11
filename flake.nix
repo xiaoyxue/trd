@@ -194,36 +194,6 @@
           }
         );
 
-        # One nix-built trd-gui wasm artifact, staged independently into each GUI
-        # web delivery surface's own pkg/ directory.
-        trdGuiWasmArgs = commonArgs // {
-          CARGO_BUILD_TARGET = "wasm32-unknown-unknown";
-          cargoExtraArgs = "--package trd-gui";
-          doCheck = false;
-        };
-        cargoArtifactsTrdGuiWasm = craneLib.buildDepsOnly trdGuiWasmArgs;
-
-        trd-gui-wasm = craneLib.buildPackage (
-          trdGuiWasmArgs
-          // {
-            pname = "trd-gui-wasm";
-            cargoArtifacts = cargoArtifactsTrdGuiWasm;
-            nativeBuildInputs = commonArgs.nativeBuildInputs ++ [
-              wasmBindgenCli
-              pkgs.binaryen
-            ];
-            doNotPostBuildInstallCargoBinaries = true;
-            installPhaseCommand = ''
-              mkdir -p $out
-              wasm-bindgen \
-                --target web \
-                --out-dir $out \
-                --out-name trd_gui \
-                target/wasm32-unknown-unknown/release/trd_gui.wasm
-              wasm-opt -Oz -o $out/trd_gui_bg.wasm $out/trd_gui_bg.wasm
-            '';
-          }
-        );
 
         # --- Web bundle ------------------------------------------------------
         # bun2nix materializes the web workspace's npm dependencies
@@ -284,10 +254,10 @@
               cp -r ${trd-wasm}/. ../crates/trd-wasm/pkg/
               chmod -R u+w ../crates/trd-wasm/pkg
               mkdir -p gui-viewer/pkg
-              cp -r ${trd-gui-wasm}/. gui-viewer/pkg/
+              cp -r ${trd-wasm}/. gui-viewer/pkg/
               chmod -R u+w gui-viewer/pkg
               mkdir -p gui-video-editing/pkg
-              cp -r ${trd-gui-wasm}/. gui-video-editing/pkg/
+              cp -r ${trd-wasm}/. gui-video-editing/pkg/
               chmod -R u+w gui-video-editing/pkg
             '';
 
@@ -377,11 +347,11 @@
             }
           );
 
-          # Lints **every** crate that is compiled to wasm, not just `trd-wasm`:
-          # `trd-gui` also ships a wasm library (the browser GUI + video editor),
-          # and it was previously only *built* for wasm by the `trd-gui-wasm`
-          # package, never linted — see #181, where `std::time::Instant` (which
-          # panics on `wasm32-unknown-unknown`) reached the browser unnoticed.
+          # Lints **every** crate that is compiled to wasm, not just the
+          # `trd-wasm` delivery surface: `trd-gui` is a plain rlib but is compiled
+          # *for* wasm through it, and used to be built for wasm without ever being
+          # linted — see #181, where `std::time::Instant` (which panics on
+          # `wasm32-unknown-unknown`) reached the browser unnoticed.
           clippy-wasm = craneLib.cargoClippy (
             wasmArgs
             // {

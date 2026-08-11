@@ -8,9 +8,10 @@ repository.workspace = true
 [lib]
 name = "trd_gui"
 path = "src/lib.rs"
-# `cdylib` so wasm-bindgen can emit the browser module (the `start` entry, Slice
-# 4); `rlib` so native delivery surfaces can reuse the same library.
-crate-type = ["cdylib", "rlib"]
+# A plain library: the browser delivery surface (`crates/trd-gui-wasm`) owns the
+# `cdylib` and the JS ABI, so this crate is reusable by every surface without
+# dragging wasm-bindgen in (#180).
+crate-type = ["rlib"]
 
 # trd-gui is the interactive egui front-end (issue #97). It displays trd-core's
 # rendered image stream and turns user interaction (orbit / zoom / translate)
@@ -57,11 +58,8 @@ eframe = { version = "0.35", default-features = false, features = [
     "glow",
     "default_fonts",
 ] }
-wasm-bindgen = "=0.2.121"
 wasm-bindgen-futures = "0.4"
-js-sys = "0.3"
 web-sys = { version = "0.3", features = ["HtmlCanvasElement", "Element", "Window"] }
-console_error_panic_hook = "0.1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 eframe = "0.35"

@@ -11,8 +11,8 @@ import beerTextureUrl from "../../../assets/meshes/qd_beer/textures/3d66-export-
   type: "file",
 };
 import editingDocumentUrl from "../data/fiba-shot1.arrow" with { type: "file" };
-import init, { startVideoEditing } from "../pkg/trd_gui.js";
-import wasmUrl from "../pkg/trd_gui_bg.wasm" with { type: "file" };
+import init, { startVideoEditing } from "../pkg/trd_wasm.js";
+import wasmUrl from "../pkg/trd_wasm_bg.wasm" with { type: "file" };
 
 async function main(): Promise<void> {
   await init({ module_or_path: wasmUrl });

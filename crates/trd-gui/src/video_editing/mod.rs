@@ -245,6 +245,29 @@ impl VideoEditingShared {
         Ok(())
     }
 
+    /// Takes the pending playback command as its **wire code**, leaving
+    /// `COMMAND_NONE`.
+    ///
+    /// These raw accessors exist so the browser bridge polls the shared state
+    /// through an API instead of reaching into its cells — the bridge lives in the
+    /// wasm surface crate now (#180). They are the untyped twins of
+    /// [`take_command`](Self::take_command) and friends, which the Rust app uses;
+    /// JS gets the code because that is what crosses the ABI.
+    pub fn take_command_code(&self) -> u8 {
+        self.command.replace(COMMAND_NONE)
+    }
+
+    /// Takes the pending catalog-asset request as its wire code, leaving `0`
+    /// ("none").
+    pub fn take_asset_request_code(&self) -> u8 {
+        self.asset_request.replace(0)
+    }
+
+    /// Takes the pending seek target as its wire code, leaving `-1` ("no seek").
+    pub fn take_seek_frame_code(&self) -> i32 {
+        self.seek_frame.replace(-1)
+    }
+
     pub fn set_video_status(&self, loaded: bool, playing: bool) {
         if !loaded {
             self.source_generation
@@ -391,204 +414,6 @@ impl VideoEditingShared {
             .set(self.render_latency_total_ms.get() + latency_ms);
         self.render_latency_count
             .set(self.render_latency_count.get().saturating_add(1));
-    }
-}
-
-/// Browser bridge for the dedicated editor. It transfers browser-decoded pixels
-/// and services commands emitted by Rust UI; it never computes scene matrices.
-#[cfg(target_arch = "wasm32")]
-#[wasm_bindgen::prelude::wasm_bindgen]
-pub struct VideoEditingHandle {
-    shared: Rc<VideoEditingShared>,
-    source_name: String,
-    byte_length: u64,
-    fps_num: u32,
-    fps_den: u32,
-    frame_count: u32,
-    width: u32,
-    height: u32,
-}
-
-#[cfg(target_arch = "wasm32")]
-impl VideoEditingHandle {
-    pub(crate) fn new(
-        document: &trd_core::VideoEditingDocument,
-        shared: Rc<VideoEditingShared>,
-    ) -> Self {
-        Self {
-            shared,
-            source_name: document.video.source_name.clone(),
-            byte_length: document.video.byte_length,
-            fps_num: document.video.fps_num,
-            fps_den: document.video.fps_den,
-            frame_count: document.video.frame_count,
-            width: document.video.width,
-            height: document.video.height,
-        }
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-#[wasm_bindgen::prelude::wasm_bindgen]
-impl VideoEditingHandle {
-    #[wasm_bindgen::prelude::wasm_bindgen(js_name = validateVideoFile)]
-    pub fn validate_video_file(
-        &self,
-        filename: &str,
-        byte_length: f64,
-    ) -> Result<(), wasm_bindgen::JsValue> {
-        if filename != self.source_name {
-            return Err(wasm_bindgen::JsValue::from_str(&format!(
-                "expected {}, got {filename}",
-                self.source_name
-            )));
-        }
-        if byte_length != self.byte_length as f64 {
-            return Err(wasm_bindgen::JsValue::from_str(&format!(
-                "expected {} bytes, got {byte_length:.0}",
-                self.byte_length
-            )));
-        }
-        Ok(())
-    }
-
-    #[wasm_bindgen::prelude::wasm_bindgen(js_name = validateVideoMetadata)]
-    pub fn validate_video_metadata(
-        &self,
-        width: u32,
-        height: u32,
-        duration_seconds: f64,
-    ) -> Result<(), wasm_bindgen::JsValue> {
-        self.shared
-            .set_video_metadata_observation(width, height, duration_seconds);
-        if (width, height) != (self.width, self.height) {
-            return Err(wasm_bindgen::JsValue::from_str(&format!(
-                "expected {}x{} video, got {width}x{height}",
-                self.width, self.height
-            )));
-        }
-        let expected_duration =
-            f64::from(self.frame_count) * f64::from(self.fps_den) / f64::from(self.fps_num);
-        let frame_duration = f64::from(self.fps_den) / f64::from(self.fps_num);
-        if !duration_seconds.is_finite()
-            || (duration_seconds - expected_duration).abs() > frame_duration
-        {
-            return Err(wasm_bindgen::JsValue::from_str(&format!(
-                "expected {expected_duration:.3}s video, got {duration_seconds:.3}s"
-            )));
-        }
-        Ok(())
-    }
-
-    #[wasm_bindgen::prelude::wasm_bindgen(js_name = frameIndexAtMediaTime)]
-    pub fn frame_index_at_media_time(&self, media_time_seconds: f64) -> u32 {
-        frame_index_at_media_time(
-            media_time_seconds,
-            self.fps_num,
-            self.fps_den,
-            self.frame_count,
-        )
-    }
-
-    #[wasm_bindgen::prelude::wasm_bindgen(js_name = mediaTimeAtFrame)]
-    pub fn media_time_at_frame(&self, frame_index: u32) -> f64 {
-        media_time_at_frame(frame_index, self.fps_num, self.fps_den, self.frame_count)
-    }
-
-    #[wasm_bindgen::prelude::wasm_bindgen(js_name = updateVideoFrameRgba)]
-    pub fn update_video_frame_rgba(
-        &self,
-        rgba: Vec<u8>,
-        width: u32,
-        height: u32,
-        frame_index: u32,
-        media_time_seconds: f64,
-    ) -> Result<(), wasm_bindgen::JsValue> {
-        if frame_index >= self.frame_count {
-            return Err(wasm_bindgen::JsValue::from_str(
-                "video frame index out of range",
-            ));
-        }
-        self.shared
-            .update_video_frame_rgba(rgba, width, height, frame_index, media_time_seconds)
-            .map_err(|error| wasm_bindgen::JsValue::from_str(&error))
-    }
-
-    #[wasm_bindgen::prelude::wasm_bindgen(js_name = setVideoStatus)]
-    pub fn set_video_status(&self, loaded: bool, playing: bool) {
-        self.shared.set_video_status(loaded, playing);
-    }
-
-    #[wasm_bindgen::prelude::wasm_bindgen(js_name = setVideoSourceInfo)]
-    pub fn set_video_source_info(
-        &self,
-        source_kind: u8,
-        name: String,
-        byte_length: f64,
-    ) -> Result<(), wasm_bindgen::JsValue> {
-        let kind = match source_kind {
-            1 => VideoSourceKind::LocalFile,
-            2 => VideoSourceKind::HttpUrl,
-            _ => return Err(wasm_bindgen::JsValue::from_str("unknown video source kind")),
-        };
-        let byte_length = (byte_length >= 0.0).then_some(byte_length as u64);
-        self.shared
-            .set_video_source_observation(kind, name, byte_length);
-        Ok(())
-    }
-
-    #[wasm_bindgen::prelude::wasm_bindgen(js_name = setVideoMediaState)]
-    pub fn set_video_media_state(&self, ready_state: u8, ended: bool) {
-        self.shared.set_video_media_observation(ready_state, ended);
-    }
-
-    #[wasm_bindgen::prelude::wasm_bindgen(js_name = setVideoError)]
-    pub fn set_video_error(&self, message: String) {
-        self.shared.set_error(message);
-    }
-
-    #[wasm_bindgen::prelude::wasm_bindgen(js_name = takeCommand)]
-    pub fn take_command(&self) -> u8 {
-        self.shared.command.replace(COMMAND_NONE)
-    }
-
-    #[wasm_bindgen::prelude::wasm_bindgen(js_name = takeAssetRequest)]
-    pub fn take_asset_request(&self) -> u8 {
-        self.shared.asset_request.replace(0)
-    }
-
-    #[wasm_bindgen::prelude::wasm_bindgen(js_name = takeVideoUrlRequest)]
-    pub fn take_video_url_request(&self) -> Option<String> {
-        self.shared.video_url_request.borrow_mut().take()
-    }
-
-    #[wasm_bindgen::prelude::wasm_bindgen(js_name = takeSeekFrame)]
-    pub fn take_seek_frame(&self) -> i32 {
-        self.shared.seek_frame.replace(-1)
-    }
-
-    #[wasm_bindgen::prelude::wasm_bindgen(js_name = loadCatalogAsset)]
-    pub async fn load_catalog_asset(
-        &self,
-        asset_code: u8,
-        model_bytes: Vec<u8>,
-        texture_bytes: Vec<u8>,
-        env_bytes: Vec<u8>,
-    ) -> Result<(), wasm_bindgen::JsValue> {
-        let asset = CatalogAsset::from_code(asset_code)
-            .ok_or_else(|| wasm_bindgen::JsValue::from_str("unknown catalog asset"))?;
-        let renderer = crate::video_editing_renderer::VideoPlacementRenderer::new(
-            asset,
-            &model_bytes,
-            &texture_bytes,
-            &env_bytes,
-            self.width,
-            self.height,
-        )
-        .await
-        .map_err(|error| wasm_bindgen::JsValue::from_str(&error))?;
-        self.shared.set_catalog_renderer(asset, renderer);
-        Ok(())
     }
 }
 

@@ -84,13 +84,21 @@ Guidance for agents working in this repository.
 - **Delivery surfaces are grouped by platform.** Native binaries live in
   `native/{trd-app,trd-gui-app,trd-gui-video-editing}`; reusable Rust stays in `crates/`. Browser apps
   live as sibling packages in `web/{viewer,gui-viewer,gui-video-editing}`.
+- **`crates/trd-wasm` is the *only* browser delivery surface.** **Every**
+  `#[wasm_bindgen]` export in the repo lives there — the viewer's
+  `CanvasRenderer`/`OffscreenRenderer` *and* the GUI's `start` /
+  `startVideoEditing` / `VideoEditingHandle` (`src/gui.rs`, `src/gui_web_app.rs`).
+  Every other crate, `trd-gui` included, is a plain `rlib` free of
+  `wasm-bindgen`, so there is one wasm build and one generated JS package
+  (`trd_wasm`) that all three web packages stage into their own `pkg/` (#180).
+  Do **not** add a `cdylib` crate-type or a `#[wasm_bindgen]` item anywhere else.
 - **`web/` is a Bun workspace** with sibling `viewer/`, `gui-viewer/`, and
   `gui-video-editing/` packages. Each package's lint/format gate is Biome; run all
   packages' checks from the workspace root
   with `bun run check`.
-  `gui-viewer` and `gui-video-editing` each own a generated `trd-gui` wasm
-  package under their own `pkg/`; neither delivery surface imports the other's
-  build output.
+  Each package owns a generated `trd_wasm` package under its own `pkg/` (all
+  three stage the same `crates/trd-wasm` build); no delivery surface imports
+  another's build output.
   Run `bun run check` / `format` / `typecheck` from `nix develop`, or directly on
   Windows — `@biomejs/biome` + `apache-arrow` are in
   `web/viewer/package.json`. On a clean non-Nix checkout, first run

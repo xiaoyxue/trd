@@ -2,8 +2,8 @@
 // UI + interaction + offscreen rendering live in Rust (the trd-gui wasm module);
 // this file only loads that module and hands it the canvas — the browser twin of
 // `main.rs`'s `eframe::run_native`. Bundled/served by the shared Bun workspace.
-import init, { start } from "../pkg/trd_gui.js";
-import wasmUrl from "../pkg/trd_gui_bg.wasm" with { type: "file" };
+import init, { start } from "../pkg/trd_wasm.js";
+import wasmUrl from "../pkg/trd_wasm_bg.wasm" with { type: "file" };
 
 async function main(): Promise<void> {
   // wasm-bindgen's default wasm path breaks once bundled, so pass the bundler's

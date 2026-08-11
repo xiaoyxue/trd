@@ -14,10 +14,10 @@ use std::rc::Rc;
 
 use egui::{TextureHandle, TextureOptions};
 
-use crate::interaction::InteractionController;
-use crate::renderer::GuiRenderer;
-use crate::renderer::ImageRgba;
-use crate::ui;
+use trd_gui::interaction::InteractionController;
+use trd_gui::renderer::GuiRenderer;
+use trd_gui::renderer::ImageRgba;
+use trd_gui::ui;
 
 /// The interactive viewer application (browser).
 pub struct WebApp {
