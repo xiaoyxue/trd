@@ -44,10 +44,9 @@ pub use render::{
     RenderTarget, Scene, SceneRenderer, ToneMapping, Tonemap, TriangleRenderer, Vertex, Viewport,
     OFFSCREEN_FORMAT,
 };
-// The native-only headless batch harness, relocated from `stream` into `render`
-// (#134); the crate-root re-export path (`trd_core::Renderer`) is unchanged.
-#[cfg(not(target_arch = "wasm32"))]
-pub use render::Renderer;
+// The offscreen harness; available on both platforms since it became async
+// (#180) — the browser could not use it while it blocked on readback.
+pub use render::{RenderError, Renderer};
 pub use scene_encode::{
     encode_frames_stream, encode_mesh_stream, encode_params_stream,
     encode_params_stream_with_frame_ids, encode_scene, encode_scene_with_frames,

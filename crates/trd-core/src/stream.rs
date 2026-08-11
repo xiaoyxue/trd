@@ -29,7 +29,9 @@ use arrow::datatypes::Schema;
 
 // `Matrix4` is referenced only by the `#[cfg(test)]` unit tests (imported there).
 use crate::protocol::{ProtocolError, PROTOCOL_VERSION};
-use crate::render::{Draw, FrameFit, FrameParams, Mesh, OffscreenError, RenderOptions, Renderer};
+use crate::render::{
+    check_dimensions, Draw, FrameFit, FrameParams, Mesh, OffscreenError, RenderOptions, Renderer,
+};
 use crate::texture::ImageTexture;
 use crate::OutputSession;
 
@@ -131,6 +133,26 @@ pub enum StreamError {
 /// [`crate::protocol`]) onto this module's [`StreamError`], so the native
 /// `run_stream` path keeps its flat error surface while the per-batch decode
 /// logic lives in exactly one place.
+/// The renderer has its own platform-neutral error (it must compile for wasm,
+/// which the native-only stream module cannot); this keeps `run_stream`'s error
+/// surface unchanged.
+impl From<crate::render::RenderError> for StreamError {
+    fn from(error: crate::render::RenderError) -> Self {
+        match error {
+            crate::render::RenderError::InvalidDimensions {
+                width,
+                height,
+                reason,
+            } => StreamError::InvalidDimensions {
+                width,
+                height,
+                reason,
+            },
+            other => StreamError::Render(other.to_string()),
+        }
+    }
+}
+
 impl From<ProtocolError> for StreamError {
     fn from(error: ProtocolError) -> Self {
         match error {
@@ -250,31 +272,6 @@ fn decode_draws(batch: &RecordBatch) -> Result<Option<Vec<Vec<Draw>>>, StreamErr
 #[cfg(test)]
 fn decode_frame_refs(batch: &RecordBatch) -> Result<Option<Vec<Option<String>>>, StreamError> {
     Ok(crate::protocol::decode_frame_refs(batch)?)
-}
-
-const BYTES_PER_PIXEL: u32 = 4;
-
-/// Validates image dimensions against zero and `u32` overflow, returning the
-/// pixel count. Does not check device limits (that needs an adapter). Called
-/// before any `width * height` / `width * 4` arithmetic so absurd dimensions
-/// produce a clean [`StreamError::InvalidDimensions`] instead of an overflow.
-pub(crate) fn check_dimensions(width: u32, height: u32) -> Result<u32, StreamError> {
-    let pixels = width
-        .checked_mul(height)
-        .filter(|&p| p > 0 && p <= i32::MAX as u32)
-        .ok_or(StreamError::InvalidDimensions {
-            width,
-            height,
-            reason: "width*height must be non-zero and <= i32::MAX",
-        })?;
-    width
-        .checked_mul(BYTES_PER_PIXEL)
-        .ok_or(StreamError::InvalidDimensions {
-            width,
-            height,
-            reason: "row byte size overflows u32",
-        })?;
-    Ok(pixels)
 }
 
 /// Resolves one decoded frame's instanced draw list: its wire `draws` when
@@ -467,7 +464,13 @@ fn render_and_write_batch<W: Write>(
         // appearance options — the same `scene_with_overlays` every other
         // front-end uses, so they cannot drift apart (#180).
         let scene = crate::render::scene_with_overlays(&draws, options, frame_fit);
-        planes.push(renderer.render_scene(frame.params, &scene)?);
+        // `run_stream` is a synchronous `Read`/`Write` filter, while the renderer
+        // is async because GPU read-back is (the browser must not block its event
+        // loop). Natively blocking here is free: the future is already complete
+        // when `poll_for_map` returns. This is the only bridge between the two.
+        planes.push(pollster::block_on(
+            renderer.render_scene(frame.params, &scene),
+        )?);
     }
     output_session.write_rgba_batch(&planes)?;
     output.write_all(&output_session.drain_new()?)?;
@@ -523,12 +526,12 @@ pub fn run_stream<R: Read, W: Write>(
             if session.meshes().is_empty() {
                 return Err(StreamError::MissingMeshStream);
             }
-            let mut built = Renderer::with_meshes_sample_count(
+            let mut built = pollster::block_on(Renderer::with_meshes_sample_count(
                 width,
                 height,
                 session.meshes(),
                 options.msaa.sample_count(),
-            )?;
+            ))?;
             if let Some(pbr) = &options.pbr {
                 built.set_disney_material(pbr.material.clone());
                 built.set_lighting(pbr.lighting);
@@ -1244,15 +1247,21 @@ mod tests {
 
     #[test]
     fn check_dimensions_rejects_zero_and_overflow() {
+        use crate::render::RenderError;
         assert!(check_dimensions(4, 3).is_ok());
         assert!(matches!(
             check_dimensions(0, 3),
-            Err(StreamError::InvalidDimensions { .. })
+            Err(RenderError::InvalidDimensions { .. })
         ));
         // width*height overflows u32 / exceeds i32::MAX.
         assert!(matches!(
             check_dimensions(100_000, 100_000),
-            Err(StreamError::InvalidDimensions { .. })
+            Err(RenderError::InvalidDimensions { .. })
+        ));
+        // ...and still surfaces as the stream's own error for CLI callers.
+        assert!(matches!(
+            StreamError::from(check_dimensions(0, 3).unwrap_err()),
+            StreamError::InvalidDimensions { .. }
         ));
     }
 

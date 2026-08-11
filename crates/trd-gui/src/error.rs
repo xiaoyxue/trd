@@ -37,6 +37,11 @@ pub enum GuiError {
     #[error("render failed: {0}")]
     Render(#[from] trd_core::StreamError),
 
+    /// The shared `trd-core` renderer failed (construction or read-back). Its own
+    /// error type since the renderer is platform-neutral (#180).
+    #[error(transparent)]
+    CoreRender(#[from] trd_core::RenderError),
+
     /// The texture image file could not be read from disk (native `--texture`).
     #[cfg(not(target_arch = "wasm32"))]
     #[error("failed to read texture file '{path}': {source}")]

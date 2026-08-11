@@ -135,7 +135,7 @@ mod native {
             width: u32,
             height: u32,
         ) -> Result<Self, GuiError> {
-            let mut renderer = Renderer::with_meshes(width, height, meshes)?;
+            let mut renderer = pollster::block_on(Renderer::with_meshes(width, height, meshes))?;
             if let Some(texture) = texture {
                 renderer.set_texture(texture);
             }
@@ -155,9 +155,14 @@ mod native {
             let aspect = self.width as f32 / self.height.max(1) as f32;
             apply_pbr(&mut self.renderer, state);
             let scene = trd_core::scene_with_overlays(&state.draws(), &render_options(state), None);
-            let rgba = self
-                .renderer
-                .render_scene(state.frame_params(aspect), &scene)?;
+            // The `SceneRenderer` trait is synchronous (the native GUI drives it
+            // from an eframe frame callback); the renderer is async because GPU
+            // read-back is. Blocking is free natively — the future is already
+            // complete when the map poll returns.
+            let rgba = pollster::block_on(
+                self.renderer
+                    .render_scene(state.frame_params(aspect), &scene),
+            )?;
             Ok(ImageRgba {
                 width: self.width,
                 height: self.height,
@@ -171,8 +176,10 @@ mod native {
 
         fn pick(&mut self, state: &SceneState, x: u32, y: u32) -> Option<u32> {
             let aspect = self.width as f32 / self.height.max(1) as f32;
-            self.renderer
-                .pick(state.frame_params(aspect), &state.draws(), x, y)
+            pollster::block_on(
+                self.renderer
+                    .pick(state.frame_params(aspect), &state.draws(), x, y),
+            )
         }
     }
 
@@ -213,7 +220,7 @@ mod native {
             width: u32,
             height: u32,
         ) -> Result<Self, GuiError> {
-            let mut renderer = Renderer::with_meshes(width, height, meshes)?;
+            let mut renderer = pollster::block_on(Renderer::with_meshes(width, height, meshes))?;
             if let Some(texture) = texture {
                 renderer.set_texture(texture);
             }
@@ -248,7 +255,7 @@ mod native {
                 &render_options(state),
                 None,
             );
-            let rgba = self.renderer.render_scene(frame.params, &scene)?;
+            let rgba = pollster::block_on(self.renderer.render_scene(frame.params, &scene))?;
 
             // 4. Serialize the rendered image to an Arrow stream and decode it back —
             // the output half of the round-trip an external consumer would read.
@@ -275,8 +282,10 @@ mod native {
 
         fn pick(&mut self, state: &SceneState, x: u32, y: u32) -> Option<u32> {
             let aspect = self.width as f32 / self.height.max(1) as f32;
-            self.renderer
-                .pick(state.frame_params(aspect), &state.draws(), x, y)
+            pollster::block_on(
+                self.renderer
+                    .pick(state.frame_params(aspect), &state.draws(), x, y),
+            )
         }
     }
 

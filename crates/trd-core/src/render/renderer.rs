@@ -18,7 +18,52 @@ use super::{
     SceneRenderer, OFFSCREEN_FORMAT,
 };
 use crate::math::Matrix4;
-use crate::stream::{check_dimensions, StreamError};
+use thiserror::Error;
+
+/// Errors constructing or driving a [`Renderer`].
+///
+/// Its own type rather than the stream module's: the renderer is
+/// platform-neutral, while `stream` is native-only (`std::io` piping), so
+/// borrowing that error would have kept the renderer off wasm — which is exactly
+/// what blocked the browser from reusing it (#180). `StreamError` converts from
+/// this, so `run_stream`'s error surface is unchanged.
+#[derive(Debug, Error)]
+pub enum RenderError {
+    /// The requested render size is zero or would overflow.
+    #[error("invalid render dimensions {width}x{height}: {reason}")]
+    InvalidDimensions {
+        width: u32,
+        height: u32,
+        reason: &'static str,
+    },
+    /// GPU device/adapter acquisition or read-back failed.
+    #[error("render failed: {0}")]
+    Gpu(String),
+    /// The offscreen target could not be created or read back.
+    #[error(transparent)]
+    Offscreen(#[from] super::OffscreenError),
+}
+
+/// Validates a render size before anything is allocated for it.
+pub(crate) fn check_dimensions(width: u32, height: u32) -> Result<u32, RenderError> {
+    const BYTES_PER_PIXEL: u32 = 4;
+    let pixels = width
+        .checked_mul(height)
+        .filter(|&p| p > 0 && p <= i32::MAX as u32)
+        .ok_or(RenderError::InvalidDimensions {
+            width,
+            height,
+            reason: "width*height must be non-zero and <= i32::MAX",
+        })?;
+    width
+        .checked_mul(BYTES_PER_PIXEL)
+        .ok_or(RenderError::InvalidDimensions {
+            width,
+            height,
+            reason: "row byte size overflows u32",
+        })?;
+    Ok(pixels)
+}
 
 /// A persistent GPU context that renders one [`FrameParams`] to tightly-packed
 /// row-major RGBA bytes (`width*height*4`) per call.
@@ -42,18 +87,23 @@ impl Renderer {
     /// draw lists place instances of these meshes by index. The mesh pass renders
     /// at 4× MSAA; use [`with_meshes_sample_count`](Self::with_meshes_sample_count)
     /// to override (e.g. `1` = no MSAA).
-    pub fn with_meshes(width: u32, height: u32, meshes: &[Mesh]) -> Result<Self, StreamError> {
+    pub async fn with_meshes(
+        width: u32,
+        height: u32,
+        meshes: &[Mesh],
+    ) -> Result<Self, RenderError> {
         Self::with_meshes_sample_count(width, height, meshes, crate::render::MSAA_SAMPLE_COUNT)
+            .await
     }
 
     /// Like [`with_meshes`](Self::with_meshes) but with an explicit mesh-pass MSAA
     /// `sample_count` (`4` = anti-aliased, `1` = single-sampled / no MSAA).
-    pub fn with_meshes_sample_count(
+    pub async fn with_meshes_sample_count(
         width: u32,
         height: u32,
         meshes: &[Mesh],
         sample_count: u32,
-    ) -> Result<Self, StreamError> {
+    ) -> Result<Self, RenderError> {
         let base_models: Vec<Matrix4> = meshes
             .iter()
             .map(|mesh| {
@@ -61,13 +111,7 @@ impl Renderer {
                     .matrix()
             })
             .collect();
-        pollster::block_on(Self::new_async(
-            width,
-            height,
-            meshes,
-            &base_models,
-            sample_count,
-        ))
+        Self::new_async(width, height, meshes, &base_models, sample_count).await
     }
 
     async fn new_async(
@@ -76,7 +120,7 @@ impl Renderer {
         meshes: &[Mesh],
         base_models: &[Matrix4],
         sample_count: u32,
-    ) -> Result<Self, StreamError> {
+    ) -> Result<Self, RenderError> {
         // Guard against zero / overflow before allocating (device limits below).
         check_dimensions(width, height)?;
 
@@ -93,7 +137,7 @@ impl Renderer {
             },
         )
         .await
-        .map_err(|e| StreamError::Render(e.to_string()))?;
+        .map_err(|e| RenderError::Gpu(e.to_string()))?;
         let format = OFFSCREEN_FORMAT;
         let renderer = SceneRenderer::with_sample_count(
             gpu.clone(),
@@ -203,17 +247,15 @@ impl Renderer {
     /// draw list plus [`RenderOptions`](crate::RenderOptions) into exactly the
     /// same `Scene` every other front-end renders. The renderer keeps no
     /// mode/overlay state of its own (#180): what to draw is entirely the scene.
-    pub fn render_scene(
+    pub async fn render_scene(
         &mut self,
         params: FrameParams,
         scene: &[DrawableObject],
-    ) -> Result<Vec<u8>, StreamError> {
-        Ok(pollster::block_on(self.target.render(
-            &self.gpu,
-            &mut self.renderer,
-            params,
-            scene,
-        ))?)
+    ) -> Result<Vec<u8>, RenderError> {
+        Ok(self
+            .target
+            .render(&self.gpu, &mut self.renderer, params, scene)
+            .await?)
     }
 
     /// **Object-id picking** (#141): renders `draws` through the flat id-color
@@ -223,13 +265,21 @@ impl Renderer {
     /// depth-tested, so the nearest object wins and ids are never blended — the
     /// "color index" method, no ray-marching. The lazily-created pick target
     /// tracks the display size ([`resize`](Self::resize) keeps it in sync).
-    pub fn pick(&mut self, params: FrameParams, draws: &[Draw], x: u32, y: u32) -> Option<u32> {
+    pub async fn pick(
+        &mut self,
+        params: FrameParams,
+        draws: &[Draw],
+        x: u32,
+        y: u32,
+    ) -> Option<u32> {
         let (w, h) = (self.target.width(), self.target.height());
         match self.pick_target.as_mut() {
             Some(target) => target.resize(&self.gpu.device, w, h),
             None => self.pick_target = Some(PickTarget::new(&self.gpu.device, w, h)),
         }
         let target = self.pick_target.as_ref()?;
-        pollster::block_on(target.pick(&self.gpu, &mut self.renderer, params, draws, x, y))
+        target
+            .pick(&self.gpu, &mut self.renderer, params, draws, x, y)
+            .await
     }
 }
