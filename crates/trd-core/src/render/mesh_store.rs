@@ -57,7 +57,7 @@ impl MeshGpu {
 }
 
 pub(super) fn upload_mesh(
-    device: &wgpu::Device,
+    gpu: &GpuContext,
     mesh: &Mesh,
     base_model: Matrix4,
     texture_layout: &wgpu::BindGroupLayout,
@@ -65,14 +65,16 @@ pub(super) fn upload_mesh(
 ) -> MeshGpu {
     use wgpu::util::DeviceExt;
 
-    let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("trd mesh vertex buffer"),
-        contents: bytemuck::cast_slice(&mesh.vertices),
-        usage: wgpu::BufferUsages::VERTEX,
-    });
-    let triangles = IndexBuf::new(device, "trd mesh index buffer", &mesh.indices);
+    let vertex_buffer = gpu
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("trd mesh vertex buffer"),
+            contents: bytemuck::cast_slice(&mesh.vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+    let triangles = IndexBuf::new(&gpu.device, "trd mesh index buffer", &mesh.indices);
     let edges = mesh.edge_indices();
-    let edges = IndexBuf::new(device, "trd mesh edge buffer", &edges);
+    let edges = IndexBuf::new(&gpu.device, "trd mesh edge buffer", &edges);
 
     // PBR vertex buffer (#): derive area-weighted smooth normals (the assets have
     // no `vn`) and pack position + normal + UV for `pbr.wgsl`, reusing the
@@ -101,11 +103,13 @@ pub(super) fn upload_mesh(
             tangent,
         })
         .collect();
-    let pbr_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("trd mesh pbr vertex buffer"),
-        contents: bytemuck::cast_slice(&pbr_vertices),
-        usage: wgpu::BufferUsages::VERTEX,
-    });
+    let pbr_vertex_buffer = gpu
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("trd mesh pbr vertex buffer"),
+            contents: bytemuck::cast_slice(&pbr_vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
 
     // AABB overlay box: the mesh's own bounding box (mesh-local coords) as 8
     // colored corner vertices + a 12-edge line list. Built once per mesh; drawn
@@ -118,10 +122,10 @@ pub(super) fn upload_mesh(
         pbr_vertex_buffer,
         triangles,
         edges,
-        aabb: VertexGeometry::new(device, "trd mesh aabb line buffer", &aabb_vertices),
+        aabb: VertexGeometry::new(&gpu.device, "trd mesh aabb line buffer", &aabb_vertices),
         base_model,
-        texture: BoundTexture::with_layout(texture_layout.clone()),
-        material_maps: BoundMaterialMaps::with_layout(material_maps_layout.clone()),
+        texture: BoundTexture::with_layout(gpu, texture_layout.clone()),
+        material_maps: BoundMaterialMaps::with_layout(gpu, material_maps_layout.clone()),
     }
 }
 
@@ -151,7 +155,7 @@ impl MeshStore {
     /// Constructs a `MeshStore`, uploading each mesh with its base (preview)
     /// model and sizing the instance buffer to at least one instance.
     pub(super) fn new(
-        device: &wgpu::Device,
+        gpu: &GpuContext,
         meshes: &[Mesh],
         base_models: &[Matrix4],
         texture_layout: &wgpu::BindGroupLayout,
@@ -162,44 +166,43 @@ impl MeshStore {
         let gpu_meshes = meshes
             .iter()
             .zip(base_models)
-            .map(|(mesh, &base)| {
-                upload_mesh(device, mesh, base, texture_layout, material_maps_layout)
-            })
+            .map(|(mesh, &base)| upload_mesh(gpu, mesh, base, texture_layout, material_maps_layout))
             .collect();
         let instance_capacity = (meshes.len() as u32).max(1);
-        let instance_buffer = create_instance_buffer(device, instance_capacity);
+        let instance_buffer = create_instance_buffer(&gpu.device, instance_capacity);
 
-        let axes_lines = VertexGeometry::new(device, "trd axes line buffer", &axes_line_vertices());
+        let axes_lines =
+            VertexGeometry::new(&gpu.device, "trd axes line buffer", &axes_line_vertices());
         let axes_heads =
-            VertexGeometry::new(device, "trd axes arrow buffer", &axes_arrow_vertices());
+            VertexGeometry::new(&gpu.device, "trd axes arrow buffer", &axes_arrow_vertices());
 
         // Coordinate-plane grids: one expanded-line vertex buffer per plane
         // (XY/XZ/YZ), drawn under each PlaneGrid object's model.
         let grid_lines = [
             VertexGeometry::new(
-                device,
+                &gpu.device,
                 "trd xy grid line buffer",
                 &grid_line_vertices(GridPlane::Xy),
             ),
             VertexGeometry::new(
-                device,
+                &gpu.device,
                 "trd xz grid line buffer",
                 &grid_line_vertices(GridPlane::Xz),
             ),
             VertexGeometry::new(
-                device,
+                &gpu.device,
                 "trd yz grid line buffer",
                 &grid_line_vertices(GridPlane::Yz),
             ),
         ];
         let quad_lines = [
             VertexGeometry::new(
-                device,
+                &gpu.device,
                 "trd placement quad line buffer",
                 &quad_outline_vertices(false),
             ),
             VertexGeometry::new(
-                device,
+                &gpu.device,
                 "trd selected placement quad line buffer",
                 &quad_outline_vertices(true),
             ),
@@ -208,11 +211,13 @@ impl MeshStore {
         // Contact / blob grounding-shadow quad: six TriangleList vertices (a unit
         // XY quad). Each BlobShadow drawable draws them under its own model via
         // the shared instance buffer, alpha-blended over the frame plane.
-        let shadow_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("trd shadow vertex buffer"),
-            contents: bytemuck::cast_slice(&blob_shadow_vertices()),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
+        let shadow_vertex_buffer =
+            gpu.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("trd shadow vertex buffer"),
+                    contents: bytemuck::cast_slice(&blob_shadow_vertices()),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
 
         Self {
             meshes: gpu_meshes,

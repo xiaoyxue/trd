@@ -10,9 +10,9 @@ use glam::{Mat4, Vec3};
 /// former single-mesh `SceneRenderer::new`/`with_base_model` production helpers,
 /// which only the GPU tests used.
 #[cfg(not(target_arch = "wasm32"))]
-fn single(device: &wgpu::Device, format: wgpu::TextureFormat, mesh: &Mesh) -> SceneRenderer {
+fn single(format: wgpu::TextureFormat, mesh: &Mesh) -> SceneRenderer {
     SceneRenderer::new(
-        device,
+        test_gpu(),
         format,
         std::slice::from_ref(mesh),
         &[Matrix4::IDENTITY],
@@ -26,7 +26,7 @@ fn render_with_readback(
     format: wgpu::TextureFormat,
     width: u32,
     height: u32,
-    encode: impl FnOnce(&wgpu::Queue, &mut wgpu::CommandEncoder, &wgpu::TextureView),
+    encode: impl FnOnce(&mut wgpu::CommandEncoder, &wgpu::TextureView),
 ) -> Vec<u8> {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("trd render test target"),
@@ -56,7 +56,7 @@ fn render_with_readback(
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("trd render test encoder"),
     });
-    encode(queue, &mut encoder, &view);
+    encode(&mut encoder, &view);
     encoder.copy_texture_to_buffer(
         wgpu::TexelCopyTextureInfo {
             texture: &texture,
@@ -114,15 +114,21 @@ fn render_with_readback(
 /// one device is fully supported, so the tests run at the default parallelism
 /// again without tripping the driver's device-creation deadlock.
 #[cfg(not(target_arch = "wasm32"))]
-fn test_device() -> (wgpu::Device, wgpu::Queue) {
-    static SHARED: std::sync::OnceLock<(wgpu::Device, wgpu::Queue)> = std::sync::OnceLock::new();
+fn test_gpu() -> std::sync::Arc<GpuContext> {
+    static SHARED: std::sync::OnceLock<std::sync::Arc<GpuContext>> = std::sync::OnceLock::new();
     SHARED
         .get_or_init(|| pollster::block_on(create_test_device()))
         .clone()
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn create_test_device() -> (wgpu::Device, wgpu::Queue) {
+fn test_device() -> (wgpu::Device, wgpu::Queue) {
+    let gpu = test_gpu();
+    (gpu.device.clone(), gpu.queue.clone())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn create_test_device() -> std::sync::Arc<GpuContext> {
     let instance =
         wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let adapter = instance
@@ -132,7 +138,7 @@ async fn create_test_device() -> (wgpu::Device, wgpu::Queue) {
         })
         .await
         .expect("GPU adapter required");
-    adapter
+    let (device, queue) = adapter
         .request_device(&wgpu::DeviceDescriptor {
             label: Some("trd mesh continuity test device"),
             required_features: wgpu::Features::empty(),
@@ -142,7 +148,58 @@ async fn create_test_device() -> (wgpu::Device, wgpu::Queue) {
             trace: wgpu::Trace::Off,
         })
         .await
-        .expect("request_device failed")
+        .expect("request_device failed");
+    std::sync::Arc::new(GpuContext {
+        adapter,
+        device,
+        queue,
+    })
+}
+
+/// A freshly constructed renderer must be able to draw **without any setter
+/// call at all**: no texture, no material maps, no environment probe.
+///
+/// This is the regression net for moving uploads out of `encode` (#180). Those
+/// fallback bind groups used to be created lazily inside `encode` ("the only
+/// place a GPU queue is available"); now that the renderer owns the queue they
+/// are built in the constructors instead. Had that been missed, the very first
+/// frame would panic in `bind_group()` — but only for a caller that sets
+/// nothing, which every other test happens to avoid.
+#[test]
+#[ignore = "requires a GPU adapter"]
+#[cfg(not(target_arch = "wasm32"))]
+fn first_frame_renders_with_no_setters_called() {
+    let (device, queue) = test_device();
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+    let (width, height) = (48, 48);
+    let mut renderer = single(format, &Mesh::hello_triangle());
+
+    // Every draw kind that reads a lazily-bound resource: Textured samples the
+    // albedo, Pbr samples albedo + material maps + the environment probe.
+    for mode in [RenderMode::Textured, RenderMode::Pbr] {
+        let scene = vec![DrawableObject::Mesh {
+            mesh_id: 0,
+            model: Matrix4::IDENTITY.to_cols_array(),
+            mode,
+        }];
+        let pixels =
+            render_with_readback(&device, &queue, format, width, height, |encoder, view| {
+                renderer.encode(
+                    encoder,
+                    view,
+                    FrameParams::IDENTITY,
+                    &scene,
+                    Viewport { width, height },
+                );
+            });
+        assert_eq!(pixels.len(), (width * height * 4) as usize);
+        assert!(
+            pixels
+                .chunks_exact(4)
+                .any(|px| px[3] > 0 && px[..3] != [0, 0, 0]),
+            "{mode:?} drew nothing on the first frame with no setters called"
+        );
+    }
 }
 
 #[test]
@@ -152,7 +209,7 @@ fn mesh_renderer_draws_multiple_instances() {
     let (device, queue) = test_device();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (64, 64);
-    let mut mesh = single(&device, format, &Mesh::hello_triangle());
+    let mut mesh = single(format, &Mesh::hello_triangle());
 
     // One centered instance vs. two instances translated to opposite sides.
     let single = [DrawableObject::Mesh {
@@ -160,9 +217,8 @@ fn mesh_renderer_draws_multiple_instances() {
         model: Matrix4::IDENTITY.to_cols_array(),
         mode: RenderMode::Filled,
     }];
-    let single_px = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
+    let single_px = render_with_readback(&device, &queue, format, width, height, |e, v| {
         mesh.encode(
-            q,
             e,
             v,
             FrameParams::IDENTITY,
@@ -183,9 +239,8 @@ fn mesh_renderer_draws_multiple_instances() {
             mode: RenderMode::Filled,
         },
     ];
-    let two_px = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
+    let two_px = render_with_readback(&device, &queue, format, width, height, |e, v| {
         mesh.encode(
-            q,
             e,
             v,
             FrameParams::IDENTITY,
@@ -259,7 +314,7 @@ fn mesh_renderer_depth_buffer_occludes_far_behind_near() {
     };
     // mesh 0 = red (drawn first), mesh 1 = green (drawn last).
     let mut mesh = SceneRenderer::new(
-        &device,
+        test_gpu(),
         format,
         &[quad([1.0, 0.0, 0.0]), quad([0.0, 1.0, 0.0])],
         &[Matrix4::IDENTITY, Matrix4::IDENTITY],
@@ -276,9 +331,8 @@ fn mesh_renderer_depth_buffer_occludes_far_behind_near() {
             mode: RenderMode::Filled,
         },
     ];
-    let px = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
+    let px = render_with_readback(&device, &queue, format, width, height, |e, v| {
         mesh.encode(
-            q,
             e,
             v,
             FrameParams::IDENTITY,
@@ -302,7 +356,7 @@ fn mesh_renderer_wireframe_lights_edges_only() {
     let (device, queue) = test_device();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (64, 64);
-    let mut mesh = single(&device, format, &Mesh::hello_triangle());
+    let mut mesh = single(format, &Mesh::hello_triangle());
     let model = Matrix4::IDENTITY.to_cols_array();
     let filled_scene = [DrawableObject::Mesh {
         mesh_id: 0,
@@ -315,9 +369,8 @@ fn mesh_renderer_wireframe_lights_edges_only() {
         mode: RenderMode::Wireframe,
     }];
 
-    let filled = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
+    let filled = render_with_readback(&device, &queue, format, width, height, |e, v| {
         mesh.encode(
-            q,
             e,
             v,
             FrameParams::IDENTITY,
@@ -326,9 +379,8 @@ fn mesh_renderer_wireframe_lights_edges_only() {
         );
     });
 
-    let wire = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
+    let wire = render_with_readback(&device, &queue, format, width, height, |e, v| {
         mesh.encode(
-            q,
             e,
             v,
             FrameParams::IDENTITY,
@@ -428,16 +480,15 @@ fn mesh_renderer_textured_samples_bound_texture() {
     )
     .unwrap();
 
-    let mut mesh = single(&device, format, &quad);
+    let mut mesh = single(format, &quad);
     mesh.set_texture(&checker);
     let scene = [DrawableObject::Mesh {
         mesh_id: 0,
         model: Matrix4::IDENTITY.to_cols_array(),
         mode: RenderMode::Textured,
     }];
-    let pixels = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
+    let pixels = render_with_readback(&device, &queue, format, width, height, |e, v| {
         mesh.encode(
-            q,
             e,
             v,
             FrameParams::IDENTITY,
@@ -484,7 +535,7 @@ fn mesh_renderer_aabb_overlay_draws_green_box() {
     let (device, queue) = test_device();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (64, 64);
-    let mut mesh = single(&device, format, &Mesh::hello_triangle());
+    let mut mesh = single(format, &Mesh::hello_triangle());
     let model = Matrix4::IDENTITY.to_cols_array();
     let plain_scene = [DrawableObject::Mesh {
         mesh_id: 0,
@@ -500,9 +551,8 @@ fn mesh_renderer_aabb_overlay_draws_green_box() {
         DrawableObject::AabbBox { mesh_id: 0, model },
     ];
 
-    let plain = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
+    let plain = render_with_readback(&device, &queue, format, width, height, |e, v| {
         mesh.encode(
-            q,
             e,
             v,
             FrameParams::IDENTITY,
@@ -511,9 +561,8 @@ fn mesh_renderer_aabb_overlay_draws_green_box() {
         );
     });
 
-    let with_box = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
+    let with_box = render_with_readback(&device, &queue, format, width, height, |e, v| {
         mesh.encode(
-            q,
             e,
             v,
             FrameParams::IDENTITY,
@@ -552,7 +601,7 @@ fn mesh_renderer_axes_overlay_draws_rgb_gizmo() {
     let (device, queue) = test_device();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (64, 64);
-    let mut mesh = single(&device, format, &Mesh::hello_triangle());
+    let mut mesh = single(format, &Mesh::hello_triangle());
     let model = Matrix4::IDENTITY.to_cols_array();
     let plain_scene = [DrawableObject::Mesh {
         mesh_id: 0,
@@ -570,9 +619,8 @@ fn mesh_renderer_axes_overlay_draws_rgb_gizmo() {
         },
     ];
 
-    let plain = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
+    let plain = render_with_readback(&device, &queue, format, width, height, |e, v| {
         mesh.encode(
-            q,
             e,
             v,
             FrameParams::IDENTITY,
@@ -581,9 +629,8 @@ fn mesh_renderer_axes_overlay_draws_rgb_gizmo() {
         );
     });
 
-    let with_axes = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
+    let with_axes = render_with_readback(&device, &queue, format, width, height, |e, v| {
         mesh.encode(
-            q,
             e,
             v,
             FrameParams::IDENTITY,
@@ -627,7 +674,7 @@ fn gizmo_lines_and_arrowheads_stay_smooth_without_msaa() {
     let (width, height) = (128, 128);
     let mesh_data = Mesh::hello_triangle();
     let mut renderer = SceneRenderer::with_sample_count(
-        &device,
+        test_gpu(),
         format,
         std::slice::from_ref(&mesh_data),
         &[Matrix4::IDENTITY],
@@ -636,9 +683,8 @@ fn gizmo_lines_and_arrowheads_stay_smooth_without_msaa() {
     let model = Matrix4::from_scale(Vector3::new(0.5, 0.5, 0.5)).to_cols_array();
     let scene = [DrawableObject::CoordinateAxes { model }];
 
-    let pixels = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
+    let pixels = render_with_readback(&device, &queue, format, width, height, |e, v| {
         renderer.encode(
-            q,
             e,
             v,
             FrameParams::IDENTITY,
@@ -690,7 +736,7 @@ fn scene_composes_all_drawable_kinds_together() {
     let (device, queue) = test_device();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (64, 64);
-    let mut mesh = single(&device, format, &Mesh::hello_triangle());
+    let mut mesh = single(format, &Mesh::hello_triangle());
     let model = Matrix4::IDENTITY.to_cols_array();
 
     let filled_only = [DrawableObject::Mesh {
@@ -715,9 +761,8 @@ fn scene_composes_all_drawable_kinds_together() {
         },
     ];
 
-    let filled_px = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
+    let filled_px = render_with_readback(&device, &queue, format, width, height, |e, v| {
         mesh.encode(
-            q,
             e,
             v,
             FrameParams::IDENTITY,
@@ -725,9 +770,8 @@ fn scene_composes_all_drawable_kinds_together() {
             Viewport { width, height },
         );
     });
-    let composed_px = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
+    let composed_px = render_with_readback(&device, &queue, format, width, height, |e, v| {
         mesh.encode(
-            q,
             e,
             v,
             FrameParams::IDENTITY,
@@ -800,7 +844,7 @@ fn environment_background_draws_bound_probe() {
     let (device, queue) = test_device();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (32, 32);
-    let mut renderer = single(&device, format, &Mesh::hello_triangle());
+    let mut renderer = single(format, &Mesh::hello_triangle());
     renderer.set_env_map(EnvMapData::from_rgba32f(
         2,
         1,
@@ -813,23 +857,15 @@ fn environment_background_draws_bound_probe() {
         blur: 0.0,
         tonemap: Tonemap::Reinhard,
     }];
-    let pixels = render_with_readback(
-        &device,
-        &queue,
-        format,
-        width,
-        height,
-        |q, encoder, view| {
-            renderer.encode(
-                q,
-                encoder,
-                view,
-                FrameParams::IDENTITY,
-                &scene,
-                Viewport { width, height },
-            );
-        },
-    );
+    let pixels = render_with_readback(&device, &queue, format, width, height, |encoder, view| {
+        renderer.encode(
+            encoder,
+            view,
+            FrameParams::IDENTITY,
+            &scene,
+            Viewport { width, height },
+        );
+    });
     assert!(
         pixels.chunks_exact(4).any(|pixel| pixel[0] > 128),
         "environment background should produce visible probe color"
@@ -848,16 +884,15 @@ fn mesh_renderer_renders_loaded_quad_filled_with_correct_coverage() {
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (64, 64);
     let quad = Mesh::from_obj(QUAD_OBJ).expect("quad OBJ parses");
-    let mut mesh = single(&device, format, &quad);
+    let mut mesh = single(format, &quad);
 
     let scene = [DrawableObject::Mesh {
         mesh_id: 0,
         model: Matrix4::IDENTITY.to_cols_array(),
         mode: RenderMode::Filled,
     }];
-    let px = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
+    let px = render_with_readback(&device, &queue, format, width, height, |e, v| {
         mesh.encode(
-            q,
             e,
             v,
             FrameParams::IDENTITY,
@@ -911,7 +946,7 @@ fn cg_and_cv_cameras_render_matching_output() {
     let (width, height) = (96, 96);
     let viewport = Viewport { width, height };
     let quad = Mesh::from_obj(QUAD_OBJ).expect("quad OBJ parses");
-    let mut mesh = single(&device, format, &quad);
+    let mut mesh = single(format, &quad);
 
     let scene = [DrawableObject::Mesh {
         mesh_id: 0,
@@ -947,11 +982,11 @@ fn cg_and_cv_cameras_render_matching_output() {
         ..FrameParams::IDENTITY
     };
 
-    let cg_px = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
-        mesh.encode(q, e, v, cg, &scene, viewport);
+    let cg_px = render_with_readback(&device, &queue, format, width, height, |e, v| {
+        mesh.encode(e, v, cg, &scene, viewport);
     });
-    let cv_px = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
-        mesh.encode(q, e, v, cv, &scene, viewport);
+    let cv_px = render_with_readback(&device, &queue, format, width, height, |e, v| {
+        mesh.encode(e, v, cv, &scene, viewport);
     });
 
     // Both must actually show the quad (non-trivial coverage).
@@ -1003,7 +1038,7 @@ fn dolly_turntable_bird_eye_cg_cv_wireframe_stays_framed() {
     let (width, height) = (128, 128);
     let viewport = Viewport { width, height };
     let cube = Mesh::from_obj(CUBE_OBJ).expect("cube OBJ parses");
-    let mut mesh = single(&device, format, &cube);
+    let mut mesh = single(format, &cube);
 
     let fovy = crate::DEFAULT_FOV_Y; // 45°
                                      // Fixed bird's-eye view direction: 45° elevation, 35° azimuth (unit).
@@ -1071,11 +1106,11 @@ fn dolly_turntable_bird_eye_cg_cv_wireframe_stays_framed() {
                 ..FrameParams::IDENTITY
             };
 
-            let cg_px = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
-                mesh.encode(q, e, v, cg, &scene, viewport);
+            let cg_px = render_with_readback(&device, &queue, format, width, height, |e, v| {
+                mesh.encode(e, v, cg, &scene, viewport);
             });
-            let cv_px = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
-                mesh.encode(q, e, v, cv, &scene, viewport);
+            let cv_px = render_with_readback(&device, &queue, format, width, height, |e, v| {
+                mesh.encode(e, v, cv, &scene, viewport);
             });
 
             let cg_lit = lit(&cg_px);
@@ -1168,12 +1203,11 @@ fn frame_plane_composites_background_under_scene() {
         indices: vec![0, 2, 3, 0, 3, 1],
         shading: None,
     };
-    let mut mesh = single(&device, format, &quad);
+    let mut mesh = single(format, &quad);
 
     // 2×2 background, row-major top-left origin: white, red / green, blue.
     assert!(!mesh.has_frame_texture());
     mesh.update_frame_texture_rgba(
-        &queue,
         &[
             255, 255, 255, 255, 255, 0, 0, 255, // white, red
             0, 255, 0, 255, 0, 0, 255, 255, // green, blue
@@ -1187,9 +1221,8 @@ fn frame_plane_composites_background_under_scene() {
     let plane_only = [DrawableObject::FramePlane {
         fit: FrameFit::Stretch,
     }];
-    let bg = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
+    let bg = render_with_readback(&device, &queue, format, width, height, |e, v| {
         mesh.encode(
-            q,
             e,
             v,
             FrameParams::IDENTITY,
@@ -1236,9 +1269,8 @@ fn frame_plane_composites_background_under_scene() {
             mode: RenderMode::Filled,
         },
     ];
-    let over = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
+    let over = render_with_readback(&device, &queue, format, width, height, |e, v| {
         mesh.encode(
-            q,
             e,
             v,
             FrameParams::IDENTITY,
@@ -1251,9 +1283,8 @@ fn frame_plane_composites_background_under_scene() {
         model: Matrix4::IDENTITY.to_cols_array(),
         mode: RenderMode::Filled,
     }];
-    let two_pass = render_with_readback(&device, &queue, format, width, height, |q, e, v| {
+    let two_pass = render_with_readback(&device, &queue, format, width, height, |e, v| {
         mesh.encode(
-            q,
             e,
             v,
             FrameParams::IDENTITY,
@@ -1261,7 +1292,6 @@ fn frame_plane_composites_background_under_scene() {
             Viewport { width, height },
         );
         mesh.encode_overlay(
-            q,
             e,
             v,
             FrameParams::IDENTITY,
@@ -1296,7 +1326,7 @@ fn triangle_renderer_draws_gradient_triangle() {
     let (width, height) = (64, 64);
     let renderer = TriangleRenderer::new(&device, format);
 
-    let px = render_with_readback(&device, &queue, format, width, height, |_q, e, v| {
+    let px = render_with_readback(&device, &queue, format, width, height, |e, v| {
         renderer.encode(e, v);
     });
     let at = |x: u32, y: u32| -> [u8; 3] {
@@ -1339,7 +1369,7 @@ fn picking_resolves_object_ids_and_background() {
     let (device, queue) = test_device();
     let quad = Mesh::from_obj(QUAD_OBJ).expect("quad OBJ parses");
     // The main-pass format is irrelevant to picking (its pipeline is PICK_FORMAT).
-    let mut renderer = single(&device, wgpu::TextureFormat::Rgba8UnormSrgb, &quad);
+    let mut renderer = single(wgpu::TextureFormat::Rgba8UnormSrgb, &quad);
 
     let (width, height) = (64u32, 64u32);
     let target = PickTarget::new(&device, width, height);

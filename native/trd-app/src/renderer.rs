@@ -16,8 +16,9 @@ use crate::stream::FrameData;
 /// GPU resources tied to a live window surface.
 pub(crate) struct WindowRenderer {
     pub(crate) window: Arc<Window>,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    /// The shared GPU context (adapter + device + queue), held as one value
+    /// instead of cloned apart into separate fields (#180).
+    gpu: Arc<trd_core::GpuContext>,
     /// The shared on-screen render harness (surface + config + sRGB view, #103).
     target: OnscreenTarget,
     /// The scene renderer, built lazily once the stream's mesh table (or the
@@ -47,11 +48,7 @@ impl WindowRenderer {
         // plus the adapter's real limits (so a large / high-DPI surface fits;
         // downlevel_defaults caps textures at 2048) and the mandated adapter log
         // line. Only the surface creation above stays shell-specific.
-        let trd_core::GpuContext {
-            adapter,
-            device,
-            queue,
-        } = trd_core::GpuContext::request(
+        let gpu = trd_core::GpuContext::request(
             &instance,
             &trd_core::GpuRequest {
                 label: "trd app device",
@@ -62,14 +59,14 @@ impl WindowRenderer {
         .await?;
 
         let mut config = surface
-            .get_default_config(&adapter, width, height)
+            .get_default_config(&gpu.adapter, width, height)
             .ok_or(AppError::SurfaceUnsupported)?;
         // `--fps` sets the real playback/present rate, so by default we do NOT
         // lock presentation to the monitor's refresh (vsync). Pick a non-vsync
         // present mode when available (Mailbox is tear-free; Immediate may tear)
         // so the app can present above/below the refresh rate; `--vsync` forces
         // Fifo. Fifo is always supported, so it is the final fallback.
-        let supported = surface.get_capabilities(&adapter).present_modes;
+        let supported = surface.get_capabilities(&gpu.adapter).present_modes;
         config.present_mode = if vsync {
             wgpu::PresentMode::Fifo
         } else if supported.contains(&wgpu::PresentMode::Mailbox) {
@@ -80,12 +77,11 @@ impl WindowRenderer {
             wgpu::PresentMode::Fifo
         };
         log::info!("present mode: {:?} (vsync={vsync})", config.present_mode);
-        let target = OnscreenTarget::new(&device, surface, config);
+        let target = OnscreenTarget::new(&gpu.device, surface, config);
 
         Ok(Self {
             window,
-            device,
-            queue,
+            gpu,
             target,
             renderer: None,
             uploaded_frame_image: None,
@@ -93,7 +89,8 @@ impl WindowRenderer {
     }
 
     pub(crate) fn resize(&mut self, size: PhysicalSize<u32>) {
-        self.target.resize(&self.device, size.width, size.height);
+        self.target
+            .resize(&self.gpu.device, size.width, size.height);
     }
 
     /// Uploads the stream's meshes and builds the scene renderer (each mesh
@@ -101,7 +98,7 @@ impl WindowRenderer {
     /// stream: called once when the mesh table first arrives.
     pub(crate) fn set_meshes(&mut self, meshes: &[Mesh]) {
         self.renderer = Some(SceneRenderer::auto_fit(
-            &self.device,
+            self.gpu.clone(),
             self.target.view_format(),
             meshes,
         ));
@@ -174,7 +171,7 @@ impl WindowRenderer {
             // The surface config is stale (e.g. after a resize/minimise or a lost
             // surface); reconfigure and try again on the next redraw.
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                self.target.reconfigure(&self.device);
+                self.target.reconfigure(&self.gpu.device);
                 self.window.request_redraw();
                 return;
             }
@@ -193,12 +190,7 @@ impl WindowRenderer {
                     .as_ref()
                     .is_some_and(|current| Arc::ptr_eq(current, image));
                 if !already_uploaded {
-                    renderer.update_frame_texture_rgba(
-                        &self.queue,
-                        &image.rgba,
-                        image.width,
-                        image.height,
-                    );
+                    renderer.update_frame_texture_rgba(&image.rgba, image.width, image.height);
                     self.uploaded_frame_image = Some(image.clone());
                 }
                 Some(FrameFit::Stretch)
@@ -219,8 +211,8 @@ impl WindowRenderer {
             frame_fit,
         );
         self.target.present(
-            &self.device,
-            &self.queue,
+            &self.gpu.device,
+            &self.gpu.queue,
             renderer,
             texture,
             frame.params,

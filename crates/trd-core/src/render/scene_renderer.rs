@@ -11,6 +11,8 @@
 //!   draws (#20).
 //! - [`FramePlane`](super::FramePlane) — the background video frame plane (#63).
 
+use std::sync::Arc;
+
 use super::batch::{build_batches, DrawKind};
 use super::bound_material_maps::BoundMaterialMaps;
 use super::buffer::{draw_indexed, draw_vertices};
@@ -301,9 +303,12 @@ pub struct SceneRenderer {
     /// The color format the pipelines were built for; the MSAA color target must
     /// be created with the same format.
     format: wgpu::TextureFormat,
-    /// Retained so `encode` can grow GPU resources on demand without the caller
-    /// threading a `&Device` through every call (`wgpu::Device` is a cheap `Arc`).
-    device: wgpu::Device,
+    /// The shared GPU context. Retained so `encode` can grow GPU resources and
+    /// the setters can upload immediately, without the caller threading handles
+    /// through every call. Holding the whole context (rather than a bare device)
+    /// is what lets the &self.gpu.queue live here too, which is why uploads no longer have
+    /// to be deferred to `encode` (#180).
+    gpu: Arc<GpuContext>,
     /// The object-id **picking** pipeline (`picking.wgsl`): renders each drawn
     /// object in a flat id color into a single-sample linear target, reused by
     /// [`encode_picking`](Self::encode_picking). Built once (its own bind-group
@@ -322,7 +327,7 @@ impl SceneRenderer {
     /// arbitrary-unit asset renders centered at a reasonable size. A convenience
     /// constructor over [`new`](Self::new); shared by the headless
     /// [`crate::run_stream`]/`BatchRenderer` and the windowed `trd-app`.
-    pub fn auto_fit(device: &wgpu::Device, format: wgpu::TextureFormat, meshes: &[Mesh]) -> Self {
+    pub fn auto_fit(gpu: Arc<GpuContext>, format: wgpu::TextureFormat, meshes: &[Mesh]) -> Self {
         let base_models: Vec<Matrix4> = meshes
             .iter()
             .map(|mesh| {
@@ -330,7 +335,7 @@ impl SceneRenderer {
                     .matrix()
             })
             .collect();
-        Self::new(device, format, meshes, &base_models)
+        Self::new(gpu, format, meshes, &base_models)
     }
 
     /// Constructs a `SceneRenderer` over one or more meshes, each paired with an
@@ -344,12 +349,12 @@ impl SceneRenderer {
     ///
     /// Panics if `meshes` is empty or `meshes`/`base_models` differ in length.
     pub fn new(
-        device: &wgpu::Device,
+        gpu: Arc<GpuContext>,
         format: wgpu::TextureFormat,
         meshes: &[Mesh],
         base_models: &[Matrix4],
     ) -> Self {
-        Self::with_sample_count(device, format, meshes, base_models, MSAA_SAMPLE_COUNT)
+        Self::with_sample_count(gpu, format, meshes, base_models, MSAA_SAMPLE_COUNT)
     }
 
     /// Like [`new`](Self::new), but with an explicit mesh-pass MSAA
@@ -361,7 +366,7 @@ impl SceneRenderer {
     /// Panics if `meshes` is empty, `meshes`/`base_models` differ in length, or
     /// `sample_count` is 0.
     pub fn with_sample_count(
-        device: &wgpu::Device,
+        gpu: Arc<GpuContext>,
         format: wgpu::TextureFormat,
         meshes: &[Mesh],
         base_models: &[Matrix4],
@@ -380,12 +385,12 @@ impl SceneRenderer {
 
         // One shared group-1 albedo layout for the textured/PBR pipelines and
         // every per-mesh [`BoundTexture`] (each object skins with its own diffuse).
-        let texture_layout = create_texture_bind_group_layout(device);
-        let material_maps_layout = BoundMaterialMaps::create_layout(device);
-        let env = BoundEnv::new(device);
-        let env_background = EnvBackground::new(device, format, env.layout(), sample_count);
+        let texture_layout = create_texture_bind_group_layout(&gpu.device);
+        let material_maps_layout = BoundMaterialMaps::create_layout(&gpu.device);
+        let env = BoundEnv::new(&gpu);
+        let env_background = EnvBackground::new(&gpu.device, format, env.layout(), sample_count);
         let pass = SceneRenderPipelines::new(
-            device,
+            &gpu.device,
             format,
             &texture_layout,
             &material_maps_layout,
@@ -394,25 +399,27 @@ impl SceneRenderer {
             meshes.len(),
         );
         let store = MeshStore::new(
-            device,
+            &gpu,
             meshes,
             base_models,
             &texture_layout,
             &material_maps_layout,
         );
-        let frame_plane = FramePlane::new(device, format, sample_count);
+        let frame_plane = FramePlane::new(&gpu.device, format, sample_count);
 
         // The picking pipeline: a group-0 camera uniform (structurally identical
         // to the mesh camera layout, so `pass.camera_bind_group` binds it) + the
         // per-instance id color, single-sampled into PICK_FORMAT.
-        let pick_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("trd picking pipeline layout"),
-            bind_group_layouts: &[Some(&create_mesh_bind_group_layout(device))],
-            immediate_size: 0,
-        });
-        let pick_pipeline = create_picking_pipeline(device, &pick_layout);
+        let pick_layout = &gpu
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("trd picking pipeline layout"),
+                bind_group_layouts: &[Some(&create_mesh_bind_group_layout(&gpu.device))],
+                immediate_size: 0,
+            });
+        let pick_pipeline = create_picking_pipeline(&gpu.device, pick_layout);
         let pick_instance_capacity = (meshes.len() as u32).max(1);
-        let pick_instances = device.create_buffer(&wgpu::BufferDescriptor {
+        let pick_instances = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("trd pick instance buffer"),
             size: pick_instance_capacity as u64 * std::mem::size_of::<PickInstanceRaw>() as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
@@ -434,7 +441,7 @@ impl SceneRenderer {
             msaa: None,
             sample_count,
             format,
-            device: device.clone(),
+            gpu,
             pick_pipeline,
             pick_instances,
             pick_instance_capacity,
@@ -462,21 +469,22 @@ impl SceneRenderer {
     /// ignored. The image uploads lazily on the next [`encode`](Self::encode).
     pub fn set_mesh_texture(&mut self, mesh_id: usize, texture: &dyn Texture) {
         if let Some(mesh) = self.store.meshes.get_mut(mesh_id) {
-            mesh.texture.set(texture);
+            mesh.texture.set(&self.gpu, texture);
         }
     }
 
     /// Binds a glTF metallic-roughness map (G=roughness, B=metallic).
     pub fn set_mesh_metallic_roughness_texture(&mut self, mesh_id: usize, texture: &dyn Texture) {
         if let Some(mesh) = self.store.meshes.get_mut(mesh_id) {
-            mesh.material_maps.set_metallic_roughness(texture);
+            mesh.material_maps
+                .set_metallic_roughness(&self.gpu, texture);
         }
     }
 
     /// Binds a tangent-space glTF normal map.
     pub fn set_mesh_normal_texture(&mut self, mesh_id: usize, texture: &dyn Texture) {
         if let Some(mesh) = self.store.meshes.get_mut(mesh_id) {
-            mesh.material_maps.set_normal(texture);
+            mesh.material_maps.set_normal(&self.gpu, texture);
         }
     }
 
@@ -541,7 +549,7 @@ impl SceneRenderer {
     /// [`encode`](Self::encode). Until set, PBR draws use no environment
     /// reflection (a 1×1 black probe keeps the bind group valid).
     pub fn set_env_map(&mut self, env: EnvMapData) {
-        self.env.set(env);
+        self.env.set(&self.gpu, env);
     }
 
     /// Uploads `rgba` (tightly-packed, row-major `height`×`width`×4) as the
@@ -550,15 +558,9 @@ impl SceneRenderer {
     /// which reuses the GPU texture across same-resolution frames.
     ///
     /// Panics if `rgba.len() != width * height * 4` or either dimension is zero.
-    pub fn update_frame_texture_rgba(
-        &mut self,
-        queue: &wgpu::Queue,
-        rgba: &[u8],
-        width: u32,
-        height: u32,
-    ) {
+    pub fn update_frame_texture_rgba(&mut self, rgba: &[u8], width: u32, height: u32) {
         self.frame_plane
-            .upload_rgba(&self.device, queue, rgba, width, height);
+            .upload_rgba(&self.gpu.device, &self.gpu.queue, rgba, width, height);
     }
 
     /// Whether a background frame texture is currently bound (so a
@@ -579,34 +581,31 @@ impl SceneRenderer {
     /// Out-of-range `mesh_id`s are skipped (callers should validate first).
     pub fn encode(
         &mut self,
-        queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
         params: FrameParams,
         scene: &[DrawableObject],
         viewport: Viewport,
     ) {
-        self.encode_pass(queue, encoder, view, params, scene, viewport, false);
+        self.encode_pass(encoder, view, params, scene, viewport, false);
     }
 
     /// Encodes a foreground scene while preserving color already rendered into
     /// `view` by an earlier pass in the same command encoder.
     pub fn encode_overlay(
         &mut self,
-        queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
         params: FrameParams,
         scene: &[DrawableObject],
         viewport: Viewport,
     ) {
-        self.encode_pass(queue, encoder, view, params, scene, viewport, true);
+        self.encode_pass(encoder, view, params, scene, viewport, true);
     }
 
     #[allow(clippy::too_many_arguments)]
     fn encode_pass(
         &mut self,
-        queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
         params: FrameParams,
@@ -615,12 +614,13 @@ impl SceneRenderer {
         load_color: bool,
     ) {
         // 1. Camera P·V for this frame.
-        self.pipelines.write_camera(queue, params, viewport);
+        self.pipelines
+            .write_camera(&self.gpu.queue, params, viewport);
         // 1b. Disney PBR uniform slots for this frame — one per mesh (each carries
         //     the shared camera/lights + that mesh's material, #141). Written
         //     unconditionally so a PBR draw always has a current material slot.
         self.pipelines.write_pbr(
-            queue,
+            &self.gpu.queue,
             params,
             viewport,
             PbrBatchInputs {
@@ -639,7 +639,7 @@ impl SceneRenderer {
             self.store.meshes.get(mesh_id).map(|mesh| mesh.base_model)
         });
         self.store
-            .upload_instances(&self.device, queue, &batches.instances);
+            .upload_instances(&self.gpu.device, &self.gpu.queue, &batches.instances);
 
         // 3. Match the depth + (when MSAA is on) color attachments to the viewport
         //    (solid meshes z-occlude; the multisampled color, if any, is resolved
@@ -650,21 +650,18 @@ impl SceneRenderer {
         // 4. Background frame-plane fit for this viewport (no-op if the scene has
         //    no FramePlane or no frame texture is bound yet).
         if let Some(fit) = batches.frame_fit {
-            self.frame_plane.write_fit(queue, fit, viewport);
+            self.frame_plane.write_fit(&self.gpu.queue, fit, viewport);
         }
 
-        // 5. (Re)upload each mesh's **own** albedo texture (#141: per-object
-        //    diffuse) + the HDR environment map, on first use / after a set —
-        //    encode is where a GPU queue is available. Uploads happen up front so
-        //    the render loop below only *reads* each mesh's group-1 bind group.
-        for mesh in &mut self.store.meshes {
-            mesh.texture.ensure_uploaded(&self.device, queue);
-            mesh.material_maps.ensure_uploaded(&self.device, queue);
-        }
-        let env_bind_group = self.env.ensure_uploaded(&self.device, queue);
+        // 5. Bind groups for each mesh's own albedo (#141) and material maps, and
+        //    for the HDR environment map. Nothing is uploaded here: now that the
+        //    renderer holds the &self.gpu.queue, every setter uploads immediately and the
+        //    constructors upload their fallbacks, so `encode` only *reads* bind
+        //    groups that are already valid (#180).
+        let env_bind_group = self.env.bind_group();
         if let Some(([rotation, exposure, blur], tonemap)) = batches.environment_background {
             self.env_background.write(
-                queue,
+                &self.gpu.queue,
                 params,
                 viewport,
                 EnvBackgroundSettings {
@@ -822,7 +819,6 @@ impl SceneRenderer {
     #[allow(clippy::too_many_arguments)]
     pub fn encode_picking(
         &mut self,
-        queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         color_view: &wgpu::TextureView,
         depth_view: &wgpu::TextureView,
@@ -832,7 +828,8 @@ impl SceneRenderer {
     ) {
         // Camera P·V for this frame (writes the shared camera uniform bound by
         // `camera_bind_group`, which is layout-compatible with the pick pipeline).
-        self.pipelines.write_camera(queue, params, viewport);
+        self.pipelines
+            .write_camera(&self.gpu.queue, params, viewport);
 
         // Build one pick instance per drawable object, carrying its index color.
         // Keep the draw index as the id even when an entry is skipped, so a decoded
@@ -858,7 +855,7 @@ impl SceneRenderer {
         // Grow + upload the pick instance buffer.
         if instances.len() as u32 > self.pick_instance_capacity {
             self.pick_instance_capacity = (instances.len() as u32).next_power_of_two();
-            self.pick_instances = self.device.create_buffer(&wgpu::BufferDescriptor {
+            self.pick_instances = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("trd pick instance buffer"),
                 size: self.pick_instance_capacity as u64
                     * std::mem::size_of::<PickInstanceRaw>() as u64,
@@ -867,7 +864,9 @@ impl SceneRenderer {
             });
         }
         if !instances.is_empty() {
-            queue.write_buffer(&self.pick_instances, 0, bytemuck::cast_slice(&instances));
+            self.gpu
+                .queue
+                .write_buffer(&self.pick_instances, 0, bytemuck::cast_slice(&instances));
         }
 
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -916,7 +915,12 @@ impl SceneRenderer {
             .as_ref()
             .is_none_or(|d| d.width != dw || d.height != dh)
         {
-            self.depth = Some(create_depth_target(&self.device, dw, dh, self.sample_count));
+            self.depth = Some(create_depth_target(
+                &self.gpu.device,
+                dw,
+                dh,
+                self.sample_count,
+            ));
         }
     }
 
@@ -939,7 +943,7 @@ impl SceneRenderer {
             .is_none_or(|m| m.width != dw || m.height != dh)
         {
             self.msaa = Some(create_msaa_color_target(
-                &self.device,
+                &self.gpu.device,
                 self.format,
                 dw,
                 dh,

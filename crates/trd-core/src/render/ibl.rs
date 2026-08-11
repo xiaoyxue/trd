@@ -1,4 +1,5 @@
 use super::create_env_bind_group_layout;
+use super::GpuContext;
 
 /// Per-object image-based-lighting controls.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -78,19 +79,32 @@ impl EnvMapData {
     }
 }
 
-/// Lazily uploaded HDR environment-map binding.
+/// The HDR environment-map binding.
+///
+/// Uploaded **eagerly**: the constructor binds a 1×1 black fallback and
+/// [`set`](Self::set) replaces it immediately, so `encode` never has to upload
+/// (#180). `has_env` still reports whether a *real* probe was supplied, which is
+/// what the PBR uniform keys reflections off.
 pub(crate) struct BoundEnv {
     layout: wgpu::BindGroupLayout,
-    bind_group: Option<wgpu::BindGroup>,
-    data: Option<EnvMapData>,
+    bind_group: wgpu::BindGroup,
+    has_env: bool,
 }
 
 impl BoundEnv {
-    pub(crate) fn new(device: &wgpu::Device) -> Self {
+    pub(crate) fn new(gpu: &GpuContext) -> Self {
+        let layout = create_env_bind_group_layout(&gpu.device);
+        // 1×1 black: no reflection until a probe is set.
+        let fallback = EnvMapData {
+            width: 1,
+            height: 1,
+            rgba: vec![0.0, 0.0, 0.0, 1.0],
+        };
+        let bind_group = upload_env_texture(&gpu.device, &gpu.queue, &layout, &fallback);
         Self {
-            layout: create_env_bind_group_layout(device),
-            bind_group: None,
-            data: None,
+            layout,
+            bind_group,
+            has_env: false,
         }
     }
 
@@ -98,30 +112,17 @@ impl BoundEnv {
         &self.layout
     }
 
-    pub(crate) fn set(&mut self, data: EnvMapData) {
-        self.data = Some(data);
-        self.bind_group = None;
+    pub(crate) fn set(&mut self, gpu: &GpuContext, data: EnvMapData) {
+        self.bind_group = upload_env_texture(&gpu.device, &gpu.queue, &self.layout, &data);
+        self.has_env = true;
     }
 
     pub(crate) fn has_env(&self) -> bool {
-        self.data.is_some()
+        self.has_env
     }
 
-    pub(crate) fn ensure_uploaded(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-    ) -> &wgpu::BindGroup {
-        if self.bind_group.is_none() {
-            let fallback = EnvMapData {
-                width: 1,
-                height: 1,
-                rgba: vec![0.0, 0.0, 0.0, 1.0],
-            };
-            let data = self.data.as_ref().unwrap_or(&fallback);
-            self.bind_group = Some(upload_env_texture(device, queue, &self.layout, data));
-        }
-        self.bind_group.as_ref().expect("uploaded above")
+    pub(crate) fn bind_group(&self) -> &wgpu::BindGroup {
+        &self.bind_group
     }
 }
 
