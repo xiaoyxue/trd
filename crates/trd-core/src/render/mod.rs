@@ -23,7 +23,6 @@ mod picking;
 mod pipeline;
 mod platform;
 mod render_target;
-#[cfg(not(target_arch = "wasm32"))]
 mod renderer;
 mod scene;
 mod scene_renderer;
@@ -51,7 +50,8 @@ pub use render_target::{
     OffscreenError, OffscreenTarget, OnscreenTarget, RenderTarget, OFFSCREEN_FORMAT,
 };
 #[cfg(not(target_arch = "wasm32"))]
-pub use renderer::Renderer;
+pub(crate) use renderer::check_dimensions;
+pub use renderer::{RenderError, Renderer};
 pub use scene::{
     build_scene, plane_grid_overlays, scene_with_overlays, selection_aabb_overlay, Draw,
     DrawableObject, FrameFit, GridPlane, RenderMode, Scene,
