@@ -25,7 +25,7 @@ video-edit timeline + VideoFrame RGBA
 
 Platform-agnostic wgpu logic, shared verbatim by every target:
 
-- **`render/` (module tree) + `*.wgsl` shaders** — `MeshRenderer`
+- **`render/` (module tree) + `shader/*.wgsl`** — `MeshRenderer`
   (`render/mesh_renderer.rs`) rasterizes a `Scene` of `DrawableObject`s into *any*
   `wgpu::TextureView`; that one renderer is why the same code targets an offscreen
   texture, a window swapchain, or a browser canvas. The offscreen render target +
@@ -128,7 +128,7 @@ Each is a *thin shell* that only supplies a render target and calls the core:
 
 | Path | What it is |
 |---|---|
-| `crates/trd-core` | the unified render core (`render/` module tree, `*.wgsl` shaders, `stream.rs`, `protocol.rs`) |
+| `crates/trd-core` | the unified render core (`render/` module tree, `shader/*.wgsl`, `stream.rs`, `protocol.rs`) |
 | `crates/trd-cli` | headless CLI: Arrow stream in → Arrow image out |
 | `crates/trd-gui` | reusable egui UI, scene/interaction state, native render backends, and browser wasm entry |
 | `crates/trd-placement` | GPU-free K + image-quad reconstruction and placement matrices |

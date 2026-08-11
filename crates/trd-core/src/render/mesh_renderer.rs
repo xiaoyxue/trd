@@ -70,7 +70,7 @@ impl VertexGeometry {
 /// model (`effective = model · base`).
 struct MeshGpu {
     vertex_buffer: wgpu::Buffer,
-    /// Parallel vertex buffer for the Disney PBR path (`disney.wgsl`): the same
+    /// Parallel vertex buffer for the Disney PBR path (`pbr.wgsl`): the same
     /// positions + UVs as `vertex_buffer`, but with a derived smooth shading
     /// **normal** in place of the vertex color. Reuses the `triangles` index
     /// buffer. Built once per mesh; only bound by [`RenderMode::Pbr`] draws.
@@ -123,7 +123,7 @@ fn upload_mesh(
     let edges = IndexBuf::new(device, "trd mesh edge buffer", &edges);
 
     // PBR vertex buffer (#): derive area-weighted smooth normals (the assets have
-    // no `vn`) and pack position + normal + UV for `disney.wgsl`, reusing the
+    // no `vn`) and pack position + normal + UV for `pbr.wgsl`, reusing the
     // triangle index buffer above.
     let normals = mesh
         .shading
@@ -215,7 +215,7 @@ enum DrawKind {
     /// sampling the bound texture at each vertex UV) (#20).
     Textured(usize),
     /// Disney **PBR** triangles of a mesh (its dedicated position+normal+UV
-    /// vertex buffer + `disney.wgsl` pipeline, lit by the virtual light rig and
+    /// vertex buffer + `pbr.wgsl` pipeline, lit by the virtual light rig and
     /// the bound HDR environment map). Reuses the triangle index buffer.
     Pbr(usize),
     /// A coordinate-plane grid (the shared per-plane grid vertex buffer indexed
@@ -349,7 +349,7 @@ struct MeshPass {
     /// The contact / blob grounding-shadow pipeline (alpha-blended, depth-write
     /// off); shares the untextured camera bind-group layout (group 0).
     shadow: wgpu::RenderPipeline,
-    /// The Disney PBR pipeline (`disney.wgsl`): group 0 = [`pbr_uniform`], group 1
+    /// The Disney PBR pipeline (`pbr.wgsl`): group 0 = [`pbr_uniform`], group 1
     /// = the bound albedo texture, group 2 = the HDR environment map.
     pbr: wgpu::RenderPipeline,
     /// The per-object `PbrUniform` buffer: `mesh_count` [`pbr_stride`]-spaced

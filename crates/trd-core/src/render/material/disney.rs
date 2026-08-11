@@ -54,7 +54,7 @@ impl Default for Auxiliary {
 
 /// Disney 2012 principled-BRDF surface parameters plus preserved import data.
 ///
-/// Only the eleven surface parameters are consumed by `disney.wgsl`.
+/// Only the eleven surface parameters are consumed by `pbr.wgsl`.
 /// [`Auxiliary`] and [`sources`](Self::sources) remain CPU-side until their
 /// corresponding visual slices land.
 #[derive(Debug, Clone, PartialEq)]

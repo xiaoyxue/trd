@@ -1,5 +1,11 @@
 // Disney principled BRDF mesh path (physically-based shading).
 //
+// **UNUSED — kept as reference material.** No `include_wgsl!` compiles this file;
+// the live PBR mesh shader is `pbr.wgsl`, which superseded it (glTF material
+// maps, tone-mapping operators, debug views). Kept because it is the closest
+// direct transcription of the reference BRDF. If you change PBR shading, change
+// `pbr.wgsl`.
+//
 // A WGSL port of the reference `ref/DisneyPBR/shader.frag` Disney BRDF (Burley
 // 2012), wired into trd's instanced mesh pipeline. Unlike `textured.wgsl` (which
 // just samples the albedo flat), this path lights the mesh with a small virtual

@@ -48,7 +48,8 @@ impl EnvBackground {
             bind_group_layouts: &[Some(&uniform_layout), Some(env_layout)],
             immediate_size: 0,
         });
-        let shader = device.create_shader_module(wgpu::include_wgsl!("../env_background.wgsl"));
+        let shader =
+            device.create_shader_module(wgpu::include_wgsl!("../shader/env_background.wgsl"));
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("trd environment background pipeline"),
             layout: Some(&pipeline_layout),

@@ -27,7 +27,7 @@ impl PbrDebugView {
     }
 }
 
-/// Maximum lights per kind, matching `disney.wgsl`'s `MAX_LIGHTS` array size.
+/// Maximum lights per kind, matching `pbr.wgsl`'s `MAX_LIGHTS` array size.
 const MAX_LIGHTS: usize = 4;
 
 pub(crate) struct PbrUniformInputs<'a> {
@@ -39,7 +39,7 @@ pub(crate) struct PbrUniformInputs<'a> {
     pub use_env: bool,
 }
 
-/// GPU byte layout matching `disney.wgsl`'s `PbrUniform` (std140-compatible: all
+/// GPU byte layout matching `pbr.wgsl`'s `PbrUniform` (std140-compatible: all
 /// members are 16-byte-aligned `vec4`/`mat4`). 304 bytes, uploaded per frame
 /// (the camera terms change; the material + light rig are constant per render).
 #[repr(C)]

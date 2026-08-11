@@ -134,7 +134,7 @@ pub(crate) fn create_picking_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
 ) -> wgpu::RenderPipeline {
-    let shader = device.create_shader_module(wgpu::include_wgsl!("../picking.wgsl"));
+    let shader = device.create_shader_module(wgpu::include_wgsl!("../shader/picking.wgsl"));
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("trd picking pipeline"),
         layout: Some(layout),
@@ -261,7 +261,7 @@ pub(crate) fn create_mesh_pipeline_with(
     depth_stencil: Option<wgpu::DepthStencilState>,
     sample_count: u32,
 ) -> wgpu::RenderPipeline {
-    let shader = device.create_shader_module(wgpu::include_wgsl!("../mesh.wgsl"));
+    let shader = device.create_shader_module(wgpu::include_wgsl!("../shader/mesh.wgsl"));
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("trd mesh pipeline"),
         layout: Some(layout),
@@ -296,7 +296,7 @@ pub(crate) fn create_gizmo_line_pipeline(
     layout: &wgpu::PipelineLayout,
     sample_count: u32,
 ) -> wgpu::RenderPipeline {
-    let shader = device.create_shader_module(wgpu::include_wgsl!("../gizmo_line.wgsl"));
+    let shader = device.create_shader_module(wgpu::include_wgsl!("../shader/gizmo_line.wgsl"));
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("trd gizmo line pipeline"),
         layout: Some(layout),
@@ -363,7 +363,7 @@ pub(crate) fn create_textured_pipeline(
     layout: &wgpu::PipelineLayout,
     sample_count: u32,
 ) -> wgpu::RenderPipeline {
-    let shader = device.create_shader_module(wgpu::include_wgsl!("../textured.wgsl"));
+    let shader = device.create_shader_module(wgpu::include_wgsl!("../shader/textured.wgsl"));
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("trd textured pipeline"),
         layout: Some(layout),
@@ -403,7 +403,7 @@ pub(crate) fn create_shadow_pipeline(
     layout: &wgpu::PipelineLayout,
     sample_count: u32,
 ) -> wgpu::RenderPipeline {
-    let shader = device.create_shader_module(wgpu::include_wgsl!("../shadow.wgsl"));
+    let shader = device.create_shader_module(wgpu::include_wgsl!("../shader/shadow.wgsl"));
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("trd shadow pipeline"),
         layout: Some(layout),
@@ -481,7 +481,7 @@ pub(crate) fn create_frame_plane_pipeline(
     layout: &wgpu::PipelineLayout,
     sample_count: u32,
 ) -> wgpu::RenderPipeline {
-    let shader = device.create_shader_module(wgpu::include_wgsl!("../frame_plane.wgsl"));
+    let shader = device.create_shader_module(wgpu::include_wgsl!("../shader/frame_plane.wgsl"));
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("trd frame plane pipeline"),
         layout: Some(layout),
@@ -589,7 +589,7 @@ pub(crate) fn write_gizmo_params(
     );
 }
 
-/// The group-0 bind-group layout for the Disney PBR pipeline (#, `disney.wgsl`):
+/// The group-0 bind-group layout for the Disney PBR pipeline (#, `pbr.wgsl`):
 /// a single `PbrUniform` (binding 0) visible to **both** the vertex stage (the
 /// `P·V` transform) and the fragment stage (camera position, material, lights,
 /// env/exposure controls).
@@ -668,7 +668,7 @@ pub(crate) fn create_env_bind_group_layout(device: &wgpu::Device) -> wgpu::BindG
     })
 }
 
-/// Builds the Disney **PBR** `TriangleList` pipeline: `disney.wgsl` over the
+/// Builds the Disney **PBR** `TriangleList` pipeline: `pbr.wgsl` over the
 /// dedicated [`PbrVertex`] (position + normal + UV) buffer plus the shared
 /// [`InstanceRaw`] model buffer, with group 0 = the `PbrUniform`, group 1 = the
 /// bound albedo texture + sampler, group 2 = the HDR environment map. Opaque
@@ -679,7 +679,7 @@ pub(crate) fn create_pbr_pipeline(
     layout: &wgpu::PipelineLayout,
     sample_count: u32,
 ) -> wgpu::RenderPipeline {
-    let shader = device.create_shader_module(wgpu::include_wgsl!("../pbr.wgsl"));
+    let shader = device.create_shader_module(wgpu::include_wgsl!("../shader/pbr.wgsl"));
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("trd pbr pipeline"),
         layout: Some(layout),
