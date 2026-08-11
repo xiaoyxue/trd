@@ -1,9 +1,12 @@
+use super::GpuContext;
 use crate::texture::{ImageData, Texture};
 
 /// Linear-data textures used by the glTF metallic-roughness and normal inputs.
 pub(super) struct BoundMaterialMaps {
     layout: wgpu::BindGroupLayout,
-    bind_group: Option<wgpu::BindGroup>,
+    /// Always valid: built at construction from the neutral defaults and rebuilt
+    /// by each setter, so the renderer never uploads during `encode` (#180).
+    bind_group: wgpu::BindGroup,
     metallic_roughness: ImageData,
     normal: ImageData,
 }
@@ -25,78 +28,79 @@ impl BoundMaterialMaps {
         })
     }
 
-    pub(super) fn with_layout(layout: wgpu::BindGroupLayout) -> Self {
+    pub(super) fn with_layout(gpu: &GpuContext, layout: wgpu::BindGroupLayout) -> Self {
+        // Neutral factors: G roughness=1, B metallic=1; neutral tangent-space
+        // normal. Uploaded immediately so `bind_group` is valid from the start.
+        let metallic_roughness = pixel([0, 255, 255, 255]);
+        let normal = pixel([128, 128, 255, 255]);
+        let bind_group = build_bind_group(gpu, &layout, &metallic_roughness, &normal);
         Self {
             layout,
-            bind_group: None,
-            // Neutral factors: G roughness=1, B metallic=1.
-            metallic_roughness: pixel([0, 255, 255, 255]),
-            // Neutral tangent-space normal.
-            normal: pixel([128, 128, 255, 255]),
+            bind_group,
+            metallic_roughness,
+            normal,
         }
     }
 
-    pub(super) fn set_metallic_roughness(&mut self, texture: &dyn Texture) {
+    pub(super) fn set_metallic_roughness(&mut self, gpu: &GpuContext, texture: &dyn Texture) {
         self.metallic_roughness = texture.to_image();
-        self.bind_group = None;
+        self.upload(gpu);
     }
 
-    pub(super) fn set_normal(&mut self, texture: &dyn Texture) {
+    pub(super) fn set_normal(&mut self, gpu: &GpuContext, texture: &dyn Texture) {
         self.normal = texture.to_image();
-        self.bind_group = None;
+        self.upload(gpu);
     }
 
-    pub(super) fn ensure_uploaded(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-    ) -> &wgpu::BindGroup {
-        if self.bind_group.is_none() {
-            let metallic_roughness = upload_linear_view(
-                device,
-                queue,
-                "trd metallic-roughness",
-                &self.metallic_roughness,
-                false,
-            );
-            let normal = upload_linear_view(device, queue, "trd normal map", &self.normal, true);
-            let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-                label: Some("trd PBR material map sampler"),
-                address_mode_u: wgpu::AddressMode::Repeat,
-                address_mode_v: wgpu::AddressMode::Repeat,
-                address_mode_w: wgpu::AddressMode::ClampToEdge,
-                mag_filter: wgpu::FilterMode::Linear,
-                min_filter: wgpu::FilterMode::Linear,
-                mipmap_filter: wgpu::MipmapFilterMode::Linear,
-                ..Default::default()
-            });
-            self.bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("trd PBR material maps bind group"),
-                layout: &self.layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&metallic_roughness),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&normal),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::Sampler(&sampler),
-                    },
-                ],
-            }));
-        }
-        self.bind_group.as_ref().expect("uploaded above")
+    fn upload(&mut self, gpu: &GpuContext) {
+        self.bind_group =
+            build_bind_group(gpu, &self.layout, &self.metallic_roughness, &self.normal);
     }
 
     pub(super) fn bind_group(&self) -> &wgpu::BindGroup {
-        self.bind_group
-            .as_ref()
-            .expect("material maps must be uploaded before drawing")
+        &self.bind_group
     }
+}
+
+/// Uploads both maps and builds the group-3 bind group.
+fn build_bind_group(
+    gpu: &GpuContext,
+    layout: &wgpu::BindGroupLayout,
+    mr_image: &ImageData,
+    normal_image: &ImageData,
+) -> wgpu::BindGroup {
+    let (device, queue) = (&gpu.device, &gpu.queue);
+    let metallic_roughness =
+        upload_linear_view(device, queue, "trd metallic-roughness", mr_image, false);
+    let normal = upload_linear_view(device, queue, "trd normal map", normal_image, true);
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("trd PBR material map sampler"),
+        address_mode_u: wgpu::AddressMode::Repeat,
+        address_mode_v: wgpu::AddressMode::Repeat,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::MipmapFilterMode::Linear,
+        ..Default::default()
+    });
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("trd PBR material maps bind group"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&metallic_roughness),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(&normal),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Sampler(&sampler),
+            },
+        ],
+    })
 }
 
 fn texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {

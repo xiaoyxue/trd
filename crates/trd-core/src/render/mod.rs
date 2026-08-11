@@ -14,7 +14,7 @@ mod env_background;
 mod frame_params;
 mod frame_plane;
 mod gizmo;
-mod gpu;
+mod gpu_context;
 mod gpu_types;
 mod ibl;
 mod light;
@@ -38,7 +38,9 @@ mod gpu_tests;
 #[cfg(not(target_arch = "wasm32"))]
 pub use batch_renderer::BatchRenderer;
 pub use frame_params::{CameraFormError, FrameParams, Viewport};
-pub use gpu::{create_instance, GpuContext, GpuInitError, GpuRequest, LimitsPreset};
+pub use gpu_context::{
+    create_instance, AdapterFacts, GpuContext, GpuInitError, GpuRequest, LimitsPreset,
+};
 pub use gpu_types::{Mesh, MeshShading, Vertex};
 pub use ibl::{EnvMapData, ImageBasedLighting};
 pub use light::{Light, Lighting, PointLight};

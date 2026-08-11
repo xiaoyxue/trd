@@ -238,7 +238,6 @@ impl OffscreenTarget {
                     label: Some("trd offscreen background"),
                 });
             renderer.encode(
-                queue,
                 &mut background_encoder,
                 &view,
                 background_params,
@@ -248,37 +247,16 @@ impl OffscreenTarget {
             // Submit before `encode_overlay` uploads foreground instances into
             // SceneRenderer's shared instance buffer.
             queue.submit(Some(background_encoder.finish()));
-            renderer.encode_overlay(
-                queue,
-                &mut encoder,
-                &view,
-                foreground_params,
-                foreground,
-                viewport,
-            );
+            renderer.encode_overlay(&mut encoder, &view, foreground_params, foreground, viewport);
         } else {
-            renderer.encode(
-                queue,
-                &mut encoder,
-                &view,
-                foreground_params,
-                foreground,
-                viewport,
-            );
+            renderer.encode(&mut encoder, &view, foreground_params, foreground, viewport);
         }
         if let Some(overlay) = overlay {
             queue.submit(Some(encoder.finish()));
             encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("trd offscreen selection overlay"),
             });
-            renderer.encode_overlay(
-                queue,
-                &mut encoder,
-                &view,
-                foreground_params,
-                overlay,
-                viewport,
-            );
+            renderer.encode_overlay(&mut encoder, &view, foreground_params, overlay, viewport);
         }
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
@@ -475,7 +453,6 @@ impl OnscreenTarget {
             label: Some("trd onscreen frame"),
         });
         renderer.encode(
-            queue,
             &mut encoder,
             &view,
             params,

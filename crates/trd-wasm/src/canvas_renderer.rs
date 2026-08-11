@@ -22,8 +22,9 @@ struct AcquiredFrame {
 pub struct CanvasRenderer {
     instance: wgpu::Instance,
     canvas: web_sys::HtmlCanvasElement,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    /// The shared GPU context, held as one value rather than cloned apart into
+    /// separate `device` + `queue` fields (#180).
+    gpu: std::sync::Arc<trd_core::GpuContext>,
     /// The shared on-screen render harness (surface + config + sRGB view, #103).
     target: OnscreenTarget,
     /// Built lazily on the first rendered frame: a multi-mesh renderer over the
@@ -82,11 +83,7 @@ impl CanvasRenderer {
         let surface = instance
             .create_surface(wgpu::SurfaceTarget::Canvas(canvas.clone()))
             .map_err(|error| js_error(format!("create_surface failed: {error}")))?;
-        let trd_core::GpuContext {
-            adapter,
-            device,
-            queue,
-        } = trd_core::GpuContext::request(
+        let gpu = trd_core::GpuContext::request(
             &instance,
             &trd_core::GpuRequest {
                 label: "trd canvas device",
@@ -97,7 +94,7 @@ impl CanvasRenderer {
         .await
         .map_err(|error| js_error(format!("GPU init failed: {error}")))?;
         let config = surface
-            .get_default_config(&adapter, width, height)
+            .get_default_config(&gpu.adapter, width, height)
             .ok_or_else(|| js_error("surface is unsupported by the selected adapter"))?;
         // The browser's preferred canvas format is non-sRGB (e.g. `Bgra8Unorm`),
         // so a pipeline targeting it writes *linear* fragment values with no
@@ -106,7 +103,7 @@ impl CanvasRenderer {
         // shared `OnscreenTarget` renders through an **sRGB view** of the surface
         // (registering it in `view_formats` + configuring), so the browser matches
         // the CLI byte-for-byte; build the mesh renderer with its `view_format()`.
-        let target = OnscreenTarget::new(&device, surface, config);
+        let target = OnscreenTarget::new(&gpu.device, surface, config);
 
         Ok(Self {
             renderer: None,
@@ -119,8 +116,7 @@ impl CanvasRenderer {
             env_map: None,
             instance,
             canvas,
-            device,
-            queue,
+            gpu,
             target,
             input: trd_core::InputSession::new(),
             frames: Vec::new(),
@@ -413,11 +409,10 @@ impl CanvasRenderer {
             ));
         }
         self.ensure_renderer();
-        let queue = &self.queue;
         self.renderer
             .as_mut()
             .expect("renderer built above")
-            .update_frame_texture_rgba(queue, rgba, width, height);
+            .update_frame_texture_rgba(rgba, width, height);
         self.last_inline_frame_id = None;
         self.external_frame_ready = true;
         Ok(())
@@ -479,15 +474,15 @@ impl CanvasRenderer {
             let acquired = self.acquire_frame()?;
             let renderer = self.renderer.as_mut().expect("renderer built above");
             self.target.present(
-                &self.device,
-                &self.queue,
+                &self.gpu.device,
+                &self.gpu.queue,
                 renderer,
                 acquired.texture,
                 params,
                 &scene,
             );
             if acquired.reconfigure_after_present {
-                self.target.reconfigure(&self.device);
+                self.target.reconfigure(&self.gpu.device);
             }
             Ok(())
         })
@@ -510,11 +505,10 @@ impl CanvasRenderer {
             .decode()
             .map_err(|error| js_error(format!("decode frame_id {frame_id}: {error}")))?;
         self.ensure_renderer();
-        let queue = &self.queue;
         self.renderer
             .as_mut()
             .expect("renderer built above")
-            .update_frame_texture_rgba(queue, &image.rgba, image.width, image.height);
+            .update_frame_texture_rgba(&image.rgba, image.width, image.height);
         self.last_inline_frame_id = Some(frame_id);
         Ok(true)
     }
@@ -527,7 +521,8 @@ impl CanvasRenderer {
     fn ensure_renderer(&mut self) -> &mut SceneRenderer {
         if self.renderer.is_none() {
             let meshes = self.input.meshes();
-            let renderer = SceneRenderer::auto_fit(&self.device, self.target.view_format(), meshes);
+            let renderer =
+                SceneRenderer::auto_fit(self.gpu.clone(), self.target.view_format(), meshes);
             self.renderer = Some(renderer);
 
             // Bind the stream's texture (0.0.4) as the sampled albedo so
@@ -565,7 +560,7 @@ impl CanvasRenderer {
                 reconfigure_after_present: true,
             }),
             wgpu::CurrentSurfaceTexture::Outdated => {
-                self.target.reconfigure(&self.device);
+                self.target.reconfigure(&self.gpu.device);
                 self.acquire_after_recovery("reconfiguration")
             }
             wgpu::CurrentSurfaceTexture::Lost => {
@@ -573,7 +568,7 @@ impl CanvasRenderer {
                     .instance
                     .create_surface(wgpu::SurfaceTarget::Canvas(self.canvas.clone()))
                     .map_err(|error| js_error(format!("surface recreation failed: {error}")))?;
-                self.target.replace_surface(&self.device, surface);
+                self.target.replace_surface(&self.gpu.device, surface);
                 self.acquire_after_recovery("recreation")
             }
             wgpu::CurrentSurfaceTexture::Timeout => Err(js_error("surface acquisition timed out")),

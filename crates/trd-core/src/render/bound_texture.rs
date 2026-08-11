@@ -7,65 +7,44 @@
 //! them as separate types makes which-is-which obvious at a glance.
 
 use super::upload_texture;
+use super::GpuContext;
 use crate::texture::{ImageData, Texture};
 
 /// The albedo texture bound as group 1 by the textured mesh pipeline (#20).
 ///
-/// Owns the group-1 bind-group layout, the CPU image to upload, and the GPU
-/// bind group. The bind group is (re)built **lazily** on the next
-/// [`ensure_uploaded`](Self::ensure_uploaded) — the only place a GPU queue is
-/// available — so [`set`](Self::set) can swap the image cheaply between frames.
-/// Until a real texture is set the image is 1×1 white (the identity albedo).
+/// Owns the group-1 bind-group layout and the GPU bind group. The bind group is
+/// built **eagerly** — at construction with the 1×1 white identity albedo, and
+/// again on every [`set`](Self::set) — so `bind_group` is always valid and the
+/// renderer never has to defer uploads to `encode` (#180).
 pub(super) struct BoundTexture {
     layout: wgpu::BindGroupLayout,
-    bind_group: Option<wgpu::BindGroup>,
-    image: ImageData,
+    bind_group: wgpu::BindGroup,
 }
 
 impl BoundTexture {
-    /// Constructs a `BoundTexture` (seeded with the 1×1 white identity albedo)
-    /// reusing a **shared** group-1 layout (cheap wgpu handle clone), so many
-    /// per-mesh albedo textures stay compatible with the one textured/PBR
-    /// pipeline layout. No GPU upload happens yet; the first
-    /// [`ensure_uploaded`](Self::ensure_uploaded) builds the bind group.
-    pub(super) fn with_layout(layout: wgpu::BindGroupLayout) -> Self {
-        Self {
-            layout,
-            bind_group: None,
-            image: ImageData {
-                width: 1,
-                height: 1,
-                rgba: vec![255, 255, 255, 255],
-            },
-        }
+    /// Constructs a `BoundTexture` holding the 1×1 white identity albedo,
+    /// uploaded immediately, reusing a **shared** group-1 layout (a cheap wgpu
+    /// handle clone) so many per-mesh albedo textures stay compatible with the
+    /// one textured/PBR pipeline layout.
+    pub(super) fn with_layout(gpu: &GpuContext, layout: wgpu::BindGroupLayout) -> Self {
+        let image = ImageData {
+            width: 1,
+            height: 1,
+            rgba: vec![255, 255, 255, 255],
+        };
+        let bind_group = upload_texture(&gpu.device, &gpu.queue, &layout, &image);
+        Self { layout, bind_group }
     }
 
-    /// Replaces the source image; the bind group is rebuilt on the next
-    /// [`ensure_uploaded`](Self::ensure_uploaded).
-    pub(super) fn set(&mut self, texture: &dyn Texture) {
-        self.image = texture.to_image();
-        self.bind_group = None;
+    /// Replaces the source image, uploading it immediately.
+    pub(super) fn set(&mut self, gpu: &GpuContext, texture: &dyn Texture) {
+        let image = texture.to_image();
+        self.bind_group = upload_texture(&gpu.device, &gpu.queue, &self.layout, &image);
     }
 
-    /// Uploads the current image if it has not been uploaded since the last
-    /// [`set`](Self::set), returning the group-1 bind group to bind.
-    pub(super) fn ensure_uploaded(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-    ) -> &wgpu::BindGroup {
-        if self.bind_group.is_none() {
-            self.bind_group = Some(upload_texture(device, queue, &self.layout, &self.image));
-        }
-        self.bind_group.as_ref().expect("uploaded above")
-    }
-
-    /// The uploaded group-1 bind group. Call after [`ensure_uploaded`](Self::ensure_uploaded)
-    /// (which must run while a GPU queue is available, i.e. before the render
-    /// pass); panics if the texture was never uploaded.
+    /// The group-1 bind group. Always valid: it is uploaded at construction and
+    /// replaced on every [`set`](Self::set).
     pub(super) fn bind_group(&self) -> &wgpu::BindGroup {
-        self.bind_group
-            .as_ref()
-            .expect("BoundTexture::ensure_uploaded must run before bind_group")
+        &self.bind_group
     }
 }

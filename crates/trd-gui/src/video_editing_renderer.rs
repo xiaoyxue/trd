@@ -32,8 +32,7 @@ pub struct VideoRendererDiagnostics {
 }
 
 pub struct VideoPlacementRenderer {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    gpu: std::sync::Arc<trd_core::GpuContext>,
     renderer: trd_core::SceneRenderer,
     target: trd_core::OffscreenTarget,
     pick_target: Option<trd_core::PickTarget>,
@@ -46,11 +45,7 @@ pub struct VideoPlacementRenderer {
 impl VideoPlacementRenderer {
     pub async fn new_empty(width: u32, height: u32) -> Result<Self, String> {
         let instance = trd_core::create_instance();
-        let trd_core::GpuContext {
-            adapter,
-            device,
-            queue,
-        } = trd_core::GpuContext::request(
+        let gpu = trd_core::GpuContext::request(
             &instance,
             &trd_core::GpuRequest {
                 label: "trd video editing wasm device",
@@ -59,27 +54,26 @@ impl VideoPlacementRenderer {
         )
         .await
         .map_err(|error| error.to_string())?;
-        let adapter_info = adapter.get_info();
+        let facts = gpu.adapter_facts();
         let placeholder = assets::default_mesh().map_err(|error| error.to_string())?;
         let renderer = trd_core::SceneRenderer::auto_fit(
-            &device,
+            gpu.clone(),
             trd_core::OFFSCREEN_FORMAT,
             std::slice::from_ref(&placeholder),
         );
-        let target = trd_core::OffscreenTarget::new(&device, width, height)
+        let target = trd_core::OffscreenTarget::new(&gpu.device, width, height)
             .map_err(|error| error.to_string())?;
         Ok(Self {
-            device,
-            queue,
+            gpu,
             renderer,
             target,
             pick_target: None,
             default_mode: trd_core::RenderMode::Filled,
             default_material: trd_core::DisneyMaterial::default(),
             identity: Rc::new(RendererIdentity {
-                adapter_name: adapter_info.name,
-                backend: format!("{:?}", adapter_info.backend),
-                device_type: format!("{:?}", adapter_info.device_type),
+                adapter_name: facts.name,
+                backend: facts.backend,
+                device_type: facts.device_type,
             }),
             asset_diagnostics: None,
         })
@@ -108,11 +102,7 @@ impl VideoPlacementRenderer {
             }
         };
         let instance = trd_core::create_instance();
-        let trd_core::GpuContext {
-            adapter,
-            device,
-            queue,
-        } = trd_core::GpuContext::request(
+        let gpu = trd_core::GpuContext::request(
             &instance,
             &trd_core::GpuRequest {
                 label: "trd video editing wasm device",
@@ -121,31 +111,30 @@ impl VideoPlacementRenderer {
         )
         .await
         .map_err(|error| error.to_string())?;
-        let adapter_info = adapter.get_info();
+        let facts = gpu.adapter_facts();
         let asset_diagnostics = imported.diagnostics();
         let mesh = imported.mesh();
         let mut renderer = trd_core::SceneRenderer::auto_fit(
-            &device,
+            gpu.clone(),
             trd_core::OFFSCREEN_FORMAT,
             std::slice::from_ref(mesh),
         );
         let (default_mode, default_material) = imported.configure(&mut renderer);
         let env = assets::decode_env_hdr(env_bytes).map_err(|error| error.to_string())?;
         renderer.set_env_map(env);
-        let target = trd_core::OffscreenTarget::new(&device, width, height)
+        let target = trd_core::OffscreenTarget::new(&gpu.device, width, height)
             .map_err(|error| error.to_string())?;
         Ok(Self {
-            device,
-            queue,
+            gpu,
             renderer,
             target,
             pick_target: None,
             default_mode,
             default_material,
             identity: Rc::new(RendererIdentity {
-                adapter_name: adapter_info.name,
-                backend: format!("{:?}", adapter_info.backend),
-                device_type: format!("{:?}", adapter_info.device_type),
+                adapter_name: facts.name,
+                backend: facts.backend,
+                device_type: facts.device_type,
             }),
             asset_diagnostics: Some(asset_diagnostics),
         })
@@ -176,7 +165,7 @@ impl VideoPlacementRenderer {
         if self.size() == (width, height) {
             return Ok(());
         }
-        self.target = trd_core::OffscreenTarget::new(&self.device, width, height)
+        self.target = trd_core::OffscreenTarget::new(&self.gpu.device, width, height)
             .map_err(|error| error.to_string())?;
         self.pick_target = None;
         Ok(())
@@ -191,12 +180,12 @@ impl VideoPlacementRenderer {
     ) -> Result<Option<u32>, String> {
         let params = self.frame_params(frame, source_size)?;
         let target = self.pick_target.get_or_insert_with(|| {
-            trd_core::PickTarget::new(&self.device, self.target.width(), self.target.height())
+            trd_core::PickTarget::new(&self.gpu.device, self.target.width(), self.target.height())
         });
         Ok(target
             .pick(
-                &self.device,
-                &self.queue,
+                &self.gpu.device,
+                &self.gpu.queue,
                 &mut self.renderer,
                 params,
                 &[trd_core::Draw {
@@ -226,7 +215,7 @@ impl VideoPlacementRenderer {
         state: &crate::scene::SceneState,
     ) -> Result<Vec<u8>, String> {
         self.renderer
-            .update_frame_texture_rgba(&self.queue, rgba, frame_width, frame_height);
+            .update_frame_texture_rgba(rgba, frame_width, frame_height);
         let background_params = self
             .frame_params(background_frame, calibration_size)
             .unwrap_or(trd_core::FrameParams::IDENTITY);
@@ -302,8 +291,8 @@ impl VideoPlacementRenderer {
         }
         self.target
             .render_three_pass(
-                &self.device,
-                &self.queue,
+                &self.gpu.device,
+                &self.gpu.queue,
                 &mut self.renderer,
                 background_params,
                 foreground_params,

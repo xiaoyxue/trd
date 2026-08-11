@@ -37,9 +37,9 @@ pub use protocol::{
 pub use material::{AlphaMode, Auxiliary, DisneyMaterial, Material, MaterialTextures};
 pub use render::{
     build_scene, create_instance, create_mesh_pipeline, plane_grid_overlays,
-    selection_aabb_overlay, CameraFormError, Draw, DrawableObject, EnvMapData, FrameFit,
-    FrameParams, GpuContext, GpuInitError, GpuRequest, GridPlane, ImageBasedLighting, Light,
-    Lighting, LimitsPreset, Mesh, MeshShading, Msaa, OffscreenError, OffscreenTarget,
+    selection_aabb_overlay, AdapterFacts, CameraFormError, Draw, DrawableObject, EnvMapData,
+    FrameFit, FrameParams, GpuContext, GpuInitError, GpuRequest, GridPlane, ImageBasedLighting,
+    Light, Lighting, LimitsPreset, Mesh, MeshShading, Msaa, OffscreenError, OffscreenTarget,
     OnscreenTarget, PbrConfig, PbrDebugView, PickTarget, PointLight, RenderMode, RenderOptions,
     Scene, SceneRenderer, ToneMapping, Tonemap, TriangleRenderer, Vertex, Viewport,
     OFFSCREEN_FORMAT,

@@ -108,7 +108,6 @@ impl PickTarget {
             label: Some("trd pick frame"),
         });
         renderer.encode_picking(
-            queue,
             &mut encoder,
             &self.color_view,
             &self.depth.view,

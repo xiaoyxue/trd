@@ -9,9 +9,11 @@
 //! decode->render->encode orchestration) so it sits beside its siblings
 //! [`OffscreenTarget`] and [`SceneRenderer`] under `render/` (#134, #82).
 
+use std::sync::Arc;
+
 use super::{
-    Draw, DrawableObject, FrameFit, FrameParams, GridPlane, Mesh, OffscreenTarget, PickTarget,
-    RenderMode, SceneRenderer, OFFSCREEN_FORMAT,
+    Draw, DrawableObject, FrameFit, FrameParams, GpuContext, GridPlane, Mesh, OffscreenTarget,
+    PickTarget, RenderMode, SceneRenderer, OFFSCREEN_FORMAT,
 };
 use crate::math::Matrix4;
 use crate::stream::{check_dimensions, StreamError};
@@ -19,8 +21,7 @@ use crate::stream::{check_dimensions, StreamError};
 /// A persistent GPU context that renders one [`FrameParams`] to tightly-packed
 /// row-major RGBA bytes (`width*height*4`) per call.
 pub struct BatchRenderer {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    gpu: Arc<GpuContext>,
     renderer: SceneRenderer,
     /// The shared offscreen render target + readback buffer (#103, Part B).
     target: OffscreenTarget,
@@ -119,19 +120,21 @@ impl BatchRenderer {
         )
         .await
         .map_err(|e| StreamError::Render(e.to_string()))?;
-        let crate::GpuContext { device, queue, .. } = gpu;
-
         let format = OFFSCREEN_FORMAT;
-        let renderer =
-            SceneRenderer::with_sample_count(&device, format, meshes, base_models, sample_count);
+        let renderer = SceneRenderer::with_sample_count(
+            gpu.clone(),
+            format,
+            meshes,
+            base_models,
+            sample_count,
+        );
 
         // The shared offscreen harness owns the render target + readback buffer
         // and re-validates the size against the adapter's max dimension.
-        let target = OffscreenTarget::new(&device, width, height)?;
+        let target = OffscreenTarget::new(&gpu.device, width, height)?;
 
         Ok(Self {
-            device,
-            queue,
+            gpu,
             renderer,
             target,
             mode: RenderMode::Filled,
@@ -290,12 +293,8 @@ impl BatchRenderer {
     /// [`render_frame`](Self::render_frame) with a `Some(fit)` to composite the
     /// image beneath the mesh scene.
     pub fn update_frame_texture(&mut self, image: &crate::texture::ImageData) {
-        self.renderer.update_frame_texture_rgba(
-            &self.queue,
-            &image.rgba,
-            image.width,
-            image.height,
-        );
+        self.renderer
+            .update_frame_texture_rgba(&image.rgba, image.width, image.height);
     }
 
     /// Builds the per-frame [`Scene`](crate::Scene) from a wire `draws` list and
@@ -342,8 +341,8 @@ impl BatchRenderer {
     ) -> Result<Vec<u8>, StreamError> {
         let scene = self.build_scene(draws, frame);
         Ok(pollster::block_on(self.target.render(
-            &self.device,
-            &self.queue,
+            &self.gpu.device,
+            &self.gpu.queue,
             &mut self.renderer,
             params,
             &scene,
@@ -360,13 +359,13 @@ impl BatchRenderer {
     pub fn pick(&mut self, params: FrameParams, draws: &[Draw], x: u32, y: u32) -> Option<u32> {
         let (w, h) = (self.target.width(), self.target.height());
         match self.pick_target.as_mut() {
-            Some(target) => target.resize(&self.device, w, h),
-            None => self.pick_target = Some(PickTarget::new(&self.device, w, h)),
+            Some(target) => target.resize(&self.gpu.device, w, h),
+            None => self.pick_target = Some(PickTarget::new(&self.gpu.device, w, h)),
         }
         let target = self.pick_target.as_ref()?;
         pollster::block_on(target.pick(
-            &self.device,
-            &self.queue,
+            &self.gpu.device,
+            &self.gpu.queue,
             &mut self.renderer,
             params,
             draws,

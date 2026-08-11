@@ -31,8 +31,9 @@ impl RendererState {
 
 #[wasm_bindgen]
 pub struct OffscreenRenderer {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    /// The shared GPU context, held as one value rather than cloned apart into
+    /// separate `device` + `queue` fields (#180).
+    gpu: std::sync::Arc<trd_core::GpuContext>,
     /// Built lazily on the first rendered frame from the stream's leading mesh
     /// table, or the built-in hello-triangle for a legacy params-only stream.
     renderer: Option<SceneRenderer>,
@@ -80,7 +81,7 @@ impl OffscreenRenderer {
         })?;
 
         let instance = trd_core::create_instance();
-        let trd_core::GpuContext { device, queue, .. } = trd_core::GpuContext::request(
+        let gpu = trd_core::GpuContext::request(
             &instance,
             &trd_core::GpuRequest {
                 label: "trd OffscreenRenderer device",
@@ -92,12 +93,11 @@ impl OffscreenRenderer {
 
         // The shared offscreen harness owns the render target + readback buffer
         // and re-validates the size against the adapter's max dimension.
-        let target = OffscreenTarget::new(&device, width, height)
+        let target = OffscreenTarget::new(&gpu.device, width, height)
             .map_err(|error| crate::js_error(error_message("OffscreenRenderer target", error)))?;
 
         Ok(Self {
-            device,
-            queue,
+            gpu,
             renderer: None,
             mode: RenderMode::Filled,
             show_aabb: false,
@@ -306,11 +306,10 @@ impl OffscreenRenderer {
             ));
         }
         self.ensure_renderer();
-        let queue = &self.queue;
         self.renderer
             .as_mut()
             .expect("renderer built above")
-            .update_frame_texture_rgba(queue, rgba, width, height);
+            .update_frame_texture_rgba(rgba, width, height);
         self.last_inline_frame_id = None;
         self.external_frame_ready = true;
         Ok(())
@@ -400,7 +399,7 @@ impl OffscreenRenderer {
     fn ensure_renderer(&mut self) -> &mut SceneRenderer {
         if self.renderer.is_none() {
             let meshes = self.input.meshes();
-            let renderer = SceneRenderer::auto_fit(&self.device, OFFSCREEN_FORMAT, meshes);
+            let renderer = SceneRenderer::auto_fit(self.gpu.clone(), OFFSCREEN_FORMAT, meshes);
             self.renderer = Some(renderer);
 
             // Bind the stream's texture (0.0.4) as the sampled albedo so
@@ -492,11 +491,10 @@ impl OffscreenRenderer {
             .decode()
             .map_err(|error| format!("decode frame_id {frame_id}: {error}"))?;
         self.ensure_renderer();
-        let queue = &self.queue;
         self.renderer
             .as_mut()
             .expect("renderer built above")
-            .update_frame_texture_rgba(queue, &image.rgba, image.width, image.height);
+            .update_frame_texture_rgba(&image.rgba, image.width, image.height);
         self.last_inline_frame_id = Some(frame_id);
         Ok(true)
     }
@@ -535,7 +533,7 @@ impl OffscreenRenderer {
             .as_mut()
             .expect("renderer built before render_frame");
         self.target
-            .render(&self.device, &self.queue, renderer, params, scene)
+            .render(&self.gpu.device, &self.gpu.queue, renderer, params, scene)
             .await
             .map_err(|error| error_message("offscreen render", error))
     }

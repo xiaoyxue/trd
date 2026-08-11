@@ -72,8 +72,8 @@ pub enum WebBackend {
 
 /// A browser offscreen renderer over a `trd-core` [`SceneRenderer`].
 pub struct WebRenderer {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    /// The shared GPU context, held as one value rather than cloned apart (#180).
+    gpu: std::sync::Arc<trd_core::GpuContext>,
     renderer: SceneRenderer,
     /// The shared offscreen render target + readback buffer (#103, Part B).
     target: OffscreenTarget,
@@ -100,7 +100,7 @@ impl WebRenderer {
         backend: WebBackend,
     ) -> Result<Self, GuiError> {
         let instance = trd_core::create_instance();
-        let trd_core::GpuContext { device, queue, .. } = trd_core::GpuContext::request(
+        let gpu = trd_core::GpuContext::request(
             &instance,
             &trd_core::GpuRequest {
                 label: "trd-gui wasm device",
@@ -110,14 +110,14 @@ impl WebRenderer {
         .await
         .map_err(|e| GuiError::WasmRender(format!("GPU init failed: {e}")))?;
 
-        let max_dim = device.limits().max_texture_dimension_2d;
+        let max_dim = gpu.device.limits().max_texture_dimension_2d;
         if width == 0 || height == 0 || width > max_dim || height > max_dim {
             return Err(GuiError::WasmRender(format!(
                 "invalid render size {width}x{height} (max {max_dim})"
             )));
         }
 
-        let mut renderer = SceneRenderer::auto_fit(&device, OFFSCREEN_FORMAT, meshes);
+        let mut renderer = SceneRenderer::auto_fit(gpu.clone(), OFFSCREEN_FORMAT, meshes);
         // Skin each object with its **own** albedo (#141): texture `i` → mesh `i`.
         for (i, texture) in textures.iter().enumerate() {
             if let Some(texture) = texture {
@@ -137,15 +137,14 @@ impl WebRenderer {
         }
 
         // The shared offscreen harness owns the render target + readback buffer.
-        let target = OffscreenTarget::new(&device, width, height)
+        let target = OffscreenTarget::new(&gpu.device, width, height)
             .map_err(|e| GuiError::WasmRender(e.to_string()))?;
 
         // The Arrow backend round-trips only the per-frame params through the
         // wire (the mesh is uploaded once into `renderer`, like native), so no
         // mesh/texture stream needs caching here.
         Ok(Self {
-            device,
-            queue,
+            gpu,
             renderer,
             target,
             pick_target: None,
@@ -167,13 +166,13 @@ impl WebRenderer {
     pub async fn pick(&mut self, state: &SceneState, x: u32, y: u32) -> Option<u32> {
         let aspect = self.width as f32 / self.height.max(1) as f32;
         if self.pick_target.is_none() {
-            self.pick_target = Some(PickTarget::new(&self.device, self.width, self.height));
+            self.pick_target = Some(PickTarget::new(&self.gpu.device, self.width, self.height));
         }
         let target = self.pick_target.as_ref()?;
         target
             .pick(
-                &self.device,
-                &self.queue,
+                &self.gpu.device,
+                &self.gpu.queue,
                 &mut self.renderer,
                 state.frame_params(aspect),
                 &state.draws(),
@@ -309,7 +308,13 @@ impl WebRenderer {
         scene: &[DrawableObject],
     ) -> Result<Vec<u8>, GuiError> {
         self.target
-            .render(&self.device, &self.queue, &mut self.renderer, params, scene)
+            .render(
+                &self.gpu.device,
+                &self.gpu.queue,
+                &mut self.renderer,
+                params,
+                scene,
+            )
             .await
             .map_err(|e| GuiError::WasmRender(e.to_string()))
     }
