@@ -25,7 +25,7 @@ video-edit timeline + VideoFrame RGBA
 
 Platform-agnostic wgpu logic, shared verbatim by every target:
 
-- **`render/` (module tree) + `shader/*.wgsl`** — `MeshRenderer`
+- **`render/` (module tree) + `shader/*.wgsl`** — `SceneRenderer`
   (`render/mesh_renderer.rs`) rasterizes a `Scene` of `DrawableObject`s into *any*
   `wgpu::TextureView`; that one renderer is why the same code targets an offscreen
   texture, a window swapchain, or a browser canvas. The offscreen render target +
@@ -45,7 +45,7 @@ Platform-agnostic wgpu logic, shared verbatim by every target:
   (a background still). Geometry is owned once (decode-once mesh store + shared
   line-quad/arrow buffers); a drawable is a light handle naming *which* primitive
   + its per-frame model. A `Scene = Vec<DrawableObject>` is rebuilt each frame;
-  every front-end hands it to `MeshRenderer::encode` without per-type branching.
+  every front-end hands it to `SceneRenderer::encode` without per-type branching.
   The render core walks it into a flat list, batches by draw kind, binds the
   shared `P·V` camera uniform (plus viewport size for gizmo lines), and records
   the draws. Appearance (filled / wireframe / textured / **PBR**) is a *mode* of
@@ -96,7 +96,7 @@ Each is a *thin shell* that only supplies a render target and calls the core:
   from stdin; the window plays it at `--fps`, drawing each frame straight into the
   swapchain surface. No read-back, no file.
 - **`trd-wasm` / `web/`** — browser: `CanvasRenderer.create(canvas)` holds a
-  persistent `MeshRenderer` + `InputSession` and renders the **same** `Scene` as
+  persistent `SceneRenderer` + `InputSession` and renders the **same** `Scene` as
   the CLI. There is **one** config-driven front-end: `render.sh --web` writes the
   demo's `stream.arrow` + `config.json`, and
   [`web/viewer/src/viewer.ts`](../web/viewer/src/viewer.ts) fetches both and

@@ -326,7 +326,7 @@ impl SceneRenderer {
     /// ([`crate::DEFAULT_PREVIEW_TARGET`]) — center + uniform scale-to-fit — so an
     /// arbitrary-unit asset renders centered at a reasonable size. A convenience
     /// constructor over [`new`](Self::new); shared by the headless
-    /// [`crate::run_stream`]/`BatchRenderer` and the windowed `trd-app`.
+    /// [`crate::run_stream`]/`Renderer` and the windowed `trd-app`.
     pub fn auto_fit(gpu: Arc<GpuContext>, format: wgpu::TextureFormat, meshes: &[Mesh]) -> Self {
         let base_models: Vec<Matrix4> = meshes
             .iter()

@@ -17,7 +17,7 @@ use trd_gui::scene::{SceneSeed, SceneState};
 /// Which render backend the viewer drives (design §5.2).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum Backend {
-    /// Call `trd-core`'s `BatchRenderer` directly (lowest latency; the default).
+    /// Call `trd-core`'s `Renderer` directly (lowest latency; the default).
     #[default]
     Inproc,
     /// Author a `[mesh][params]` Arrow stream → `run_stream` → decode the image

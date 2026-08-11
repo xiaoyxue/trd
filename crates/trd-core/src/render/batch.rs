@@ -1,5 +1,10 @@
 //! Per-frame batching: walking a [`Scene`] into instanced draw commands.
 //!
+//! This is what "batch" means in trd: grouping draws that share GPU state into
+//! one instanced command. (The former `BatchRenderer` used the word for
+//! *batch-mode headless output* and owned none of this; it is now `Renderer`,
+//! so the term is unambiguous — #180.)
+//!
 //! Pure data and a pure function — no `wgpu::Device`, no GPU state — so this is
 //! unit-testable on its own. [`build_batches`] flattens every
 //! [`DrawableObject`] into a `(DrawKind, model)` pair, stable-sorts by kind, and

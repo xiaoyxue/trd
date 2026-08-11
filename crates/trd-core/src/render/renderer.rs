@@ -1,14 +1,16 @@
-//! Headless GPU batch render harness (#134).
+//! [`Renderer`] — the persistent offscreen render harness (#134).
 //!
-//! [`BatchRenderer`] is trd-core's persistent offscreen render context: it owns
-//! the wgpu `device`/`queue`, a [`SceneRenderer`], and the shared
-//! [`OffscreenTarget`] readback plumbing, plus the CLI overlay toggles
+//! Owns a [`GpuContext`], a [`SceneRenderer`] and the shared [`OffscreenTarget`]
+//! readback plumbing, plus the CLI overlay toggles
 //! (`show_aabb`/`show_axes`/`show_local_axes`/`show_local_grid`) and the mesh-pass
 //! MSAA sample count, rendering one [`FrameParams`] to tightly-packed row-major
-//! RGBA bytes per call. Relocated out of `stream.rs` (which keeps only the
-//! decode->render->encode orchestration) so it sits beside its siblings
-//! [`OffscreenTarget`] and [`SceneRenderer`] under `render/` (#134, #82).
-
+//! RGBA bytes per call.
+//!
+//! Formerly `BatchRenderer`. "Batch" there meant *batch-mode headless output* and
+//! described nothing about the type — instanced batching lives entirely in
+//! [`SceneRenderer`] (`batch.rs`) — while colliding with that real meaning. The
+//! name now belongs to one concept: grouping draws into instanced commands
+//! (#180).
 use std::sync::Arc;
 
 use super::{
@@ -20,7 +22,7 @@ use crate::stream::{check_dimensions, StreamError};
 
 /// A persistent GPU context that renders one [`FrameParams`] to tightly-packed
 /// row-major RGBA bytes (`width*height*4`) per call.
-pub struct BatchRenderer {
+pub struct Renderer {
     gpu: Arc<GpuContext>,
     renderer: SceneRenderer,
     /// The shared offscreen render target + readback buffer (#103, Part B).
@@ -59,7 +61,7 @@ pub struct BatchRenderer {
     pick_target: Option<PickTarget>,
 }
 
-impl BatchRenderer {
+impl Renderer {
     /// Builds the GPU context (instance/adapter/device/pipeline/target/readback)
     /// once for a fixed `width` x `height`, rendering the `meshes` of the stream's
     /// leading mesh table, applying each mesh's [`Mesh::preview_transform`]
