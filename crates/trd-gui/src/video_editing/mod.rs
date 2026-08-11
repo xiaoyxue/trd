@@ -14,7 +14,12 @@ pub use diagnostics::{PoseDeltaDiagnostics, QuadFrameDiagnostics, TrackingPlacem
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::time::Instant;
+// `std::time::Instant::now()` panics on `wasm32-unknown-unknown` ("time not
+// implemented on this platform"), which surfaces in the browser as
+// `RuntimeError: unreachable` the moment the first video frame schedules a
+// render. `web_time::Instant` is that same type on native and a
+// `performance.now()`-backed clock on wasm.
+use web_time::Instant;
 
 use diagnostics::{dot3, pose_delta};
 
