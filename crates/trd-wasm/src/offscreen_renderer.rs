@@ -533,7 +533,7 @@ impl OffscreenRenderer {
             .as_mut()
             .expect("renderer built before render_frame");
         self.target
-            .render(&self.gpu.device, &self.gpu.queue, renderer, params, scene)
+            .render(&self.gpu, renderer, params, scene)
             .await
             .map_err(|error| error_message("offscreen render", error))
     }

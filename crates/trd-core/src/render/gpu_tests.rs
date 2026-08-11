@@ -21,13 +21,13 @@ fn single(format: wgpu::TextureFormat, mesh: &Mesh) -> SceneRenderer {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn render_with_readback(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
+    gpu: &GpuContext,
     format: wgpu::TextureFormat,
     width: u32,
     height: u32,
     encode: impl FnOnce(&mut wgpu::CommandEncoder, &wgpu::TextureView),
 ) -> Vec<u8> {
+    let (device, queue) = (&gpu.device, &gpu.queue);
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("trd render test target"),
         size: wgpu::Extent3d {
@@ -122,12 +122,6 @@ fn test_gpu() -> std::sync::Arc<GpuContext> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn test_device() -> (wgpu::Device, wgpu::Queue) {
-    let gpu = test_gpu();
-    (gpu.device.clone(), gpu.queue.clone())
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 async fn create_test_device() -> std::sync::Arc<GpuContext> {
     let instance =
         wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
@@ -156,6 +150,36 @@ async fn create_test_device() -> std::sync::Arc<GpuContext> {
     })
 }
 
+/// `RenderTarget` must report the format a renderer's pipelines are built for.
+///
+/// For [`OffscreenTarget`] that is [`OFFSCREEN_FORMAT`]; the on-screen case is
+/// the interesting one and is covered by `OnscreenTarget`'s own sRGB-view logic
+/// (a surface's preferred format is often *non*-sRGB, so the target renders
+/// through an sRGB view to stay byte-identical with the headless CLI). Pinning
+/// the offscreen side here keeps the trait honest about which of the two a
+/// caller gets.
+#[test]
+#[ignore = "requires a GPU adapter"]
+#[cfg(not(target_arch = "wasm32"))]
+fn offscreen_target_reports_its_render_format_and_size() {
+    let gpu = test_gpu();
+    let (width, height) = (32, 24);
+    let mut target = OffscreenTarget::new(&gpu.device, width, height).expect("offscreen target");
+
+    assert_eq!(target.view_format(), OFFSCREEN_FORMAT);
+    assert_eq!(target.viewport(), Viewport { width, height });
+
+    RenderTarget::resize(&mut target, &gpu, 64, 48).expect("resize");
+    assert_eq!(
+        target.viewport(),
+        Viewport {
+            width: 64,
+            height: 48
+        }
+    );
+    assert_eq!(target.view_format(), OFFSCREEN_FORMAT);
+}
+
 /// A freshly constructed renderer must be able to draw **without any setter
 /// call at all**: no texture, no material maps, no environment probe.
 ///
@@ -169,7 +193,7 @@ async fn create_test_device() -> std::sync::Arc<GpuContext> {
 #[ignore = "requires a GPU adapter"]
 #[cfg(not(target_arch = "wasm32"))]
 fn first_frame_renders_with_no_setters_called() {
-    let (device, queue) = test_device();
+    let gpu = test_gpu();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (48, 48);
     let mut renderer = single(format, &Mesh::hello_triangle());
@@ -182,16 +206,15 @@ fn first_frame_renders_with_no_setters_called() {
             model: Matrix4::IDENTITY.to_cols_array(),
             mode,
         }];
-        let pixels =
-            render_with_readback(&device, &queue, format, width, height, |encoder, view| {
-                renderer.encode(
-                    encoder,
-                    view,
-                    FrameParams::IDENTITY,
-                    &scene,
-                    Viewport { width, height },
-                );
-            });
+        let pixels = render_with_readback(&gpu, format, width, height, |encoder, view| {
+            renderer.encode(
+                encoder,
+                view,
+                FrameParams::IDENTITY,
+                &scene,
+                Viewport { width, height },
+            );
+        });
         assert_eq!(pixels.len(), (width * height * 4) as usize);
         assert!(
             pixels
@@ -206,7 +229,7 @@ fn first_frame_renders_with_no_setters_called() {
 #[ignore = "requires a GPU adapter"]
 #[cfg(not(target_arch = "wasm32"))]
 fn mesh_renderer_draws_multiple_instances() {
-    let (device, queue) = test_device();
+    let gpu = test_gpu();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (64, 64);
     let mut mesh = single(format, &Mesh::hello_triangle());
@@ -217,7 +240,7 @@ fn mesh_renderer_draws_multiple_instances() {
         model: Matrix4::IDENTITY.to_cols_array(),
         mode: RenderMode::Filled,
     }];
-    let single_px = render_with_readback(&device, &queue, format, width, height, |e, v| {
+    let single_px = render_with_readback(&gpu, format, width, height, |e, v| {
         mesh.encode(
             e,
             v,
@@ -239,7 +262,7 @@ fn mesh_renderer_draws_multiple_instances() {
             mode: RenderMode::Filled,
         },
     ];
-    let two_px = render_with_readback(&device, &queue, format, width, height, |e, v| {
+    let two_px = render_with_readback(&gpu, format, width, height, |e, v| {
         mesh.encode(
             e,
             v,
@@ -282,7 +305,7 @@ fn mesh_renderer_depth_buffer_occludes_far_behind_near() {
     // painter's algorithm). With the depth buffer the nearer RED must win —
     // proving solid meshes z-occlude instead of last-draw-wins (the bug that
     // let textured meshes sample back faces over the front, #20).
-    let (device, queue) = test_device();
+    let gpu = test_gpu();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (64, 64);
 
@@ -331,7 +354,7 @@ fn mesh_renderer_depth_buffer_occludes_far_behind_near() {
             mode: RenderMode::Filled,
         },
     ];
-    let px = render_with_readback(&device, &queue, format, width, height, |e, v| {
+    let px = render_with_readback(&gpu, format, width, height, |e, v| {
         mesh.encode(
             e,
             v,
@@ -353,7 +376,7 @@ fn mesh_renderer_depth_buffer_occludes_far_behind_near() {
 #[ignore = "requires a GPU adapter"]
 #[cfg(not(target_arch = "wasm32"))]
 fn mesh_renderer_wireframe_lights_edges_only() {
-    let (device, queue) = test_device();
+    let gpu = test_gpu();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (64, 64);
     let mut mesh = single(format, &Mesh::hello_triangle());
@@ -369,7 +392,7 @@ fn mesh_renderer_wireframe_lights_edges_only() {
         mode: RenderMode::Wireframe,
     }];
 
-    let filled = render_with_readback(&device, &queue, format, width, height, |e, v| {
+    let filled = render_with_readback(&gpu, format, width, height, |e, v| {
         mesh.encode(
             e,
             v,
@@ -379,7 +402,7 @@ fn mesh_renderer_wireframe_lights_edges_only() {
         );
     });
 
-    let wire = render_with_readback(&device, &queue, format, width, height, |e, v| {
+    let wire = render_with_readback(&gpu, format, width, height, |e, v| {
         mesh.encode(
             e,
             v,
@@ -436,7 +459,7 @@ fn mesh_renderer_textured_samples_bound_texture() {
     // red / green, blue (top-left origin). Each screen quadrant must show the
     // matching texel color, proving the textured pipeline samples the bound
     // texture at the interpolated vertex UVs with the correct orientation.
-    let (device, queue) = test_device();
+    let gpu = test_gpu();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (64, 64);
 
@@ -487,7 +510,7 @@ fn mesh_renderer_textured_samples_bound_texture() {
         model: Matrix4::IDENTITY.to_cols_array(),
         mode: RenderMode::Textured,
     }];
-    let pixels = render_with_readback(&device, &queue, format, width, height, |e, v| {
+    let pixels = render_with_readback(&gpu, format, width, height, |e, v| {
         mesh.encode(
             e,
             v,
@@ -532,7 +555,7 @@ fn mesh_renderer_textured_samples_bound_texture() {
 #[ignore = "requires a GPU adapter"]
 #[cfg(not(target_arch = "wasm32"))]
 fn mesh_renderer_aabb_overlay_draws_green_box() {
-    let (device, queue) = test_device();
+    let gpu = test_gpu();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (64, 64);
     let mut mesh = single(format, &Mesh::hello_triangle());
@@ -551,7 +574,7 @@ fn mesh_renderer_aabb_overlay_draws_green_box() {
         DrawableObject::AabbBox { mesh_id: 0, model },
     ];
 
-    let plain = render_with_readback(&device, &queue, format, width, height, |e, v| {
+    let plain = render_with_readback(&gpu, format, width, height, |e, v| {
         mesh.encode(
             e,
             v,
@@ -561,7 +584,7 @@ fn mesh_renderer_aabb_overlay_draws_green_box() {
         );
     });
 
-    let with_box = render_with_readback(&device, &queue, format, width, height, |e, v| {
+    let with_box = render_with_readback(&gpu, format, width, height, |e, v| {
         mesh.encode(
             e,
             v,
@@ -598,7 +621,7 @@ fn mesh_renderer_aabb_overlay_draws_green_box() {
 #[ignore = "requires a GPU adapter"]
 #[cfg(not(target_arch = "wasm32"))]
 fn mesh_renderer_axes_overlay_draws_rgb_gizmo() {
-    let (device, queue) = test_device();
+    let gpu = test_gpu();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (64, 64);
     let mut mesh = single(format, &Mesh::hello_triangle());
@@ -619,7 +642,7 @@ fn mesh_renderer_axes_overlay_draws_rgb_gizmo() {
         },
     ];
 
-    let plain = render_with_readback(&device, &queue, format, width, height, |e, v| {
+    let plain = render_with_readback(&gpu, format, width, height, |e, v| {
         mesh.encode(
             e,
             v,
@@ -629,7 +652,7 @@ fn mesh_renderer_axes_overlay_draws_rgb_gizmo() {
         );
     });
 
-    let with_axes = render_with_readback(&device, &queue, format, width, height, |e, v| {
+    let with_axes = render_with_readback(&gpu, format, width, height, |e, v| {
         mesh.encode(
             e,
             v,
@@ -669,7 +692,7 @@ fn mesh_renderer_axes_overlay_draws_rgb_gizmo() {
 #[ignore = "requires a GPU adapter"]
 #[cfg(not(target_arch = "wasm32"))]
 fn gizmo_lines_and_arrowheads_stay_smooth_without_msaa() {
-    let (device, queue) = test_device();
+    let gpu = test_gpu();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (128, 128);
     let mesh_data = Mesh::hello_triangle();
@@ -683,7 +706,7 @@ fn gizmo_lines_and_arrowheads_stay_smooth_without_msaa() {
     let model = Matrix4::from_scale(Vector3::new(0.5, 0.5, 0.5)).to_cols_array();
     let scene = [DrawableObject::CoordinateAxes { model }];
 
-    let pixels = render_with_readback(&device, &queue, format, width, height, |e, v| {
+    let pixels = render_with_readback(&gpu, format, width, height, |e, v| {
         renderer.encode(
             e,
             v,
@@ -733,7 +756,7 @@ fn scene_composes_all_drawable_kinds_together() {
     // filled mesh, a wireframe mesh, an AABB box, and the axes gizmo must
     // render all of them at once — the filled mesh alone lights fewer pixels
     // than the full composed scene, and the green box + RGB axes appear.
-    let (device, queue) = test_device();
+    let gpu = test_gpu();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (64, 64);
     let mut mesh = single(format, &Mesh::hello_triangle());
@@ -761,7 +784,7 @@ fn scene_composes_all_drawable_kinds_together() {
         },
     ];
 
-    let filled_px = render_with_readback(&device, &queue, format, width, height, |e, v| {
+    let filled_px = render_with_readback(&gpu, format, width, height, |e, v| {
         mesh.encode(
             e,
             v,
@@ -770,7 +793,7 @@ fn scene_composes_all_drawable_kinds_together() {
             Viewport { width, height },
         );
     });
-    let composed_px = render_with_readback(&device, &queue, format, width, height, |e, v| {
+    let composed_px = render_with_readback(&gpu, format, width, height, |e, v| {
         mesh.encode(
             e,
             v,
@@ -841,7 +864,7 @@ f 1 2 6 5
 #[ignore = "requires a GPU adapter"]
 #[cfg(not(target_arch = "wasm32"))]
 fn environment_background_draws_bound_probe() {
-    let (device, queue) = test_device();
+    let gpu = test_gpu();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (32, 32);
     let mut renderer = single(format, &Mesh::hello_triangle());
@@ -857,7 +880,7 @@ fn environment_background_draws_bound_probe() {
         blur: 0.0,
         tonemap: Tonemap::Reinhard,
     }];
-    let pixels = render_with_readback(&device, &queue, format, width, height, |encoder, view| {
+    let pixels = render_with_readback(&gpu, format, width, height, |encoder, view| {
         renderer.encode(
             encoder,
             view,
@@ -880,7 +903,7 @@ fn mesh_renderer_renders_loaded_quad_filled_with_correct_coverage() {
     // via `draw_indexed` as a `DrawableObject::Mesh`. Under the identity camera
     // the unit quad spans NDC [-0.5, 0.5]², i.e. the central quarter of the
     // frame — so the center is lit, the corners are dark, and coverage ≈ 25%.
-    let (device, queue) = test_device();
+    let gpu = test_gpu();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (64, 64);
     let quad = Mesh::from_obj(QUAD_OBJ).expect("quad OBJ parses");
@@ -891,7 +914,7 @@ fn mesh_renderer_renders_loaded_quad_filled_with_correct_coverage() {
         model: Matrix4::IDENTITY.to_cols_array(),
         mode: RenderMode::Filled,
     }];
-    let px = render_with_readback(&device, &queue, format, width, height, |e, v| {
+    let px = render_with_readback(&gpu, format, width, height, |e, v| {
         mesh.encode(
             e,
             v,
@@ -941,7 +964,7 @@ fn cg_and_cv_cameras_render_matching_output() {
     // #43/#49: a CG-authored camera (eye/target/up/fovy) and its CV-lowered
     // equivalent (pose = world-from-camera, K = intrinsics) describe the *same*
     // camera, so rendering the same `Scene` under each yields matching pixels.
-    let (device, queue) = test_device();
+    let gpu = test_gpu();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (96, 96);
     let viewport = Viewport { width, height };
@@ -982,10 +1005,10 @@ fn cg_and_cv_cameras_render_matching_output() {
         ..FrameParams::IDENTITY
     };
 
-    let cg_px = render_with_readback(&device, &queue, format, width, height, |e, v| {
+    let cg_px = render_with_readback(&gpu, format, width, height, |e, v| {
         mesh.encode(e, v, cg, &scene, viewport);
     });
-    let cv_px = render_with_readback(&device, &queue, format, width, height, |e, v| {
+    let cv_px = render_with_readback(&gpu, format, width, height, |e, v| {
         mesh.encode(e, v, cv, &scene, viewport);
     });
 
@@ -1033,7 +1056,7 @@ fn dolly_turntable_bird_eye_cg_cv_wireframe_stays_framed() {
     // (A cube stands in for the bunny for a fast, deterministic GPU test; the
     // same scenario is exercised on the real bunny by examples/bunny_dolly.py
     // + `render.sh --wireframe`.)
-    let (device, queue) = test_device();
+    let gpu = test_gpu();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (128, 128);
     let viewport = Viewport { width, height };
@@ -1106,10 +1129,10 @@ fn dolly_turntable_bird_eye_cg_cv_wireframe_stays_framed() {
                 ..FrameParams::IDENTITY
             };
 
-            let cg_px = render_with_readback(&device, &queue, format, width, height, |e, v| {
+            let cg_px = render_with_readback(&gpu, format, width, height, |e, v| {
                 mesh.encode(e, v, cg, &scene, viewport);
             });
-            let cv_px = render_with_readback(&device, &queue, format, width, height, |e, v| {
+            let cv_px = render_with_readback(&gpu, format, width, height, |e, v| {
                 mesh.encode(e, v, cv, &scene, viewport);
             });
 
@@ -1171,7 +1194,7 @@ fn frame_plane_composites_background_under_scene() {
     // A FramePlane fills the background from a reused 2×2 texture (upload +
     // fullscreen sample + top-left `v=0` orientation), and a solid mesh drawn
     // in the same scene z-composites ON TOP of it (depth-write-off plane).
-    let (device, queue) = test_device();
+    let gpu = test_gpu();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (64, 64);
 
@@ -1221,7 +1244,7 @@ fn frame_plane_composites_background_under_scene() {
     let plane_only = [DrawableObject::FramePlane {
         fit: FrameFit::Stretch,
     }];
-    let bg = render_with_readback(&device, &queue, format, width, height, |e, v| {
+    let bg = render_with_readback(&gpu, format, width, height, |e, v| {
         mesh.encode(
             e,
             v,
@@ -1269,7 +1292,7 @@ fn frame_plane_composites_background_under_scene() {
             mode: RenderMode::Filled,
         },
     ];
-    let over = render_with_readback(&device, &queue, format, width, height, |e, v| {
+    let over = render_with_readback(&gpu, format, width, height, |e, v| {
         mesh.encode(
             e,
             v,
@@ -1283,7 +1306,7 @@ fn frame_plane_composites_background_under_scene() {
         model: Matrix4::IDENTITY.to_cols_array(),
         mode: RenderMode::Filled,
     }];
-    let two_pass = render_with_readback(&device, &queue, format, width, height, |e, v| {
+    let two_pass = render_with_readback(&gpu, format, width, height, |e, v| {
         mesh.encode(
             e,
             v,
@@ -1321,12 +1344,12 @@ fn frame_plane_composites_background_under_scene() {
 #[ignore = "requires a GPU adapter"]
 #[cfg(not(target_arch = "wasm32"))]
 fn triangle_renderer_draws_gradient_triangle() {
-    let (device, queue) = test_device();
+    let gpu = test_gpu();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (64, 64);
-    let renderer = TriangleRenderer::new(&device, format);
+    let renderer = TriangleRenderer::new(&gpu.device, format);
 
-    let px = render_with_readback(&device, &queue, format, width, height, |e, v| {
+    let px = render_with_readback(&gpu, format, width, height, |e, v| {
         renderer.encode(e, v);
     });
     let at = |x: u32, y: u32| -> [u8; 3] {
@@ -1366,13 +1389,13 @@ fn triangle_renderer_draws_gradient_triangle() {
 #[ignore = "requires a GPU adapter"]
 #[cfg(not(target_arch = "wasm32"))]
 fn picking_resolves_object_ids_and_background() {
-    let (device, queue) = test_device();
+    let gpu = test_gpu();
     let quad = Mesh::from_obj(QUAD_OBJ).expect("quad OBJ parses");
     // The main-pass format is irrelevant to picking (its pipeline is PICK_FORMAT).
     let mut renderer = single(wgpu::TextureFormat::Rgba8UnormSrgb, &quad);
 
     let (width, height) = (64u32, 64u32);
-    let target = PickTarget::new(&device, width, height);
+    let target = PickTarget::new(&gpu.device, width, height);
 
     // Two objects: a 0.35-scaled quad at NDC x = -0.5 (object 0) and +0.5
     // (object 1), leaving the center a background gap.
@@ -1394,15 +1417,7 @@ fn picking_resolves_object_ids_and_background() {
     ];
 
     let mut pick = |x: u32, y: u32| {
-        pollster::block_on(target.pick(
-            &device,
-            &queue,
-            &mut renderer,
-            FrameParams::IDENTITY,
-            &draws,
-            x,
-            y,
-        ))
+        pollster::block_on(target.pick(&gpu, &mut renderer, FrameParams::IDENTITY, &draws, x, y))
     };
 
     // NDC x=-0.5 → pixel ≈ 16; x=+0.5 → ≈ 48; center gap at 32; corner at (2,2).

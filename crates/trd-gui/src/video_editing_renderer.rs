@@ -184,8 +184,7 @@ impl VideoPlacementRenderer {
         });
         Ok(target
             .pick(
-                &self.gpu.device,
-                &self.gpu.queue,
+                &self.gpu,
                 &mut self.renderer,
                 params,
                 &[trd_core::Draw {
@@ -291,8 +290,7 @@ impl VideoPlacementRenderer {
         }
         self.target
             .render_three_pass(
-                &self.gpu.device,
-                &self.gpu.queue,
+                &self.gpu,
                 &mut self.renderer,
                 background_params,
                 foreground_params,

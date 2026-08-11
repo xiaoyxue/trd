@@ -100,7 +100,7 @@ impl BoundEnv {
             height: 1,
             rgba: vec![0.0, 0.0, 0.0, 1.0],
         };
-        let bind_group = upload_env_texture(&gpu.device, &gpu.queue, &layout, &fallback);
+        let bind_group = upload_env_texture(gpu, &layout, &fallback);
         Self {
             layout,
             bind_group,
@@ -113,7 +113,7 @@ impl BoundEnv {
     }
 
     pub(crate) fn set(&mut self, gpu: &GpuContext, data: EnvMapData) {
-        self.bind_group = upload_env_texture(&gpu.device, &gpu.queue, &self.layout, &data);
+        self.bind_group = upload_env_texture(gpu, &self.layout, &data);
         self.has_env = true;
     }
 
@@ -127,11 +127,11 @@ impl BoundEnv {
 }
 
 fn upload_env_texture(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
+    gpu: &GpuContext,
     layout: &wgpu::BindGroupLayout,
     env: &EnvMapData,
 ) -> wgpu::BindGroup {
+    let (device, queue) = (&gpu.device, &gpu.queue);
     let (width, height, base_rgba) = fit_environment(env, 512);
     let size = wgpu::Extent3d {
         width,
@@ -205,10 +205,9 @@ fn upload_env_texture(
         mipmap_filter: wgpu::MipmapFilterMode::Linear,
         ..Default::default()
     });
-    let (brdf_view, brdf_sampler) = upload_brdf_lut(device, queue);
+    let (brdf_view, brdf_sampler) = upload_brdf_lut(gpu);
     let irradiance = build_irradiance_map(width, height, &base_rgba, 64, 32, 32);
-    let irradiance_view =
-        upload_rgba16f_view(device, queue, "trd diffuse irradiance", 64, 32, &irradiance);
+    let irradiance_view = upload_rgba16f_view(gpu, "trd diffuse irradiance", 64, 32, &irradiance);
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("trd env bind group"),
         layout,
@@ -417,13 +416,13 @@ fn sample_equirectangular(width: u32, height: u32, rgba: &[f32], direction: [f32
 }
 
 fn upload_rgba16f_view(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
+    gpu: &GpuContext,
     label: &str,
     width: u32,
     height: u32,
     rgba: &[f32],
 ) -> wgpu::TextureView {
+    let (device, queue) = (&gpu.device, &gpu.queue);
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
         size: wgpu::Extent3d {
@@ -472,10 +471,8 @@ fn normalize(vector: [f32; 3]) -> [f32; 3] {
     [vector[0] / length, vector[1] / length, vector[2] / length]
 }
 
-fn upload_brdf_lut(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-) -> (wgpu::TextureView, wgpu::Sampler) {
+fn upload_brdf_lut(gpu: &GpuContext) -> (wgpu::TextureView, wgpu::Sampler) {
+    let (device, queue) = (&gpu.device, &gpu.queue);
     const SIZE: u32 = 128;
     const SAMPLES: u32 = 64;
     let mut rgba = Vec::with_capacity((SIZE * SIZE * 4) as usize);

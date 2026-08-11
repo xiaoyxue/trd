@@ -171,8 +171,7 @@ impl WebRenderer {
         let target = self.pick_target.as_ref()?;
         target
             .pick(
-                &self.gpu.device,
-                &self.gpu.queue,
+                &self.gpu,
                 &mut self.renderer,
                 state.frame_params(aspect),
                 &state.draws(),
@@ -308,13 +307,7 @@ impl WebRenderer {
         scene: &[DrawableObject],
     ) -> Result<Vec<u8>, GuiError> {
         self.target
-            .render(
-                &self.gpu.device,
-                &self.gpu.queue,
-                &mut self.renderer,
-                params,
-                scene,
-            )
+            .render(&self.gpu, &mut self.renderer, params, scene)
             .await
             .map_err(|e| GuiError::WasmRender(e.to_string()))
     }

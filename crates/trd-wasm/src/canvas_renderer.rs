@@ -473,14 +473,8 @@ impl CanvasRenderer {
         measure("trd.canvas.render-submit", || {
             let acquired = self.acquire_frame()?;
             let renderer = self.renderer.as_mut().expect("renderer built above");
-            self.target.present(
-                &self.gpu.device,
-                &self.gpu.queue,
-                renderer,
-                acquired.texture,
-                params,
-                &scene,
-            );
+            self.target
+                .present(&self.gpu, renderer, acquired.texture, params, &scene);
             if acquired.reconfigure_after_present {
                 self.target.reconfigure(&self.gpu.device);
             }

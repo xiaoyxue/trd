@@ -1,6 +1,7 @@
 //! CPU-side color helpers: texture upload with mipmap generation and
 //! sRGB (de)linearization.
 
+use super::GpuContext;
 use crate::texture::ImageData;
 
 /// Uploads `image` to a fresh `Rgba8UnormSrgb` `wgpu::Texture` and builds the
@@ -10,11 +11,11 @@ use crate::texture::ImageData;
 /// sRGB storage) and uploaded per level, so minified/foreshortened surfaces
 /// filter smoothly instead of aliasing the atlas detail into speckle.
 pub(crate) fn upload_texture(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
+    gpu: &GpuContext,
     layout: &wgpu::BindGroupLayout,
     image: &ImageData,
 ) -> wgpu::BindGroup {
+    let (device, queue) = (&gpu.device, &gpu.queue);
     let mip_level_count = 1 + image.width.max(image.height).max(1).ilog2();
     let size = wgpu::Extent3d {
         width: image.width,

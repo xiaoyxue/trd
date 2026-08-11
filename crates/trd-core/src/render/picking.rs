@@ -10,6 +10,7 @@
 //! single-sampled (ids must never be averaged at edges) and use a non-sRGB format
 //! (so the id bytes round-trip exactly).
 
+use super::GpuContext;
 use futures_channel::oneshot;
 
 use super::{
@@ -92,14 +93,14 @@ impl PickTarget {
     #[allow(clippy::too_many_arguments)]
     pub async fn pick(
         &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        gpu: &GpuContext,
         renderer: &mut SceneRenderer,
         params: FrameParams,
         draws: &[Draw],
         x: u32,
         y: u32,
     ) -> Option<u32> {
+        let (device, queue) = (&gpu.device, &gpu.queue);
         if x >= self.width || y >= self.height {
             return None;
         }

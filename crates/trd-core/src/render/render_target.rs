@@ -13,11 +13,39 @@
 //! canvas). Note the picking target is deliberately **not** here: it is a second
 //! pass producing ids, not a place a frame is rendered to (see `picking.rs`).
 
+use super::GpuContext;
 use futures_channel::oneshot;
 use thiserror::Error;
 
 use super::{DrawableObject, FrameParams, SceneRenderer, Viewport};
 use crate::tightly_pack_rgba;
+
+/// What every render target has in common.
+///
+/// Deliberately thin. Both targets are just somewhere to render **into a
+/// `wgpu::TextureView`**, and the encoding in between is identical — only the
+/// two ends differ: how the view is acquired (an owned texture, infallibly,
+/// versus a surface that can be outdated or lost) and what happens after
+/// submission (copy + map + read pixels back, versus present). Those tails
+/// produce different things (`Vec<u8>` versus nothing), so they stay as inherent
+/// methods on each target rather than being forced through this trait; putting
+/// them here would mean returning `Option<Vec<u8>>`, where the `None` is real
+/// on-screen and therefore belongs to a different layer (I5 in #180).
+///
+/// `PickTarget` deliberately does **not** implement this: it is a second pass
+/// producing ids, not a place a frame is rendered to.
+pub trait RenderTarget {
+    /// The texture format a renderer's pipelines must be built for. Offscreen
+    /// this is [`OFFSCREEN_FORMAT`]; on-screen it is the surface's **sRGB view**
+    /// format, which is why it must be read off the target rather than assumed.
+    fn view_format(&self) -> wgpu::TextureFormat;
+
+    /// The current render size in pixels.
+    fn viewport(&self) -> Viewport;
+
+    /// Resizes the target to `width` x `height`.
+    fn resize(&mut self, gpu: &GpuContext, width: u32, height: u32) -> Result<(), OffscreenError>;
+}
 
 // ---------------------------------------------------------------------------
 // Offscreen
@@ -147,13 +175,12 @@ impl OffscreenTarget {
     /// `wait_indefinitely` poll below keeps correct).
     pub async fn render(
         &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        gpu: &GpuContext,
         renderer: &mut SceneRenderer,
         params: FrameParams,
         scene: &[DrawableObject],
     ) -> Result<Vec<u8>, OffscreenError> {
-        self.render_passes(device, queue, renderer, params, params, None, scene, None)
+        self.render_passes(gpu, renderer, params, params, None, scene, None)
             .await
     }
 
@@ -162,8 +189,7 @@ impl OffscreenTarget {
     #[allow(clippy::too_many_arguments)]
     pub async fn render_two_pass(
         &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        gpu: &GpuContext,
         renderer: &mut SceneRenderer,
         background_params: FrameParams,
         foreground_params: FrameParams,
@@ -171,8 +197,7 @@ impl OffscreenTarget {
         foreground: &[DrawableObject],
     ) -> Result<Vec<u8>, OffscreenError> {
         self.render_passes(
-            device,
-            queue,
+            gpu,
             renderer,
             background_params,
             foreground_params,
@@ -188,8 +213,7 @@ impl OffscreenTarget {
     #[allow(clippy::too_many_arguments)]
     pub async fn render_three_pass(
         &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        gpu: &GpuContext,
         renderer: &mut SceneRenderer,
         background_params: FrameParams,
         foreground_params: FrameParams,
@@ -198,8 +222,7 @@ impl OffscreenTarget {
         overlay: &[DrawableObject],
     ) -> Result<Vec<u8>, OffscreenError> {
         self.render_passes(
-            device,
-            queue,
+            gpu,
             renderer,
             background_params,
             foreground_params,
@@ -213,8 +236,7 @@ impl OffscreenTarget {
     #[allow(clippy::too_many_arguments)]
     async fn render_passes(
         &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        gpu: &GpuContext,
         renderer: &mut SceneRenderer,
         background_params: FrameParams,
         foreground_params: FrameParams,
@@ -222,6 +244,7 @@ impl OffscreenTarget {
         foreground: &[DrawableObject],
         overlay: Option<&[DrawableObject]>,
     ) -> Result<Vec<u8>, OffscreenError> {
+        let (device, queue) = (&gpu.device, &gpu.queue);
         let view = self
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -438,13 +461,13 @@ impl OnscreenTarget {
     /// [`acquire`](Self::acquire).
     pub fn present(
         &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        gpu: &GpuContext,
         renderer: &mut SceneRenderer,
         texture: wgpu::SurfaceTexture,
         params: FrameParams,
         scene: &[DrawableObject],
     ) {
+        let (device, queue) = (&gpu.device, &gpu.queue);
         let view = texture.texture.create_view(&wgpu::TextureViewDescriptor {
             format: Some(self.view_format),
             ..Default::default()
@@ -464,5 +487,42 @@ impl OnscreenTarget {
         );
         queue.submit(Some(encoder.finish()));
         queue.present(texture);
+    }
+}
+
+impl RenderTarget for OffscreenTarget {
+    fn view_format(&self) -> wgpu::TextureFormat {
+        OFFSCREEN_FORMAT
+    }
+
+    fn viewport(&self) -> Viewport {
+        Viewport {
+            width: self.width,
+            height: self.height,
+        }
+    }
+
+    fn resize(&mut self, gpu: &GpuContext, width: u32, height: u32) -> Result<(), OffscreenError> {
+        *self = Self::new(&gpu.device, width, height)?;
+        Ok(())
+    }
+}
+
+impl RenderTarget for OnscreenTarget {
+    fn view_format(&self) -> wgpu::TextureFormat {
+        self.view_format
+    }
+
+    fn viewport(&self) -> Viewport {
+        Viewport {
+            width: self.config.width,
+            height: self.config.height,
+        }
+    }
+
+    /// Never fails: a surface resize reconfigures in place.
+    fn resize(&mut self, gpu: &GpuContext, width: u32, height: u32) -> Result<(), OffscreenError> {
+        OnscreenTarget::resize(self, &gpu.device, width, height);
+        Ok(())
     }
 }

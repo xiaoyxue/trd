@@ -48,7 +48,9 @@ pub use options::{Msaa, PbrConfig, RenderOptions};
 pub use pbr::PbrDebugView;
 pub use picking::PickTarget;
 pub use pipeline::create_mesh_pipeline;
-pub use render_target::{OffscreenError, OffscreenTarget, OnscreenTarget, OFFSCREEN_FORMAT};
+pub use render_target::{
+    OffscreenError, OffscreenTarget, OnscreenTarget, RenderTarget, OFFSCREEN_FORMAT,
+};
 pub use scene::{
     build_scene, plane_grid_overlays, selection_aabb_overlay, Draw, DrawableObject, FrameFit,
     GridPlane, RenderMode, Scene,
