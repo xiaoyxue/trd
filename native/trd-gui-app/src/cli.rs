@@ -12,7 +12,7 @@ use trd_core::{
 };
 
 use trd_gui::error::GuiError;
-use trd_gui::scene::SceneState;
+use trd_gui::scene::{SceneSeed, SceneState};
 
 /// Which render backend the viewer drives (design §5.2).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default, clap::ValueEnum)]
@@ -200,20 +200,20 @@ impl Cli {
     /// set to [`RenderMode::Pbr`] when `--pbr` is given, carrying the material
     /// assembled from the CLI flags (subsequently edited live in the UI).
     pub fn scene_state(&self) -> SceneState {
-        SceneState {
-            // The native CLI authors a single object; its mode + material seed the
-            // one-element per-object lists.
-            modes: vec![if self.pbr {
+        // The native CLI authors a single object, so the seed carries exactly one
+        // material; `seeded` keeps every per-object vector that length.
+        SceneState::seeded(SceneSeed {
+            materials: vec![self.disney_material()],
+            mode: if self.pbr {
                 RenderMode::Pbr
             } else {
                 RenderMode::Filled
-            }],
-            materials: vec![self.disney_material()],
-            image_based_lighting: vec![self.image_based_lighting()],
-            tone_mappings: vec![self.tone_mapping()],
+            },
+            image_based_lighting: self.image_based_lighting(),
+            tone_mapping: self.tone_mapping(),
             lighting: self.lighting(),
-            ..SceneState::default()
-        }
+            environment_available: false,
+        })
     }
 }
 

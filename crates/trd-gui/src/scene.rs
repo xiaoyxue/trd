@@ -266,6 +266,53 @@ impl Default for SceneState {
     }
 }
 
+/// What a front-end wants the scene to start out looking like.
+///
+/// Both delivery surfaces used to assemble [`SceneState`]'s parallel per-object
+/// vectors by hand — the native CLI in `trd-gui-app`'s `Cli::scene_state`, the
+/// browser in `start()` — which meant duplicating the rule that
+/// `objects` / `modes` / `materials` / `image_based_lighting` / `tone_mappings` /
+/// `pbr_debug_views` must all stay the **same length**, since `draws()` and the
+/// UI index into them positionally. This carries only the values that actually
+/// differ between front-ends; [`SceneState::seeded`] enforces the invariant.
+#[derive(Debug, Clone)]
+pub struct SceneSeed {
+    /// One material per object. Its length **is** the object count: glTF assets
+    /// bring their own imported material, everything else repeats a default.
+    pub materials: Vec<DisneyMaterial>,
+    /// The render mode every object starts in (each is editable afterwards).
+    pub mode: RenderMode,
+    /// Initial image-based-lighting controls, applied to every object.
+    pub image_based_lighting: ImageBasedLighting,
+    /// Initial output transform, applied to every object.
+    pub tone_mapping: ToneMapping,
+    /// The shared scene light rig.
+    pub lighting: Lighting,
+    /// Whether an HDR probe was supplied; also decides whether the environment
+    /// is drawn as the background.
+    pub environment_available: bool,
+}
+
+impl SceneState {
+    /// The initial scene for [`SceneSeed`], with every per-object vector exactly
+    /// `seed.materials.len()` long.
+    pub fn seeded(seed: SceneSeed) -> Self {
+        let n = seed.materials.len();
+        Self {
+            objects: vec![ObjectTransform::default(); n],
+            modes: vec![seed.mode; n],
+            materials: seed.materials,
+            image_based_lighting: vec![seed.image_based_lighting; n],
+            tone_mappings: vec![seed.tone_mapping; n],
+            pbr_debug_views: vec![PbrDebugView::default(); n],
+            lighting: seed.lighting,
+            environment_available: seed.environment_available,
+            show_environment_background: seed.environment_available,
+            ..Self::default()
+        }
+    }
+}
+
 impl SceneState {
     /// The camera [`FrameParams`] for the given viewport `aspect` (width/height):
     /// the CG `eye`/`target`/`up`/`fovy`/`aspect` form derived from the orbit
@@ -539,5 +586,32 @@ mod tests {
         // Out-of-range selection is also None (never panics).
         state.selected = Some(5);
         assert!(state.selected_object_mut().is_none());
+    }
+
+    /// The whole point of [`SceneState::seeded`]: every per-object vector must
+    /// come out the same length as `materials`, because `draws()` and the UI
+    /// index into them positionally.
+    #[test]
+    fn seeded_keeps_every_per_object_vector_the_same_length() {
+        for n in [1usize, 3] {
+            let state = SceneState::seeded(SceneSeed {
+                materials: vec![DisneyMaterial::default(); n],
+                mode: RenderMode::Pbr,
+                image_based_lighting: ImageBasedLighting::default(),
+                tone_mapping: ToneMapping::default(),
+                lighting: Lighting::default(),
+                environment_available: true,
+            });
+            assert_eq!(state.objects.len(), n);
+            assert_eq!(state.modes.len(), n);
+            assert_eq!(state.materials.len(), n);
+            assert_eq!(state.image_based_lighting.len(), n);
+            assert_eq!(state.tone_mappings.len(), n);
+            assert_eq!(state.pbr_debug_views.len(), n);
+            assert_eq!(state.draws().len(), n);
+            // An env probe seeds both flags together.
+            assert!(state.environment_available);
+            assert!(state.show_environment_background);
+        }
     }
 }

@@ -60,7 +60,7 @@ pub async fn start(
     backend: Option<String>,
 ) -> Result<(), wasm_bindgen::JsValue> {
     use crate::interaction::InteractionController;
-    use crate::scene::{ObjectTransform, SceneState};
+    use crate::scene::{SceneSeed, SceneState};
     use crate::web_app::WebApp;
     use crate::web_renderer::{WebBackend, WebRenderer};
 
@@ -208,24 +208,17 @@ pub async fn start(
     } else {
         trd_core::ToneMapping::default()
     };
-    let scene = SceneState {
-        // One transform + mode + material per loaded mesh, so `draws()` lays them
-        // out side-by-side and each object has its **own** editable render mode +
-        // PBR material (#141).
-        objects: vec![ObjectTransform::default(); meshes.len()],
-        modes: vec![initial_mode; meshes.len()],
+    // One transform + mode + material per loaded mesh, so `draws()` lays them out
+    // side-by-side and each object has its **own** editable render mode + PBR
+    // material (#141). `seeded` keeps those per-object vectors the same length.
+    let scene = SceneState::seeded(SceneSeed {
         materials: loaded.iter().map(|asset| asset.material.clone()).collect(),
-        image_based_lighting: loaded
-            .iter()
-            .map(|_| trd_core::ImageBasedLighting::default())
-            .collect(),
-        tone_mappings: vec![tone_mapping; meshes.len()],
-        pbr_debug_views: vec![trd_core::PbrDebugView::default(); meshes.len()],
+        mode: initial_mode,
+        image_based_lighting: trd_core::ImageBasedLighting::default(),
+        tone_mapping,
         lighting,
         environment_available: env.is_some(),
-        show_environment_background: env.is_some(),
-        ..SceneState::default()
-    };
+    });
     // `?backend=arrow` selects the Arrow wire round-trip; anything else (or
     // absent) is the direct in-process render.
     let backend = match backend.as_deref() {
