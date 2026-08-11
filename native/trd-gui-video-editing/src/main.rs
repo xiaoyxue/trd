@@ -1,13 +1,8 @@
-#[cfg(not(target_arch = "wasm32"))]
 mod app;
-#[cfg(not(target_arch = "wasm32"))]
 mod cli;
-#[cfg(not(target_arch = "wasm32"))]
 mod error;
-#[cfg(not(target_arch = "wasm32"))]
 mod media;
 
-#[cfg(not(target_arch = "wasm32"))]
 fn main() {
     if let Err(error) = run() {
         log::error!("{error}");
@@ -15,7 +10,6 @@ fn main() {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn run() -> Result<(), error::NativeVideoEditingError> {
     use clap::Parser;
 
@@ -58,6 +52,3 @@ fn run() -> Result<(), error::NativeVideoEditingError> {
     )?;
     Ok(())
 }
-
-#[cfg(target_arch = "wasm32")]
-fn main() {}
