@@ -9,7 +9,7 @@
 //! pointer / wheel gesture
 //!   → InteractionController (events → camera / model matrix)   [interaction.rs]
 //!   → SceneState (orbit camera + object transform)             [scene.rs]
-//!   → SceneRenderer::render (trd-core headless RGBA)           [render_backend.rs]
+//!   → GuiRenderer::render (trd-core headless RGBA)              [renderer.rs]
 //!   → egui texture in the delivery surface
 //! ```
 //!
@@ -20,16 +20,17 @@
 //!
 //! ## Module layout
 //!
-//! `scene`/`interaction`/`ui`/`assets`/`error` are **platform-agnostic** (the
-//! scene + controller are unit-tested without egui or a GPU; `ui` is the shared
-//! egui layout). The render path is target-split: `native/trd-gui-app` drives the
-//! synchronous `render_backend` (`Renderer`); wasm uses the asynchronous
-//! offscreen `web_renderer` driven by `web_app`, started via [`start`].
+//! `scene`/`interaction`/`ui`/`assets`/`error`/`renderer` are all
+//! **platform-agnostic** (the scene + controller are unit-tested without egui or
+//! a GPU; `ui` is the shared egui layout). There is **one** renderer,
+//! [`GuiRenderer`](renderer::GuiRenderer): native `trd-gui-app` and the browser
+//! `web_app` (started via [`start`]) drive the same type, the former blocking on
+//! its async API. Only the delivery surfaces are target-split (#180).
 
 pub mod assets;
 pub mod error;
 pub mod interaction;
-pub mod render_backend;
+pub mod renderer;
 pub mod scene;
 pub mod ui;
 pub mod video_editing;
@@ -37,8 +38,6 @@ pub mod video_editing_renderer;
 
 #[cfg(target_arch = "wasm32")]
 pub mod web_app;
-#[cfg(target_arch = "wasm32")]
-pub mod web_renderer;
 
 /// The browser entry point (Slice 4): builds the offscreen renderer and runs the
 /// eframe app on `canvas`. `mesh_bytes`, `texture_bytes`, and `env_bytes` are the
@@ -59,9 +58,9 @@ pub async fn start(
     env_bytes: Option<Vec<u8>>,
 ) -> Result<(), wasm_bindgen::JsValue> {
     use crate::interaction::InteractionController;
+    use crate::renderer::{GuiRenderer, MaterialMaps};
     use crate::scene::{SceneSeed, SceneState};
     use crate::web_app::WebApp;
-    use crate::web_renderer::WebRenderer;
 
     console_error_panic_hook::set_once();
     let _ = eframe::WebLogger::init(log::LevelFilter::Warn);
@@ -223,7 +222,20 @@ pub async fn start(
     // instead of upscaling a small fixed buffer. Bounded (aspect-preserving) to
     // keep GPU + readback cost in check.
     let (render_w, render_h) = browser_render_size(&canvas);
-    let renderer = WebRenderer::new(&meshes, &textures, &material_maps, env, render_w, render_h)
+    let textures: Vec<Option<&dyn trd_core::Texture>> = textures
+        .iter()
+        .map(|t| t.as_ref().map(|t| t as &dyn trd_core::Texture))
+        .collect();
+    let material_maps: Vec<MaterialMaps<'_>> = material_maps
+        .iter()
+        .map(|(metallic_roughness, normal)| MaterialMaps {
+            metallic_roughness: metallic_roughness
+                .as_ref()
+                .map(|t| t as &dyn trd_core::Texture),
+            normal: normal.as_ref().map(|t| t as &dyn trd_core::Texture),
+        })
+        .collect();
+    let renderer = GuiRenderer::new(&meshes, &textures, &material_maps, env, render_w, render_h)
         .await
         .map_err(to_js)?;
     let app = WebApp::new(InteractionController::new(scene), renderer);

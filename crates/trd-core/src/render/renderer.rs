@@ -178,6 +178,29 @@ impl Renderer {
         self.renderer.set_mesh_texture(mesh_id, texture);
     }
 
+    /// Binds mesh `mesh_id`'s **metallic-roughness** map (glTF packing: roughness
+    /// in G, metallic in B), sampled by [`RenderMode::Pbr`](crate::RenderMode::Pbr)
+    /// in place of the scalar material values. Out-of-range ids are ignored.
+    pub fn set_mesh_metallic_roughness_texture(
+        &mut self,
+        mesh_id: usize,
+        texture: &dyn crate::texture::Texture,
+    ) {
+        self.renderer
+            .set_mesh_metallic_roughness_texture(mesh_id, texture);
+    }
+
+    /// Binds mesh `mesh_id`'s **tangent-space normal** map, perturbing the shading
+    /// normal in [`RenderMode::Pbr`](crate::RenderMode::Pbr). Out-of-range ids are
+    /// ignored.
+    pub fn set_mesh_normal_texture(
+        &mut self,
+        mesh_id: usize,
+        texture: &dyn crate::texture::Texture,
+    ) {
+        self.renderer.set_mesh_normal_texture(mesh_id, texture);
+    }
+
     /// Sets the [`DisneyMaterial`](crate::DisneyMaterial) applied to every PBR mesh.
     pub fn set_disney_material(&mut self, material: crate::DisneyMaterial) {
         self.renderer.set_disney_material(material);

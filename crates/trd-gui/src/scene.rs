@@ -5,7 +5,7 @@
 //! **object transform** (the per-draw model matrix), together with the render
 //! mode and overlay flags. It carries no GPU or egui state — it only produces
 //! the two values `trd-core` consumes each frame: a [`FrameParams`] camera and a
-//! list of [`Draw`]s. The render backend ([`crate::render_backend`]) turns those
+//! list of [`Draw`]s. The render backend ([`crate::renderer`]) turns those
 //! into pixels; the interaction controller ([`crate::interaction`]) mutates this
 //! state from user gestures.
 //!

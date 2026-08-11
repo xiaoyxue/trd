@@ -1,12 +1,14 @@
 # `trd-gui` design — interactive egui front-end
 
-> **Superseded in places.** The `SceneRenderer` trait and the
-> `ArrowRoundTripRenderer` backend described below were removed in #180: with
-> one concrete backend the trait abstracted nothing, and protocol `0.0.6`
-> cannot round-trip a `Scene` losslessly (it has no gizmo/overlay columns), so
-> the GUI round-trip was never the external-producer seam it is described as
-> here. The wire path is still exercised end-to-end by `run_stream` and pinned
-> by the golden suite. Sections below are kept as the design record.
+> **Superseded in places.** The `SceneRenderer` trait and its three
+> implementations — `ArrowRoundTripRenderer`, `InProcRenderer`, `WebRenderer` —
+> were all removed in #180. Protocol `0.0.6` cannot round-trip a `Scene`
+> losslessly (it has no gizmo/overlay columns), so the GUI round-trip was never
+> the external-producer seam it is described as here; and once it was gone the
+> remaining native and browser renderers were the same type written twice, so
+> they collapsed into the single `renderer::GuiRenderer` (§5.2). The wire path is
+> still exercised end-to-end by `run_stream` and pinned by the golden suite.
+> Sections below are kept as the design record.
 
 
 Status: **in progress** (in-process interaction loop implemented; Arrow
@@ -34,23 +36,22 @@ Slices 0–3**; the Arrow round-trip and wasm land as their own follow-up PRs.
   "input → matrix → render → display" cycle. Modules mirror §7.2: `scene.rs`
   (orbit camera + object transform → `FrameParams`/`Draw`s), `interaction.rs`
   (`InteractionController`: events → scene, unit-tested, egui-free),
-  `render_backend.rs` (`InProcRenderer` over
-  `trd_core::Renderer`), `app.rs` (egui panels), `cli.rs` (`--mesh` /
+  `renderer.rs` (`GuiRenderer` over
+  `trd_core::Renderer`, plus the shared `render_options`/`scene_for`/
+  `apply_materials` state→scene assembly), `app.rs` (egui panels), `cli.rs` (`--mesh` /
   `--texture` / `--width` / `--height`, built-in default cube). Render modes
   Filled / Wireframe / **Textured** (`--texture` binds an albedo, downscaled to
   the renderer's 2048² limit). Deps: `eframe`/`egui` 0.35 (glow), `trd-core`,
   `clap`, `thiserror`, `image`. Native-only (empty `main` on wasm, like
   trd-app); the pure `scene`/`interaction` modules still compile on wasm.
-- **Verification:** 19 unit tests (scene/interaction/cli/render_backend, no GPU)
-  run in `nix flake check`; a GPU-gated `tests/inproc_render.rs` (`#[ignore]`,
-  3 tests) renders the real backend and asserts a non-blank,
-  interaction-sensitive, texture-sampling frame (run locally: MSVC on Windows,
+- **Verification:** unit tests (scene/interaction/cli/renderer, no GPU)
+  run in `nix flake check`; a GPU-gated `tests/gui_render.rs` (`#[ignore]`,
+  4 tests) renders the real renderer and asserts a non-blank,
+  interaction-sensitive, texture-sampling, overlay-honouring frame (run locally: MSVC on Windows,
   nixGL on Linux).
-- **Next (own PRs, §10):** Slice 3's `ArrowRoundTripRenderer` (author a
-  `[mesh][params]` stream → `run_stream` → image stream, enabling external
-  producers) behind the same `SceneRenderer` trait, then Slice 4 (wasm:
-  egui-on-canvas + `trd-core` offscreen). See issue #97 for the per-slice
-  checklists.
+- **Next (own PRs, §10):** Slice 4 (wasm: egui-on-canvas + `trd-core`
+  offscreen). See issue #97 for the per-slice checklists. Slice 3's
+  `ArrowRoundTripRenderer` shipped and was later removed (#180).
 
 ## 1. Goal
 
@@ -175,11 +176,11 @@ behind a trait so this is a drop-in later.
         │                            │                                    │
         │            ┌───────────────┴────────────────┐                  │
         │            ▼                                 ▼                  │
-        │   InProcRenderer                     ArrowRoundTripRenderer     │
-        │   (call trd-core directly)           (encode `[mesh][params]`   │
-        │            │                          Arrow → trd-cli/run_stream│
-        │            │                          → Arrow image stream)     │
-        │            └───────────────┬────────────────┘                  │
+        │                    GuiRenderer                                   │
+        │            (one type, native + browser: call trd-core            │
+        │             directly through `trd_core::Renderer`)               │
+        │                            │                                    │
+        │            └───────────────┴────────────────┘                  │
         │                            ▼                                    │
         │                     RGBA image bytes                            │
         │                            │                                    │
@@ -206,33 +207,34 @@ The controller is **UI-toolkit-agnostic** (takes a normalized
 `InteractionEvent`, returns an updated scene state) so it is unit-testable
 without egui and reusable by the wasm target.
 
-### 5.2 `SceneRenderer` trait (two backends)
+### 5.2 `GuiRenderer` — one renderer, both platforms
 
 ```rust
-trait SceneRenderer {
+impl GuiRenderer {
     /// Render the current scene state to an RGBA image (width×height×4).
-    fn render(&mut self, state: &SceneState) -> Result<ImageRgba, RenderError>;
+    pub async fn render(&mut self, state: &SceneState) -> Result<ImageRgba, GuiError>;
 }
 ```
 
-* **`InProcRenderer`** (native default): builds `Draw`/`Scene` in memory and
-  calls trd-core directly — reuse `Renderer::render_frame` (headless RGBA)
-  or a live `SceneRenderer`. No serialization; lowest latency. Good for smooth
-  drag.
-* **`ArrowRoundTripRenderer`** (the literal request): serializes the updated
-  scene state to a **new Arrow `[mesh][texture?][frames?][params]` stream**, feeds it to
-  `trd_core::run_stream` (in-proc) or the `trd-cli` binary (out-of-process),
-  reads the Arrow **image** stream back (`output_schema` fixed-shape tensor),
-  and decodes it to RGBA. This produces output **pixel-identical to the batch
-  pipeline** and lets an **external producer** (Python/ML/CV that consumes the
-  event and computes the matrix — e.g. #77's normal-basis / pose estimation)
-  sit in the loop. Higher latency (serialize + subprocess), so it re-renders
-  on interaction *end* rather than every drag delta.
+This section originally specified a `SceneRenderer` **trait** over two backends
+(`InProcRenderer` + `ArrowRoundTripRenderer`), later joined by a browser
+`WebRenderer`. All three are gone (#180):
 
-The GUI renders through `InProcRenderer` only; the Arrow round-trip backend was
-removed in #180 (protocol `0.0.6` cannot round-trip a `Scene` losslessly, so it
-was never the external-producer seam it was documented as).
-third `LiveSurfaceRenderer` later.
+* the **Arrow round-trip** backend was removed because protocol `0.0.6` cannot
+  round-trip a `Scene` losslessly, so it was never the external-producer seam it
+  was documented as — and with one implementor left the trait abstracted nothing;
+* `InProcRenderer` and `WebRenderer` were then **the same type written twice**,
+  with byte-identical fields, only because `trd_core::Renderer` used to be
+  native-only. Once it became async and platform-neutral they collapsed into
+  `GuiRenderer`.
+
+`GuiRenderer` builds `Draw`/`Scene` in memory and calls trd-core directly through
+`trd_core::Renderer` — no serialization, lowest latency, good for smooth drag. Its
+API is `async` because GPU read-back is; the native shell blocks on it, which is
+free (the future is already complete when the map poll returns). The scene it
+renders comes from the shared `render_options` / `scene_for` / `apply_materials`
+helpers, so native and browser cannot disagree about overlays, materials, or the
+environment background.
 
 ### 5.3 New piece of work: a Rust **input**-scene encoder
 
@@ -240,11 +242,12 @@ trd-core today only *decodes* the input scene Arrow (`Mesh::from_arrow_all`,
 `decode_frames`, `decode_draws`) and *encodes* the **image output**
 (`OutputSession`). The input `[mesh][texture?][frames?][params]` stream is currently
 authored only by the Python producers (`scripts/*_to_arrow.py`) and by test
-code. `ArrowRoundTripRenderer` needs to author that input stream **in Rust**
-(arrow `StreamWriter` + the 0.0.6 schema/metadata). Proposed: add a small
-`trd_core::scene_encode` module (mirror of the decoders, reused by tests) so
-the encoder is covered by the existing decoder-parity net. `InProcRenderer`
-avoids this entirely.
+code. An Arrow round-trip backend would need to author that input stream **in Rust**
+(arrow `StreamWriter` + the 0.0.6 schema/metadata). That backend was removed in
+#180, so nothing needs this today; should it return, add a small
+`trd_core::scene_encode` module (mirror of the decoders, reused by tests) so the
+encoder is covered by the existing decoder-parity net. `GuiRenderer` avoids this
+entirely.
 
 ## 6. Reverse channel — the interaction/event protocol
 
@@ -287,10 +290,11 @@ thin, non-interactive player/renderer peers.
 | egui UI (panels, widgets, image) | ✅ `ui.rs` | | |
 | `InteractionController` (events → matrix) | ✅ `interaction.rs` | | |
 | `SceneState` (models + camera) | ✅ `scene.rs` | | |
-| RGBA handoff | ✅ `render_backend::ImageRgba` | synchronous trait | async renderer |
+| RGBA handoff | ✅ `renderer::ImageRgba` | | |
 | Application shell | | `native/trd-gui-app/src/app.rs` | `crates/trd-gui/src/web_app.rs` |
 | Bootstrap / runner | | `native/trd-gui-app/src/main.rs` | `lib.rs` wasm entry + `web/gui-viewer` |
-| Render backend impl | | `InProcRenderer` / `ArrowRoundTripRenderer` | `WebRenderer` |
+| Renderer | ✅ `renderer::GuiRenderer` | (blocks on its async API) | |
+| State → `Scene` assembly | ✅ `renderer::{render_options, scene_for, apply_materials}` | | |
 
 ### 7.2 Files
 
@@ -304,9 +308,8 @@ crates/trd-gui/
     ui.rs              # shared egui panels/layout/image widget
     interaction.rs     # InteractionController: InteractionEvent → SceneState (SHARED, unit-tested, no egui)
     scene.rs           # SceneState: meshes + per-object model + camera FrameParams (SHARED)
-    render_backend.rs  # shared RGBA type + native inproc/Arrow backends
+    renderer.rs        # GuiRenderer + shared RGBA type + state→Scene assembly (SHARED)
     web_app.rs         # browser eframe application
-    web_renderer.rs    # browser async offscreen renderer
     error.rs
 
 native/trd-gui-app/
@@ -369,7 +372,7 @@ scene authoring, and the image-display texture. All pixels come from trd-core.
 1. ✅ **Display**: `trd-gui` native window shows a `trd-core` render as an egui
    image. Proves the Strategy-A decoupling + the wgpu-gap workaround. *(PR #98)*
 2. ✅ **Camera interaction**: orbit/zoom updates the `FrameParams` camera,
-   `InProcRenderer` re-renders. Proves the event → render → display loop.
+   `GuiRenderer` re-renders. Proves the event → render → display loop.
    *(PR #98)*
 3. **Object interaction + Arrow round-trip**: ✅ translate/rotate the mesh
    (`Draw.model`) in process, plus Filled/Wireframe/**Textured** render modes
@@ -380,7 +383,7 @@ scene authoring, and the image-display texture. All pixels come from trd-core.
 4. ✅ **wasm parity**: egui-on-canvas (eframe `WebRunner`) + `trd-core` offscreen
    (async wgpu 30 readback → egui texture, Strategy A). Shared `scene`/
    `interaction`/`ui` compile on both targets; `wasm_renderer` + `web_app` are the
-   wasm twins of `render_backend` + the native app. Thin `web/gui-viewer/` bootstrap
+   the browser shell around the shared renderer. Thin `web/gui-viewer/` bootstrap
    (`start(canvas)`). Compiles + clippy-clean on wasm32; browser render is a
    handoff (WebGPU browser required).
 5. ⏳ **(later)** Strategy B live shared-surface overlay once egui ships wgpu 30.

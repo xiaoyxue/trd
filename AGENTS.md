@@ -212,7 +212,7 @@ not complete until these tiers pass; **record the results on the PR.**
    Mandatory for any render-path change, on every platform with a GPU.
 2. **GPU-gated tests (must).** Every `#[ignore]` test, on a real GPU:
    `cargo test -p trd-core -- --ignored` (golden + `render::gpu_tests`) and
-   `cargo test -p trd-gui --test inproc_render -- --ignored`
+   `cargo test -p trd-gui --test gui_render -- --ignored`
 3. **End-to-end — Linux *and* Windows:**
    - **trd-core / trd-cli:** stream a real Arrow input through the CLI and read an
      image stream back — `nix run .#trd-cli -- …` / `examples/render.sh` (Linux),

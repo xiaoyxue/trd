@@ -1,13 +1,13 @@
 //! GPU-gated end-to-end test for the trd-gui in-process render backend (#97).
 //!
-//! Renders the built-in scene through [`InProcRenderer`] — the exact path the
+//! Renders the built-in scene through [`GuiRenderer`] — the exact path the
 //! interactive window uses — and asserts the backend produces a correctly sized,
 //! non-blank frame that responds to interaction (orbiting the camera changes the
 //! image). It needs a GPU adapter, so it is `#[ignore]`d and run locally (nixGL
 //! on Linux, the MSVC toolchain on Windows) per the repo's dual-platform policy;
 //! CI skips it.
 
-use trd_gui::render_backend::InProcRenderer;
+use trd_gui::renderer::GuiRenderer;
 use trd_gui::scene::SceneState;
 
 /// A small origin-centered cube (matches the shape of the CLI's built-in mesh).
@@ -28,9 +28,10 @@ f 4 8 7 3
 f 1 5 6 2
 ";
 
-fn backend(width: u32, height: u32) -> InProcRenderer {
+fn backend(width: u32, height: u32) -> GuiRenderer {
     let mesh = trd_core::Mesh::from_obj(CUBE_OBJ).expect("cube parses");
-    InProcRenderer::new(&[mesh], None, None, width, height).expect("GPU backend builds")
+    pollster::block_on(GuiRenderer::new(&[mesh], &[], &[], None, width, height))
+        .expect("GPU backend builds")
 }
 
 #[test]
@@ -38,9 +39,8 @@ fn backend(width: u32, height: u32) -> InProcRenderer {
 fn renders_a_nonblank_frame_of_expected_size() {
     let (w, h) = (128, 128);
     let mut renderer = backend(w, h);
-    let image = renderer
-        .render(&SceneState::default())
-        .expect("render succeeds");
+    let image =
+        pollster::block_on(renderer.render(&SceneState::default())).expect("render succeeds");
 
     assert_eq!(image.width, w);
     assert_eq!(image.height, h);
@@ -70,14 +70,21 @@ fn textured_mode_samples_the_bound_texture() {
         ],
     )
     .expect("texture builds");
-    let mut renderer =
-        InProcRenderer::new(&[mesh], Some(&red), None, w, h).expect("GPU backend builds");
+    let mut renderer = pollster::block_on(GuiRenderer::new(
+        &[mesh],
+        &[Some(&red as &dyn trd_core::Texture)],
+        &[],
+        None,
+        w,
+        h,
+    ))
+    .expect("GPU backend builds");
 
     let state = SceneState {
         modes: vec![trd_core::RenderMode::Textured],
         ..Default::default()
     };
-    let image = renderer.render(&state).expect("render succeeds");
+    let image = pollster::block_on(renderer.render(&state)).expect("render succeeds");
 
     let red_px = image
         .rgba
@@ -92,14 +99,15 @@ fn orbiting_the_camera_changes_the_image() {
     let (w, h) = (128, 128);
     let mut renderer = backend(w, h);
 
-    let base = renderer
-        .render(&SceneState::default())
+    let base = pollster::block_on(renderer.render(&SceneState::default()))
         .expect("render succeeds")
         .rgba;
 
     let mut orbited = SceneState::default();
     orbited.camera.orbit(1.0, 0.2);
-    let moved = renderer.render(&orbited).expect("render succeeds").rgba;
+    let moved = pollster::block_on(renderer.render(&orbited))
+        .expect("render succeeds")
+        .rgba;
 
     assert_ne!(base, moved, "orbiting the camera did not change the frame");
 }
@@ -115,23 +123,24 @@ fn orbiting_the_camera_changes_the_image() {
 #[ignore = "requires a GPU adapter"]
 fn overlay_toggles_change_the_rendered_image() {
     let (w, h) = (96, 96);
-    let mut renderer = InProcRenderer::new(
+    let mut renderer = pollster::block_on(GuiRenderer::new(
         &[trd_core::Mesh::from_obj(CUBE_OBJ).expect("cube parses")],
-        None,
+        &[],
+        &[],
         None,
         w,
         h,
-    )
-    .expect("in-process backend builds");
+    ))
+    .expect("the GUI renderer builds");
 
     let plain = SceneState::default();
-    let base = renderer.render(&plain).expect("render without overlays");
+    let base = pollster::block_on(renderer.render(&plain)).expect("render without overlays");
 
     let with_axes = SceneState {
         show_axes: true,
         ..SceneState::default()
     };
-    let axes = renderer.render(&with_axes).expect("render with world axes");
+    let axes = pollster::block_on(renderer.render(&with_axes)).expect("render with world axes");
 
     assert_eq!(base.rgba.len(), axes.rgba.len());
     assert_ne!(
@@ -143,7 +152,7 @@ fn overlay_toggles_change_the_rendered_image() {
         show_aabb: true,
         ..SceneState::default()
     };
-    let aabb = renderer.render(&with_aabb).expect("render with AABB");
+    let aabb = pollster::block_on(renderer.render(&with_aabb)).expect("render with AABB");
     assert_ne!(
         base.rgba, aabb.rgba,
         "enabling the bounding-box overlay must change the image"
