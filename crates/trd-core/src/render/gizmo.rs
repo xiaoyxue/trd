@@ -1,7 +1,8 @@
 //! Overlay gizmo geometry: screen-space-expanded line segments for AABBs, axes,
 //! and grids, plus the coordinate-axis arrowhead triangles.
 
-use super::{GizmoLineVertex, GridPlane, Vertex};
+use super::{GizmoLineVertex, Vertex};
+use crate::scene::GridPlane;
 
 /// RGB color of the optional AABB overlay box (bright green), chosen to stand
 /// out against the default white mesh.

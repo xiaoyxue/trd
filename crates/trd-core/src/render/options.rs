@@ -7,7 +7,7 @@
 //! with no I/O, so they belong beside the scene they describe, available on both
 //! platforms.
 
-use super::{GridPlane, RenderMode};
+use crate::scene::{GridPlane, RenderMode};
 
 /// The typed Disney PBR configuration threaded through [`RenderOptions`].
 #[derive(Debug, Clone, Default)]

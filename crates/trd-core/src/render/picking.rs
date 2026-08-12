@@ -14,9 +14,10 @@ use super::GpuContext;
 use futures_channel::oneshot;
 
 use super::{
-    create_depth_target, DepthTarget, Draw, FrameParams, PickInstanceRaw, SceneRenderer, Viewport,
+    create_depth_target, DepthTarget, FrameParams, PickInstanceRaw, SceneRenderer, Viewport,
     PICK_FORMAT,
 };
+use crate::scene::Draw;
 
 /// A single-sample id-color render target + depth + a tiny read-back buffer for
 /// one pixel. Sized to the display; rebuilt when the render size changes.

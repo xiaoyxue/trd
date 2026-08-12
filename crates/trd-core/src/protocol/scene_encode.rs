@@ -39,7 +39,8 @@ use super::{
     FRAMES_TABLE_KIND, MESH_TABLE_KIND, PARAMS_TABLE_KIND, PROTOCOL_VERSION, PROTOCOL_VERSION_KEY,
     TABLE_KIND_KEY, TEXTURE_TABLE_KIND,
 };
-use crate::render::{Draw, FrameParams, Mesh, RenderMode};
+use crate::render::{FrameParams, Mesh};
+use crate::scene::{Draw, RenderMode};
 use crate::texture::{Texture, TEXTURE_COLUMN};
 use crate::{InlineFrame, FRAME_BYTES_COLUMN, FRAME_PIXELS_COLUMN};
 
@@ -255,7 +256,7 @@ pub fn encode_texture_stream(texture: &dyn Texture) -> Result<Vec<u8>, SceneEnco
 /// the global mode). Inverse of [`RenderMode::from_wire`].
 fn mode_to_wire(mode: Option<RenderMode>) -> u8 {
     match mode {
-        None => crate::render::DRAW_MODE_INHERIT,
+        None => crate::scene::DRAW_MODE_INHERIT,
         Some(RenderMode::Filled) => 0,
         Some(RenderMode::Wireframe) => 1,
         Some(RenderMode::Textured) => 2,

@@ -14,6 +14,7 @@ use super::bound_texture::BoundTexture;
 use super::buffer::{create_instance_buffer, IndexBuf, VertexGeometry};
 use super::*;
 use crate::math::Matrix4;
+use crate::scene::GridPlane;
 
 /// A mesh uploaded to the GPU. Its `vertex_buffer` feeds both the filled
 /// `triangles` and the deduped wireframe `edges` (#38); the `aabb` overlay (#42)

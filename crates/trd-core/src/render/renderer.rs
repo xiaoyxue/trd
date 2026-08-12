@@ -14,10 +14,11 @@
 use std::sync::Arc;
 
 use super::{
-    Draw, DrawableObject, FrameParams, GpuContext, Mesh, OffscreenTarget, OnscreenTarget,
-    PickTarget, RenderTarget, SceneLayer, SceneRenderer, Viewport, OFFSCREEN_FORMAT,
+    FrameParams, GpuContext, Mesh, OffscreenTarget, OnscreenTarget, PickTarget, RenderTarget,
+    SceneLayer, SceneRenderer, Viewport, OFFSCREEN_FORMAT,
 };
 use crate::math::Matrix4;
+use crate::scene::{Draw, DrawableObject};
 use thiserror::Error;
 
 /// Errors constructing or driving a [`Renderer`].

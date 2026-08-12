@@ -17,8 +17,9 @@ use super::GpuContext;
 use futures_channel::oneshot;
 use thiserror::Error;
 
-use super::{DrawableObject, FrameParams, SceneRenderer, Viewport};
+use super::{FrameParams, SceneRenderer, Viewport};
 use crate::output::tightly_pack_rgba;
+use crate::scene::DrawableObject;
 
 /// What every render target has in common.
 ///

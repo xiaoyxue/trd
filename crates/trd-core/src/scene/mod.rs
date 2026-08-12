@@ -1,241 +1,36 @@
-//! The `DrawableObject` scene model: render modes, frame fit, draws, and
-//! per-frame scene assembly.
+//! The **scene model**: what a frame draws, independent of how it is rendered.
+//!
+//! A [`Scene`] is an ordered list of [`DrawableObject`]s — light `Copy` handles
+//! naming *which* primitive to draw and its per-frame model. Geometry and GPU
+//! state are owned by the renderer; nothing here touches wgpu, which is why this
+//! sits at the crate root beside `mesh`/`camera`/`material` rather than inside
+//! the render backend (the same reasoning that moved materials out in #180).
+//!
+//! Split by concern (#203):
+//!
+//! | module | owns |
+//! |---|---|
+//! | [`drawable`] | [`DrawableObject`] — the base interface for every primitive — and [`Scene`] |
+//! | [`draw`] | [`Draw`], the *wire* instance record, and its render-mode byte codec |
+//! | [`draw_config`] | [`RenderMode`], [`FrameFit`], [`GridPlane`] — the per-drawable configuration a front-end selects |
+//! | this module | assembly: [`scene_with_overlays`], [`build_scene`], and the overlay builders |
+//!
+//! Assembly is the **one** place a wire [`Draw`] becomes a [`DrawableObject`],
+//! which is what keeps every front-end rendering the same scene from the same
+//! inputs (#180).
+
+mod draw;
+mod draw_config;
+mod drawable;
+
+pub use draw::Draw;
+#[cfg(test)]
+pub(crate) use draw::DRAW_MODE_INHERIT;
+pub(crate) use draw_config::frame_fit_uv_scale;
+pub use draw_config::{FrameFit, GridPlane, RenderMode};
+pub use drawable::{DrawableObject, Scene};
 
 use crate::math::Matrix4;
-
-/// How a [`SceneRenderer`] rasterizes its meshes: solid filled triangles, or an
-/// edge **wireframe** (`LineList` over the derived [`crate::Mesh::edge_indices`]
-/// buffer). Default is [`RenderMode::Filled`]; wireframe (#38) is opt-in via
-/// [`Renderer::set_mode`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum RenderMode {
-    /// Draw triangles filled with the per-vertex color (the mesh's triangle
-    /// index buffer).
-    #[default]
-    Filled,
-    /// Draw only triangle edges as lines (the deduped edge index buffer).
-    Wireframe,
-    /// Draw triangles filled, sampling the renderer's bound texture at each
-    /// vertex UV instead of the vertex color (#20).
-    Textured,
-    /// Physically-based **Disney principled BRDF** shading (`pbr.wgsl`): the
-    /// bound albedo lit by a small virtual light rig plus an optional
-    /// equirectangular HDR environment-map reflection, with smooth shading
-    /// normals derived at upload. Metallic materials read as shiny reflective
-    /// metal (e.g. the coke can). Configured globally via the renderer's
-    /// [`DisneyMaterial`](crate::DisneyMaterial) + bound environment map.
-    Pbr,
-    /// Not a mesh rasterization at all: draw a **contact / blob grounding
-    /// shadow** ([`DrawableObject::BlobShadow`]) instead of the mesh. A per-draw
-    /// `mode: "shadow"` in the stream lifts that draw's `model` into a soft dark
-    /// blob on the placed mesh's ground plane (#110 follow-up), so the placed mesh
-    /// reads as sitting on the reconstructed surface. The draw's `mesh` id is
-    /// ignored (the shadow uses shared gizmo geometry).
-    Shadow,
-}
-
-/// Wire byte meaning "inherit the renderer's global mode" in the optional
-/// per-draw `draw_mode` (`List<UInt8>`) protocol column (see
-/// [`RenderMode::from_wire`]). A draw carrying this value defers to the `mode`
-/// argument of [`build_scene`], so a stream can override only *some* draws
-/// (e.g. draw a wireframe overlay quad while every other draw follows the
-/// front-end's global mode).
-pub const DRAW_MODE_INHERIT: u8 = 255;
-
-impl RenderMode {
-    /// Decodes an optional per-draw `draw_mode` wire byte into a [`Draw::mode`]
-    /// override: `0`→`Filled`, `1`→`Wireframe`, `2`→`Textured`, `3`→`Shadow`,
-    /// `4`→`Pbr`, and [`DRAW_MODE_INHERIT`]→`None` (inherit the global mode).
-    /// Returns `None` for an unrecognized byte so callers can raise a decode error.
-    pub fn from_wire(byte: u8) -> Option<Option<RenderMode>> {
-        match byte {
-            0 => Some(Some(RenderMode::Filled)),
-            1 => Some(Some(RenderMode::Wireframe)),
-            2 => Some(Some(RenderMode::Textured)),
-            3 => Some(Some(RenderMode::Shadow)),
-            4 => Some(Some(RenderMode::Pbr)),
-            DRAW_MODE_INHERIT => Some(None),
-            _ => None,
-        }
-    }
-}
-
-/// How a [`DrawableObject::FramePlane`] maps its background image onto the
-/// viewport (#63). Both modes fill the whole viewport (no letterbox bars); they
-/// differ only in how a mismatched image/viewport aspect is handled.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum FrameFit {
-    /// Stretch the image to exactly fill the viewport, ignoring aspect ratio.
-    /// The natural choice when the frame image already matches the render aspect
-    /// (e.g. a 16:9 video rendered at 16:9).
-    #[default]
-    Stretch,
-    /// Scale the image to cover the viewport preserving aspect, center-cropping
-    /// the overflowing axis (no bars, some content cropped).
-    Cover,
-}
-
-/// The centered UV scale that realizes `fit` for an image of `tex_w`×`tex_h`
-/// displayed on a `view_w`×`view_h` viewport. Applied in `frame_plane.wgsl` as
-/// `uv' = (uv − 0.5)·scale + 0.5`, so `1.0` fills and `< 1.0` crops (zooms in).
-/// [`FrameFit::Stretch`] is always `(1, 1)`; [`FrameFit::Cover`] shrinks the UV
-/// range on the longer axis so the shorter one fills.
-pub(crate) fn frame_fit_uv_scale(
-    fit: FrameFit,
-    tex_w: u32,
-    tex_h: u32,
-    view_w: u32,
-    view_h: u32,
-) -> [f32; 2] {
-    match fit {
-        FrameFit::Stretch => [1.0, 1.0],
-        FrameFit::Cover => {
-            let tex_aspect = tex_w.max(1) as f32 / tex_h.max(1) as f32;
-            let view_aspect = view_w.max(1) as f32 / view_h.max(1) as f32;
-            if tex_aspect > view_aspect {
-                // Image wider than the viewport: crop its width (sample a
-                // narrower horizontal UV range).
-                [view_aspect / tex_aspect, 1.0]
-            } else {
-                // Image taller than the viewport: crop its height.
-                [1.0, tex_aspect / view_aspect]
-            }
-        }
-    }
-}
-
-/// Which coordinate plane a [`DrawableObject::PlaneGrid`] lattices, i.e. the two
-/// model-space axes it spans (the third is held at 0): `Xy` → the X/Y plane,
-/// `Xz` → X/Z, `Yz` → Y/Z. For a #77 placement quad (whose local Z is the plane
-/// normal), `Xy` is the quad's own plane — a grid on the reconstructed surface.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GridPlane {
-    /// The model-space X/Y plane (Z = 0). The placement-quad's own surface.
-    Xy,
-    /// The model-space X/Z plane (Y = 0).
-    Xz,
-    /// The model-space Y/Z plane (X = 0).
-    Yz,
-}
-
-impl GridPlane {
-    /// A stable `0..3` index (`Xy`→0, `Xz`→1, `Yz`→2) used to key the renderer's
-    /// per-plane grid vertex buffers.
-    pub(crate) fn index(self) -> usize {
-        match self {
-            GridPlane::Xy => 0,
-            GridPlane::Xz => 1,
-            GridPlane::Yz => 2,
-        }
-    }
-}
-
-impl std::str::FromStr for GridPlane {
-    type Err = String;
-
-    /// Parses `xy` / `xz` / `yz` (case-insensitive) into a [`GridPlane`], so
-    /// front-ends can accept the plane as a plain flag value.
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_ascii_lowercase().as_str() {
-            "xy" => Ok(GridPlane::Xy),
-            "xz" => Ok(GridPlane::Xz),
-            "yz" => Ok(GridPlane::Yz),
-            other => Err(format!(
-                "unknown grid plane {other:?} (expected xy, xz, or yz)"
-            )),
-        }
-    }
-}
-
-/// A single instance placement decoded from a frame's protocol draw list
-/// (`draw_mesh` / `draw_model`): which mesh to draw (index into the leading mesh
-/// table) and the per-instance model matrix (column-major), applied beneath that
-/// mesh's base (preview) model. This is the *wire* representation; the renderer
-/// composes it (plus core gizmos) into a [`Scene`] of [`DrawableObject`]s.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Draw {
-    pub mesh_id: u32,
-    pub model: [f32; 16],
-    /// Optional per-draw [`RenderMode`] override (protocol `draw_mode` column):
-    /// `Some(mode)` draws this instance in `mode` regardless of the front-end's
-    /// global mode; `None` inherits the global `mode` passed to [`build_scene`].
-    /// Lets one frame mix e.g. a textured mesh with a wireframe overlay quad.
-    pub mode: Option<RenderMode>,
-}
-
-/// The base interface for every primitive the renderer can draw (#41). A
-/// `DrawableObject` is a light, `Copy` handle: geometry (GPU buffers) is owned
-/// once by the renderer's decode-once store (meshes keyed by id, plus the shared
-/// gizmo geometry), and each variant carries only *which* primitive to draw and
-/// its per-frame model. The renderer and [`Scene`] only ever see
-/// `DrawableObject`s and never special-case a concrete primitive type.
-///
-/// Wireframe is a render *mode* of the [`DrawableObject::Mesh`] primitive (not a
-/// separate variant); the coordinate axes and the AABB box are genuinely
-/// distinct gizmo primitives rendered with screen-space-expanded line geometry.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum DrawableObject {
-    /// A decoded mesh (id = row index in the leading mesh table) placed by
-    /// `model` and drawn in `mode` (filled or wireframe). `model` is the
-    /// per-frame draw model; the renderer pre-multiplies the mesh's base
-    /// (preview) model beneath it (`effective = model · base`).
-    Mesh {
-        mesh_id: u32,
-        model: [f32; 16],
-        mode: RenderMode,
-    },
-    /// The axis-aligned bounding-box outline of mesh `mesh_id` (#42), placed by
-    /// the same `model` as the mesh instance it boxes (the renderer applies that
-    /// mesh's base model beneath `model` too), so the box tracks the mesh
-    /// exactly. Reuses the mesh's precomputed corner geometry.
-    AabbBox { mesh_id: u32, model: [f32; 16] },
-    /// The world-orientation coordinate gizmo (#42): three anti-aliased shafts
-    /// with cone arrowheads from the origin along +X/+Y/+Z, colored
-    /// red/green/blue. Placed by `model` (identity marks the world origin); not
-    /// tied to any mesh, so no base model is applied.
-    CoordinateAxes { model: [f32; 16] },
-    /// A **coordinate-plane grid** lattice on `plane` (X/Y, X/Z, or Y/Z),
-    /// spanning the model-space square `[-1, 1]²`, placed by `model`. Like
-    /// [`CoordinateAxes`](Self::CoordinateAxes) it is a screen-space-expanded
-    /// line gizmo tied to no mesh (no base model); with a #77 placement-quad
-    /// `model` the `Xy` grid lays exactly over the reconstructed quad in its
-    /// local frame.
-    PlaneGrid { plane: GridPlane, model: [f32; 16] },
-    /// The tracked placement-quad outline, rendered by the shared analytic-AA
-    /// gizmo line pipeline at 1.5 px.
-    QuadOutline { model: [f32; 16], selected: bool },
-    /// A **contact / blob grounding shadow** (#110 follow-up): a soft dark radial
-    /// blob laid on a placed mesh's ground plane, placed by `model` (a flat quad
-    /// on the plane, sized to the mesh footprint), so the mesh reads as *sitting
-    /// on* the reconstructed surface rather than floating over the composited
-    /// video plate. A [`RenderMode::Shadow`] draw becomes this variant. Tied to no
-    /// mesh (no base model); alpha-blended over the [`FramePlane`](Self::FramePlane)
-    /// and drawn *before* the opaque content mesh (depth-write off) so the mesh
-    /// composites on top while the surrounding rim darkens the floor.
-    BlobShadow { model: [f32; 16] },
-    /// Camera-centered spherical HDR environment drawn behind the scene.
-    EnvironmentBackground {
-        rotation: f32,
-        exposure: f32,
-        blur: f32,
-        tonemap: super::Tonemap,
-    },
-    /// A screen-aligned **background frame plane** (#63): a fullscreen quad that
-    /// samples the renderer's bound background frame texture (set via
-    /// [`SceneRenderer::update_frame_texture_rgba`]), composited **under** the
-    /// mesh scene. `fit` selects how the image maps to the viewport. Carries no
-    /// model — it is authored directly in clip space and ignores the camera.
-    /// Drawn only when a background texture is bound (else skipped), so an absent
-    /// `frame_path`/`frame_url` renders with no background (back-compat).
-    FramePlane { fit: FrameFit },
-}
-
-/// A frame's ordered list of [`DrawableObject`]s the renderer walks and encodes
-/// under the one shared camera `P·V` uniform. The wire authors the mesh draws
-/// (the protocol 0.0.3 draw list); the core adds gizmo drawables (axes, AABB
-/// boxes). A single-mesh frame is the degenerate one-element scene — the
-/// renderer always iterates a `Scene`, with no single-object special case.
-pub type Scene = Vec<DrawableObject>;
 
 /// Builds a per-frame [`Scene`] from a wire `draws` list plus the render `mode`
 /// and overlay flags. When `frame` is `Some`, a background
@@ -995,44 +790,5 @@ mod tests {
         assert_eq!(meshes, 2, "shadow draw is not a Mesh; bunny + quad are");
         assert_eq!(aabbs, 2, "no AABB for the shadow draw");
         assert_eq!(axes, 2, "no local-axes gizmo for the shadow draw");
-    }
-
-    #[test]
-    fn grid_plane_from_str_roundtrip() {
-        use std::str::FromStr;
-        assert_eq!(GridPlane::from_str("xy"), Ok(GridPlane::Xy));
-        assert_eq!(GridPlane::from_str("XZ"), Ok(GridPlane::Xz));
-        assert_eq!(GridPlane::from_str("yz"), Ok(GridPlane::Yz));
-        assert!(GridPlane::from_str("zz").is_err());
-    }
-
-    #[test]
-    fn frame_fit_uv_scale_stretch_and_cover() {
-        // Stretch always fills exactly (no crop), regardless of aspect mismatch.
-        assert_eq!(
-            frame_fit_uv_scale(FrameFit::Stretch, 200, 100, 100, 100),
-            [1.0, 1.0]
-        );
-
-        // Cover a 2:1 image on a 1:1 viewport: crop width (sample a narrower
-        // horizontal UV range), full height.
-        let s = frame_fit_uv_scale(FrameFit::Cover, 200, 100, 100, 100);
-        assert!(
-            (s[0] - 0.5).abs() < 1e-6 && (s[1] - 1.0).abs() < 1e-6,
-            "wide image over square viewport crops width, got {s:?}"
-        );
-
-        // Cover a 1:2 image on a 1:1 viewport: crop height, full width.
-        let s = frame_fit_uv_scale(FrameFit::Cover, 100, 200, 100, 100);
-        assert!(
-            (s[0] - 1.0).abs() < 1e-6 && (s[1] - 0.5).abs() < 1e-6,
-            "tall image over square viewport crops height, got {s:?}"
-        );
-
-        // Matching aspect ⇒ no crop either way.
-        assert_eq!(
-            frame_fit_uv_scale(FrameFit::Cover, 160, 90, 320, 180),
-            [1.0, 1.0]
-        );
     }
 }
