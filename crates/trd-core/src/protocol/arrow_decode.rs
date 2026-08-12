@@ -17,7 +17,7 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, Field, Schema};
 
-use crate::scene::{Draw, RenderMode};
+use crate::scene::{Draw, DrawSelection};
 use crate::{CameraFormError, FrameParams};
 
 use super::{ProtocolError, PROTOCOL_VERSION_KEY, SUPPORTED_INPUT_VERSIONS};
@@ -132,7 +132,7 @@ pub(crate) fn decode_frame_ids(
 /// present, `None` when neither is (legacy single-object streams). Having
 /// exactly one of the `draw_mesh`/`draw_model` pair, or a per-row length
 /// mismatch, is an error. `draw_mode` bytes decode via
-/// [`RenderMode::from_wire`] (`255` = inherit); an absent column leaves every
+/// [`DrawSelection::from_wire`] (`255` = inherit); an absent column leaves every
 /// [`Draw::mode`] `None`. Mirrors the native `stream::decode_draws`.
 pub(crate) fn decode_draws(batch: &RecordBatch) -> Result<Option<Vec<Vec<Draw>>>, ProtocolError> {
     let (mesh_col, model_col) = match (
@@ -231,8 +231,9 @@ pub(crate) fn decode_draws(batch: &RecordBatch) -> Result<Option<Vec<Vec<Draw>>>
                 actual: models.values().data_type().clone(),
             })?;
 
-        // Per-draw modes for this row (empty ⇒ every draw inherits the global).
-        let modes: Vec<Option<RenderMode>> = match &mode_list {
+        // Per-draw selections for this row (empty ⇒ every draw is a mesh
+        // inheriting the global mode).
+        let selections: Vec<DrawSelection> = match &mode_list {
             None => Vec::new(),
             Some(mode_list) => {
                 let modes_ref = mode_list.value(row);
@@ -256,7 +257,7 @@ pub(crate) fn decode_draws(batch: &RecordBatch) -> Result<Option<Vec<Vec<Draw>>>
                 }
                 (0..bytes.len())
                     .map(|j| {
-                        RenderMode::from_wire(bytes.value(j)).ok_or(
+                        DrawSelection::from_wire(bytes.value(j)).ok_or(
                             ProtocolError::InvalidDrawMode {
                                 value: bytes.value(j),
                             },
@@ -270,7 +271,7 @@ pub(crate) fn decode_draws(batch: &RecordBatch) -> Result<Option<Vec<Vec<Draw>>>
             .map(|j| Draw {
                 mesh_id: ids.value(j),
                 model: read_fixed::<16>(models, model_values, j),
-                mode: modes.get(j).copied().flatten(),
+                selection: selections.get(j).copied().unwrap_or_default(),
             })
             .collect();
         rows.push(draws);

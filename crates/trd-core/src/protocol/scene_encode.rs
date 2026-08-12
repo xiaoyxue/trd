@@ -40,7 +40,7 @@ use super::{
     TABLE_KIND_KEY, TEXTURE_TABLE_KIND,
 };
 use crate::render::{FrameParams, Mesh};
-use crate::scene::{Draw, RenderMode};
+use crate::scene::{Draw, DrawSelection, RenderMode};
 use crate::texture::{Texture, TEXTURE_COLUMN};
 use crate::{InlineFrame, FRAME_BYTES_COLUMN, FRAME_PIXELS_COLUMN};
 
@@ -252,16 +252,17 @@ pub fn encode_texture_stream(texture: &dyn Texture) -> Result<Vec<u8>, SceneEnco
     write_ipc(&schema, &batch)
 }
 
-/// The `draw_mode` wire byte for a per-draw render-mode override (`255` = inherit
-/// the global mode). Inverse of [`RenderMode::from_wire`].
-fn mode_to_wire(mode: Option<RenderMode>) -> u8 {
-    match mode {
-        None => crate::scene::DRAW_MODE_INHERIT,
-        Some(RenderMode::Filled) => 0,
-        Some(RenderMode::Wireframe) => 1,
-        Some(RenderMode::Textured) => 2,
-        Some(RenderMode::Shadow) => 3,
-        Some(RenderMode::Shaded) => 4,
+/// The `draw_mode` wire byte for a per-draw selection (`255` = a mesh inheriting
+/// the global mode). Inverse of [`DrawSelection::from_wire`], and pinned against
+/// it by the round-trip tests below.
+fn selection_to_wire(selection: DrawSelection) -> u8 {
+    match selection {
+        DrawSelection::Mesh(None) => crate::scene::DRAW_MODE_INHERIT,
+        DrawSelection::Mesh(Some(RenderMode::Filled)) => 0,
+        DrawSelection::Mesh(Some(RenderMode::Wireframe)) => 1,
+        DrawSelection::Mesh(Some(RenderMode::Textured)) => 2,
+        DrawSelection::Shadow => 3,
+        DrawSelection::Mesh(Some(RenderMode::Shaded)) => 4,
     }
 }
 
@@ -375,10 +376,14 @@ pub fn encode_params_stream_with_frame_ids(
 
         // Emit the per-draw mode override only when a draw actually overrides the
         // global mode; otherwise every draw inherits (the common case).
-        if draws.iter().flatten().any(|d| d.mode.is_some()) {
+        if draws
+            .iter()
+            .flatten()
+            .any(|d| d.selection != DrawSelection::INHERIT)
+        {
             let mode_rows: Vec<u8> = draws
                 .iter()
-                .flat_map(|row| row.iter().map(|d| mode_to_wire(d.mode)))
+                .flat_map(|row| row.iter().map(|d| selection_to_wire(d.selection)))
                 .collect();
             let offsets = OffsetBuffer::from_lengths(draws.iter().map(Vec::len));
             fields.push(Field::new(
@@ -637,7 +642,7 @@ mod tests {
             model: [
                 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.2, -0.1, 0.0, 1.0,
             ],
-            mode: None,
+            selection: DrawSelection::INHERIT,
         }]];
 
         let bytes = encode_scene(&meshes, &[frame], Some(&draws)).unwrap();
@@ -702,14 +707,14 @@ mod tests {
                 model: [
                     1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.2, -0.1, 0.0, 1.0,
                 ],
-                mode: None,
+                selection: DrawSelection::INHERIT,
             }],
             vec![Draw {
                 mesh_id: 0,
                 model: [
                     0.5, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 1.0,
                 ],
-                mode: Some(RenderMode::Wireframe),
+                selection: DrawSelection::Mesh(Some(RenderMode::Wireframe)),
             }],
         ];
 
@@ -737,7 +742,7 @@ mod tests {
             model: [
                 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.2, -0.1, 0.0, 1.0,
             ],
-            mode: None,
+            selection: DrawSelection::INHERIT,
         };
         let draws = vec![vec![placed], Vec::new()];
 

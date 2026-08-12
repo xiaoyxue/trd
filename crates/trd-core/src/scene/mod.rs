@@ -23,9 +23,9 @@ mod draw;
 mod draw_config;
 mod drawable;
 
-pub use draw::Draw;
 #[cfg(test)]
 pub(crate) use draw::DRAW_MODE_INHERIT;
+pub use draw::{Draw, DrawSelection};
 pub(crate) use draw_config::frame_fit_uv_scale;
 pub use draw_config::{FrameFit, GridPlane, RenderMode};
 pub use drawable::{DrawableObject, Scene};
@@ -122,26 +122,20 @@ pub fn build_scene(
     if let Some(fit) = frame {
         scene.push(DrawableObject::FramePlane { fit });
     }
+    // The one place a `DrawSelection` is resolved: past here the scene holds
+    // primitives, and nothing downstream needs to know a shadow ever existed.
     for draw in draws {
-        let resolved = draw.mode.unwrap_or(mode);
-        // A `Shadow` draw is not a mesh rasterization: lift its model into a
-        // BlobShadow grounding blob on the placed mesh's plane (#110 follow-up).
-        if resolved == RenderMode::Shadow {
-            scene.push(DrawableObject::BlobShadow { model: draw.model });
-            continue;
-        }
-        scene.push(DrawableObject::Mesh {
-            mesh_id: draw.mesh_id,
-            model: draw.model,
-            mode: resolved,
+        scene.push(match draw.selection.mesh_mode(mode) {
+            Some(mode) => DrawableObject::Mesh {
+                mesh_id: draw.mesh_id,
+                model: draw.model,
+                mode,
+            },
+            None => DrawableObject::BlobShadow { model: draw.model },
         });
     }
     if show_aabb {
-        for draw in draws {
-            // Skip shadow draws — they carry no mesh geometry to box.
-            if draw.mode.unwrap_or(mode) == RenderMode::Shadow {
-                continue;
-            }
+        for draw in draws.iter().filter(|d| d.selection.is_mesh()) {
             scene.push(DrawableObject::AabbBox {
                 mesh_id: draw.mesh_id,
                 model: draw.model,
@@ -157,7 +151,7 @@ pub fn build_scene(
             // mesh is *also* wireframe (e.g. a wireframe-reveal intro), `grid_mesh`
             // narrows the grid to the placement quad's `mesh_id` so exactly one
             // floor grid is laid — not one under every wireframe object (#114).
-            let is_wireframe = draw.mode.unwrap_or(mode) == RenderMode::Wireframe;
+            let is_wireframe = draw.selection.mesh_mode(mode) == Some(RenderMode::Wireframe);
             let mesh_selected = grid_mesh.is_none_or(|id| draw.mesh_id == id);
             if is_wireframe && mesh_selected {
                 scene.push(DrawableObject::PlaneGrid {
@@ -168,12 +162,9 @@ pub fn build_scene(
         }
     }
     if show_local_axes {
-        for draw in draws {
-            // Skip shadow draws — the blob is a floor decal, not a placed object
-            // whose local frame warrants an axes gizmo.
-            if draw.mode.unwrap_or(mode) == RenderMode::Shadow {
-                continue;
-            }
+        // A shadow blob is a floor decal, not a placed object whose local frame
+        // warrants an axes gizmo.
+        for draw in draws.iter().filter(|d| d.selection.is_mesh()) {
             scene.push(DrawableObject::CoordinateAxes { model: draw.model });
         }
     }
@@ -208,10 +199,7 @@ pub(crate) fn plane_grid_overlays(
         });
     }
     if let Some(plane) = object_grid {
-        for draw in draws {
-            if draw.mode == Some(RenderMode::Shadow) {
-                continue;
-            }
+        for draw in draws.iter().filter(|d| d.selection.is_mesh()) {
             grids.push(DrawableObject::PlaneGrid {
                 plane,
                 model: draw.model,
@@ -231,7 +219,7 @@ pub(crate) fn selection_aabb_overlay(draws: &[Draw], selected: Option<u32>) -> V
     let Some(draw) = selected.and_then(|i| draws.get(i as usize)) else {
         return Vec::new();
     };
-    if draw.mode == Some(RenderMode::Shadow) {
+    if !draw.selection.is_mesh() {
         return Vec::new();
     }
     vec![DrawableObject::AabbBox {
@@ -251,12 +239,12 @@ mod tests {
                 mesh_id: 0,
                 model: Matrix4::from_translation(crate::math::Vector3::new(1.0, 0.0, 0.0))
                     .to_cols_array(),
-                mode: None,
+                selection: DrawSelection::INHERIT,
             },
             Draw {
                 mesh_id: 1,
                 model: Matrix4::IDENTITY.to_cols_array(),
-                mode: Some(RenderMode::Shadow),
+                selection: DrawSelection::Shadow,
             },
         ];
         // Neither grid ⇒ empty (opt-in only, byte-identical for non-users).
@@ -290,7 +278,7 @@ mod tests {
         let draws = [Draw {
             mesh_id: 0,
             model: Matrix4::IDENTITY.to_cols_array(),
-            mode: None,
+            selection: DrawSelection::INHERIT,
         }];
 
         // No frame ⇒ no FramePlane in the scene (byte-identical to the pre-0.0.5
@@ -359,17 +347,17 @@ mod tests {
             Draw {
                 mesh_id: 0,
                 model,
-                mode: None,
+                selection: DrawSelection::INHERIT,
             }, // inherits the scene default
             Draw {
                 mesh_id: 1,
                 model,
-                mode: Some(RenderMode::Wireframe),
+                selection: DrawSelection::Mesh(Some(RenderMode::Wireframe)),
             }, // overrides
             Draw {
                 mesh_id: 2,
                 model,
-                mode: Some(RenderMode::Textured),
+                selection: DrawSelection::Mesh(Some(RenderMode::Textured)),
             }, // overrides
         ];
 
@@ -442,12 +430,12 @@ mod tests {
             Draw {
                 mesh_id: 0,
                 model: model_a,
-                mode: None,
+                selection: DrawSelection::INHERIT,
             },
             Draw {
                 mesh_id: 1,
                 model: model_b,
-                mode: None,
+                selection: DrawSelection::INHERIT,
             },
         ];
 
@@ -524,12 +512,12 @@ mod tests {
             Draw {
                 mesh_id: 0,
                 model: model_a,
-                mode: None,
+                selection: DrawSelection::INHERIT,
             },
             Draw {
                 mesh_id: 1,
                 model: model_b,
-                mode: None,
+                selection: DrawSelection::INHERIT,
             },
         ];
 
@@ -598,12 +586,12 @@ mod tests {
             Draw {
                 mesh_id: 0,
                 model: model_a,
-                mode: Some(RenderMode::Textured),
+                selection: DrawSelection::Mesh(Some(RenderMode::Textured)),
             },
             Draw {
                 mesh_id: 1,
                 model: model_b,
-                mode: Some(RenderMode::Wireframe),
+                selection: DrawSelection::Mesh(Some(RenderMode::Wireframe)),
             },
         ];
         let scene = build_scene(
@@ -640,17 +628,17 @@ mod tests {
             Draw {
                 mesh_id: 0,
                 model: model_can,
-                mode: Some(RenderMode::Wireframe),
+                selection: DrawSelection::Mesh(Some(RenderMode::Wireframe)),
             },
             Draw {
                 mesh_id: 0,
                 model: Matrix4::IDENTITY.to_cols_array(),
-                mode: Some(RenderMode::Wireframe),
+                selection: DrawSelection::Mesh(Some(RenderMode::Wireframe)),
             },
             Draw {
                 mesh_id: 1,
                 model: model_quad,
-                mode: Some(RenderMode::Wireframe),
+                selection: DrawSelection::Mesh(Some(RenderMode::Wireframe)),
             },
         ];
 
@@ -733,17 +721,17 @@ mod tests {
             Draw {
                 mesh_id: 0,
                 model: shadow_m,
-                mode: Some(RenderMode::Shadow),
+                selection: DrawSelection::Shadow,
             },
             Draw {
                 mesh_id: 0,
                 model: bunny_m,
-                mode: Some(RenderMode::Textured),
+                selection: DrawSelection::Mesh(Some(RenderMode::Textured)),
             },
             Draw {
                 mesh_id: 1,
                 model: quad_m,
-                mode: Some(RenderMode::Wireframe),
+                selection: DrawSelection::Mesh(Some(RenderMode::Wireframe)),
             },
         ];
 
