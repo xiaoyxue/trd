@@ -19,6 +19,7 @@ use super::{
 };
 use crate::math::Matrix4;
 use crate::visual::{Draw, DrawableObject};
+use crate::Camera;
 use thiserror::Error;
 
 /// Errors constructing or driving a [`Renderer`].
@@ -43,6 +44,10 @@ pub enum RenderError {
     /// The offscreen target could not be created or read back.
     #[error(transparent)]
     Offscreen(#[from] super::OffscreenError),
+    /// The frame's camera columns are malformed (CV and CG forms mixed, or an
+    /// incomplete CG look-at), so no camera could be resolved.
+    #[error(transparent)]
+    CameraForm(#[from] super::CameraFormError),
 }
 
 /// Validates a render size before anything is allocated for it.
@@ -201,19 +206,35 @@ impl Renderer<OffscreenTarget> {
     /// bytes (`width * height * 4`).
     ///
     /// The caller assembles the scene — typically with
-    /// [`scene_with_overlays`](crate::scene_with_overlays), which turns a wire
-    /// draw list plus [`RenderOptions`](crate::RenderOptions) into exactly the
-    /// same `Scene` every other front-end renders. The renderer keeps no
+    /// [`Scene::from_draws`](crate::Scene::from_draws), which turns a wire draw
+    /// list plus [`RenderOptions`](crate::RenderOptions) into exactly the same
+    /// `Scene` every other front-end renders. The renderer keeps no
     /// mode/overlay state of its own (#180): what to draw is entirely the scene.
     pub async fn render_scene(
         &mut self,
-        params: FrameParams,
+        camera: Camera,
         scene: &[DrawableObject],
     ) -> Result<Vec<u8>, RenderError> {
         Ok(self
             .target
-            .render(&self.gpu, &mut self.renderer, params, scene)
+            .render(&self.gpu, &mut self.renderer, camera, scene)
             .await?)
+    }
+
+    /// [`render_scene`](Self::render_scene) for a wire-driven front-end: resolves
+    /// the camera against **the target's own size**, so the viewport cannot
+    /// disagree with the attachments.
+    ///
+    /// `FrameParams` is a protocol type, so it stays out of the core signature
+    /// (#203); this is the convenience for callers that decode a frame and render
+    /// it immediately.
+    pub async fn render_params(
+        &mut self,
+        params: FrameParams,
+        scene: &[DrawableObject],
+    ) -> Result<Vec<u8>, RenderError> {
+        let camera = params.to_camera(self.target.viewport())?;
+        self.render_scene(camera, scene).await
     }
 
     /// Renders `layers` back-to-front, returning tightly-packed row-major RGBA.
@@ -416,13 +437,7 @@ impl<T: RenderTarget> Renderer<T> {
     /// depth-tested, so the nearest object wins and ids are never blended — the
     /// "color index" method, no ray-marching. The lazily-created pick target
     /// tracks the display size ([`resize`](Self::resize) keeps it in sync).
-    pub async fn pick(
-        &mut self,
-        params: FrameParams,
-        draws: &[Draw],
-        x: u32,
-        y: u32,
-    ) -> Option<u32> {
+    pub async fn pick(&mut self, camera: Camera, draws: &[Draw], x: u32, y: u32) -> Option<u32> {
         let Viewport {
             width: w,
             height: h,
@@ -433,7 +448,7 @@ impl<T: RenderTarget> Renderer<T> {
         }
         let target = self.pick_target.as_ref()?;
         target
-            .pick(&self.gpu, &mut self.renderer, params, draws, x, y)
+            .pick(&self.gpu, &mut self.renderer, camera, draws, x, y)
             .await
     }
 }
@@ -477,18 +492,14 @@ pub enum SurfaceSkip {
 }
 
 impl Renderer<OnscreenTarget> {
-    /// Acquires the surface's next texture, encodes `scene` under `params` into
+    /// Acquires the surface's next texture, encodes `scene` through `camera` into
     /// it, submits, and presents — reporting the outcome so the caller applies its
     /// own recovery policy.
     ///
     /// Nothing is drawn for [`Outdated`](PresentOutcome::Outdated),
     /// [`Lost`](PresentOutcome::Lost) or [`Skipped`](PresentOutcome::Skipped); the
     /// caller recovers through [`target_mut`](Self::target_mut) and draws again.
-    pub fn present_scene(
-        &mut self,
-        params: FrameParams,
-        scene: &[DrawableObject],
-    ) -> PresentOutcome {
+    pub fn present_scene(&mut self, camera: Camera, scene: &[DrawableObject]) -> PresentOutcome {
         let (texture, outcome) = match self.target.acquire() {
             wgpu::CurrentSurfaceTexture::Success(texture) => (texture, PresentOutcome::Presented),
             wgpu::CurrentSurfaceTexture::Suboptimal(texture) => {
@@ -507,7 +518,7 @@ impl Renderer<OnscreenTarget> {
             }
         };
         self.target
-            .present(&self.gpu, &mut self.renderer, texture, params, scene);
+            .present(&self.gpu, &mut self.renderer, texture, camera, scene);
         outcome
     }
 }

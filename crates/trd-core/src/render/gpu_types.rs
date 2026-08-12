@@ -1,7 +1,7 @@
 //! GPU byte-layout types: the camera uniform, the vertex/instance
 //! buffer layouts, and the indexed mesh container.
 
-use super::{FrameParams, Viewport};
+use crate::Camera;
 
 /// GPU uniform matching the WGSL `Params` layout: a single column-major 4×4
 /// matrix (64 bytes) storing the camera-only `P · V` (each instance supplies
@@ -13,9 +13,9 @@ pub(crate) struct Uniform {
 }
 
 impl Uniform {
-    pub(crate) fn view_proj(params: FrameParams, viewport: Viewport) -> Self {
+    pub(crate) fn view_proj(camera: Camera) -> Self {
         Uniform {
-            transform: params.view_proj_matrix(viewport).to_cols_array(),
+            transform: camera.view_projection().matrix().to_cols_array(),
         }
     }
 }
@@ -31,11 +31,12 @@ pub(crate) struct GizmoUniform {
 }
 
 impl GizmoUniform {
-    pub(crate) fn new(params: FrameParams, viewport: Viewport) -> Self {
+    pub(crate) fn new(camera: Camera) -> Self {
+        let viewport = camera.viewport();
         let width = viewport.width.max(1) as f32;
         let height = viewport.height.max(1) as f32;
         Self {
-            view_proj: params.view_proj_matrix(viewport).to_cols_array(),
+            view_proj: camera.view_projection().matrix().to_cols_array(),
             viewport: [width, height, 2.0 / width, 2.0 / height],
         }
     }
@@ -337,6 +338,7 @@ impl Mesh {
 mod tests {
     use super::*;
     use crate::math::Matrix4;
+    use crate::render::{FrameParams, Viewport};
 
     #[test]
     fn pick_instance_id_round_trips_through_rgba() {
@@ -379,7 +381,7 @@ mod tests {
             height: 4,
         };
         assert_eq!(
-            Uniform::view_proj(FrameParams::IDENTITY, viewport).transform,
+            Uniform::view_proj(FrameParams::IDENTITY.to_camera(viewport).unwrap()).transform,
             Matrix4::IDENTITY.to_cols_array()
         );
     }
@@ -391,7 +393,7 @@ mod tests {
             width: 8,
             height: 4,
         };
-        let uniform = GizmoUniform::new(FrameParams::IDENTITY, viewport);
+        let uniform = GizmoUniform::new(FrameParams::IDENTITY.to_camera(viewport).unwrap());
         assert_eq!(uniform.view_proj, Matrix4::IDENTITY.to_cols_array());
         assert_eq!(uniform.viewport, [8.0, 4.0, 0.25, 0.5]);
     }

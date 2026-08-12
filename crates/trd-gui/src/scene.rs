@@ -15,8 +15,8 @@
 //! authored around the world origin — the camera targets the origin by default.
 
 use trd_core::{
-    DisneyMaterial, Draw, DrawSelection, FrameParams, ImageBasedLighting, Lighting, PbrDebugView,
-    Point3, RenderMode, Rotation, ToneMapping, Transform, Vector3,
+    Camera, DisneyMaterial, Draw, DrawSelection, ImageBasedLighting, Lighting, PbrDebugView,
+    Point3, RenderMode, Rotation, ToneMapping, Transform, Vector3, Viewport,
 };
 
 /// The minimum orbit distance (never let the camera cross the target).
@@ -314,20 +314,26 @@ impl SceneState {
 }
 
 impl SceneState {
-    /// The camera [`FrameParams`] for the given viewport `aspect` (width/height):
-    /// the CG `eye`/`target`/`up`/`fovy`/`aspect` form derived from the orbit
-    /// camera. The model matrix rides on the per-draw list (see [`Self::draws`]),
-    /// not here, so this carries only the camera.
-    pub fn frame_params(&self, aspect: f32) -> FrameParams {
+    /// The [`Camera`] for a `viewport`-sized target, derived from the orbit
+    /// camera's eye/target/fovy.
+    ///
+    /// The GUI owns a real camera, so it builds one directly rather than
+    /// encoding it into the wire-shaped `FrameParams` the renderer used to take
+    /// (#203). The model matrix rides on the per-draw list (see [`Self::draws`]),
+    /// not here.
+    pub fn camera(&self, viewport: Viewport) -> Camera {
         let eye = self.camera.eye();
-        FrameParams {
-            eye: Some(eye),
-            target: Some(self.camera.target),
-            up: Some([0.0, 1.0, 0.0]),
-            fovy: Some(self.camera.fovy),
-            aspect: Some(aspect),
-            ..FrameParams::IDENTITY
-        }
+        Camera::look_at(
+            Point3::new(eye[0], eye[1], eye[2]),
+            Point3::new(
+                self.camera.target[0],
+                self.camera.target[1],
+                self.camera.target[2],
+            ),
+            Vector3::Y,
+            self.camera.fovy,
+            viewport,
+        )
     }
 
     /// The per-frame draw list: one instance per object in
@@ -534,17 +540,31 @@ mod tests {
         assert!(!SceneState::default().has_quad());
     }
 
+    /// The GUI builds a `Camera` straight from its orbit state (#203) — no wire
+    /// round-trip — and that camera carries the viewport it was built for, looks
+    /// at the orbit target, and applies no model (which rides on the draw list).
     #[test]
-    fn frame_params_carry_only_the_cg_camera() {
+    fn camera_is_built_from_the_orbit_state() {
         let state = SceneState::default();
-        let params = state.frame_params(1.5);
-        assert!(params.eye.is_some());
-        assert!(params.target.is_some());
-        assert_eq!(params.fovy, Some(trd_core::DEFAULT_FOV_Y));
-        assert_eq!(params.aspect, Some(1.5));
-        // Camera only: no CV form, no model on the params.
-        assert!(params.k.is_none() && params.pose.is_none());
-        assert!(params.model.is_none());
+        let viewport = Viewport {
+            width: 300,
+            height: 200,
+        };
+        let camera = state.camera(viewport);
+
+        assert_eq!(camera.viewport(), viewport);
+        // The eye sits where the orbit camera says, and the view looks at the
+        // orbit target — so the pose's translation is the eye.
+        let eye = state.camera.eye();
+        let pose = camera.to_pose().matrix().to_cols_array();
+        for (axis, expected) in eye.iter().enumerate() {
+            assert!(
+                (pose[12 + axis] - expected).abs() < 1e-5,
+                "eye axis {axis}: {} vs {expected}",
+                pose[12 + axis]
+            );
+        }
+        assert_eq!(camera.position(), eye);
     }
 
     #[test]

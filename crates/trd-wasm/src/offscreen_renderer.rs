@@ -514,7 +514,7 @@ impl OffscreenRenderer {
         self.renderer
             .as_mut()
             .expect("renderer built before render_frame")
-            .render_scene(params, scene)
+            .render_params(params, scene)
             .await
             .map_err(|error| error_message("offscreen render", error))
     }

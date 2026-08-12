@@ -468,7 +468,7 @@ fn render_and_write_batch<W: Write>(
         // loop). Natively blocking here is free: the future is already complete
         // when `poll_for_map` returns. This is the only bridge between the two.
         planes.push(pollster::block_on(
-            renderer.render_scene(frame.params, &scene),
+            renderer.render_params(frame.params, &scene),
         )?);
     }
     output_session.write_rgba_batch(&planes)?;

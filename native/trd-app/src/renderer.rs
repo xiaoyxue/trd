@@ -196,7 +196,14 @@ impl WindowRenderer {
         };
         let scene = Scene::from_draws(&frame.draws, options, frame_fit);
 
-        match renderer.present_scene(frame.params, &scene) {
+        let camera = match frame.params.to_camera(renderer.viewport()) {
+            Ok(camera) => camera,
+            Err(error) => {
+                log::warn!("skipping frame with a malformed camera: {error}");
+                return;
+            }
+        };
+        match renderer.present_scene(camera, &scene) {
             PresentOutcome::Presented => {}
             // The surface config is stale (e.g. after a resize/minimise), no longer
             // optimal, or lost; reconfigure and try again on the next redraw. This

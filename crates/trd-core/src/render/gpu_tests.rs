@@ -11,6 +11,15 @@ use glam::{Mat4, Vec3};
 /// former single-mesh `SceneRenderer::new`/`with_base_model` production helpers,
 /// which only the GPU tests used.
 #[cfg(not(target_arch = "wasm32"))]
+/// The [`Camera`] a set of wire params resolves to for a `width`x`height`
+/// target — the tests' stand-in for what a front-end does at the decode
+/// boundary (#203).
+fn camera_of(params: FrameParams, width: u32, height: u32) -> crate::Camera {
+    params
+        .to_camera(Viewport { width, height })
+        .expect("test params are a valid camera form")
+}
+
 fn single(format: wgpu::TextureFormat, mesh: &Mesh) -> SceneRenderer {
     SceneRenderer::new(
         test_gpu(),
@@ -216,12 +225,19 @@ fn render_layers_matches_the_fixed_arity_passes() {
     let one_layer = pollster::block_on(target.render_layers(
         &gpu,
         &mut renderer,
-        &[SceneLayer::new(FrameParams::IDENTITY, &foreground)],
+        &[SceneLayer::new(
+            camera_of(FrameParams::IDENTITY, width, height),
+            &foreground,
+        )],
     ))
     .expect("one layer renders");
-    let single_pass =
-        pollster::block_on(target.render(&gpu, &mut renderer, FrameParams::IDENTITY, &foreground))
-            .expect("single pass renders");
+    let single_pass = pollster::block_on(target.render(
+        &gpu,
+        &mut renderer,
+        camera_of(FrameParams::IDENTITY, width, height),
+        &foreground,
+    ))
+    .expect("single pass renders");
     assert_eq!(one_layer, single_pass, "one layer != render");
     assert_eq!(one_layer.len(), (width * height * 4) as usize);
     assert!(
@@ -233,17 +249,17 @@ fn render_layers_matches_the_fixed_arity_passes() {
         &gpu,
         &mut renderer,
         &[
-            SceneLayer::new(FrameParams::IDENTITY, &background),
-            SceneLayer::new(FrameParams::IDENTITY, &foreground),
-            SceneLayer::new(FrameParams::IDENTITY, &overlay),
+            SceneLayer::new(camera_of(FrameParams::IDENTITY, width, height), &background),
+            SceneLayer::new(camera_of(FrameParams::IDENTITY, width, height), &foreground),
+            SceneLayer::new(camera_of(FrameParams::IDENTITY, width, height), &overlay),
         ],
     ))
     .expect("three layers render");
     let three_pass = pollster::block_on(target.render_three_pass(
         &gpu,
         &mut renderer,
-        FrameParams::IDENTITY,
-        FrameParams::IDENTITY,
+        camera_of(FrameParams::IDENTITY, width, height),
+        camera_of(FrameParams::IDENTITY, width, height),
         &background,
         &foreground,
         &overlay,
@@ -291,7 +307,7 @@ fn with_target_builds_resizes_and_unwraps_the_harness() {
         }
     );
 
-    let small = pollster::block_on(renderer.render_scene(FrameParams::IDENTITY, &scene))
+    let small = pollster::block_on(renderer.render_params(FrameParams::IDENTITY, &scene))
         .expect("renders at the initial size");
     assert_eq!(small.len(), 40 * 24 * 4);
 
@@ -303,7 +319,7 @@ fn with_target_builds_resizes_and_unwraps_the_harness() {
             height: 32
         }
     );
-    let large = pollster::block_on(renderer.render_scene(FrameParams::IDENTITY, &scene))
+    let large = pollster::block_on(renderer.render_params(FrameParams::IDENTITY, &scene))
         .expect("renders at the new size");
     assert_eq!(large.len(), 64 * 32 * 4);
     assert!(
@@ -346,12 +362,12 @@ fn with_gpu_renders_identically_to_with_meshes() {
     let mut owned = pollster::block_on(Renderer::with_meshes(width, height, &meshes))
         .expect("the harness requests its own device");
     let expected =
-        pollster::block_on(owned.render_scene(FrameParams::IDENTITY, &scene)).expect("renders");
+        pollster::block_on(owned.render_params(FrameParams::IDENTITY, &scene)).expect("renders");
 
     let mut borrowed = Renderer::with_gpu(test_gpu(), width, height, &meshes)
         .expect("the harness accepts an existing device");
     let actual =
-        pollster::block_on(borrowed.render_scene(FrameParams::IDENTITY, &scene)).expect("renders");
+        pollster::block_on(borrowed.render_params(FrameParams::IDENTITY, &scene)).expect("renders");
 
     assert_eq!(borrowed.mesh_count(), 1);
     assert_eq!(actual.len(), (width * height * 4) as usize);
@@ -391,9 +407,8 @@ fn first_frame_renders_with_no_setters_called() {
             renderer.encode(
                 encoder,
                 view,
-                FrameParams::IDENTITY,
+                camera_of(FrameParams::IDENTITY, width, height),
                 &scene,
-                Viewport { width, height },
             );
         });
         assert_eq!(pixels.len(), (width * height * 4) as usize);
@@ -425,9 +440,8 @@ fn mesh_renderer_draws_multiple_instances() {
         mesh.encode(
             e,
             v,
-            FrameParams::IDENTITY,
+            camera_of(FrameParams::IDENTITY, width, height),
             &single,
-            Viewport { width, height },
         );
     });
 
@@ -444,13 +458,7 @@ fn mesh_renderer_draws_multiple_instances() {
         },
     ];
     let two_px = render_with_readback(&gpu, format, width, height, |e, v| {
-        mesh.encode(
-            e,
-            v,
-            FrameParams::IDENTITY,
-            &two,
-            Viewport { width, height },
-        );
+        mesh.encode(e, v, camera_of(FrameParams::IDENTITY, width, height), &two);
     });
 
     assert_ne!(
@@ -539,9 +547,8 @@ fn mesh_renderer_depth_buffer_occludes_far_behind_near() {
         mesh.encode(
             e,
             v,
-            FrameParams::IDENTITY,
+            camera_of(FrameParams::IDENTITY, width, height),
             &scene,
-            Viewport { width, height },
         );
     });
     let c = ((height / 2 * width + width / 2) * 4) as usize;
@@ -577,9 +584,8 @@ fn mesh_renderer_wireframe_lights_edges_only() {
         mesh.encode(
             e,
             v,
-            FrameParams::IDENTITY,
+            camera_of(FrameParams::IDENTITY, width, height),
             &filled_scene,
-            Viewport { width, height },
         );
     });
 
@@ -587,9 +593,8 @@ fn mesh_renderer_wireframe_lights_edges_only() {
         mesh.encode(
             e,
             v,
-            FrameParams::IDENTITY,
+            camera_of(FrameParams::IDENTITY, width, height),
             &wire_scene,
-            Viewport { width, height },
         );
     });
 
@@ -695,9 +700,8 @@ fn mesh_renderer_textured_samples_bound_texture() {
         mesh.encode(
             e,
             v,
-            FrameParams::IDENTITY,
+            camera_of(FrameParams::IDENTITY, width, height),
             &scene,
-            Viewport { width, height },
         );
     });
 
@@ -759,9 +763,8 @@ fn mesh_renderer_aabb_overlay_draws_green_box() {
         mesh.encode(
             e,
             v,
-            FrameParams::IDENTITY,
+            camera_of(FrameParams::IDENTITY, width, height),
             &plain_scene,
-            Viewport { width, height },
         );
     });
 
@@ -769,9 +772,8 @@ fn mesh_renderer_aabb_overlay_draws_green_box() {
         mesh.encode(
             e,
             v,
-            FrameParams::IDENTITY,
+            camera_of(FrameParams::IDENTITY, width, height),
             &box_scene,
-            Viewport { width, height },
         );
     });
 
@@ -827,9 +829,8 @@ fn mesh_renderer_axes_overlay_draws_rgb_gizmo() {
         mesh.encode(
             e,
             v,
-            FrameParams::IDENTITY,
+            camera_of(FrameParams::IDENTITY, width, height),
             &plain_scene,
-            Viewport { width, height },
         );
     });
 
@@ -837,9 +838,8 @@ fn mesh_renderer_axes_overlay_draws_rgb_gizmo() {
         mesh.encode(
             e,
             v,
-            FrameParams::IDENTITY,
+            camera_of(FrameParams::IDENTITY, width, height),
             &axes_scene,
-            Viewport { width, height },
         );
     });
 
@@ -891,9 +891,8 @@ fn gizmo_lines_and_arrowheads_stay_smooth_without_msaa() {
         renderer.encode(
             e,
             v,
-            FrameParams::IDENTITY,
+            camera_of(FrameParams::IDENTITY, width, height),
             &scene,
-            Viewport { width, height },
         );
     });
     let red = |x: u32, y: u32| {
@@ -969,18 +968,16 @@ fn scene_composes_all_drawable_kinds_together() {
         mesh.encode(
             e,
             v,
-            FrameParams::IDENTITY,
+            camera_of(FrameParams::IDENTITY, width, height),
             &filled_only,
-            Viewport { width, height },
         );
     });
     let composed_px = render_with_readback(&gpu, format, width, height, |e, v| {
         mesh.encode(
             e,
             v,
-            FrameParams::IDENTITY,
+            camera_of(FrameParams::IDENTITY, width, height),
             &composed,
-            Viewport { width, height },
         );
     });
 
@@ -1065,9 +1062,8 @@ fn environment_background_draws_bound_probe() {
         renderer.encode(
             encoder,
             view,
-            FrameParams::IDENTITY,
+            camera_of(FrameParams::IDENTITY, width, height),
             &scene,
-            Viewport { width, height },
         );
     });
     assert!(
@@ -1099,9 +1095,8 @@ fn mesh_renderer_renders_loaded_quad_filled_with_correct_coverage() {
         mesh.encode(
             e,
             v,
-            FrameParams::IDENTITY,
+            camera_of(FrameParams::IDENTITY, width, height),
             &scene,
-            Viewport { width, height },
         );
     });
 
@@ -1187,10 +1182,10 @@ fn cg_and_cv_cameras_render_matching_output() {
     };
 
     let cg_px = render_with_readback(&gpu, format, width, height, |e, v| {
-        mesh.encode(e, v, cg, &scene, viewport);
+        mesh.encode(e, v, cg.to_camera(viewport).unwrap(), &scene);
     });
     let cv_px = render_with_readback(&gpu, format, width, height, |e, v| {
-        mesh.encode(e, v, cv, &scene, viewport);
+        mesh.encode(e, v, cv.to_camera(viewport).unwrap(), &scene);
     });
 
     // Both must actually show the quad (non-trivial coverage).
@@ -1311,10 +1306,10 @@ fn dolly_turntable_bird_eye_cg_cv_wireframe_stays_framed() {
             };
 
             let cg_px = render_with_readback(&gpu, format, width, height, |e, v| {
-                mesh.encode(e, v, cg, &scene, viewport);
+                mesh.encode(e, v, cg.to_camera(viewport).unwrap(), &scene);
             });
             let cv_px = render_with_readback(&gpu, format, width, height, |e, v| {
-                mesh.encode(e, v, cv, &scene, viewport);
+                mesh.encode(e, v, cv.to_camera(viewport).unwrap(), &scene);
             });
 
             let cg_lit = lit(&cg_px);
@@ -1429,9 +1424,8 @@ fn frame_plane_composites_background_under_scene() {
         mesh.encode(
             e,
             v,
-            FrameParams::IDENTITY,
+            camera_of(FrameParams::IDENTITY, width, height),
             &plane_only,
-            Viewport { width, height },
         );
     });
     let at = |px: &[u8], x: u32, y: u32| -> [u8; 3] {
@@ -1477,9 +1471,8 @@ fn frame_plane_composites_background_under_scene() {
         mesh.encode(
             e,
             v,
-            FrameParams::IDENTITY,
+            camera_of(FrameParams::IDENTITY, width, height),
             &composited,
-            Viewport { width, height },
         );
     });
     let foreground = [DrawableObject::Mesh {
@@ -1491,16 +1484,14 @@ fn frame_plane_composites_background_under_scene() {
         mesh.encode(
             e,
             v,
-            FrameParams::IDENTITY,
+            camera_of(FrameParams::IDENTITY, width, height),
             &plane_only,
-            Viewport { width, height },
         );
         mesh.encode_overlay(
             e,
             v,
-            FrameParams::IDENTITY,
+            camera_of(FrameParams::IDENTITY, width, height),
             &foreground,
-            Viewport { width, height },
         );
     });
     assert_eq!(
@@ -1598,7 +1589,14 @@ fn picking_resolves_object_ids_and_background() {
     ];
 
     let mut pick = |x: u32, y: u32| {
-        pollster::block_on(target.pick(&gpu, &mut renderer, FrameParams::IDENTITY, &draws, x, y))
+        pollster::block_on(target.pick(
+            &gpu,
+            &mut renderer,
+            camera_of(FrameParams::IDENTITY, width, height),
+            &draws,
+            x,
+            y,
+        ))
     };
 
     // NDC x=-0.5 → pixel ≈ 16; x=+0.5 → ≈ 48; center gap at 32; corner at (2,2).

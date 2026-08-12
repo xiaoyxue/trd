@@ -1,4 +1,5 @@
-use super::{overlay_depth_stencil, FrameParams, Tonemap, Viewport};
+use super::{overlay_depth_stencil, Tonemap};
+use crate::Camera;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -98,15 +99,14 @@ impl EnvBackground {
     pub(super) fn write(
         &self,
         queue: &wgpu::Queue,
-        frame: FrameParams,
-        viewport: Viewport,
+        camera: Camera,
         settings: EnvBackgroundSettings,
     ) {
-        let inverse_view_proj = frame.view_proj_matrix(viewport).inverse().to_cols_array();
-        let camera = frame.camera_position();
+        let inverse_view_proj = camera.view_projection().matrix().inverse().to_cols_array();
+        let position = camera.position();
         let uniform = EnvBackgroundUniform {
             inverse_view_proj,
-            camera_pos: [camera[0], camera[1], camera[2], 1.0],
+            camera_pos: [position[0], position[1], position[2], 1.0],
             params: [
                 settings.rotation,
                 settings.exposure,

@@ -180,7 +180,7 @@ impl GuiRenderer {
         apply_materials(&mut self.renderer, state);
         let rgba = self
             .renderer
-            .render_scene(state.frame_params(self.aspect()), &scene_for(state))
+            .render_scene(state.camera(self.viewport()), &scene_for(state))
             .await?;
         Ok(ImageRgba {
             width: self.width,
@@ -193,12 +193,15 @@ impl GuiRenderer {
     /// picking pass (#141), returning its 0-based index into `state.draws()`, or
     /// `None` for the background.
     pub async fn pick(&mut self, state: &SceneState, x: u32, y: u32) -> Option<u32> {
-        let params = state.frame_params(self.aspect());
-        self.renderer.pick(params, &state.draws(), x, y).await
+        let camera = state.camera(self.viewport());
+        self.renderer.pick(camera, &state.draws(), x, y).await
     }
 
-    fn aspect(&self) -> f32 {
-        self.width as f32 / self.height.max(1) as f32
+    fn viewport(&self) -> trd_core::Viewport {
+        trd_core::Viewport {
+            width: self.width,
+            height: self.height,
+        }
     }
 }
 /// Reports whether `mesh` carries real UV coordinates — a mesh without them

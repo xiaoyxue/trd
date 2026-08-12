@@ -2,6 +2,7 @@
 //! derived from camera intrinsics.
 
 use crate::math::{Matrix4, Point3, Transform, Vector3};
+use crate::Camera;
 
 /// Default clip near/far planes used when deriving a projection from camera
 /// intrinsics `K`. The hello-triangle is authored on the `z = 0` plane, so the
@@ -64,14 +65,19 @@ pub struct FrameParams {
 }
 
 /// A malformed camera specification detected at decode time. Mapped by each
-/// decoder to its stream/protocol error type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// decoder to its stream/protocol error type, and surfaced by
+/// [`FrameParams::to_camera`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum CameraFormError {
     /// Both the CV form (`k`/`pose`) and the CG form (`eye`/`target`/
     /// `direction`/`fovy`) are present; a stream must use exactly one.
+    #[error(
+        "conflicting camera form: the CV (k/pose) and CG (eye/target/fovy) forms are both present"
+    )]
     Conflicting,
     /// The CG form is incomplete: an `eye` without a look `target`/`direction`,
     /// or a look `target`/`direction` without an `eye`.
+    #[error("incomplete CG camera: an eye needs a look target/direction, and vice versa")]
     Incomplete,
 }
 
@@ -185,19 +191,44 @@ impl FrameParams {
         Ok(())
     }
 
-    /// The camera-only transform `P · V` for a given viewport, used by the
-    /// instanced mesh path where each drawn instance supplies its own model
-    /// matrix (`clip = P · V · M · p`).
+    /// The camera-only transform `P · V` for a given viewport.
+    ///
+    /// The render path now takes a resolved [`Camera`] instead (#203), so this
+    /// survives only as the reference the `to_camera` round-trip test pins
+    /// against — it is the pre-#203 formula, and the test fails if the typed
+    /// camera ever disagrees with it.
+    #[cfg(test)]
     pub(crate) fn view_proj_matrix(&self, viewport: Viewport) -> Matrix4 {
         self.projection_matrix(viewport) * self.view_matrix()
     }
 
-    /// The camera's **world-space position** — the translation of the inverse
-    /// view (`world-from-camera`) matrix. Needed by the Disney PBR path for the
-    /// view vector `V` (and environment reflection). Identity view ⇒ origin.
-    pub(crate) fn camera_position(&self) -> [f32; 3] {
-        let cols = self.view_matrix().inverse().to_cols_array();
-        [cols[12], cols[13], cols[14]]
+    /// Resolves these wire parameters into the typed [`Camera`] the render path
+    /// consumes, for a target of `viewport` pixels.
+    ///
+    /// **The one place the wire's camera columns become a camera** (#203).
+    /// `FrameParams` is a *protocol* type — eleven `Option`s expressing "this
+    /// Arrow column is absent" — while [`Camera`] is the resolved
+    /// `(view, projection, viewport)` triple, which cannot be internally
+    /// inconsistent.
+    ///
+    /// View and projection are resolved **independently** and combined through
+    /// [`Camera::from_gl`], rather than dispatching to
+    /// [`Camera::from_cv`]/[`Camera::look_at`]. That is required, not stylistic:
+    /// a stream may carry `k` without `pose` (the video editor does exactly
+    /// this), or `pose` without `k`, or a partial CG form — all of which
+    /// [`view_matrix`](Self::view_matrix)/[`projection_matrix`](Self::projection_matrix)
+    /// already handle by falling back to identity per half, while `from_cv`
+    /// demands both.
+    ///
+    /// Validates the camera form first, so a stream mixing the CV and CG forms
+    /// is rejected here rather than rendering something arbitrary.
+    pub fn to_camera(&self, viewport: Viewport) -> Result<Camera, CameraFormError> {
+        self.check_camera_form()?;
+        Ok(Camera::from_gl(
+            Transform::from_matrix(self.view_matrix()),
+            Transform::from_matrix(self.projection_matrix(viewport)),
+            viewport,
+        ))
     }
 }
 
@@ -502,5 +533,111 @@ mod tests {
         let clip = p.into_inner() * Vec4::new(0.0, 0.0, -5.0, 1.0);
         let ndc = clip.truncate() / clip.w;
         assert!(ndc.x.abs() < 1e-5 && ndc.y.abs() < 1e-5, "ndc = {ndc:?}");
+    }
+
+    /// `to_camera` must reproduce the matrices the render path used before the
+    /// camera became a typed value (#203) — **bit-for-bit**, or every frame
+    /// shifts. Covers each authoring form the wire allows, including the partial
+    /// ones that `Camera::from_cv`/`look_at` cannot express.
+    #[test]
+    fn to_camera_matches_the_raw_matrices_for_every_authoring_form() {
+        let viewport = Viewport {
+            width: 800,
+            height: 600,
+        };
+        let k = [900.0, 0.0, 0.0, 0.0, 900.0, 0.0, 400.0, 300.0, 1.0];
+        let pose = Matrix4::from_translation(Vector3::new(1.0, 2.0, 3.0)).to_cols_array();
+
+        let cases: [(&str, FrameParams); 7] = [
+            ("identity (no camera columns)", FrameParams::IDENTITY),
+            (
+                "CV: k only (what the video editor emits)",
+                FrameParams {
+                    k: Some(k),
+                    ..FrameParams::IDENTITY
+                },
+            ),
+            (
+                "CV: pose only",
+                FrameParams {
+                    pose: Some(pose),
+                    ..FrameParams::IDENTITY
+                },
+            ),
+            (
+                "CV: k + pose",
+                FrameParams {
+                    k: Some(k),
+                    pose: Some(pose),
+                    ..FrameParams::IDENTITY
+                },
+            ),
+            (
+                "CG: eye + target + fovy",
+                FrameParams {
+                    eye: Some([0.0, 1.0, 5.0]),
+                    target: Some([0.0, 0.0, 0.0]),
+                    fovy: Some(std::f32::consts::FRAC_PI_3),
+                    ..FrameParams::IDENTITY
+                },
+            ),
+            (
+                "CG: eye + direction + up",
+                FrameParams {
+                    eye: Some([2.0, 0.0, 0.0]),
+                    direction: Some([-1.0, 0.0, 0.0]),
+                    up: Some([0.0, 0.0, 1.0]),
+                    ..FrameParams::IDENTITY
+                },
+            ),
+            (
+                "CG: explicit aspect / znear / zfar",
+                FrameParams {
+                    eye: Some([0.0, 0.0, 4.0]),
+                    target: Some([0.0, 0.0, 0.0]),
+                    fovy: Some(std::f32::consts::FRAC_PI_4),
+                    aspect: Some(2.0),
+                    znear: Some(0.5),
+                    zfar: Some(50.0),
+                    ..FrameParams::IDENTITY
+                },
+            ),
+        ];
+
+        for (label, params) in cases {
+            let camera = params.to_camera(viewport).expect(label);
+            assert_eq!(
+                camera.view().matrix(),
+                params.view_matrix(),
+                "view drifted for {label}"
+            );
+            assert_eq!(
+                camera.projection().matrix(),
+                params.projection_matrix(viewport),
+                "projection drifted for {label}"
+            );
+            assert_eq!(
+                camera.view_projection().matrix(),
+                params.view_proj_matrix(viewport),
+                "P*V drifted for {label}"
+            );
+            assert_eq!(camera.viewport(), viewport, "viewport lost for {label}");
+        }
+    }
+
+    /// A camera form the wire forbids is rejected at resolution, not rendered.
+    #[test]
+    fn to_camera_rejects_a_conflicting_camera_form() {
+        let viewport = Viewport {
+            width: 4,
+            height: 4,
+        };
+        let mixed = FrameParams {
+            k: Some([1.0; 9]),
+            eye: Some([0.0, 0.0, 1.0]),
+            target: Some([0.0; 3]),
+            ..FrameParams::IDENTITY
+        };
+        assert_eq!(mixed.to_camera(viewport), Err(CameraFormError::Conflicting));
     }
 }

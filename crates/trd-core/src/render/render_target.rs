@@ -14,10 +14,11 @@
 //! pass producing ids, not a place a frame is rendered to (see `picking.rs`).
 
 use super::GpuContext;
+use crate::Camera;
 use futures_channel::oneshot;
 use thiserror::Error;
 
-use super::{FrameParams, SceneRenderer, Viewport};
+use super::{SceneRenderer, Viewport};
 use crate::output::tightly_pack_rgba;
 use crate::visual::DrawableObject;
 
@@ -110,16 +111,16 @@ pub enum OffscreenError {
 /// top. Each layer keeps the accumulated color and clears depth.
 #[derive(Debug, Clone, Copy)]
 pub struct SceneLayer<'a> {
-    /// The camera/projection this layer is rendered through.
-    pub params: FrameParams,
+    /// The camera this layer is rendered through.
+    pub camera: Camera,
     /// What this layer draws.
     pub scene: &'a [DrawableObject],
 }
 
 impl<'a> SceneLayer<'a> {
-    /// A layer drawing `scene` through `params`.
-    pub fn new(params: FrameParams, scene: &'a [DrawableObject]) -> Self {
-        Self { params, scene }
+    /// A layer drawing `scene` through `camera`.
+    pub fn new(camera: Camera, scene: &'a [DrawableObject]) -> Self {
+        Self { camera, scene }
     }
 }
 
@@ -190,7 +191,7 @@ impl OffscreenTarget {
         self.height
     }
 
-    /// Encodes `scene` under `params` onto the target with `renderer`, then reads
+    /// Encodes `scene` through `camera` onto the target with `renderer`, then reads
     /// the target back to tightly-packed row-major RGBA (`width * height * 4`
     /// bytes). `async` so the browser event loop is not blocked during readback;
     /// native callers drive it with `pollster::block_on` (which the
@@ -199,10 +200,10 @@ impl OffscreenTarget {
         &self,
         gpu: &GpuContext,
         renderer: &mut SceneRenderer,
-        params: FrameParams,
+        camera: Camera,
         scene: &[DrawableObject],
     ) -> Result<Vec<u8>, OffscreenError> {
-        self.render_passes(gpu, renderer, params, params, None, scene, None)
+        self.render_passes(gpu, renderer, camera, camera, None, scene, None)
             .await
     }
 
@@ -213,16 +214,16 @@ impl OffscreenTarget {
         &self,
         gpu: &GpuContext,
         renderer: &mut SceneRenderer,
-        background_params: FrameParams,
-        foreground_params: FrameParams,
+        background_camera: Camera,
+        foreground_camera: Camera,
         background: &[DrawableObject],
         foreground: &[DrawableObject],
     ) -> Result<Vec<u8>, OffscreenError> {
         self.render_passes(
             gpu,
             renderer,
-            background_params,
-            foreground_params,
+            background_camera,
+            foreground_camera,
             Some(background),
             foreground,
             None,
@@ -237,8 +238,8 @@ impl OffscreenTarget {
         &self,
         gpu: &GpuContext,
         renderer: &mut SceneRenderer,
-        background_params: FrameParams,
-        foreground_params: FrameParams,
+        background_camera: Camera,
+        foreground_camera: Camera,
         background: &[DrawableObject],
         foreground: &[DrawableObject],
         overlay: &[DrawableObject],
@@ -246,8 +247,8 @@ impl OffscreenTarget {
         self.render_passes(
             gpu,
             renderer,
-            background_params,
-            foreground_params,
+            background_camera,
+            foreground_camera,
             Some(background),
             foreground,
             Some(overlay),
@@ -275,7 +276,7 @@ impl OffscreenTarget {
         let view = self
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let viewport = Viewport {
+        let _viewport = Viewport {
             width: self.width,
             height: self.height,
         };
@@ -284,9 +285,9 @@ impl OffscreenTarget {
                 label: Some("trd offscreen layer"),
             });
             if index == 0 {
-                renderer.encode(&mut encoder, &view, layer.params, layer.scene, viewport);
+                renderer.encode(&mut encoder, &view, layer.camera, layer.scene);
             } else {
-                renderer.encode_overlay(&mut encoder, &view, layer.params, layer.scene, viewport);
+                renderer.encode_overlay(&mut encoder, &view, layer.camera, layer.scene);
             }
             queue.submit(Some(encoder.finish()));
         }
@@ -298,8 +299,8 @@ impl OffscreenTarget {
         &self,
         gpu: &GpuContext,
         renderer: &mut SceneRenderer,
-        background_params: FrameParams,
-        foreground_params: FrameParams,
+        background_camera: Camera,
+        foreground_camera: Camera,
         background: Option<&[DrawableObject]>,
         foreground: &[DrawableObject],
         overlay: Option<&[DrawableObject]>,
@@ -308,7 +309,7 @@ impl OffscreenTarget {
         let view = self
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let viewport = Viewport {
+        let _viewport = Viewport {
             width: self.width,
             height: self.height,
         };
@@ -323,23 +324,22 @@ impl OffscreenTarget {
             renderer.encode(
                 &mut background_encoder,
                 &view,
-                background_params,
+                background_camera,
                 background,
-                viewport,
             );
             // Submit before `encode_overlay` uploads foreground instances into
             // SceneRenderer's shared instance buffer.
             queue.submit(Some(background_encoder.finish()));
-            renderer.encode_overlay(&mut encoder, &view, foreground_params, foreground, viewport);
+            renderer.encode_overlay(&mut encoder, &view, foreground_camera, foreground);
         } else {
-            renderer.encode(&mut encoder, &view, foreground_params, foreground, viewport);
+            renderer.encode(&mut encoder, &view, foreground_camera, foreground);
         }
         if let Some(overlay) = overlay {
             queue.submit(Some(encoder.finish()));
             encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("trd offscreen selection overlay"),
             });
-            renderer.encode_overlay(&mut encoder, &view, foreground_params, overlay, viewport);
+            renderer.encode_overlay(&mut encoder, &view, foreground_camera, overlay);
         }
         queue.submit(Some(encoder.finish()));
         self.read_back(gpu).await
@@ -518,7 +518,7 @@ impl OnscreenTarget {
         self.surface.get_current_texture()
     }
 
-    /// Encodes `scene` under `params` onto `texture`'s sRGB view with `renderer`,
+    /// Encodes `scene` through `camera` onto `texture`'s sRGB view with `renderer`,
     /// submits, and presents. The mechanical per-frame block shared by every
     /// on-screen front-end; call it with a texture obtained from
     /// [`acquire`](Self::acquire).
@@ -527,7 +527,7 @@ impl OnscreenTarget {
         gpu: &GpuContext,
         renderer: &mut SceneRenderer,
         texture: wgpu::SurfaceTexture,
-        params: FrameParams,
+        camera: Camera,
         scene: &[DrawableObject],
     ) {
         let (device, queue) = (&gpu.device, &gpu.queue);
@@ -538,16 +538,7 @@ impl OnscreenTarget {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("trd onscreen frame"),
         });
-        renderer.encode(
-            &mut encoder,
-            &view,
-            params,
-            scene,
-            Viewport {
-                width: self.config.width,
-                height: self.config.height,
-            },
-        );
+        renderer.encode(&mut encoder, &view, camera, scene);
         queue.submit(Some(encoder.finish()));
         queue.present(texture);
     }
