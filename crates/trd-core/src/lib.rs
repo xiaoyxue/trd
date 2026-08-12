@@ -38,8 +38,8 @@ pub use render::{
     create_instance, AdapterFacts, CameraFormError, EnvMapData, FrameParams, GpuContext,
     GpuInitError, GpuRequest, ImageBasedLighting, Light, Lighting, Mesh, MeshShading, Msaa,
     OffscreenError, OffscreenTarget, OnscreenTarget, PbrConfig, PbrDebugView, PickTarget,
-    PointLight, PresentOutcome, RenderOptions, RenderTarget, SceneLayer, SceneRenderer,
-    SurfaceSkip, ToneMapping, Tonemap, Vertex, Viewport, OFFSCREEN_FORMAT,
+    PointLight, RenderOptions, RenderTarget, SceneLayer, SceneRenderer, SurfaceError,
+    SurfaceRepair, ToneMapping, Tonemap, Vertex, Viewport, OFFSCREEN_FORMAT,
 };
 // The visual model (scene + primitives) is plain data (no wgpu), so it sits
 // beside `mesh`/`camera`/`material` at the crate root rather than inside the

@@ -453,72 +453,92 @@ impl<T: RenderTarget> Renderer<T> {
     }
 }
 
-/// What one on-screen frame did.
+/// What a shell must do to its surface before the next frame.
 ///
-/// wgpu's surface acquisition can fail in ways only the **front-end** knows how to
-/// recover from — the native window defers to the next redraw, while the browser
-/// recreates the surface from its canvas — so [`present_scene`] reports what
-/// happened instead of baking in a policy (#180).
-///
-/// [`present_scene`]: Renderer::present_scene
+/// wgpu's surface acquisition can fail in ways only the **front-end** knows how
+/// to recover from — the native window defers to the next redraw, while the
+/// browser recreates the surface from its canvas — so presenting reports what is
+/// needed instead of baking in a policy (#180).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PresentOutcome {
-    /// The frame was drawn and presented.
-    Presented,
-    /// The frame was drawn and presented, but the surface no longer optimally
-    /// matches its configuration — wgpu still hands back a usable texture, so the
-    /// frame is **not** lost; reconfigure before the next one.
-    PresentedSuboptimal,
-    /// Nothing was drawn: the surface configuration is stale (a resize or a
-    /// minimise). Reconfigure, then draw again.
-    Outdated,
-    /// Nothing was drawn: the surface was lost. Recreate it, then draw again.
-    Lost,
-    /// Nothing was drawn, for a transient reason. Skipping the frame is correct;
-    /// the next one is expected to succeed.
-    Skipped(SurfaceSkip),
+pub enum SurfaceRepair {
+    /// Reapply the current configuration ([`OnscreenTarget::reconfigure`]).
+    Reconfigure,
+    /// Build a new surface for the same window/canvas and swap it in
+    /// ([`OnscreenTarget::replace_surface`]) — the old one is gone.
+    Recreate,
 }
 
-/// Why a frame was skipped without being drawn — the transient half of
-/// [`PresentOutcome`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SurfaceSkip {
-    /// Acquisition timed out.
+/// Why a frame could not be drawn onto a surface.
+///
+/// Separate from "what repair is needed" ([`SurfaceRepair`]) because they are
+/// **independent questions**: a frame can be presented *and* need a repair
+/// (`Ok(Some(Reconfigure))`), or be skipped needing none (`Timeout`). Folding
+/// both into one enum is what made the old `PresentOutcome` awkward — every
+/// consumer immediately re-projected it onto one axis (#203).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum SurfaceError {
+    /// The surface configuration is stale (a resize or a minimise).
+    #[error("surface is outdated: reconfigure and draw again")]
+    Outdated,
+    /// The surface was lost and must be recreated.
+    #[error("surface was lost: recreate it and draw again")]
+    Lost,
+    /// Acquisition timed out — transient, the next frame should succeed.
+    #[error("surface acquisition timed out")]
     Timeout,
-    /// The surface is not visible (e.g. an occluded or hidden window).
+    /// The surface is not visible (an occluded or hidden window).
+    #[error("surface is occluded")]
     Occluded,
     /// The surface failed validation.
+    #[error("surface validation failed")]
     Validation,
+}
+
+impl SurfaceError {
+    /// What the shell must do before the next frame, or `None` when the cause is
+    /// transient and skipping this frame is the whole remedy.
+    pub fn repair(self) -> Option<SurfaceRepair> {
+        match self {
+            SurfaceError::Outdated => Some(SurfaceRepair::Reconfigure),
+            SurfaceError::Lost => Some(SurfaceRepair::Recreate),
+            SurfaceError::Timeout | SurfaceError::Occluded | SurfaceError::Validation => None,
+        }
+    }
 }
 
 impl Renderer<OnscreenTarget> {
     /// Acquires the surface's next texture, encodes `scene` through `camera` into
-    /// it, submits, and presents — reporting the outcome so the caller applies its
-    /// own recovery policy.
+    /// it, submits, and presents.
     ///
-    /// Nothing is drawn for [`Outdated`](PresentOutcome::Outdated),
-    /// [`Lost`](PresentOutcome::Lost) or [`Skipped`](PresentOutcome::Skipped); the
-    /// caller recovers through [`target_mut`](Self::target_mut) and draws again.
-    pub fn present_scene(&mut self, camera: Camera, scene: &[DrawableObject]) -> PresentOutcome {
-        let (texture, outcome) = match self.target.acquire() {
-            wgpu::CurrentSurfaceTexture::Success(texture) => (texture, PresentOutcome::Presented),
+    /// `Ok(None)` — presented, nothing to do. `Ok(Some(repair))` — presented, but
+    /// repair the surface before the next frame. `Err(e)` — **nothing was drawn**;
+    /// [`SurfaceError::repair`] says what to do, and `None` there means the cause
+    /// was transient and skipping this frame is the whole remedy.
+    ///
+    /// The two axes are deliberately separate (#203): whether the frame reached
+    /// the screen, and what the surface needs, are independent facts. Returning a
+    /// `Result` also makes the outcome `#[must_use]` — dropping it used to be
+    /// silent, and a dropped "outdated" means the window never repaints again.
+    pub fn present_scene(
+        &mut self,
+        camera: Camera,
+        scene: &[DrawableObject],
+    ) -> Result<Option<SurfaceRepair>, SurfaceError> {
+        let (texture, repair) = match self.target.acquire() {
+            wgpu::CurrentSurfaceTexture::Success(texture) => (texture, None),
+            // Presented, but the configuration no longer matches: the frame is on
+            // screen, so this is `Ok` with a repair for the next one.
             wgpu::CurrentSurfaceTexture::Suboptimal(texture) => {
-                (texture, PresentOutcome::PresentedSuboptimal)
+                (texture, Some(SurfaceRepair::Reconfigure))
             }
-            wgpu::CurrentSurfaceTexture::Outdated => return PresentOutcome::Outdated,
-            wgpu::CurrentSurfaceTexture::Lost => return PresentOutcome::Lost,
-            wgpu::CurrentSurfaceTexture::Timeout => {
-                return PresentOutcome::Skipped(SurfaceSkip::Timeout)
-            }
-            wgpu::CurrentSurfaceTexture::Occluded => {
-                return PresentOutcome::Skipped(SurfaceSkip::Occluded)
-            }
-            wgpu::CurrentSurfaceTexture::Validation => {
-                return PresentOutcome::Skipped(SurfaceSkip::Validation)
-            }
+            wgpu::CurrentSurfaceTexture::Outdated => return Err(SurfaceError::Outdated),
+            wgpu::CurrentSurfaceTexture::Lost => return Err(SurfaceError::Lost),
+            wgpu::CurrentSurfaceTexture::Timeout => return Err(SurfaceError::Timeout),
+            wgpu::CurrentSurfaceTexture::Occluded => return Err(SurfaceError::Occluded),
+            wgpu::CurrentSurfaceTexture::Validation => return Err(SurfaceError::Validation),
         };
         self.target
             .present(&self.gpu, &mut self.renderer, texture, camera, scene);
-        outcome
+        Ok(repair)
     }
 }
