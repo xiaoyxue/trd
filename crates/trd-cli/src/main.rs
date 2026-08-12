@@ -154,7 +154,7 @@ fn main() -> Result<(), trd_core::StreamError> {
 
     let cli = Cli::parse();
     let mode = if cli.pbr {
-        trd_core::RenderMode::Pbr
+        trd_core::RenderMode::Shaded
     } else if cli.textured {
         trd_core::RenderMode::Textured
     } else if cli.wireframe {

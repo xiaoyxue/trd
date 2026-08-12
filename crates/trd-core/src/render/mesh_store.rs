@@ -26,7 +26,7 @@ pub(super) struct MeshGpu {
     /// Parallel vertex buffer for the Disney PBR path (`pbr.wgsl`): the same
     /// positions + UVs as `vertex_buffer`, but with a derived smooth shading
     /// **normal** in place of the vertex color. Reuses the `triangles` index
-    /// buffer. Built once per mesh; only bound by [`RenderMode::Pbr`] draws.
+    /// buffer. Built once per mesh; only bound by [`RenderMode::Shaded`] draws.
     pub(super) pbr_vertex_buffer: wgpu::Buffer,
     pub(super) triangles: IndexBuf,
     pub(super) edges: IndexBuf,

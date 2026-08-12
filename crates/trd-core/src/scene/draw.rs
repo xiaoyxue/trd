@@ -40,15 +40,19 @@ pub const DRAW_MODE_INHERIT: u8 = 255;
 impl RenderMode {
     /// Decodes an optional per-draw `draw_mode` wire byte into a [`Draw::mode`]
     /// override: `0`→`Filled`, `1`→`Wireframe`, `2`→`Textured`, `3`→`Shadow`,
-    /// `4`→`Pbr`, and [`DRAW_MODE_INHERIT`]→`None` (inherit the global mode).
+    /// `4`→`Shaded`, and [`DRAW_MODE_INHERIT`]→`None` (inherit the global mode).
     /// Returns `None` for an unrecognized byte so callers can raise a decode error.
+    ///
+    /// **The byte values are protocol and never change** — `4` still means what
+    /// the producers and `viewer.ts` spell `"pbr"`; only the Rust variant was
+    /// renamed to `Shaded` (#203).
     pub fn from_wire(byte: u8) -> Option<Option<RenderMode>> {
         match byte {
             0 => Some(Some(RenderMode::Filled)),
             1 => Some(Some(RenderMode::Wireframe)),
             2 => Some(Some(RenderMode::Textured)),
             3 => Some(Some(RenderMode::Shadow)),
-            4 => Some(Some(RenderMode::Pbr)),
+            4 => Some(Some(RenderMode::Shaded)),
             DRAW_MODE_INHERIT => Some(None),
             _ => None,
         }

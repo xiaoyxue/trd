@@ -134,10 +134,10 @@ impl GuiRenderer {
     /// mesh `i` (#141) — and `material_maps` binds its optional
     /// [`MaterialMaps`] the same way; both may be shorter than
     /// `meshes`, and a `None` entry leaves `trd-core`'s 1×1 defaults in place. An
-    /// optional `env` HDR probe is reflected by [`RenderMode::Pbr`] surfaces
+    /// optional `env` HDR probe is reflected by [`RenderMode::Shaded`] surfaces
     /// (bound once; the interactive material rides on the scene state).
     ///
-    /// [`RenderMode::Pbr`]: trd_core::RenderMode::Pbr
+    /// [`RenderMode::Shaded`]: trd_core::RenderMode::Shaded
     pub async fn new(
         meshes: &[trd_core::Mesh],
         textures: &[Option<&dyn trd_core::Texture>],

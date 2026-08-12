@@ -319,7 +319,7 @@ impl<T: RenderTarget> Renderer<T> {
     }
 
     /// Binds mesh `mesh_id`'s **metallic-roughness** map (glTF packing: roughness
-    /// in G, metallic in B), sampled by [`RenderMode::Pbr`](crate::RenderMode::Pbr)
+    /// in G, metallic in B), sampled by [`RenderMode::Shaded`](crate::RenderMode::Shaded)
     /// in place of the scalar material values. Out-of-range ids are ignored.
     pub fn set_mesh_metallic_roughness_texture(
         &mut self,
@@ -331,7 +331,7 @@ impl<T: RenderTarget> Renderer<T> {
     }
 
     /// Binds mesh `mesh_id`'s **tangent-space normal** map, perturbing the shading
-    /// normal in [`RenderMode::Pbr`](crate::RenderMode::Pbr). Out-of-range ids are
+    /// normal in [`RenderMode::Shaded`](crate::RenderMode::Shaded). Out-of-range ids are
     /// ignored.
     pub fn set_mesh_normal_texture(
         &mut self,
@@ -393,7 +393,7 @@ impl<T: RenderTarget> Renderer<T> {
     }
 
     /// Binds `env` as the equirectangular HDR environment map reflected by
-    /// [`RenderMode::Pbr`] meshes. Delegates to [`SceneRenderer::set_env_map`]; the
+    /// [`RenderMode::Shaded`] meshes. Delegates to [`SceneRenderer::set_env_map`]; the
     /// probe is (re)uploaded on the next `render`.
     pub fn set_env_map(&mut self, env: crate::EnvMapData) {
         self.renderer.set_env_map(env);

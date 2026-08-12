@@ -324,7 +324,7 @@ impl ImportedAsset {
                     ..Default::default()
                 };
                 renderer.set_mesh_disney_material(0, material.clone());
-                (trd_core::RenderMode::Pbr, material)
+                (trd_core::RenderMode::Shaded, material)
             }
             Self::Pbr(asset) => {
                 if let Some(texture) = asset.base_color_texture.as_ref() {
@@ -337,7 +337,7 @@ impl ImportedAsset {
                     renderer.set_mesh_normal_texture(0, texture);
                 }
                 renderer.set_mesh_disney_material(0, asset.material.clone());
-                (trd_core::RenderMode::Pbr, asset.material)
+                (trd_core::RenderMode::Shaded, asset.material)
             }
         }
     }

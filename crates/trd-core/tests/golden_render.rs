@@ -26,7 +26,7 @@
 //! covered.
 //!
 //! The **`stage2` mesh is additionally rendered through the Disney PBR path**
-//! ([`trd_core::RenderMode::Pbr`]) with a deterministic synthetic HDR environment
+//! ([`trd_core::RenderMode::Shaded`]) with a deterministic synthetic HDR environment
 //! probe (no external `.hdr` decode), once per tone-map operator — pinning both
 //! the historical [`trd_core::Tonemap::Reinhard`] curve and the [`Tonemap::Aces`]
 //! filmic curve (#116). These `stage2_pbr_{reinhard,aces}_*` goldens are the
@@ -180,7 +180,7 @@ fn pbr_material() -> DisneyMaterial {
 /// like `stage2`, 4× MSAA.
 fn pbr_options(tonemap: Tonemap) -> RenderOptions {
     RenderOptions {
-        mode: RenderMode::Pbr,
+        mode: RenderMode::Shaded,
         show_aabb: true,
         show_axes: false,
         show_local_axes: true,
