@@ -24,7 +24,6 @@ mod pipeline;
 mod platform;
 mod render_target;
 mod renderer;
-mod scene;
 mod scene_renderer;
 mod tonemap;
 #[cfg(test)]
@@ -51,9 +50,6 @@ pub use render_target::{
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use renderer::check_dimensions;
 pub use renderer::{PresentOutcome, RenderError, Renderer, SurfaceSkip};
-pub use scene::{
-    build_scene, scene_with_overlays, Draw, DrawableObject, FrameFit, GridPlane, RenderMode, Scene,
-};
 pub use scene_renderer::SceneRenderer;
 pub use tonemap::{ToneMapping, Tonemap};
 /// Reference + test scaffolding only (#202): the minimal canonical wgpu
@@ -85,9 +81,3 @@ pub(crate) use pipeline::{
     write_gizmo_params, write_view_proj, DepthTarget, MsaaColorTarget, MSAA_SAMPLE_COUNT,
     PICK_FORMAT,
 };
-pub(crate) use scene::frame_fit_uv_scale;
-/// The wire byte meaning "inherit the global render mode". Only the protocol's
-/// test-only encoder needs it by name (#202); the decoder matches on it inside
-/// `RenderMode::from_wire`.
-#[cfg(test)]
-pub(crate) use scene::DRAW_MODE_INHERIT;

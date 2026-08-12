@@ -13,6 +13,7 @@ mod mesh;
 mod output;
 mod protocol;
 mod render;
+mod scene;
 mod texture;
 mod video_editing;
 
@@ -34,12 +35,17 @@ pub use protocol::{
 // backend (#180). The public paths (`trd_core::DisneyMaterial`, ...) are unchanged.
 pub use material::{AlphaMode, Auxiliary, DisneyMaterial, Material, MaterialTextures};
 pub use render::{
-    build_scene, create_instance, scene_with_overlays, AdapterFacts, CameraFormError, Draw,
-    DrawableObject, EnvMapData, FrameFit, FrameParams, GpuContext, GpuInitError, GpuRequest,
-    GridPlane, ImageBasedLighting, Light, Lighting, Mesh, MeshShading, Msaa, OffscreenError,
-    OffscreenTarget, OnscreenTarget, PbrConfig, PbrDebugView, PickTarget, PointLight,
-    PresentOutcome, RenderMode, RenderOptions, RenderTarget, Scene, SceneLayer, SceneRenderer,
+    create_instance, AdapterFacts, CameraFormError, EnvMapData, FrameParams, GpuContext,
+    GpuInitError, GpuRequest, ImageBasedLighting, Light, Lighting, Mesh, MeshShading, Msaa,
+    OffscreenError, OffscreenTarget, OnscreenTarget, PbrConfig, PbrDebugView, PickTarget,
+    PointLight, PresentOutcome, RenderOptions, RenderTarget, SceneLayer, SceneRenderer,
     SurfaceSkip, ToneMapping, Tonemap, Vertex, Viewport, OFFSCREEN_FORMAT,
+};
+// The scene model is plain data (no wgpu), so it sits beside `mesh`/`camera`/
+// `material` at the crate root rather than inside the render backend (#203).
+// The public paths (`trd_core::DrawableObject`, ...) are unchanged.
+pub use scene::{
+    build_scene, scene_with_overlays, Draw, DrawableObject, FrameFit, GridPlane, RenderMode, Scene,
 };
 // The offscreen harness; available on both platforms since it became async
 // (#180) — the browser could not use it while it blocked on readback.

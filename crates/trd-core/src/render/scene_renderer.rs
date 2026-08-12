@@ -23,6 +23,7 @@ use super::pbr::PbrBatchInputs;
 use super::*;
 use crate::material::DisneyMaterial;
 use crate::math::Matrix4;
+use crate::scene::{Draw, DrawableObject, RenderMode};
 use crate::texture::Texture;
 
 /// The mesh and gizmo pipelines plus their camera/material bindings. Filled,
@@ -954,6 +955,7 @@ impl SceneRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scene::{FrameFit, GridPlane};
 
     fn model(tag: f32) -> [f32; 16] {
         let mut model = Matrix4::IDENTITY.to_cols_array();
