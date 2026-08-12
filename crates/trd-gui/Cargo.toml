@@ -8,7 +8,7 @@ repository.workspace = true
 [lib]
 name = "trd_gui"
 path = "src/lib.rs"
-# A plain library: the browser delivery surface (`crates/trd-gui-wasm`) owns the
+# A plain library: the browser delivery surface (`crates/trd-wasm`) owns the
 # `cdylib` and the JS ABI, so this crate is reusable by every surface without
 # dragging wasm-bindgen in (#180).
 crate-type = ["rlib"]

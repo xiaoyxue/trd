@@ -27,28 +27,6 @@ pub(crate) fn multisample_state(sample_count: u32) -> wgpu::MultisampleState {
     }
 }
 
-/// Builds the indexed mesh render pipeline for `format` using an auto bind-group
-/// layout (group 0, binding 0 = the params uniform), drawn as filled triangles.
-/// Single-sampled (the standalone/legacy pass draws to a non-MSAA target).
-pub fn create_mesh_pipeline(
-    device: &wgpu::Device,
-    format: wgpu::TextureFormat,
-) -> wgpu::RenderPipeline {
-    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("trd mesh pipeline layout"),
-        bind_group_layouts: &[Some(&create_mesh_bind_group_layout(device))],
-        immediate_size: 0,
-    });
-    create_mesh_pipeline_with(
-        device,
-        format,
-        &layout,
-        wgpu::PrimitiveTopology::TriangleList,
-        None,
-        1,
-    )
-}
-
 /// The explicit bind-group layout shared by every mesh pipeline (group 0,
 /// binding 0 = the camera `P·V` uniform, vertex-stage visible). Making it
 /// explicit (rather than auto-derived per pipeline) lets the filled and

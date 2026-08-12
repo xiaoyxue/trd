@@ -14,6 +14,11 @@ use crate::texture::{ImageTexture, TextureError};
 use crate::{FrameError, FrameParams, InlineFrame, Mesh, MeshError};
 
 mod arrow_decode;
+/// The encode half of the wire format, compiled for tests only (#202): it
+/// authors the `0.0.6` tables that this module's tests — and its own round-trip
+/// tests — feed back through the real decoders.
+#[cfg(test)]
+mod scene_encode;
 pub(crate) use arrow_decode::{
     check_version, decode_batch, decode_draws, decode_frame_ids, decode_frame_refs, validate_schema,
 };
@@ -556,14 +561,17 @@ fn decode_frame_batch(
 }
 
 /// Decodes a standalone **params** Arrow IPC stream (the bytes authored by
-/// [`crate::encode_params_stream`]) into one [`DecodedFrame`] per frame, reusing
-/// the single [`InputSession`] framing decoder. Unlike a full stream it does
-/// **not** require a leading mesh table — it is the params-only counterpart for a
-/// producer that already holds the meshes (e.g. the GUI's Arrow round-trip
-/// render), so it need not re-decode the mesh per frame. Every batch's
-/// `trd.protocol.version` metadata is checked (via [`InputSession`]'s schema
-/// validation). Available on both native and wasm.
-pub fn decode_params_stream(bytes: &[u8]) -> Result<Vec<DecodedFrame>, ProtocolError> {
+/// [`scene_encode::encode_params_stream`]) into one [`DecodedFrame`] per frame,
+/// reusing the single [`InputSession`] framing decoder. Unlike a full stream it
+/// does **not** require a leading mesh table — it is the params-only counterpart
+/// for a producer that already holds the meshes, so it need not re-decode the
+/// mesh per frame. Every batch's `trd.protocol.version` metadata is checked (via
+/// [`InputSession`]'s schema validation).
+///
+/// Test-only (#202): its sole caller is the round-trip test in
+/// [`scene_encode`], which pins the encoder against this decoder.
+#[cfg(test)]
+pub(crate) fn decode_params_stream(bytes: &[u8]) -> Result<Vec<DecodedFrame>, ProtocolError> {
     let mut session = InputSession::new();
     let mut frames = Vec::new();
     for batch in session.push(bytes)? {
@@ -1637,7 +1645,7 @@ mod tests {
             FrameParams::IDENTITY,
         ];
         let ids = [Some(0), Some(1), Some(0)];
-        let bytes = crate::encode_scene_with_frames(
+        let bytes = scene_encode::encode_scene_with_frames(
             std::slice::from_ref(&mesh),
             &resources,
             &params,
@@ -1673,11 +1681,11 @@ mod tests {
         let mesh = crate::Mesh::hello_triangle();
         let texture = crate::ImageTexture::from_rgba(1, 1, vec![100, 110, 120, 255]).unwrap();
         let resources = vec![inline_pixel(30)];
-        let mut bytes = crate::encode_mesh_stream(std::slice::from_ref(&mesh)).unwrap();
-        bytes.extend(crate::encode_texture_stream(&texture).unwrap());
-        bytes.extend(crate::encode_frames_stream(&resources).unwrap());
+        let mut bytes = scene_encode::encode_mesh_stream(std::slice::from_ref(&mesh)).unwrap();
+        bytes.extend(scene_encode::encode_texture_stream(&texture).unwrap());
+        bytes.extend(scene_encode::encode_frames_stream(&resources).unwrap());
         bytes.extend(
-            crate::encode_params_stream_with_frame_ids(
+            scene_encode::encode_params_stream_with_frame_ids(
                 &[FrameParams::IDENTITY],
                 None,
                 Some(&[Some(0)]),
@@ -1814,8 +1822,8 @@ mod tests {
     #[test]
     fn rejects_frames_table_before_mesh_and_duplicate_resource_tables() {
         let mesh = crate::Mesh::hello_triangle();
-        let frames = crate::encode_frames_stream(&[inline_pixel(1)]).unwrap();
-        let params = crate::encode_params_stream_with_frame_ids(
+        let frames = scene_encode::encode_frames_stream(&[inline_pixel(1)]).unwrap();
+        let params = scene_encode::encode_params_stream_with_frame_ids(
             &[FrameParams::IDENTITY],
             None,
             Some(&[Some(0)]),
@@ -1823,7 +1831,7 @@ mod tests {
         .unwrap();
 
         let mut before_mesh = frames.clone();
-        before_mesh.extend(crate::encode_mesh_stream(std::slice::from_ref(&mesh)).unwrap());
+        before_mesh.extend(scene_encode::encode_mesh_stream(std::slice::from_ref(&mesh)).unwrap());
         before_mesh.extend(params.clone());
         let mut session = InputSession::new();
         assert!(matches!(
@@ -1834,7 +1842,7 @@ mod tests {
             })
         ));
 
-        let mut duplicate = crate::encode_mesh_stream(std::slice::from_ref(&mesh)).unwrap();
+        let mut duplicate = scene_encode::encode_mesh_stream(std::slice::from_ref(&mesh)).unwrap();
         duplicate.extend(frames.clone());
         duplicate.extend(frames);
         duplicate.extend(params);

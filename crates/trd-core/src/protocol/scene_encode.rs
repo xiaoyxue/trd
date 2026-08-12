@@ -1,24 +1,28 @@
-//! Authoring the trd **input** stream in Rust (#97, Slice 3b).
+//! Authoring the trd **input** stream in Rust (#97, Slice 3b) — **test-only**.
 //!
 //! `trd-core` decodes the `[mesh][texture?][frames?][params]` input stream
 //! (`Mesh::from_arrow_all`, [`crate::decode_frames`], the wasm
-//! [`crate::InputSession`]) and encodes the **image output** ([`crate::OutputSession`]).
-//! The **input** stream is normally authored by the Python producers
-//! (`scripts/*_to_arrow.py`); this module authors the same
-//! `0.0.6` stream **in Rust** so an in-process front-end (the GUI's
-//! an external producer) — or any Rust producer — can drive
-//! [`crate::run_stream`] without shelling out to Python.
+//! [`super::InputSession`]) and encodes the **image output**
+//! ([`crate::OutputSession`]). The **input** stream is authored by the Python
+//! producers (`scripts/*_to_arrow.py`); this module authors the same `0.0.6`
+//! stream **in Rust**, as the encode half of the protocol's round-trip tests.
 //!
-//! It mirrors the decoders exactly (column names, nested Arrow types, and the
-//! `trd.protocol.version` metadata), and is covered by a round-trip test that
-//! feeds the bytes back through the real decoders, so it can't silently drift
-//! from the wire format.
+//! It is compiled `#[cfg(test)]` only (#202): its sole consumers are protocol
+//! tests — this module's own round-trips plus the fixtures in
+//! [`super`]'s test module. It is the executable specification the decoders are
+//! pinned against, which is why it is kept rather than deleted: its tests feed
+//! the encoded bytes back through the **real** decoders, so the wire format
+//! cannot silently drift.
+//!
+//! It sits beside [`super::arrow_decode`] as the encode counterpart of the same
+//! wire format: `arrow_decode` turns a `RecordBatch` into [`FrameParams`], this
+//! turns values back into the tables.
 //!
 //! The stream is **mesh-first**: [`encode_mesh_stream`] writes the leading mesh
 //! table (its own complete Arrow IPC stream) and [`encode_params_stream`] writes
 //! the following params stream; [`encode_scene`] concatenates them (the framing
-//! [`run_stream`](crate::run_stream) expects). Texture tables are not authored
-//! here yet (the GUI's Textured mode uses the in-process backend).
+//! [`run_stream`](crate::run_stream) expects). Texture tables are authored by
+//! [`encode_texture_stream`].
 
 use std::sync::Arc;
 
@@ -31,7 +35,7 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use thiserror::Error;
 
-use crate::protocol::{
+use super::{
     FRAMES_TABLE_KIND, MESH_TABLE_KIND, PARAMS_TABLE_KIND, PROTOCOL_VERSION, PROTOCOL_VERSION_KEY,
     TABLE_KIND_KEY, TEXTURE_TABLE_KIND,
 };
@@ -578,7 +582,7 @@ pub fn encode_scene_with_frames(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::InputSession;
+    use crate::protocol::{decode_params_stream, InputSession};
     use crate::render::Vertex;
 
     fn tri_mesh() -> Mesh {
@@ -709,7 +713,7 @@ mod tests {
         ];
 
         let bytes = encode_params_stream(&frames, Some(&draws)).unwrap();
-        let decoded = crate::decode_params_stream(&bytes).unwrap();
+        let decoded = decode_params_stream(&bytes).unwrap();
 
         assert_eq!(decoded.len(), 2);
         for (i, frame) in decoded.iter().enumerate() {
@@ -737,7 +741,7 @@ mod tests {
         let draws = vec![vec![placed], Vec::new()];
 
         let bytes = encode_params_stream(&frames, Some(&draws)).unwrap();
-        let decoded = crate::decode_params_stream(&bytes).unwrap();
+        let decoded = decode_params_stream(&bytes).unwrap();
 
         assert_eq!(decoded.len(), 2);
         // Frame 0: the placed draw survives verbatim.

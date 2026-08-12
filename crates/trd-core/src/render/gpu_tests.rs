@@ -94,7 +94,7 @@ fn render_with_readback(
 
     let pixels = {
         let mapped = slice.get_mapped_range().expect("buffer mapped after poll");
-        crate::tightly_pack_rgba(&mapped, width, height, padded_bytes_per_row)
+        crate::output::tightly_pack_rgba(&mapped, width, height, padded_bytes_per_row)
             .expect("GPU row unpack failed")
     };
     staging.unmap();

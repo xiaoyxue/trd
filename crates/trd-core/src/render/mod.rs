@@ -27,6 +27,7 @@ mod renderer;
 mod scene;
 mod scene_renderer;
 mod tonemap;
+#[cfg(test)]
 mod triangle_renderer;
 
 #[cfg(test)]
@@ -36,16 +37,14 @@ mod gpu_tests;
 // The headless offscreen harness is native-only (drives wgpu under
 // `pollster::block_on`), so it and its re-export are gated off wasm.
 pub use frame_params::{CameraFormError, FrameParams, Viewport};
-pub use gpu_context::{
-    create_instance, AdapterFacts, GpuContext, GpuInitError, GpuRequest, LimitsPreset,
-};
+pub(crate) use gpu_context::LimitsPreset;
+pub use gpu_context::{create_instance, AdapterFacts, GpuContext, GpuInitError, GpuRequest};
 pub use gpu_types::{Mesh, MeshShading, Vertex};
 pub use ibl::{EnvMapData, ImageBasedLighting};
 pub use light::{Light, Lighting, PointLight};
 pub use options::{Msaa, PbrConfig, RenderOptions};
 pub use pbr::PbrDebugView;
 pub use picking::PickTarget;
-pub use pipeline::create_mesh_pipeline;
 pub use render_target::{
     OffscreenError, OffscreenTarget, OnscreenTarget, RenderTarget, SceneLayer, OFFSCREEN_FORMAT,
 };
@@ -53,12 +52,15 @@ pub use render_target::{
 pub(crate) use renderer::check_dimensions;
 pub use renderer::{PresentOutcome, RenderError, Renderer, SurfaceSkip};
 pub use scene::{
-    build_scene, plane_grid_overlays, scene_with_overlays, selection_aabb_overlay, Draw,
-    DrawableObject, FrameFit, GridPlane, RenderMode, Scene,
+    build_scene, scene_with_overlays, Draw, DrawableObject, FrameFit, GridPlane, RenderMode, Scene,
 };
 pub use scene_renderer::SceneRenderer;
 pub use tonemap::{ToneMapping, Tonemap};
-pub use triangle_renderer::TriangleRenderer;
+/// Reference + test scaffolding only (#202): the minimal canonical wgpu
+/// renderer, kept to be *read* and exercised by `render::gpu_tests`. It has no
+/// production consumer, so it is compiled for tests only.
+#[cfg(test)]
+pub(crate) use triangle_renderer::TriangleRenderer;
 
 // Crate-internal items shared across render submodules and sibling modules.
 pub(crate) use color::upload_texture;
@@ -83,4 +85,9 @@ pub(crate) use pipeline::{
     write_gizmo_params, write_view_proj, DepthTarget, MsaaColorTarget, MSAA_SAMPLE_COUNT,
     PICK_FORMAT,
 };
-pub(crate) use scene::{frame_fit_uv_scale, DRAW_MODE_INHERIT};
+pub(crate) use scene::frame_fit_uv_scale;
+/// The wire byte meaning "inherit the global render mode". Only the protocol's
+/// test-only encoder needs it by name (#202); the decoder matches on it inside
+/// `RenderMode::from_wire`.
+#[cfg(test)]
+pub(crate) use scene::DRAW_MODE_INHERIT;

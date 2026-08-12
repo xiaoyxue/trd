@@ -400,7 +400,7 @@ pub fn build_scene(
 /// grid under a *filled/textured/PBR* object (e.g. the interactive `trd-gui`
 /// overlays) without the #77 wireframe-quad gating; `None`/`None` yields an empty
 /// list, so callers that don't opt in are byte-identical.
-pub fn plane_grid_overlays(
+pub(crate) fn plane_grid_overlays(
     draws: &[Draw],
     world_grid: Option<GridPlane>,
     object_grid: Option<GridPlane>,
@@ -432,7 +432,7 @@ pub fn plane_grid_overlays(
 /// `None`, an out-of-range index, or a `Shadow` draw yields an empty list, so a
 /// caller that doesn't opt in is byte-identical. Appended to the scene by
 /// front-ends that highlight a clicked object.
-pub fn selection_aabb_overlay(draws: &[Draw], selected: Option<u32>) -> Vec<DrawableObject> {
+pub(crate) fn selection_aabb_overlay(draws: &[Draw], selected: Option<u32>) -> Vec<DrawableObject> {
     let Some(draw) = selected.and_then(|i| draws.get(i as usize)) else {
         return Vec::new();
     };
