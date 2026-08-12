@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use trd_core::{
     DisneyMaterial, EnvMapData, FrameFit, ImageBasedLighting, ImageData, ImageTexture, Lighting,
-    Mesh, OnscreenTarget, PresentOutcome, RenderOptions, Renderer, Scene, ToneMapping,
+    Mesh, OnscreenTarget, RenderOptions, Renderer, Scene, ToneMapping,
 };
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
@@ -21,6 +21,10 @@ use crate::stream::FrameData;
 /// GPU resources tied to a live window surface.
 pub(crate) struct WindowRenderer {
     pub(crate) window: Arc<Window>,
+    /// Retained so a **lost** surface can be rebuilt for the same window: wgpu
+    /// asks for recreation, not reconfiguration, and a new surface needs the
+    /// instance that made the first one (#203).
+    instance: wgpu::Instance,
     /// The shared GPU context (adapter + device + queue), held as one value
     /// instead of cloned apart into separate fields (#180).
     gpu: Arc<trd_core::GpuContext>,
@@ -87,6 +91,7 @@ impl WindowRenderer {
 
         Ok(Self {
             window,
+            instance,
             gpu,
             target,
             renderer: None,
@@ -203,19 +208,43 @@ impl WindowRenderer {
                 return;
             }
         };
-        match renderer.present_scene(camera, &scene) {
-            PresentOutcome::Presented => {}
-            // The surface config is stale (e.g. after a resize/minimise), no longer
-            // optimal, or lost; reconfigure and try again on the next redraw. This
-            // recovery policy is the window's, not the harness's (#180).
-            PresentOutcome::PresentedSuboptimal
-            | PresentOutcome::Outdated
-            | PresentOutcome::Lost => {
+        // The recovery policy is the window's, not the harness's (#180): repair
+        // the surface and defer to the next redraw. A frame that *was* presented
+        // needs no redraw, only the repair.
+        let (repair, redraw) = match renderer.present_scene(camera, &scene) {
+            Ok(repair) => (repair, false),
+            Err(error) => (error.repair(), true),
+        };
+        if let Some(repair) = repair {
+            self.repair_surface(repair);
+        }
+        if redraw {
+            self.window.request_redraw();
+        }
+    }
+
+    /// Applies the repair a failed or suboptimal present asked for.
+    ///
+    /// `Recreate` really does build a new surface: wgpu reports a *lost* surface
+    /// as unusable, and merely reconfiguring it leaves the window blank (#203).
+    fn repair_surface(&mut self, repair: trd_core::SurfaceRepair) {
+        let Some(renderer) = self.renderer.as_mut() else {
+            return;
+        };
+        match repair {
+            trd_core::SurfaceRepair::Reconfigure => {
                 renderer.target_mut().reconfigure(&self.gpu.device);
-                self.window.request_redraw();
             }
-            // Transient (timeout/occluded/validation): skip this frame.
-            PresentOutcome::Skipped(_) => {}
+            trd_core::SurfaceRepair::Recreate => {
+                match self.instance.create_surface(self.window.clone()) {
+                    Ok(surface) => renderer
+                        .target_mut()
+                        .replace_surface(&self.gpu.device, surface),
+                    Err(error) => {
+                        log::error!("could not recreate the lost surface: {error}");
+                    }
+                }
+            }
         }
     }
 }

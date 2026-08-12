@@ -1,7 +1,7 @@
 use trd_core::{
     DecodedFrame, DisneyMaterial, Draw, DrawableObject, EnvMapData, FrameFit, FrameParams,
-    ImageBasedLighting, Lighting, OnscreenTarget, PresentOutcome, RenderMode, RenderOptions,
-    Renderer, Scene, SurfaceSkip, ToneMapping, Tonemap,
+    ImageBasedLighting, Lighting, OnscreenTarget, RenderMode, RenderOptions, Renderer, Scene,
+    SurfaceError, SurfaceRepair, ToneMapping, Tonemap,
 };
 use wasm_bindgen::prelude::*;
 
@@ -464,31 +464,34 @@ impl CanvasRenderer {
     /// happened (#180).
     fn present(&mut self, params: FrameParams, scene: &[DrawableObject]) -> Result<(), JsValue> {
         match self.present_once(params, scene) {
-            PresentOutcome::Presented => Ok(()),
-            // Presented, but the configuration no longer matches the canvas: the
-            // frame is on screen, so just repair before the next one.
-            PresentOutcome::PresentedSuboptimal => {
-                self.reconfigure();
+            // Presented. A repair (the surface no longer matches the canvas) is
+            // applied now so the *next* frame is clean; this one is on screen.
+            Ok(repair) => {
+                if repair.is_some() {
+                    self.reconfigure();
+                }
                 Ok(())
             }
-            PresentOutcome::Outdated => {
-                self.reconfigure();
-                self.retry(params, scene, "reconfiguration")
-            }
-            PresentOutcome::Lost => {
-                let surface = self
-                    .instance
-                    .create_surface(wgpu::SurfaceTarget::Canvas(self.canvas.clone()))
-                    .map_err(|error| js_error(format!("surface recreation failed: {error}")))?;
-                let device = self.gpu.device.clone();
-                self.target_mut().replace_surface(&device, surface);
-                self.retry(params, scene, "recreation")
-            }
-            PresentOutcome::Skipped(skip) => Err(js_error(match skip {
-                SurfaceSkip::Timeout => "surface acquisition timed out",
-                SurfaceSkip::Occluded => "surface is occluded",
-                SurfaceSkip::Validation => "surface validation failed",
-            })),
+            // Nothing was drawn. Repair, then retry exactly once — the browser
+            // cannot defer to "the next redraw" the way the native window does.
+            Err(error) => match error.repair() {
+                Some(SurfaceRepair::Reconfigure) => {
+                    self.reconfigure();
+                    self.retry(params, scene, "reconfiguration")
+                }
+                Some(SurfaceRepair::Recreate) => {
+                    let surface = self
+                        .instance
+                        .create_surface(wgpu::SurfaceTarget::Canvas(self.canvas.clone()))
+                        .map_err(|error| js_error(format!("surface recreation failed: {error}")))?;
+                    let device = self.gpu.device.clone();
+                    self.target_mut().replace_surface(&device, surface);
+                    self.retry(params, scene, "recreation")
+                }
+                // Transient: skipping the frame is the whole remedy, but the
+                // caller drove this call expecting pixels, so report it.
+                None => Err(js_error(error.to_string())),
+            },
         }
     }
 
@@ -499,18 +502,23 @@ impl CanvasRenderer {
         recovery: &str,
     ) -> Result<(), JsValue> {
         match self.present_once(params, scene) {
-            PresentOutcome::Presented => Ok(()),
-            PresentOutcome::PresentedSuboptimal => {
-                self.reconfigure();
+            Ok(repair) => {
+                if repair.is_some() {
+                    self.reconfigure();
+                }
                 Ok(())
             }
-            outcome => Err(js_error(format!(
-                "surface still unusable after {recovery}: {outcome:?}"
+            Err(error) => Err(js_error(format!(
+                "surface still unusable after {recovery}: {error}"
             ))),
         }
     }
 
-    fn present_once(&mut self, params: FrameParams, scene: &[DrawableObject]) -> PresentOutcome {
+    fn present_once(
+        &mut self,
+        params: FrameParams,
+        scene: &[DrawableObject],
+    ) -> Result<Option<SurfaceRepair>, SurfaceError> {
         let renderer = self
             .renderer
             .as_mut()
@@ -518,7 +526,7 @@ impl CanvasRenderer {
         // Wire-decoded params: resolve against the surface's own size, so the
         // camera's viewport cannot disagree with the attachments (#203).
         let Ok(camera) = params.to_camera(renderer.viewport()) else {
-            return PresentOutcome::Skipped(SurfaceSkip::Validation);
+            return Err(SurfaceError::Validation);
         };
         renderer.present_scene(camera, scene)
     }
