@@ -203,57 +203,53 @@ impl OffscreenTarget {
         camera: Camera,
         scene: &[DrawableObject],
     ) -> Result<Vec<u8>, OffscreenError> {
-        self.render_passes(gpu, renderer, camera, camera, None, scene, None)
+        self.render_layers(gpu, renderer, &[SceneLayer::new(camera, scene)])
             .await
     }
 
-    /// Renders a background scene first, then preserves that color while
-    /// rendering the foreground scene in a second pass.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn render_two_pass(
+    /// Encodes and submits `layers` **without** reading the target back.
+    ///
+    /// Drawing is synchronous: only the readback needs to await, and pairing this
+    /// with [`read_pixels`](Self::read_pixels) keeps that fact visible instead of
+    /// making every draw call `async` (#203). [`render_layers`](Self::render_layers)
+    /// is the two composed.
+    pub fn draw_layers(
         &self,
         gpu: &GpuContext,
         renderer: &mut SceneRenderer,
-        background_camera: Camera,
-        foreground_camera: Camera,
-        background: &[DrawableObject],
-        foreground: &[DrawableObject],
-    ) -> Result<Vec<u8>, OffscreenError> {
-        self.render_passes(
-            gpu,
-            renderer,
-            background_camera,
-            foreground_camera,
-            Some(background),
-            foreground,
-            None,
-        )
-        .await
+        layers: &[SceneLayer<'_>],
+    ) {
+        let (device, queue) = (&gpu.device, &gpu.queue);
+        let view = self
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        for (index, layer) in layers.iter().enumerate() {
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("trd offscreen layer"),
+            });
+            if index == 0 {
+                renderer.encode(&mut encoder, &view, layer.camera, layer.scene);
+            } else {
+                renderer.encode_overlay(&mut encoder, &view, layer.camera, layer.scene);
+            }
+            // Submitted per layer, not once at the end: `SceneRenderer` uploads
+            // instances into one shared buffer, so the next layer's upload must
+            // not race the previous layer's draw.
+            queue.submit(Some(encoder.finish()));
+        }
     }
 
-    /// Renders background, foreground, and selection/gizmo overlay as three
-    /// independently submitted passes.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn render_three_pass(
-        &self,
-        gpu: &GpuContext,
-        renderer: &mut SceneRenderer,
-        background_camera: Camera,
-        foreground_camera: Camera,
-        background: &[DrawableObject],
-        foreground: &[DrawableObject],
-        overlay: &[DrawableObject],
-    ) -> Result<Vec<u8>, OffscreenError> {
-        self.render_passes(
-            gpu,
-            renderer,
-            background_camera,
-            foreground_camera,
-            Some(background),
-            foreground,
-            Some(overlay),
-        )
-        .await
+    /// Reads the target's **current contents** back as tightly-packed row-major
+    /// RGBA (`width * height * 4` bytes).
+    ///
+    /// `async` because the buffer map only resolves while the device is polled —
+    /// which this does itself, natively by blocking and on wasm by yielding, so a
+    /// caller cannot hang by forgetting to drive it.
+    ///
+    /// Reads whatever is in the texture, so calling it without a preceding draw
+    /// yields the cleared (or stale) target rather than failing.
+    pub async fn read_pixels(&self, gpu: &GpuContext) -> Result<Vec<u8>, OffscreenError> {
+        self.read_back(gpu).await
     }
 
     /// Renders `layers` back-to-front into the target, then reads it back.
@@ -272,82 +268,10 @@ impl OffscreenTarget {
         renderer: &mut SceneRenderer,
         layers: &[SceneLayer<'_>],
     ) -> Result<Vec<u8>, OffscreenError> {
-        let (device, queue) = (&gpu.device, &gpu.queue);
-        let view = self
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        let _viewport = Viewport {
-            width: self.width,
-            height: self.height,
-        };
-        for (index, layer) in layers.iter().enumerate() {
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("trd offscreen layer"),
-            });
-            if index == 0 {
-                renderer.encode(&mut encoder, &view, layer.camera, layer.scene);
-            } else {
-                renderer.encode_overlay(&mut encoder, &view, layer.camera, layer.scene);
-            }
-            queue.submit(Some(encoder.finish()));
-        }
-        self.read_back(gpu).await
+        self.draw_layers(gpu, renderer, layers);
+        self.read_pixels(gpu).await
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn render_passes(
-        &self,
-        gpu: &GpuContext,
-        renderer: &mut SceneRenderer,
-        background_camera: Camera,
-        foreground_camera: Camera,
-        background: Option<&[DrawableObject]>,
-        foreground: &[DrawableObject],
-        overlay: Option<&[DrawableObject]>,
-    ) -> Result<Vec<u8>, OffscreenError> {
-        let (device, queue) = (&gpu.device, &gpu.queue);
-        let view = self
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        let _viewport = Viewport {
-            width: self.width,
-            height: self.height,
-        };
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("trd offscreen foreground"),
-        });
-        if let Some(background) = background {
-            let mut background_encoder =
-                device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("trd offscreen background"),
-                });
-            renderer.encode(
-                &mut background_encoder,
-                &view,
-                background_camera,
-                background,
-            );
-            // Submit before `encode_overlay` uploads foreground instances into
-            // SceneRenderer's shared instance buffer.
-            queue.submit(Some(background_encoder.finish()));
-            renderer.encode_overlay(&mut encoder, &view, foreground_camera, foreground);
-        } else {
-            renderer.encode(&mut encoder, &view, foreground_camera, foreground);
-        }
-        if let Some(overlay) = overlay {
-            queue.submit(Some(encoder.finish()));
-            encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("trd offscreen selection overlay"),
-            });
-            renderer.encode_overlay(&mut encoder, &view, foreground_camera, overlay);
-        }
-        queue.submit(Some(encoder.finish()));
-        self.read_back(gpu).await
-    }
-
-    /// Copies the target texture into the staging buffer and maps it back to
-    /// tightly-packed row-major RGBA. The shared read-back tail of every render
-    /// path on this target.
     async fn read_back(&self, gpu: &GpuContext) -> Result<Vec<u8>, OffscreenError> {
         let (device, queue) = (&gpu.device, &gpu.queue);
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {

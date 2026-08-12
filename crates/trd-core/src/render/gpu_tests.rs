@@ -193,15 +193,58 @@ fn offscreen_target_reports_its_render_format_and_size() {
 /// `render_layers` must reproduce the fixed-arity passes exactly, and composite.
 ///
 /// The video editor builds a frame from three passes through two different camera
-/// calibrations, which used to need a bespoke `render_three_pass` on the target.
-/// Generalising that to N layers (#180) is only safe if the loop clears, orders,
-/// and submits identically — so this renders the same content both ways and
-/// compares byte for byte — one layer against `render`, three against
-/// `render_three_pass` — and checks that layering actually composites.
+/// calibrations. `render_layers` generalises that to N layers (#180), and #203
+/// deleted the fixed-arity `render_two_pass`/`render_three_pass` wrappers once
+/// this test had shown the loop clears, orders and submits identically.
+///
+/// What is pinned now: one layer is *exactly* `render` (it is literally routed
+/// through `render_layers` today, so this guards the routing), and additional
+/// layers actually composite rather than overwrite.
+/// `draw_layers` + `read_pixels` must equal `render_layers` (#203).
+///
+/// The split exists so drawing can stay synchronous — only the readback awaits —
+/// so what has to hold is that separating them changes nothing about the pixels
+/// or the submission order.
 #[test]
 #[ignore = "requires a GPU adapter"]
 #[cfg(not(target_arch = "wasm32"))]
-fn render_layers_matches_the_fixed_arity_passes() {
+fn draw_then_read_pixels_matches_render_layers() {
+    use crate::render::SceneLayer;
+    use crate::OffscreenTarget;
+
+    let gpu = test_gpu();
+    let (width, height) = (32, 24);
+    let target = OffscreenTarget::new(&gpu.device, width, height).expect("target builds");
+    let mut renderer = single(OFFSCREEN_FORMAT, &Mesh::hello_triangle());
+
+    let camera = camera_of(FrameParams::IDENTITY, width, height);
+    let scene = [DrawableObject::Mesh {
+        mesh_id: 0,
+        model: Matrix4::IDENTITY.to_cols_array(),
+        mode: RenderMode::Filled,
+    }];
+    let layers = [SceneLayer::new(camera, &scene)];
+
+    let fused = pollster::block_on(target.render_layers(&gpu, &mut renderer, &layers))
+        .expect("fused render");
+
+    target.draw_layers(&gpu, &mut renderer, &layers);
+    let split = pollster::block_on(target.read_pixels(&gpu)).expect("split readback");
+
+    assert_eq!(
+        split, fused,
+        "splitting draw from readback changed the pixels"
+    );
+    assert!(
+        fused.chunks_exact(4).any(|px| px[..3] != [0, 0, 0]),
+        "the test scene drew nothing, so the comparison is vacuous"
+    );
+}
+
+#[test]
+#[ignore = "requires a GPU adapter"]
+#[cfg(not(target_arch = "wasm32"))]
+fn render_layers_composites_and_matches_render_for_one_layer() {
     use crate::render::SceneLayer;
     use crate::OffscreenTarget;
 
@@ -255,21 +298,6 @@ fn render_layers_matches_the_fixed_arity_passes() {
         ],
     ))
     .expect("three layers render");
-    let three_pass = pollster::block_on(target.render_three_pass(
-        &gpu,
-        &mut renderer,
-        camera_of(FrameParams::IDENTITY, width, height),
-        camera_of(FrameParams::IDENTITY, width, height),
-        &background,
-        &foreground,
-        &overlay,
-    ))
-    .expect("three passes render");
-
-    assert_eq!(
-        three_layers, three_pass,
-        "render_layers and render_three_pass disagree"
-    );
     assert_ne!(
         three_layers, one_layer,
         "layering did not composite anything extra"

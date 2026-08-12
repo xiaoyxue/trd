@@ -221,6 +221,19 @@ impl Renderer<OffscreenTarget> {
             .await?)
     }
 
+    /// Encodes and submits `layers` without reading the target back — the
+    /// synchronous half of [`render_layers`](Self::render_layers), for a caller
+    /// that draws now and collects pixels later (#203).
+    pub fn draw_layers(&mut self, layers: &[SceneLayer<'_>]) {
+        self.target
+            .draw_layers(&self.gpu, &mut self.renderer, layers);
+    }
+
+    /// Reads the target's current contents as tightly-packed row-major RGBA.
+    pub async fn read_pixels(&self) -> Result<Vec<u8>, RenderError> {
+        Ok(self.target.read_pixels(&self.gpu).await?)
+    }
+
     /// [`render_scene`](Self::render_scene) for a wire-driven front-end: resolves
     /// the camera against **the target's own size**, so the viewport cannot
     /// disagree with the attachments.
