@@ -1,36 +1,120 @@
-//! The **scene model**: what a frame draws, independent of how it is rendered.
+//! [`Scene`] — a frame's ordered list of primitives, and the one place it is
+//! assembled from a wire draw list.
 //!
-//! A [`Scene`] is an ordered list of [`DrawableObject`]s — light `Copy` handles
-//! naming *which* primitive to draw and its per-frame model. Geometry and GPU
-//! state are owned by the renderer; nothing here touches wgpu, which is why this
-//! sits at the crate root beside `mesh`/`camera`/`material` rather than inside
-//! the render backend (the same reasoning that moved materials out in #180).
-//!
-//! Split by concern (#203):
-//!
-//! | module | owns |
-//! |---|---|
-//! | [`drawable`] | [`DrawableObject`] — the base interface for every primitive — and [`Scene`] |
-//! | [`draw`] | [`Draw`], the *wire* instance record, and its render-mode byte codec |
-//! | [`draw_config`] | [`RenderMode`], [`FrameFit`], [`GridPlane`] — the per-drawable configuration a front-end selects |
-//! | this module | assembly: [`scene_with_overlays`], [`build_scene`], and the overlay builders |
-//!
-//! Assembly is the **one** place a wire [`Draw`] becomes a [`DrawableObject`],
-//! which is what keeps every front-end rendering the same scene from the same
-//! inputs (#180).
+//! [`Scene::from_draws`] is the entry point every front-end uses; the overlay
+//! builders it composes are private, so a front-end cannot assemble half a
+//! scene. That is what keeps native and browser rendering the same frame from
+//! the same inputs (#180).
 
-mod draw;
-mod draw_config;
-mod drawable;
-
-#[cfg(test)]
-pub(crate) use draw::DRAW_MODE_INHERIT;
-pub use draw::{Draw, DrawSelection};
-pub(crate) use draw_config::frame_fit_uv_scale;
-pub use draw_config::{FrameFit, GridPlane, RenderMode};
-pub use drawable::{DrawableObject, Scene};
-
+use super::{Draw, DrawableObject, FrameFit, GridPlane, RenderMode};
 use crate::math::Matrix4;
+
+/// A frame's ordered list of [`DrawableObject`]s the renderer walks and encodes
+/// under the one shared camera `P·V` uniform. The wire authors the mesh draws
+/// (the protocol draw list); the core adds gizmo drawables (axes, AABB boxes).
+/// A single-mesh frame is the degenerate one-element scene — the renderer always
+/// iterates a `Scene`, with no single-object special case.
+///
+/// A struct rather than a `Vec` alias (#203) so assembly can live on it:
+/// [`Scene::from_draws`] is the one entry point every front-end uses, which is
+/// what keeps them all rendering the same scene from the same inputs. It
+/// [`Deref`]s to `[DrawableObject]`, so it reads like the slice it wraps.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Scene {
+    objects: Vec<DrawableObject>,
+}
+
+impl Scene {
+    /// An empty scene.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// An empty scene with room for `capacity` objects.
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            objects: Vec::with_capacity(capacity),
+        }
+    }
+
+    /// Appends one primitive. Order is draw order within a kind, so callers push
+    /// in the order the renderer's buckets expect.
+    pub fn push(&mut self, object: DrawableObject) {
+        self.objects.push(object);
+    }
+
+    /// Appends every primitive of `objects`.
+    pub fn extend(&mut self, objects: impl IntoIterator<Item = DrawableObject>) {
+        self.objects.extend(objects);
+    }
+
+    /// The primitives, in draw order.
+    pub fn objects(&self) -> &[DrawableObject] {
+        &self.objects
+    }
+
+    /// The **one** place a frame's scene is assembled from a wire draw list plus
+    /// appearance options.
+    ///
+    /// Every front-end used to do this itself — the headless `Renderer` from nine
+    /// retained overlay flags, `trd-gui` through setters, the browser renderers
+    /// from their own booleans — which is how native and web overlay assembly
+    /// drifted apart. Assembling here means all of them get the same scene from
+    /// the same inputs (#180), and owning it on `Scene` means the overlay
+    /// builders need not be public at all (#203).
+    ///
+    /// `frame` prepends a background [`DrawableObject::FramePlane`] (#63) when
+    /// the caller has a frame texture bound.
+    pub fn from_draws(
+        draws: &[Draw],
+        options: &crate::RenderOptions,
+        frame: Option<FrameFit>,
+    ) -> Self {
+        let mut scene = build_scene(
+            draws,
+            options.mode,
+            options.show_aabb,
+            options.show_axes,
+            options.show_local_axes,
+            options.show_local_grid,
+            options.show_local_grid_mesh,
+            frame,
+        );
+        // World / object plane grids (#140) are ungated by render mode, so a
+        // filled or shaded object still gets a floor. `encode` buckets by
+        // primitive type, so appending here still draws them in the grid pass.
+        scene.extend(plane_grid_overlays(
+            draws,
+            options.show_world_grid,
+            options.show_object_grid,
+        ));
+        // Selection highlight (#141): drawn even when show-all-AABBs is off.
+        scene.extend(selection_aabb_overlay(draws, options.selected));
+        scene
+    }
+}
+
+impl std::ops::Deref for Scene {
+    type Target = [DrawableObject];
+
+    fn deref(&self) -> &Self::Target {
+        &self.objects
+    }
+}
+
+impl FromIterator<DrawableObject> for Scene {
+    fn from_iter<T: IntoIterator<Item = DrawableObject>>(iter: T) -> Self {
+        Self {
+            objects: iter.into_iter().collect(),
+        }
+    }
+}
+
+impl From<Vec<DrawableObject>> for Scene {
+    fn from(objects: Vec<DrawableObject>) -> Self {
+        Self { objects }
+    }
+}
 
 /// Builds a per-frame [`Scene`] from a wire `draws` list plus the render `mode`
 /// and overlay flags. When `frame` is `Some`, a background
@@ -57,51 +141,10 @@ use crate::math::Matrix4;
 /// the world-origin axes) matches the renderer's draw buckets so output is
 /// pixel-identical to the pre-scene, flag-driven path.
 ///
-/// Shared by the native ([`crate::run_stream`]) and wasm front-ends so neither
-/// branches per primitive type: both author the same ordered `Scene` and hand
-/// it to [`SceneRenderer::encode`].
-/// The **one** place a frame's [`Scene`] is assembled from a wire draw list plus
-/// appearance options.
-///
-/// Every front-end used to do this itself — the headless `Renderer` from nine
-/// retained overlay flags, `trd-gui` through setters, the browser renderers from
-/// their own booleans — which is how native and web overlay assembly drifted
-/// apart. Composing [`build_scene`], [`plane_grid_overlays`] and
-/// [`selection_aabb_overlay`] here means all of them get the same scene from the
-/// same inputs (#180).
-///
-/// `frame` prepends a background [`DrawableObject::FramePlane`] (#63) when the
-/// caller has a frame texture bound.
-pub fn scene_with_overlays(
-    draws: &[Draw],
-    options: &super::RenderOptions,
-    frame: Option<FrameFit>,
-) -> Scene {
-    let mut scene = build_scene(
-        draws,
-        options.mode,
-        options.show_aabb,
-        options.show_axes,
-        options.show_local_axes,
-        options.show_local_grid,
-        options.show_local_grid_mesh,
-        frame,
-    );
-    // World / object plane grids (#140) are ungated by render mode, so a filled or
-    // PBR object still gets a floor. `encode` buckets by primitive type, so
-    // appending here still draws them in the grid pass.
-    scene.extend(plane_grid_overlays(
-        draws,
-        options.show_world_grid,
-        options.show_object_grid,
-    ));
-    // Selection highlight (#141): drawn even when the show-all-AABBs toggle is off.
-    scene.extend(selection_aabb_overlay(draws, options.selected));
-    scene
-}
-
+/// Private: [`Scene::from_draws`] is the entry point, so a front-end cannot
+/// assemble half a scene.
 #[allow(clippy::too_many_arguments)]
-pub fn build_scene(
+fn build_scene(
     draws: &[Draw],
     mode: RenderMode,
     show_aabb: bool,
@@ -111,7 +154,7 @@ pub fn build_scene(
     grid_mesh: Option<u32>,
     frame: Option<FrameFit>,
 ) -> Scene {
-    let mut scene = Vec::with_capacity(
+    let mut scene = Scene::with_capacity(
         draws.len()
             * (1 + usize::from(show_aabb)
                 + usize::from(show_local_axes)
@@ -231,6 +274,7 @@ pub(crate) fn selection_aabb_overlay(draws: &[Draw], selected: Option<u32>) -> V
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::visual::DrawSelection;
 
     #[test]
     fn plane_grid_overlays_place_world_and_object_grids() {
@@ -778,5 +822,183 @@ mod tests {
         assert_eq!(meshes, 2, "shadow draw is not a Mesh; bunny + quad are");
         assert_eq!(aabbs, 2, "no AABB for the shadow draw");
         assert_eq!(axes, 2, "no local-axes gizmo for the shadow draw");
+    }
+
+    #[test]
+    fn build_scene_maps_draws_and_overlays_in_bucket_order() {
+        // #41: the draw list + mode/overlay flags become an ordered `Scene` of
+        // `DrawableObject`s — one Mesh per draw (in `mode`), then one AabbBox per
+        // draw when enabled, then a single origin CoordinateAxes when enabled.
+        let a = [1.0f32; 16];
+        let b = [2.0f32; 16];
+        let draws = [
+            Draw {
+                mesh_id: 0,
+                model: a,
+                selection: DrawSelection::INHERIT,
+            },
+            Draw {
+                mesh_id: 1,
+                model: b,
+                selection: DrawSelection::INHERIT,
+            },
+        ];
+
+        // Plain filled: exactly one Mesh drawable per draw, no gizmos.
+        assert_eq!(
+            *build_scene(
+                &draws,
+                RenderMode::Filled,
+                false,
+                false,
+                false,
+                None,
+                None,
+                None
+            ),
+            [
+                DrawableObject::Mesh {
+                    mesh_id: 0,
+                    model: a,
+                    mode: RenderMode::Filled,
+                },
+                DrawableObject::Mesh {
+                    mesh_id: 1,
+                    model: b,
+                    mode: RenderMode::Filled,
+                },
+            ]
+        );
+
+        // Wireframe propagates the mode to every mesh drawable.
+        assert_eq!(
+            *build_scene(
+                &draws,
+                RenderMode::Wireframe,
+                false,
+                false,
+                false,
+                None,
+                None,
+                None
+            ),
+            [
+                DrawableObject::Mesh {
+                    mesh_id: 0,
+                    model: a,
+                    mode: RenderMode::Wireframe,
+                },
+                DrawableObject::Mesh {
+                    mesh_id: 1,
+                    model: b,
+                    mode: RenderMode::Wireframe,
+                },
+            ]
+        );
+
+        // Both overlays: meshes, then a tracking box per draw, then one gizmo.
+        assert_eq!(
+            *build_scene(
+                &draws,
+                RenderMode::Filled,
+                true,
+                true,
+                false,
+                None,
+                None,
+                None
+            ),
+            [
+                DrawableObject::Mesh {
+                    mesh_id: 0,
+                    model: a,
+                    mode: RenderMode::Filled,
+                },
+                DrawableObject::Mesh {
+                    mesh_id: 1,
+                    model: b,
+                    mode: RenderMode::Filled,
+                },
+                DrawableObject::AabbBox {
+                    mesh_id: 0,
+                    model: a,
+                },
+                DrawableObject::AabbBox {
+                    mesh_id: 1,
+                    model: b,
+                },
+                DrawableObject::CoordinateAxes {
+                    model: Matrix4::IDENTITY.to_cols_array(),
+                },
+            ]
+        );
+
+        // Local axes: one CoordinateAxes per draw at its own model (in the mesh
+        // bucket order, before the world-origin gizmo), each tracking its draw.
+        assert_eq!(
+            *build_scene(
+                &draws,
+                RenderMode::Filled,
+                false,
+                false,
+                true,
+                None,
+                None,
+                None
+            ),
+            [
+                DrawableObject::Mesh {
+                    mesh_id: 0,
+                    model: a,
+                    mode: RenderMode::Filled,
+                },
+                DrawableObject::Mesh {
+                    mesh_id: 1,
+                    model: b,
+                    mode: RenderMode::Filled,
+                },
+                DrawableObject::CoordinateAxes { model: a },
+                DrawableObject::CoordinateAxes { model: b },
+            ]
+        );
+
+        // Per-draw mode override: a draw's own `mode` wins over the global one,
+        // so one frame can mix (e.g.) a textured mesh with a wireframe overlay.
+        let mixed = [
+            Draw {
+                mesh_id: 0,
+                model: a,
+                selection: DrawSelection::INHERIT,
+            },
+            Draw {
+                mesh_id: 1,
+                model: b,
+                selection: DrawSelection::Mesh(Some(RenderMode::Wireframe)),
+            },
+        ];
+        assert_eq!(
+            *build_scene(
+                &mixed,
+                RenderMode::Textured,
+                false,
+                false,
+                false,
+                None,
+                None,
+                None
+            ),
+            [
+                DrawableObject::Mesh {
+                    mesh_id: 0,
+                    model: a,
+                    mode: RenderMode::Textured,
+                },
+                DrawableObject::Mesh {
+                    mesh_id: 1,
+                    model: b,
+                    mode: RenderMode::Wireframe,
+                },
+            ]
+        );
     }
 }

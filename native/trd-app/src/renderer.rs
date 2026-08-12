@@ -9,9 +9,8 @@
 use std::sync::Arc;
 
 use trd_core::{
-    scene_with_overlays, DisneyMaterial, EnvMapData, FrameFit, ImageBasedLighting, ImageData,
-    ImageTexture, Lighting, Mesh, OnscreenTarget, PresentOutcome, RenderOptions, Renderer,
-    ToneMapping,
+    DisneyMaterial, EnvMapData, FrameFit, ImageBasedLighting, ImageData, ImageTexture, Lighting,
+    Mesh, OnscreenTarget, PresentOutcome, RenderOptions, Renderer, Scene, ToneMapping,
 };
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
@@ -175,7 +174,7 @@ impl WindowRenderer {
 
         // Author the frame's Scene from its draw list + the render mode/overlay
         // flags, then hand it to the shared harness — the same Scene, built by the
-        // same `scene_with_overlays`, that the headless CLI and the wasm front-ends
+        // same `Scene::from_draws`, that the headless CLI and the wasm front-ends
         // render. A per-frame background image (#63) is uploaded first, then
         // composited beneath the scene.
         let frame_fit = match frame.frame_image.as_ref() {
@@ -195,7 +194,7 @@ impl WindowRenderer {
                 None
             }
         };
-        let scene = scene_with_overlays(&frame.draws, options, frame_fit);
+        let scene = Scene::from_draws(&frame.draws, options, frame_fit);
 
         match renderer.present_scene(frame.params, &scene) {
             PresentOutcome::Presented => {}

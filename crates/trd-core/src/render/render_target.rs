@@ -19,7 +19,7 @@ use thiserror::Error;
 
 use super::{FrameParams, SceneRenderer, Viewport};
 use crate::output::tightly_pack_rgba;
-use crate::scene::DrawableObject;
+use crate::visual::DrawableObject;
 
 /// What every render target has in common.
 ///

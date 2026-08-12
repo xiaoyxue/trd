@@ -1,9 +1,9 @@
 use wasm_bindgen::prelude::*;
 
 use trd_core::{
-    scene_with_overlays, DecodedFrame, DisneyMaterial, Draw, DrawableObject, EnvMapData,
-    FrameBatch, FrameFit, FrameParams, ImageBasedLighting, InputSession, Lighting, OutputSession,
-    RenderMode, RenderOptions, Renderer, ToneMapping, Tonemap,
+    DecodedFrame, DisneyMaterial, Draw, DrawableObject, EnvMapData, FrameBatch, FrameFit,
+    FrameParams, ImageBasedLighting, InputSession, Lighting, OutputSession, RenderMode,
+    RenderOptions, Renderer, Scene, ToneMapping, Tonemap,
 };
 
 use crate::PbrState;
@@ -42,7 +42,7 @@ pub struct OffscreenRenderer {
     /// meshes, so the device above is eager and this is not (#180).
     renderer: Option<Renderer>,
     /// Draw mode + every overlay toggle, in the **one** type every front-end uses
-    /// to describe a frame's appearance; [`scene_with_overlays`] turns it into the
+    /// to describe a frame's appearance; [`Scene::from_draws`] turns it into the
     /// scene. The renderer keeps no overlay state of its own (#180).
     options: RenderOptions,
     /// Composite the uploaded background frame texture beneath the scene as a
@@ -425,10 +425,7 @@ impl OffscreenRenderer {
     /// the mesh ids, then builds the scene with the current flags + optional
     /// background compositing. Shared by [`push_open`](Self::push_open) (the
     /// output-stream path) and [`render_index`](Self::render_index) (paced replay).
-    fn scene_for(
-        &mut self,
-        frame: &DecodedFrame,
-    ) -> Result<(FrameParams, Vec<DrawableObject>), String> {
+    fn scene_for(&mut self, frame: &DecodedFrame) -> Result<(FrameParams, Scene), String> {
         // The protocol is mesh-first: without a leading mesh table there is
         // nothing to draw (and the mesh renderer requires ≥1 mesh).
         if !self.input.has_meshes() {
@@ -454,7 +451,7 @@ impl OffscreenRenderer {
                 ));
             }
         }
-        let scene = scene_with_overlays(
+        let scene = Scene::from_draws(
             &draws,
             &self.options,
             (has_inline_frame || (self.composite_frame && has_external_frame))

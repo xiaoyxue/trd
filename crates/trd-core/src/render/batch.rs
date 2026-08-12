@@ -17,7 +17,7 @@
 
 use super::*;
 use crate::math::Matrix4;
-use crate::scene::{DrawableObject, FrameFit, RenderMode};
+use crate::visual::{DrawableObject, FrameFit, RenderMode};
 
 /// Which geometry a [`DrawCommand`] binds. The `usize` is a mesh id (index into
 /// [`MeshStore::meshes`](super::mesh_store::MeshStore) for the mesh kinds, or a

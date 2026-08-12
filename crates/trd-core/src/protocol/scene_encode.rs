@@ -40,8 +40,8 @@ use super::{
     TABLE_KIND_KEY, TEXTURE_TABLE_KIND,
 };
 use crate::render::{FrameParams, Mesh};
-use crate::scene::{Draw, DrawSelection, RenderMode};
 use crate::texture::{Texture, TEXTURE_COLUMN};
+use crate::visual::{Draw, DrawSelection, RenderMode};
 use crate::{InlineFrame, FRAME_BYTES_COLUMN, FRAME_PIXELS_COLUMN};
 
 /// A failure authoring an input Arrow stream.
@@ -257,7 +257,7 @@ pub fn encode_texture_stream(texture: &dyn Texture) -> Result<Vec<u8>, SceneEnco
 /// it by the round-trip tests below.
 fn selection_to_wire(selection: DrawSelection) -> u8 {
     match selection {
-        DrawSelection::Mesh(None) => crate::scene::DRAW_MODE_INHERIT,
+        DrawSelection::Mesh(None) => crate::visual::DRAW_MODE_INHERIT,
         DrawSelection::Mesh(Some(RenderMode::Filled)) => 0,
         DrawSelection::Mesh(Some(RenderMode::Wireframe)) => 1,
         DrawSelection::Mesh(Some(RenderMode::Textured)) => 2,

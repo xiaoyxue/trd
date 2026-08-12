@@ -10,7 +10,7 @@
 
 use super::GpuContext;
 use super::{create_frame_bind_group_layout, create_frame_plane_pipeline, Viewport};
-use crate::scene::{frame_fit_uv_scale, FrameFit};
+use crate::visual::{frame_fit_uv_scale, FrameFit};
 
 /// The reused GPU frame texture plus its bind group and fit uniform. Recreated
 /// only when the frame resolution changes, so streaming a fixed-resolution video

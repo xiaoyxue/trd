@@ -17,7 +17,7 @@ use super::{
     create_depth_target, DepthTarget, FrameParams, PickInstanceRaw, SceneRenderer, Viewport,
     PICK_FORMAT,
 };
-use crate::scene::Draw;
+use crate::visual::Draw;
 
 /// A single-sample id-color render target + depth + a tiny read-back buffer for
 /// one pixel. Sized to the display; rebuilt when the render size changes.
