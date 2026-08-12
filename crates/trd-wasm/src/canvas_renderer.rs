@@ -511,10 +511,16 @@ impl CanvasRenderer {
     }
 
     fn present_once(&mut self, params: FrameParams, scene: &[DrawableObject]) -> PresentOutcome {
-        self.renderer
+        let renderer = self
+            .renderer
             .as_mut()
-            .expect("renderer built before present")
-            .present_scene(params, scene)
+            .expect("renderer built before present");
+        // Wire-decoded params: resolve against the surface's own size, so the
+        // camera's viewport cannot disagree with the attachments (#203).
+        let Ok(camera) = params.to_camera(renderer.viewport()) else {
+            return PresentOutcome::Skipped(SurfaceSkip::Validation);
+        };
+        renderer.present_scene(camera, scene)
     }
 
     fn reconfigure(&mut self) {

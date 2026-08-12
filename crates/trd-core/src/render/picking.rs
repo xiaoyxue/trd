@@ -13,11 +13,9 @@
 use super::GpuContext;
 use futures_channel::oneshot;
 
-use super::{
-    create_depth_target, DepthTarget, FrameParams, PickInstanceRaw, SceneRenderer, Viewport,
-    PICK_FORMAT,
-};
+use super::{create_depth_target, DepthTarget, PickInstanceRaw, SceneRenderer, PICK_FORMAT};
 use crate::visual::Draw;
+use crate::Camera;
 
 /// A single-sample id-color render target + depth + a tiny read-back buffer for
 /// one pixel. Sized to the display; rebuilt when the render size changes.
@@ -96,7 +94,7 @@ impl PickTarget {
         &self,
         gpu: &GpuContext,
         renderer: &mut SceneRenderer,
-        params: FrameParams,
+        camera: Camera,
         draws: &[Draw],
         x: u32,
         y: u32,
@@ -113,12 +111,8 @@ impl PickTarget {
             &mut encoder,
             &self.color_view,
             &self.depth.view,
-            params,
+            camera,
             draws,
-            Viewport {
-                width: self.width,
-                height: self.height,
-            },
         );
         // Copy just the one texel under the cursor into the staging buffer.
         encoder.copy_texture_to_buffer(

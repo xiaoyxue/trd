@@ -25,6 +25,7 @@ use crate::material::DisneyMaterial;
 use crate::math::Matrix4;
 use crate::texture::Texture;
 use crate::visual::{Draw, DrawableObject};
+use crate::Camera;
 
 /// The mesh and gizmo pipelines plus their camera/material bindings. Filled,
 /// wireframe, arrowheads, and textured rendering share the camera layout;
@@ -168,26 +169,18 @@ impl SceneRenderPipelines {
                 }),
             }],
         });
-        // Identity params ignore the viewport (no intrinsics); each frame's
-        // `write_camera` supplies the real target dimensions.
-        let (camera_uniform, camera_bind_group) = create_view_proj_binding(
-            device,
-            &camera_layout,
-            FrameParams::IDENTITY,
-            Viewport {
+        // A placeholder camera: the buffers only need to exist here, and every
+        // frame's `write_camera` overwrites them with the real one.
+        let placeholder = FrameParams::IDENTITY
+            .to_camera(Viewport {
                 width: 1,
                 height: 1,
-            },
-        );
-        let (gizmo_uniform, gizmo_bind_group) = create_gizmo_binding(
-            device,
-            &gizmo_layout,
-            FrameParams::IDENTITY,
-            Viewport {
-                width: 1,
-                height: 1,
-            },
-        );
+            })
+            .expect("the identity params are a valid camera form");
+        let (camera_uniform, camera_bind_group) =
+            create_view_proj_binding(device, &camera_layout, placeholder);
+        let (gizmo_uniform, gizmo_bind_group) =
+            create_gizmo_binding(device, &gizmo_layout, placeholder);
         Self {
             filled,
             wireframe,
@@ -206,10 +199,10 @@ impl SceneRenderPipelines {
         }
     }
 
-    /// Rewrites the camera `P·V` uniform for this frame's `params`/`viewport`.
-    fn write_camera(&self, queue: &wgpu::Queue, params: FrameParams, viewport: Viewport) {
-        write_view_proj(queue, &self.camera_uniform, params, viewport);
-        write_gizmo_params(queue, &self.gizmo_uniform, params, viewport);
+    /// Rewrites the camera `P·V` uniform for this frame's `camera`.
+    fn write_camera(&self, queue: &wgpu::Queue, camera: Camera) {
+        write_view_proj(queue, &self.camera_uniform, camera);
+        write_gizmo_params(queue, &self.gizmo_uniform, camera);
     }
 
     /// Rewrites the Disney PBR uniform **slots** for this frame: one slot per
@@ -220,16 +213,15 @@ impl SceneRenderPipelines {
     fn write_pbr(
         &self,
         queue: &wgpu::Queue,
-        params: FrameParams,
-        viewport: Viewport,
+        camera: Camera,
         inputs: PbrBatchInputs<'_>,
         use_env: bool,
     ) {
         debug_assert_eq!(inputs.materials.len(), inputs.ibl.len());
         debug_assert_eq!(inputs.materials.len(), inputs.tone_mappings.len());
         debug_assert_eq!(inputs.materials.len(), inputs.debug_views.len());
-        let view_proj = params.view_proj_matrix(viewport).to_cols_array();
-        let camera_pos = params.camera_position();
+        let view_proj = camera.view_projection().matrix().to_cols_array();
+        let camera_pos = camera.position();
         for (i, (((material, ibl), tone_mapping), debug_view)) in inputs
             .materials
             .iter()
@@ -583,11 +575,10 @@ impl SceneRenderer {
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
-        params: FrameParams,
+        camera: Camera,
         scene: &[DrawableObject],
-        viewport: Viewport,
     ) {
-        self.encode_pass(encoder, view, params, scene, viewport, false);
+        self.encode_pass(encoder, view, camera, scene, false);
     }
 
     /// Encodes a foreground scene while preserving color already rendered into
@@ -596,11 +587,10 @@ impl SceneRenderer {
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
-        params: FrameParams,
+        camera: Camera,
         scene: &[DrawableObject],
-        viewport: Viewport,
     ) {
-        self.encode_pass(encoder, view, params, scene, viewport, true);
+        self.encode_pass(encoder, view, camera, scene, true);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -608,21 +598,19 @@ impl SceneRenderer {
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
-        params: FrameParams,
+        camera: Camera,
         scene: &[DrawableObject],
-        viewport: Viewport,
         load_color: bool,
     ) {
         // 1. Camera P·V for this frame.
-        self.pipelines
-            .write_camera(&self.gpu.queue, params, viewport);
+        self.pipelines.write_camera(&self.gpu.queue, camera);
         // 1b. Disney PBR uniform slots for this frame — one per mesh (each carries
         //     the shared camera/lights + that mesh's material, #141). Written
         //     unconditionally so a PBR draw always has a current material slot.
+        let viewport = camera.viewport();
         self.pipelines.write_pbr(
             &self.gpu.queue,
-            params,
-            viewport,
+            camera,
             PbrBatchInputs {
                 materials: &self.pbr_materials,
                 ibl: &self.pbr_ibl,
@@ -661,8 +649,7 @@ impl SceneRenderer {
         if let Some(([rotation, exposure, blur], tonemap)) = batches.environment_background {
             self.env_background.write(
                 &self.gpu.queue,
-                params,
-                viewport,
+                camera,
                 EnvBackgroundSettings {
                     rotation,
                     exposure,
@@ -821,14 +808,12 @@ impl SceneRenderer {
         encoder: &mut wgpu::CommandEncoder,
         color_view: &wgpu::TextureView,
         depth_view: &wgpu::TextureView,
-        params: FrameParams,
+        camera: Camera,
         draws: &[Draw],
-        viewport: Viewport,
     ) {
         // Camera P·V for this frame (writes the shared camera uniform bound by
         // `camera_bind_group`, which is layout-compatible with the pick pipeline).
-        self.pipelines
-            .write_camera(&self.gpu.queue, params, viewport);
+        self.pipelines.write_camera(&self.gpu.queue, camera);
 
         // Build one pick instance per drawable object, carrying its index color.
         // Keep the draw index as the id even when an entry is skipped, so a decoded

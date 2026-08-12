@@ -161,11 +161,11 @@ impl VideoPlacementRenderer {
         model: trd_core::Matrix4,
         point: (u32, u32),
     ) -> Result<Option<u32>, String> {
-        let params = self.frame_params(frame, source_size)?;
+        let camera = self.frame_camera(frame, source_size)?;
         Ok(self
             .renderer
             .pick(
-                params,
+                camera,
                 &[trd_core::Draw {
                     mesh_id: 0,
                     model: model.to_cols_array(),
@@ -194,13 +194,16 @@ impl VideoPlacementRenderer {
     ) -> Result<Vec<u8>, String> {
         self.renderer
             .update_frame_texture_rgba(rgba, frame_width, frame_height);
-        let background_params = self
-            .frame_params(background_frame, calibration_size)
-            .unwrap_or(trd_core::FrameParams::IDENTITY);
-        let foreground_params = placement_frame
-            .map(|frame| self.frame_params(frame, calibration_size))
+        let identity_camera = trd_core::FrameParams::IDENTITY
+            .to_camera(self.renderer.viewport())
+            .map_err(|error| error.to_string())?;
+        let background_camera = self
+            .frame_camera(background_frame, calibration_size)
+            .unwrap_or(identity_camera);
+        let foreground_camera = placement_frame
+            .map(|frame| self.frame_camera(frame, calibration_size))
             .transpose()?
-            .unwrap_or(background_params);
+            .unwrap_or(background_camera);
         if self.renderer.mesh_count() > 0 {
             self.renderer
                 .set_mesh_disney_material(0, state.materials[0].clone());
@@ -224,24 +227,24 @@ impl VideoPlacementRenderer {
 
         self.renderer
             .render_layers(&[
-                trd_core::SceneLayer::new(background_params, &background),
-                trd_core::SceneLayer::new(foreground_params, &foreground),
-                trd_core::SceneLayer::new(foreground_params, &selection_overlay),
+                trd_core::SceneLayer::new(background_camera, &background),
+                trd_core::SceneLayer::new(foreground_camera, &foreground),
+                trd_core::SceneLayer::new(foreground_camera, &selection_overlay),
             ])
             .await
             .map_err(|error| error.to_string())
     }
 
-    fn frame_params(
+    fn frame_camera(
         &self,
         frame: &trd_core::VideoEditingFrame,
         source_size: (u32, u32),
-    ) -> Result<trd_core::FrameParams, String> {
+    ) -> Result<trd_core::Camera, String> {
         let k = frame.k.ok_or("selected video frame has no quad/K")?;
         let (width, height) = self.size();
         let sx = width as f32 / source_size.0 as f32;
         let sy = height as f32 / source_size.1 as f32;
-        Ok(trd_core::FrameParams {
+        let params = trd_core::FrameParams {
             k: Some([
                 k[0] * sx,
                 k[3] * sy,
@@ -254,7 +257,10 @@ impl VideoPlacementRenderer {
                 k[8],
             ]),
             ..trd_core::FrameParams::IDENTITY
-        })
+        };
+        params
+            .to_camera(self.renderer.viewport())
+            .map_err(|error| error.to_string())
     }
 }
 

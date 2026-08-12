@@ -120,6 +120,15 @@ impl Camera {
         self.view.inverse()
     }
 
+    /// The camera's **world-space position** — the translation of the pose
+    /// (world-from-camera). Needed by the shaded path for the view vector `V`
+    /// and the environment reflection. An identity view sits at the origin.
+    #[inline]
+    pub fn position(self) -> [f32; 3] {
+        let cols = self.to_pose().matrix().to_cols_array();
+        [cols[12], cols[13], cols[14]]
+    }
+
     /// The pinhole **intrinsics `K`** recovered from the projection and viewport
     /// (column-major `[fx, 0, 0, s, fy, 0, cx, cy, 1]`).
     ///

@@ -2,9 +2,9 @@
 //! uniform construction helpers.
 
 use super::{
-    FrameParams, GizmoLineVertex, GizmoUniform, InstanceRaw, PbrVertex, PickInstanceRaw, Uniform,
-    Vertex, Viewport,
+    GizmoLineVertex, GizmoUniform, InstanceRaw, PbrVertex, PickInstanceRaw, Uniform, Vertex,
 };
+use crate::Camera;
 
 /// The mesh pass's MSAA sample count. 4× multisampling is the WebGPU-guaranteed
 /// level for renderable formats (native Vulkan/Metal/DX + the WebGL2 downlevel
@@ -487,18 +487,17 @@ pub(crate) fn create_frame_plane_pipeline(
 }
 /// Creates the camera `P·V` uniform buffer + bind group over an **explicit**
 /// bind-group layout (shared by the filled and wireframe mesh pipelines),
-/// initialised to `params`'s view-projection for `viewport`. Used by
+/// initialised to `camera`'s view-projection. Used by
 /// [`SceneRenderer`], whose two pipelines must share one bind group.
 pub(crate) fn create_view_proj_binding(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
-    params: FrameParams,
-    viewport: Viewport,
+    camera: Camera,
 ) -> (wgpu::Buffer, wgpu::BindGroup) {
     use wgpu::util::DeviceExt;
     let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("trd view-proj uniform"),
-        contents: bytemuck::bytes_of(&Uniform::view_proj(params, viewport)),
+        contents: bytemuck::bytes_of(&Uniform::view_proj(camera)),
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     });
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -516,30 +515,20 @@ pub(crate) fn create_view_proj_binding(
 /// instanced mesh path supplies each model matrix per instance). Lets
 /// [`SceneRenderer`] reuse one uniform buffer across frames instead of rebuilding
 /// it.
-pub(crate) fn write_view_proj(
-    queue: &wgpu::Queue,
-    buffer: &wgpu::Buffer,
-    params: FrameParams,
-    viewport: Viewport,
-) {
-    queue.write_buffer(
-        buffer,
-        0,
-        bytemuck::bytes_of(&Uniform::view_proj(params, viewport)),
-    );
+pub(crate) fn write_view_proj(queue: &wgpu::Queue, buffer: &wgpu::Buffer, camera: Camera) {
+    queue.write_buffer(buffer, 0, bytemuck::bytes_of(&Uniform::view_proj(camera)));
 }
 
 /// Creates the viewport-aware gizmo uniform and bind group.
 pub(crate) fn create_gizmo_binding(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
-    params: FrameParams,
-    viewport: Viewport,
+    camera: Camera,
 ) -> (wgpu::Buffer, wgpu::BindGroup) {
     use wgpu::util::DeviceExt;
     let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("trd gizmo uniform"),
-        contents: bytemuck::bytes_of(&GizmoUniform::new(params, viewport)),
+        contents: bytemuck::bytes_of(&GizmoUniform::new(camera)),
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     });
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -554,17 +543,8 @@ pub(crate) fn create_gizmo_binding(
 }
 
 /// Updates the gizmo camera + viewport uniform for the current frame.
-pub(crate) fn write_gizmo_params(
-    queue: &wgpu::Queue,
-    buffer: &wgpu::Buffer,
-    params: FrameParams,
-    viewport: Viewport,
-) {
-    queue.write_buffer(
-        buffer,
-        0,
-        bytemuck::bytes_of(&GizmoUniform::new(params, viewport)),
-    );
+pub(crate) fn write_gizmo_params(queue: &wgpu::Queue, buffer: &wgpu::Buffer, camera: Camera) {
+    queue.write_buffer(buffer, 0, bytemuck::bytes_of(&GizmoUniform::new(camera)));
 }
 
 /// The group-0 bind-group layout for the Disney PBR pipeline (#, `pbr.wgsl`):
