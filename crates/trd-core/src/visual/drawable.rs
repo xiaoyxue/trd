@@ -54,7 +54,7 @@ pub enum DrawableObject {
     /// blob laid on a placed mesh's ground plane, placed by `model` (a flat quad
     /// on the plane, sized to the mesh footprint), so the mesh reads as *sitting
     /// on* the reconstructed surface rather than floating over the composited
-    /// video plate. A [`RenderMode::Shadow`] draw becomes this variant. Tied to no
+    /// video plate. A [`DrawSelection::Shadow`](super::DrawSelection) draw becomes this variant. Tied to no
     /// mesh (no base model); alpha-blended over the [`FramePlane`](Self::FramePlane)
     /// and drawn *before* the opaque content mesh (depth-write off) so the mesh
     /// composites on top while the surrounding rim darkens the floor.
@@ -75,10 +75,3 @@ pub enum DrawableObject {
     /// `frame_path`/`frame_url` renders with no background (back-compat).
     FramePlane { fit: FrameFit },
 }
-
-/// A frame's ordered list of [`DrawableObject`]s the renderer walks and encodes
-/// under the one shared camera `P·V` uniform. The wire authors the mesh draws
-/// (the protocol 0.0.3 draw list); the core adds gizmo drawables (axes, AABB
-/// boxes). A single-mesh frame is the degenerate one-element scene — the
-/// renderer always iterates a `Scene`, with no single-object special case.
-pub type Scene = Vec<DrawableObject>;

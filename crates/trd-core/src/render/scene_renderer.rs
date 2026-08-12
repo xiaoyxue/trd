@@ -23,8 +23,8 @@ use super::pbr::PbrBatchInputs;
 use super::*;
 use crate::material::DisneyMaterial;
 use crate::math::Matrix4;
-use crate::scene::{Draw, DrawableObject};
 use crate::texture::Texture;
+use crate::visual::{Draw, DrawableObject};
 
 /// The mesh and gizmo pipelines plus their camera/material bindings. Filled,
 /// wireframe, arrowheads, and textured rendering share the camera layout;
@@ -956,7 +956,7 @@ impl SceneRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scene::{FrameFit, GridPlane, RenderMode};
+    use crate::visual::{FrameFit, GridPlane, RenderMode};
 
     fn model(tag: f32) -> [f32; 16] {
         let mut model = Matrix4::IDENTITY.to_cols_array();

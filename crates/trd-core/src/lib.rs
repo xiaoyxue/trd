@@ -13,9 +13,9 @@ mod mesh;
 mod output;
 mod protocol;
 mod render;
-mod scene;
 mod texture;
 mod video_editing;
+mod visual;
 
 pub use camera::{Camera, DEFAULT_FIT_MARGIN, DEFAULT_FOV_Y, DEFAULT_VIEW_DIR};
 pub use frame::{FrameError, InlineFrame, FRAME_BYTES_COLUMN, FRAME_PIXELS_COLUMN};
@@ -41,13 +41,10 @@ pub use render::{
     PointLight, PresentOutcome, RenderOptions, RenderTarget, SceneLayer, SceneRenderer,
     SurfaceSkip, ToneMapping, Tonemap, Vertex, Viewport, OFFSCREEN_FORMAT,
 };
-// The scene model is plain data (no wgpu), so it sits beside `mesh`/`camera`/
-// `material` at the crate root rather than inside the render backend (#203).
-// The public paths (`trd_core::DrawableObject`, ...) are unchanged.
-pub use scene::{
-    build_scene, scene_with_overlays, Draw, DrawSelection, DrawableObject, FrameFit, GridPlane,
-    RenderMode, Scene,
-};
+// The visual model (scene + primitives) is plain data (no wgpu), so it sits
+// beside `mesh`/`camera`/`material` at the crate root rather than inside the
+// render backend (#203). Public paths (`trd_core::DrawableObject`) are unchanged.
+pub use visual::{Draw, DrawSelection, DrawableObject, FrameFit, GridPlane, RenderMode, Scene};
 // The offscreen harness; available on both platforms since it became async
 // (#180) — the browser could not use it while it blocked on readback.
 pub use render::{RenderError, Renderer};

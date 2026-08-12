@@ -30,8 +30,8 @@ use arrow::datatypes::Schema;
 // `Matrix4` is referenced only by the `#[cfg(test)]` unit tests (imported there).
 use crate::protocol::{ProtocolError, PROTOCOL_VERSION};
 use crate::render::{check_dimensions, FrameParams, Mesh, OffscreenError, RenderOptions, Renderer};
-use crate::scene::{Draw, FrameFit};
 use crate::texture::ImageTexture;
+use crate::visual::{Draw, FrameFit};
 use crate::OutputSession;
 
 /// Errors from decoding, validating, rendering, or encoding a trd stream.
@@ -462,7 +462,7 @@ fn render_and_write_batch<W: Write>(
         // The scene is assembled here, from the wire draw list plus the CLI's
         // appearance options — the same `scene_with_overlays` every other
         // front-end uses, so they cannot drift apart (#180).
-        let scene = crate::scene::scene_with_overlays(&draws, options, frame_fit);
+        let scene = crate::visual::Scene::from_draws(&draws, options, frame_fit);
         // `run_stream` is a synchronous `Read`/`Write` filter, while the renderer
         // is async because GPU read-back is (the browser must not block its event
         // loop). Natively blocking here is free: the future is already complete
@@ -580,11 +580,10 @@ pub fn run_stream<R: Read, W: Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::math::Matrix4;
     use crate::protocol::{
         MESH_TABLE_KIND, PARAMS_TABLE_KIND, PROTOCOL_VERSION_KEY, TABLE_KIND_KEY,
     };
-    use crate::scene::{build_scene, DrawSelection, DrawableObject, RenderMode};
+    use crate::visual::{DrawSelection, RenderMode};
     use arrow::array::{
         Array, ArrayRef, FixedSizeListArray, FixedSizeListArray as U8List, Float32Array, ListArray,
         StringArray, UInt32Array, UInt8Array,
@@ -1006,184 +1005,6 @@ mod tests {
             decode_draws(&with_mesh_only),
             Err(StreamError::MissingColumn("draw_model"))
         ));
-    }
-
-    #[test]
-    fn build_scene_maps_draws_and_overlays_in_bucket_order() {
-        // #41: the draw list + mode/overlay flags become an ordered `Scene` of
-        // `DrawableObject`s — one Mesh per draw (in `mode`), then one AabbBox per
-        // draw when enabled, then a single origin CoordinateAxes when enabled.
-        let a = [1.0f32; 16];
-        let b = [2.0f32; 16];
-        let draws = [
-            Draw {
-                mesh_id: 0,
-                model: a,
-                selection: DrawSelection::INHERIT,
-            },
-            Draw {
-                mesh_id: 1,
-                model: b,
-                selection: DrawSelection::INHERIT,
-            },
-        ];
-
-        // Plain filled: exactly one Mesh drawable per draw, no gizmos.
-        assert_eq!(
-            build_scene(
-                &draws,
-                RenderMode::Filled,
-                false,
-                false,
-                false,
-                None,
-                None,
-                None
-            ),
-            vec![
-                DrawableObject::Mesh {
-                    mesh_id: 0,
-                    model: a,
-                    mode: RenderMode::Filled,
-                },
-                DrawableObject::Mesh {
-                    mesh_id: 1,
-                    model: b,
-                    mode: RenderMode::Filled,
-                },
-            ]
-        );
-
-        // Wireframe propagates the mode to every mesh drawable.
-        assert_eq!(
-            build_scene(
-                &draws,
-                RenderMode::Wireframe,
-                false,
-                false,
-                false,
-                None,
-                None,
-                None
-            ),
-            vec![
-                DrawableObject::Mesh {
-                    mesh_id: 0,
-                    model: a,
-                    mode: RenderMode::Wireframe,
-                },
-                DrawableObject::Mesh {
-                    mesh_id: 1,
-                    model: b,
-                    mode: RenderMode::Wireframe,
-                },
-            ]
-        );
-
-        // Both overlays: meshes, then a tracking box per draw, then one gizmo.
-        assert_eq!(
-            build_scene(
-                &draws,
-                RenderMode::Filled,
-                true,
-                true,
-                false,
-                None,
-                None,
-                None
-            ),
-            vec![
-                DrawableObject::Mesh {
-                    mesh_id: 0,
-                    model: a,
-                    mode: RenderMode::Filled,
-                },
-                DrawableObject::Mesh {
-                    mesh_id: 1,
-                    model: b,
-                    mode: RenderMode::Filled,
-                },
-                DrawableObject::AabbBox {
-                    mesh_id: 0,
-                    model: a,
-                },
-                DrawableObject::AabbBox {
-                    mesh_id: 1,
-                    model: b,
-                },
-                DrawableObject::CoordinateAxes {
-                    model: Matrix4::IDENTITY.to_cols_array(),
-                },
-            ]
-        );
-
-        // Local axes: one CoordinateAxes per draw at its own model (in the mesh
-        // bucket order, before the world-origin gizmo), each tracking its draw.
-        assert_eq!(
-            build_scene(
-                &draws,
-                RenderMode::Filled,
-                false,
-                false,
-                true,
-                None,
-                None,
-                None
-            ),
-            vec![
-                DrawableObject::Mesh {
-                    mesh_id: 0,
-                    model: a,
-                    mode: RenderMode::Filled,
-                },
-                DrawableObject::Mesh {
-                    mesh_id: 1,
-                    model: b,
-                    mode: RenderMode::Filled,
-                },
-                DrawableObject::CoordinateAxes { model: a },
-                DrawableObject::CoordinateAxes { model: b },
-            ]
-        );
-
-        // Per-draw mode override: a draw's own `mode` wins over the global one,
-        // so one frame can mix (e.g.) a textured mesh with a wireframe overlay.
-        let mixed = [
-            Draw {
-                mesh_id: 0,
-                model: a,
-                selection: DrawSelection::INHERIT,
-            },
-            Draw {
-                mesh_id: 1,
-                model: b,
-                selection: DrawSelection::Mesh(Some(RenderMode::Wireframe)),
-            },
-        ];
-        assert_eq!(
-            build_scene(
-                &mixed,
-                RenderMode::Textured,
-                false,
-                false,
-                false,
-                None,
-                None,
-                None
-            ),
-            vec![
-                DrawableObject::Mesh {
-                    mesh_id: 0,
-                    model: a,
-                    mode: RenderMode::Textured,
-                },
-                DrawableObject::Mesh {
-                    mesh_id: 1,
-                    model: b,
-                    mode: RenderMode::Wireframe,
-                },
-            ]
-        );
     }
 
     #[test]

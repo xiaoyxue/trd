@@ -1,7 +1,7 @@
 use trd_core::{
-    scene_with_overlays, DecodedFrame, DisneyMaterial, Draw, DrawableObject, EnvMapData, FrameFit,
-    FrameParams, ImageBasedLighting, Lighting, OnscreenTarget, PresentOutcome, RenderMode,
-    RenderOptions, Renderer, SurfaceSkip, ToneMapping, Tonemap,
+    DecodedFrame, DisneyMaterial, Draw, DrawableObject, EnvMapData, FrameFit, FrameParams,
+    ImageBasedLighting, Lighting, OnscreenTarget, PresentOutcome, RenderMode, RenderOptions,
+    Renderer, Scene, SurfaceSkip, ToneMapping, Tonemap,
 };
 use wasm_bindgen::prelude::*;
 
@@ -29,7 +29,7 @@ pub struct CanvasRenderer {
     /// first frame arrives (the mesh table has been decoded by then).
     renderer: Option<Renderer<OnscreenTarget>>,
     /// Draw mode + every overlay toggle, in the **one** type every front-end uses
-    /// to describe a frame's appearance; [`scene_with_overlays`] turns it into the
+    /// to describe a frame's appearance; [`Scene::from_draws`] turns it into the
     /// scene. The renderer keeps no overlay state of its own (#180).
     options: RenderOptions,
     /// Composite the uploaded background frame texture beneath the scene as a
@@ -445,7 +445,7 @@ impl CanvasRenderer {
                 )));
             }
         }
-        let scene = scene_with_overlays(
+        let scene = Scene::from_draws(
             &draws,
             &self.options,
             (has_inline_frame || (self.composite_frame && has_external_frame))

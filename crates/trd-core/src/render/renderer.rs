@@ -18,7 +18,7 @@ use super::{
     SceneLayer, SceneRenderer, Viewport, OFFSCREEN_FORMAT,
 };
 use crate::math::Matrix4;
-use crate::scene::{Draw, DrawableObject};
+use crate::visual::{Draw, DrawableObject};
 use thiserror::Error;
 
 /// Errors constructing or driving a [`Renderer`].

@@ -48,11 +48,11 @@ pub fn render_options(state: &SceneState) -> trd_core::RenderOptions {
 }
 
 /// The full per-frame scene for `state`: the shared
-/// [`scene_with_overlays`](trd_core::scene_with_overlays) assembly plus the
+/// [`Scene::from_draws`](trd_core::Scene::from_draws) assembly plus the
 /// optional HDR environment background, which is a scene element rather than an
 /// overlay toggle.
 pub fn scene_for(state: &SceneState) -> trd_core::Scene {
-    let mut scene = trd_core::scene_with_overlays(&state.draws(), &render_options(state), None);
+    let mut scene = trd_core::Scene::from_draws(&state.draws(), &render_options(state), None);
     if state.show_environment_background {
         scene.push(trd_core::DrawableObject::EnvironmentBackground {
             rotation: state
@@ -255,7 +255,7 @@ mod tests {
     }
 
     /// `render_options` must forward **every** overlay toggle, so the one
-    /// `scene_with_overlays` assembly produces what the panel asked for.
+    /// `Scene::from_draws` assembly produces what the panel asked for.
     #[test]
     fn render_options_forward_the_overlay_toggles() {
         let state = SceneState {

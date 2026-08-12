@@ -2,7 +2,7 @@
 //! and grids, plus the coordinate-axis arrowhead triangles.
 
 use super::{GizmoLineVertex, Vertex};
-use crate::scene::GridPlane;
+use crate::visual::GridPlane;
 
 /// RGB color of the optional AABB overlay box (bright green), chosen to stand
 /// out against the default white mesh.
