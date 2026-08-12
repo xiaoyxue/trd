@@ -23,7 +23,7 @@ use super::pbr::PbrBatchInputs;
 use super::*;
 use crate::material::DisneyMaterial;
 use crate::math::Matrix4;
-use crate::scene::{Draw, DrawableObject, RenderMode};
+use crate::scene::{Draw, DrawableObject};
 use crate::texture::Texture;
 
 /// The mesh and gizmo pipelines plus their camera/material bindings. Filled,
@@ -835,8 +835,9 @@ impl SceneRenderer {
         // id maps straight back to `draws[index]`.
         let mut instances: Vec<PickInstanceRaw> = Vec::with_capacity(draws.len());
         let mut records: Vec<(usize, u32)> = Vec::with_capacity(draws.len());
+        // A shadow blob has no mesh geometry to hit-test, so it is not pickable.
         for (index, draw) in draws.iter().enumerate() {
-            if draw.mode == Some(RenderMode::Shadow) {
+            if !draw.selection.is_mesh() {
                 continue;
             }
             let Some(mesh) = self.store.meshes.get(draw.mesh_id as usize) else {
@@ -955,7 +956,7 @@ impl SceneRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scene::{FrameFit, GridPlane};
+    use crate::scene::{FrameFit, GridPlane, RenderMode};
 
     fn model(tag: f32) -> [f32; 16] {
         let mut model = Matrix4::IDENTITY.to_cols_array();
@@ -1003,7 +1004,6 @@ mod tests {
             },
             mesh(1, 31.0, RenderMode::Shaded),
             mesh(99, 99.0, RenderMode::Filled),
-            mesh(0, 98.0, RenderMode::Shadow),
             DrawableObject::FramePlane {
                 fit: FrameFit::Cover,
             },

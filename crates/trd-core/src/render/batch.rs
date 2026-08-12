@@ -98,7 +98,6 @@ pub(super) fn build_batches(
                     RenderMode::Textured => DrawKind::Textured(mesh_id),
                     RenderMode::Shaded => DrawKind::Shaded(mesh_id),
                     RenderMode::Wireframe => DrawKind::Wireframe(mesh_id),
-                    RenderMode::Shadow => continue,
                 };
                 let effective = Matrix4::from_cols_array(&model) * base_model;
                 (kind, effective.to_cols_array())

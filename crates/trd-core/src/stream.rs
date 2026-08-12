@@ -584,7 +584,7 @@ mod tests {
     use crate::protocol::{
         MESH_TABLE_KIND, PARAMS_TABLE_KIND, PROTOCOL_VERSION_KEY, TABLE_KIND_KEY,
     };
-    use crate::scene::{build_scene, DrawableObject, RenderMode};
+    use crate::scene::{build_scene, DrawSelection, DrawableObject, RenderMode};
     use arrow::array::{
         Array, ArrayRef, FixedSizeListArray, FixedSizeListArray as U8List, Float32Array, ListArray,
         StringArray, UInt32Array, UInt8Array,
@@ -872,12 +872,12 @@ mod tests {
                 Draw {
                     mesh_id: 0,
                     model: a,
-                    mode: None
+                    selection: DrawSelection::INHERIT
                 },
                 Draw {
                     mesh_id: 1,
                     model: b,
-                    mode: None
+                    selection: DrawSelection::INHERIT
                 },
             ]
         );
@@ -886,7 +886,7 @@ mod tests {
             vec![Draw {
                 mesh_id: 1,
                 model: b,
-                mode: None
+                selection: DrawSelection::INHERIT
             }]
         );
     }
@@ -951,14 +951,22 @@ mod tests {
             Some(&[vec![255, 1], vec![2]]),
         );
         let rows = decode_draws(&batch).unwrap().unwrap();
-        assert_eq!(rows[0][0].mode, None);
-        assert_eq!(rows[0][1].mode, Some(RenderMode::Wireframe));
-        assert_eq!(rows[1][0].mode, Some(RenderMode::Textured));
+        assert_eq!(rows[0][0].selection, DrawSelection::INHERIT);
+        assert_eq!(
+            rows[0][1].selection,
+            DrawSelection::Mesh(Some(RenderMode::Wireframe))
+        );
+        assert_eq!(
+            rows[1][0].selection,
+            DrawSelection::Mesh(Some(RenderMode::Textured))
+        );
 
         // Absent `draw_mode` column ⇒ every draw inherits (None).
         let plain = draw_batch_with_modes(&[vec![0, 1]], &[vec![m, m]], None);
         let plain_rows = decode_draws(&plain).unwrap().unwrap();
-        assert!(plain_rows[0].iter().all(|d| d.mode.is_none()));
+        assert!(plain_rows[0]
+            .iter()
+            .all(|d| d.selection == DrawSelection::INHERIT));
     }
 
     #[test]
@@ -1011,12 +1019,12 @@ mod tests {
             Draw {
                 mesh_id: 0,
                 model: a,
-                mode: None,
+                selection: DrawSelection::INHERIT,
             },
             Draw {
                 mesh_id: 1,
                 model: b,
-                mode: None,
+                selection: DrawSelection::INHERIT,
             },
         ];
 
@@ -1144,12 +1152,12 @@ mod tests {
             Draw {
                 mesh_id: 0,
                 model: a,
-                mode: None,
+                selection: DrawSelection::INHERIT,
             },
             Draw {
                 mesh_id: 1,
                 model: b,
-                mode: Some(RenderMode::Wireframe),
+                selection: DrawSelection::Mesh(Some(RenderMode::Wireframe)),
             },
         ];
         assert_eq!(

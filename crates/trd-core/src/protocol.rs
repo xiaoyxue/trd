@@ -7,7 +7,7 @@ use arrow::error::ArrowError;
 use arrow::ipc::reader::StreamDecoder;
 
 use crate::frame::validate_schema as validate_frames_schema;
-use crate::scene::Draw;
+use crate::scene::{Draw, DrawSelection};
 #[cfg(test)]
 use crate::texture::TEXTURE_COLUMN;
 use crate::texture::{ImageTexture, TextureError};
@@ -96,7 +96,7 @@ impl DecodedFrame {
             None => vec![Draw {
                 mesh_id: 0,
                 model: self.params.model_matrix().to_cols_array(),
-                mode: None,
+                selection: DrawSelection::INHERIT,
             }],
         }
     }
@@ -1450,7 +1450,7 @@ mod tests {
         let one = Draw {
             mesh_id: 3,
             model: [1.0_f32; 16],
-            mode: None,
+            selection: DrawSelection::INHERIT,
         };
         let explicit = DecodedFrame {
             params: identity_frame(),
@@ -1481,12 +1481,12 @@ mod tests {
                 Draw {
                     mesh_id: 0,
                     model: a,
-                    mode: None
+                    selection: DrawSelection::INHERIT
                 },
                 Draw {
                     mesh_id: 1,
                     model: b,
-                    mode: None
+                    selection: DrawSelection::INHERIT
                 },
             ])
         );

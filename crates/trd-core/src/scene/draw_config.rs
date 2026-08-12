@@ -11,10 +11,14 @@
 //! Distinct from [`RenderOptions`](crate::RenderOptions), which configures a
 //! whole *frame*; these configure a single drawable.
 
-/// How a [`SceneRenderer`] rasterizes its meshes: solid filled triangles, or an
-/// edge **wireframe** (`LineList` over the derived [`crate::Mesh::edge_indices`]
-/// buffer). Default is [`RenderMode::Filled`]; wireframe (#38) is opt-in via
-/// [`Renderer::set_mode`].
+/// How a mesh is **rasterized**: solid filled triangles, an edge wireframe
+/// (`LineList` over the derived [`crate::Mesh::edge_indices`] buffer), textured,
+/// or physically-based [`Shaded`](Self::Shaded). Default is
+/// [`Filled`](Self::Filled).
+///
+/// Every variant is a way of drawing *the mesh's own geometry*. Choosing to draw
+/// something else entirely — a grounding shadow — is a
+/// [`DrawSelection`](super::DrawSelection), not a mode (#203).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RenderMode {
     /// Draw triangles filled with the per-vertex color (the mesh's triangle
@@ -39,13 +43,6 @@ pub enum RenderMode {
     /// machinery keeps its own name: `PbrConfig`, `pbr.wgsl`, `DisneyMaterial`.
     /// The wire byte (`4`) and the external `"pbr"` config string are unchanged.
     Shaded,
-    /// Not a mesh rasterization at all: draw a **contact / blob grounding
-    /// shadow** ([`DrawableObject::BlobShadow`]) instead of the mesh. A per-draw
-    /// `mode: "shadow"` in the stream lifts that draw's `model` into a soft dark
-    /// blob on the placed mesh's ground plane (#110 follow-up), so the placed mesh
-    /// reads as sitting on the reconstructed surface. The draw's `mesh` id is
-    /// ignored (the shadow uses shared gizmo geometry).
-    Shadow,
 }
 
 /// How a [`DrawableObject::FramePlane`] maps its background image onto the

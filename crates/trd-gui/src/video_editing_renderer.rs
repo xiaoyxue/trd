@@ -169,7 +169,7 @@ impl VideoPlacementRenderer {
                 &[trd_core::Draw {
                     mesh_id: 0,
                     model: model.to_cols_array(),
-                    mode: None,
+                    selection: trd_core::DrawSelection::INHERIT,
                 }],
                 point.0,
                 point.1,

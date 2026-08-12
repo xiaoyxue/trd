@@ -15,8 +15,8 @@
 //! authored around the world origin — the camera targets the origin by default.
 
 use trd_core::{
-    DisneyMaterial, Draw, FrameParams, ImageBasedLighting, Lighting, PbrDebugView, Point3,
-    RenderMode, Rotation, ToneMapping, Transform, Vector3,
+    DisneyMaterial, Draw, DrawSelection, FrameParams, ImageBasedLighting, Lighting, PbrDebugView,
+    Point3, RenderMode, Rotation, ToneMapping, Transform, Vector3,
 };
 
 /// The minimum orbit distance (never let the camera cross the target).
@@ -344,7 +344,7 @@ impl SceneState {
             .map(|(i, obj)| Draw {
                 mesh_id: i as u32,
                 model: obj.model_matrix_offset(layout_offset(i, n)),
-                mode: Some(self.mode_of(i)),
+                selection: DrawSelection::Mesh(Some(self.mode_of(i))),
             })
             .collect()
     }

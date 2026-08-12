@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::math::{Matrix4, Point3, Vector3};
-use crate::scene::{Draw, DrawableObject, FrameFit, RenderMode};
+use crate::scene::{Draw, DrawSelection, DrawableObject, FrameFit, RenderMode};
 use glam::{Mat4, Vec3};
 
 /// Test convenience constructor: a [`SceneRenderer`] over a single mesh with an
@@ -1588,12 +1588,12 @@ fn picking_resolves_object_ids_and_background() {
         Draw {
             mesh_id: 0,
             model: model(-0.5),
-            mode: None,
+            selection: DrawSelection::INHERIT,
         },
         Draw {
             mesh_id: 0,
             model: model(0.5),
-            mode: None,
+            selection: DrawSelection::INHERIT,
         },
     ];
 

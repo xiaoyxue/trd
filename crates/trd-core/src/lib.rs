@@ -45,7 +45,8 @@ pub use render::{
 // `material` at the crate root rather than inside the render backend (#203).
 // The public paths (`trd_core::DrawableObject`, ...) are unchanged.
 pub use scene::{
-    build_scene, scene_with_overlays, Draw, DrawableObject, FrameFit, GridPlane, RenderMode, Scene,
+    build_scene, scene_with_overlays, Draw, DrawSelection, DrawableObject, FrameFit, GridPlane,
+    RenderMode, Scene,
 };
 // The offscreen harness; available on both platforms since it became async
 // (#180) — the browser could not use it while it blocked on readback.
