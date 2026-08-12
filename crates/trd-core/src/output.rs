@@ -301,7 +301,7 @@ impl OutputSession {
     }
 }
 
-pub fn tightly_pack_rgba(
+pub(crate) fn tightly_pack_rgba(
     mapped: &[u8],
     width: u32,
     height: u32,

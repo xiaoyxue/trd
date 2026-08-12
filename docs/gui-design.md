@@ -244,10 +244,11 @@ trd-core today only *decodes* the input scene Arrow (`Mesh::from_arrow_all`,
 authored only by the Python producers (`scripts/*_to_arrow.py`) and by test
 code. An Arrow round-trip backend would need to author that input stream **in Rust**
 (arrow `StreamWriter` + the 0.0.6 schema/metadata). That backend was removed in
-#180, so nothing needs this today; should it return, add a small
-`trd_core::scene_encode` module (mirror of the decoders, reused by tests) so the
-encoder is covered by the existing decoder-parity net. `GuiRenderer` avoids this
-entirely.
+#180, so nothing needs this today; the encoder itself survives as
+`trd_core`'s test-only `protocol::scene_encode` module (the encode half of the
+wire format, beside `protocol::arrow_decode`), which keeps the protocol
+round-trip tests honest. Should the backend return, make that module public
+again rather than writing a second encoder. `GuiRenderer` avoids this entirely.
 
 ## 6. Reverse channel — the interaction/event protocol
 
@@ -380,10 +381,11 @@ scene authoring, and the image-display texture. All pixels come from trd-core.
    *(PR #98)*
 3. **Object interaction + Arrow round-trip**: ✅ translate/rotate the mesh
    (`Draw.model`) in process, plus Filled/Wireframe/**Textured** render modes
-   (`--texture`) *(PR #98)*; ✅ the `ArrowRoundTripRenderer` (`trd_core::scene_encode`
-   authors the `[mesh][params]` Arrow → `run_stream` → `read_image_stream`),
-   removed in #180.
-   render → gui" loop, and the seam for external producers.
+   (`--texture`) *(PR #98)*; ✅ the `ArrowRoundTripRenderer` (`trd_core`'s
+   `scene_encode` authored the `[mesh][params]` Arrow → `run_stream` →
+   `read_image_stream`), removed in #180 — the encoder now lives on as
+   `protocol::scene_encode`, compiled for tests only (#202). It proved the full
+   "gui → render → gui" loop, and the seam for external producers.
 4. ✅ **wasm parity**: egui-on-canvas (eframe `WebRunner`) + `trd-core` offscreen
    (async wgpu 30 readback → egui texture, Strategy A). Shared `scene`/
    `interaction`/`ui` compile on both targets; `wasm_renderer` + `web_app` are the

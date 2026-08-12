@@ -13,7 +13,6 @@ mod mesh;
 mod output;
 mod protocol;
 mod render;
-mod scene_encode;
 mod texture;
 mod video_editing;
 
@@ -25,33 +24,26 @@ pub use math::{
     Transform, Vector2, Vector3, Vector4, EPSILON,
 };
 pub use mesh::{MeshError, DEFAULT_PREVIEW_TARGET};
-pub use output::{output_schema, read_image_stream, tightly_pack_rgba, OutputError, OutputSession};
+pub use output::{output_schema, read_image_stream, OutputError, OutputSession};
 pub use protocol::{
-    decode_params_stream, frame_rate_from_metadata, DecodedFrame, FrameBatch, InputSession,
-    ProtocolError, DEFAULT_FRAME_RATE, FRAME_RATE_KEY, PROTOCOL_VERSION, PROTOCOL_VERSION_KEY,
-    TABLE_KIND_KEY,
+    frame_rate_from_metadata, DecodedFrame, FrameBatch, InputSession, ProtocolError,
+    DEFAULT_FRAME_RATE, FRAME_RATE_KEY, PROTOCOL_VERSION, PROTOCOL_VERSION_KEY, TABLE_KIND_KEY,
 };
 // Material models are plain data (no wgpu, no bytemuck), so they sit beside
 // `mesh`/`texture`/`camera` at the crate root rather than inside the render
 // backend (#180). The public paths (`trd_core::DisneyMaterial`, ...) are unchanged.
 pub use material::{AlphaMode, Auxiliary, DisneyMaterial, Material, MaterialTextures};
 pub use render::{
-    build_scene, create_instance, create_mesh_pipeline, plane_grid_overlays, scene_with_overlays,
-    selection_aabb_overlay, AdapterFacts, CameraFormError, Draw, DrawableObject, EnvMapData,
-    FrameFit, FrameParams, GpuContext, GpuInitError, GpuRequest, GridPlane, ImageBasedLighting,
-    Light, Lighting, LimitsPreset, Mesh, MeshShading, Msaa, OffscreenError, OffscreenTarget,
-    OnscreenTarget, PbrConfig, PbrDebugView, PickTarget, PointLight, PresentOutcome, RenderMode,
-    RenderOptions, RenderTarget, Scene, SceneLayer, SceneRenderer, SurfaceSkip, ToneMapping,
-    Tonemap, TriangleRenderer, Vertex, Viewport, OFFSCREEN_FORMAT,
+    build_scene, create_instance, scene_with_overlays, AdapterFacts, CameraFormError, Draw,
+    DrawableObject, EnvMapData, FrameFit, FrameParams, GpuContext, GpuInitError, GpuRequest,
+    GridPlane, ImageBasedLighting, Light, Lighting, Mesh, MeshShading, Msaa, OffscreenError,
+    OffscreenTarget, OnscreenTarget, PbrConfig, PbrDebugView, PickTarget, PointLight,
+    PresentOutcome, RenderMode, RenderOptions, RenderTarget, Scene, SceneLayer, SceneRenderer,
+    SurfaceSkip, ToneMapping, Tonemap, Vertex, Viewport, OFFSCREEN_FORMAT,
 };
 // The offscreen harness; available on both platforms since it became async
 // (#180) — the browser could not use it while it blocked on readback.
 pub use render::{RenderError, Renderer};
-pub use scene_encode::{
-    encode_frames_stream, encode_mesh_stream, encode_params_stream,
-    encode_params_stream_with_frame_ids, encode_scene, encode_scene_with_frames,
-    encode_texture_stream, SceneEncodeError,
-};
 pub use texture::{
     ConstantTexture, ImageData, ImageTexture, Texture, TextureError, TEXTURE_COLUMN,
 };

@@ -60,26 +60,6 @@ pub enum GuiError {
         source: std::io::Error,
     },
 
-    /// Authoring an Arrow scene stream failed (Arrow round-trip path, native +
-    /// wasm).
-    #[error("scene encode failed: {0}")]
-    Encode(#[from] trd_core::SceneEncodeError),
-
-    /// Encoding/decoding the rendered image Arrow stream failed (Arrow round-trip
-    /// path, native + wasm).
-    #[error("image stream failed: {0}")]
-    Output(#[from] trd_core::OutputError),
-
-    /// Decoding the input Arrow stream failed (wasm Arrow round-trip via
-    /// `InputSession`).
-    #[error("input stream decode failed: {0}")]
-    Protocol(#[from] trd_core::ProtocolError),
-
-    /// The Arrow round-trip produced no image frame for the scene.
-    #[cfg(not(target_arch = "wasm32"))]
-    #[error("the render pipeline produced no frame")]
-    NoFrame,
-
     /// A browser offscreen render (wasm) failed (adapter/device/readback).
     #[cfg(target_arch = "wasm32")]
     #[error("wasm render failed: {0}")]

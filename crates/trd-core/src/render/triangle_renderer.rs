@@ -1,6 +1,11 @@
 //! [`TriangleRenderer`]: the minimal canonical wgpu renderer, meant to be read
 //! first.
 //!
+//! **Reference material and test scaffolding — not production code** (#202). It
+//! has no consumer outside `render::gpu_tests`, so it is `pub(crate)` rather
+//! than part of the crate's public API. It is kept because it is the shortest
+//! complete example of the constructs the real renderer uses.
+//!
 //! It draws one static gradient triangle (three colored vertices) tinted by a
 //! uniform, exercising exactly the explicit wgpu constructs that
 //! [`SceneRenderer`](super::SceneRenderer) uses at scale — a vertex buffer with a

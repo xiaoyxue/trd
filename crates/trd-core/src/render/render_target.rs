@@ -18,7 +18,7 @@ use futures_channel::oneshot;
 use thiserror::Error;
 
 use super::{DrawableObject, FrameParams, SceneRenderer, Viewport};
-use crate::tightly_pack_rgba;
+use crate::output::tightly_pack_rgba;
 
 /// What every render target has in common.
 ///

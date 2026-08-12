@@ -145,7 +145,7 @@ impl Renderer<OffscreenTarget> {
         let gpu = crate::GpuContext::request(
             &instance,
             &crate::GpuRequest {
-                limits: crate::LimitsPreset::Downlevel,
+                limits: super::LimitsPreset::Downlevel,
                 memory_hints: wgpu::MemoryHints::MemoryUsage,
                 ..Default::default()
             },
