@@ -49,12 +49,12 @@ pub struct OffscreenRenderer {
     /// [`DrawableObject::FramePlane`] (#63); a no-op until a background is
     /// uploaded via [`update_frame_texture_rgba`](Self::update_frame_texture_rgba).
     composite_frame: bool,
-    /// The typed Disney PBR configuration for [`RenderMode::Pbr`] draws, set via
+    /// The typed Disney PBR configuration for [`RenderMode::Shaded`] draws, set via
     /// [`set_pbr_material`](Self::set_pbr_material) before the first frame and
     /// applied when the renderer is built. `None` ⇒ the renderer's default.
     pbr: Option<PbrState>,
     /// The decoded equirectangular HDR environment probe reflected by
-    /// [`RenderMode::Pbr`] draws, set via [`set_env_map_hdr`](Self::set_env_map_hdr).
+    /// [`RenderMode::Shaded`] draws, set via [`set_env_map_hdr`](Self::set_env_map_hdr).
     /// `None` ⇒ no probe reflection.
     env_map: Option<EnvMapData>,
     input: InputSession,
@@ -177,14 +177,14 @@ impl OffscreenRenderer {
     #[wasm_bindgen(js_name = setPbr)]
     pub fn set_pbr(&mut self, enabled: bool) {
         self.options.mode = if enabled {
-            RenderMode::Pbr
+            RenderMode::Shaded
         } else {
             RenderMode::Filled
         };
     }
 
     /// Sets the typed Disney PBR configuration applied to every
-    /// [`RenderMode::Pbr`] draw — the browser twin of trd-cli's
+    /// [`RenderMode::Shaded`] draw — the browser twin of trd-cli's
     /// `--metallic/--roughness/--specular/--clearcoat/--env-intensity/--exposure/
     /// --ambient/--tonemap` flags. `tonemap` is `"aces"` (filmic) or anything
     /// else for Reinhard. Non-forwarded Disney parameters keep their defaults.
@@ -231,7 +231,7 @@ impl OffscreenRenderer {
     }
 
     /// Decodes an equirectangular Radiance `.hdr` buffer and binds it as the
-    /// environment probe reflected by [`RenderMode::Pbr`] draws — the browser
+    /// environment probe reflected by [`RenderMode::Shaded`] draws — the browser
     /// twin of trd-cli's `--env HDR` (decoded here, downscaled to 2048px).
     #[wasm_bindgen(js_name = setEnvMapHdr)]
     pub fn set_env_map_hdr(&mut self, bytes: &[u8]) -> Result<(), JsValue> {
@@ -406,7 +406,7 @@ impl OffscreenRenderer {
             }
 
             // Apply the Disney PBR material + HDR environment probe staged by the
-            // JS shell before the first frame (RenderMode::Pbr draws only).
+            // JS shell before the first frame (RenderMode::Shaded draws only).
             if let Some(pbr) = &self.pbr {
                 pbr.apply(self.renderer.as_mut().expect("renderer just built"));
             }

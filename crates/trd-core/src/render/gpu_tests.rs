@@ -381,7 +381,7 @@ fn first_frame_renders_with_no_setters_called() {
 
     // Every draw kind that reads a lazily-bound resource: Textured samples the
     // albedo, Pbr samples albedo + material maps + the environment probe.
-    for mode in [RenderMode::Textured, RenderMode::Pbr] {
+    for mode in [RenderMode::Textured, RenderMode::Shaded] {
         let scene = vec![DrawableObject::Mesh {
             mesh_id: 0,
             model: Matrix4::IDENTITY.to_cols_array(),

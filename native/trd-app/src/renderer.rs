@@ -132,7 +132,7 @@ impl WindowRenderer {
         }
     }
 
-    /// Sets the Disney PBR material applied to [`RenderMode::Pbr`] meshes. No-op
+    /// Sets the Disney PBR material applied to [`RenderMode::Shaded`] meshes. No-op
     /// until the renderer is built.
     pub(crate) fn set_disney_material(&mut self, material: DisneyMaterial) {
         if let Some(renderer) = self.renderer.as_mut() {

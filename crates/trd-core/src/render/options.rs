@@ -85,7 +85,7 @@ pub struct RenderOptions {
     /// (#141) — regardless of [`show_aabb`](Self::show_aabb).
     pub selected: Option<u32>,
     /// Disney PBR material + environment map, applied when `mode` is
-    /// [`RenderMode::Pbr`] (also honoured for any per-draw PBR-mode draws).
+    /// [`RenderMode::Shaded`] (also honoured for any per-draw PBR-mode draws).
     pub pbr: Option<PbrConfig>,
     /// Mesh-pass multisample anti-aliasing (default [`Msaa::X4`]).
     pub msaa: Msaa,

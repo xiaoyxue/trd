@@ -181,7 +181,7 @@ impl Cli {
     }
 
     /// The initial [`SceneState`]: the default camera/object with the render mode
-    /// set to [`RenderMode::Pbr`] when `--pbr` is given, carrying the material
+    /// set to [`RenderMode::Shaded`] when `--pbr` is given, carrying the material
     /// assembled from the CLI flags (subsequently edited live in the UI).
     pub fn scene_state(&self) -> SceneState {
         // The native CLI authors a single object, so the seed carries exactly one
@@ -189,7 +189,7 @@ impl Cli {
         SceneState::seeded(SceneSeed {
             materials: vec![self.disney_material()],
             mode: if self.pbr {
-                RenderMode::Pbr
+                RenderMode::Shaded
             } else {
                 RenderMode::Filled
             },
@@ -229,7 +229,7 @@ mod tests {
     fn pbr_flag_selects_pbr_mode_and_material() {
         let cli = Cli::parse_from(["trd-gui", "--pbr", "--metallic", "1", "--roughness", "0.3"]);
         let state = cli.scene_state();
-        assert_eq!(state.modes[0], RenderMode::Pbr);
+        assert_eq!(state.modes[0], RenderMode::Shaded);
         assert_eq!(state.materials[0].metallic, 1.0);
         assert_eq!(state.materials[0].roughness, 0.3);
     }

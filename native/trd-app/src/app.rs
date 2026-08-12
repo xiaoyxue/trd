@@ -320,7 +320,7 @@ pub fn run() -> Result<(), AppError> {
     let cli = Cli::parse();
     let rate_override = cli.fps.filter(|fps| fps.is_finite() && *fps > 0.0);
     let mode = if cli.pbr {
-        RenderMode::Pbr
+        RenderMode::Shaded
     } else if cli.textured {
         RenderMode::Textured
     } else if cli.wireframe {

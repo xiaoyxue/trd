@@ -129,7 +129,7 @@ pub(super) fn render_mode_label(mode: trd_core::RenderMode) -> &'static str {
         trd_core::RenderMode::Filled => "filled",
         trd_core::RenderMode::Wireframe => "wireframe",
         trd_core::RenderMode::Textured => "textured",
-        trd_core::RenderMode::Pbr => "pbr",
+        trd_core::RenderMode::Shaded => "pbr",
         trd_core::RenderMode::Shadow => "shadow",
     }
 }

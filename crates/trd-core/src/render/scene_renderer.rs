@@ -270,11 +270,11 @@ impl SceneRenderPipelines {
 /// scene.
 pub struct SceneRenderer {
     pipelines: SceneRenderPipelines,
-    /// The bound HDR environment map reflected by [`RenderMode::Pbr`] draws.
+    /// The bound HDR environment map reflected by [`RenderMode::Shaded`] draws.
     env: BoundEnv,
     env_background: EnvBackground,
     /// The Disney material of **each** mesh (indexed by mesh id) applied to its
-    /// [`RenderMode::Pbr`] draws (#141) — so a multi-object scene can give every
+    /// [`RenderMode::Shaded`] draws (#141) — so a multi-object scene can give every
     /// object its own metallic/roughness/base_color.
     pbr_materials: Vec<DisneyMaterial>,
     /// Per-object environment reflection gains, parallel to `pbr_materials`.
@@ -457,7 +457,7 @@ impl SceneRenderer {
     }
 
     /// Binds `texture` as the albedo of **mesh 0** — the single-mesh /
-    /// wire-protocol default sampled by [`RenderMode::Textured`]/[`RenderMode::Pbr`]
+    /// wire-protocol default sampled by [`RenderMode::Textured`]/[`RenderMode::Shaded`]
     /// draws (#20). For a multi-object scene, skin each object with
     /// [`set_mesh_texture`](Self::set_mesh_texture). The image is (re)uploaded
     /// lazily on the next [`encode`](Self::encode); until set it is 1×1 white.
@@ -546,7 +546,7 @@ impl SceneRenderer {
     }
 
     /// Binds `env` as the equirectangular HDR environment map reflected by
-    /// [`RenderMode::Pbr`] draws. The probe is (re)uploaded lazily on the next
+    /// [`RenderMode::Shaded`] draws. The probe is (re)uploaded lazily on the next
     /// [`encode`](Self::encode). Until set, PBR draws use no environment
     /// reflection (a 1×1 black probe keeps the bind group valid).
     pub fn set_env_map(&mut self, env: EnvMapData) {
@@ -750,7 +750,7 @@ impl SceneRenderer {
                     pass.set_bind_group(1, mesh.texture.bind_group(), &[]);
                     draw_indexed(&mut pass, mesh.filled(), range);
                 }
-                DrawKind::Pbr(id) => {
+                DrawKind::Shaded(id) => {
                     let mesh = &self.store.meshes[id];
                     pass.set_pipeline(&self.pipelines.pbr);
                     // group 0 = this mesh's PbrUniform slot (selected by a dynamic
@@ -980,7 +980,7 @@ mod tests {
                 fit: FrameFit::Stretch,
             },
             mesh(1, 12.0, RenderMode::Filled),
-            mesh(0, 30.0, RenderMode::Pbr),
+            mesh(0, 30.0, RenderMode::Shaded),
             DrawableObject::BlobShadow { model: model(1.0) },
             DrawableObject::AabbBox {
                 mesh_id: 1,
@@ -1001,7 +1001,7 @@ mod tests {
                 mesh_id: 0,
                 model: model(70.0),
             },
-            mesh(1, 31.0, RenderMode::Pbr),
+            mesh(1, 31.0, RenderMode::Shaded),
             mesh(99, 99.0, RenderMode::Filled),
             mesh(0, 98.0, RenderMode::Shadow),
             DrawableObject::FramePlane {
@@ -1024,8 +1024,8 @@ mod tests {
                 (DrawKind::Filled(0), 1, 2),
                 (DrawKind::Filled(1), 3, 1),
                 (DrawKind::Textured(0), 4, 1),
-                (DrawKind::Pbr(0), 5, 1),
-                (DrawKind::Pbr(1), 6, 1),
+                (DrawKind::Shaded(0), 5, 1),
+                (DrawKind::Shaded(1), 6, 1),
                 (DrawKind::Grid(0), 7, 1),
                 (DrawKind::Grid(2), 8, 1),
                 (DrawKind::Wireframe(1), 9, 1),

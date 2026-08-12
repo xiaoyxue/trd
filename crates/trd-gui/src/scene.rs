@@ -204,7 +204,7 @@ pub struct SceneState {
     /// different render mode. The UI edits the **selected** object's mode.
     pub modes: Vec<RenderMode>,
     /// The Disney PBR material of **each** object (parallel to [`objects`](Self::objects)),
-    /// applied to objects whose [`mode`](Self::modes) is [`RenderMode::Pbr`].
+    /// applied to objects whose [`mode`](Self::modes) is [`RenderMode::Shaded`].
     /// Interactive: the UI edits the **selected** object's material
     /// (metallic/roughness/etc.); the bound HDR env probe lives on the renderer,
     /// set once from `--env` / `?env=`.
@@ -596,7 +596,7 @@ mod tests {
         for n in [1usize, 3] {
             let state = SceneState::seeded(SceneSeed {
                 materials: vec![DisneyMaterial::default(); n],
-                mode: RenderMode::Pbr,
+                mode: RenderMode::Shaded,
                 image_based_lighting: ImageBasedLighting::default(),
                 tone_mapping: ToneMapping::default(),
                 lighting: Lighting::default(),

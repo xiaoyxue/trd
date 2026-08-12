@@ -26,13 +26,19 @@ pub enum RenderMode {
     /// Draw triangles filled, sampling the renderer's bound texture at each
     /// vertex UV instead of the vertex color (#20).
     Textured,
-    /// Physically-based **Disney principled BRDF** shading (`pbr.wgsl`): the
+    /// **Shaded**: physically-based Disney principled BRDF (`pbr.wgsl`) — the
     /// bound albedo lit by a small virtual light rig plus an optional
     /// equirectangular HDR environment-map reflection, with smooth shading
     /// normals derived at upload. Metallic materials read as shiny reflective
     /// metal (e.g. the coke can). Configured globally via the renderer's
     /// [`DisneyMaterial`](crate::DisneyMaterial) + bound environment map.
-    Pbr,
+    ///
+    /// Named for the *appearance* it selects, like its siblings, rather than for
+    /// the technique that achieves it — which leaves room for a second
+    /// physically-based model without a `Pbr2`-style name (#203). The PBR
+    /// machinery keeps its own name: `PbrConfig`, `pbr.wgsl`, `DisneyMaterial`.
+    /// The wire byte (`4`) and the external `"pbr"` config string are unchanged.
+    Shaded,
     /// Not a mesh rasterization at all: draw a **contact / blob grounding
     /// shadow** ([`DrawableObject::BlobShadow`]) instead of the mesh. A per-draw
     /// `mode: "shadow"` in the stream lifts that draw's `model` into a soft dark

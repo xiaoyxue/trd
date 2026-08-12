@@ -273,7 +273,9 @@ pub fn render_mode_section(ui: &mut egui::Ui, controller: &mut InteractionContro
                     c |= ui
                         .selectable_value(mode, RenderMode::Textured, "Textured")
                         .changed();
-                    c |= ui.selectable_value(mode, RenderMode::Pbr, "PBR").changed();
+                    c |= ui
+                        .selectable_value(mode, RenderMode::Shaded, "PBR")
+                        .changed();
                 });
             }
             None => {
@@ -285,12 +287,12 @@ pub fn render_mode_section(ui: &mut egui::Ui, controller: &mut InteractionContro
 }
 
 /// The Disney PBR material controls. Draws nothing unless the selected object
-/// is in [`RenderMode::Pbr`].
+/// is in [`RenderMode::Shaded`].
 pub fn pbr_material_section(ui: &mut egui::Ui, controller: &mut InteractionController) -> bool {
     let selected_is_pbr = controller
         .state
         .selected
-        .is_some_and(|i| controller.state.mode_of(i as usize) == RenderMode::Pbr);
+        .is_some_and(|i| controller.state.mode_of(i as usize) == RenderMode::Shaded);
     if !selected_is_pbr {
         return false;
     }
@@ -462,7 +464,7 @@ fn angle_row(ui: &mut egui::Ui, label: &str, radians: &mut f32) -> bool {
     changed
 }
 
-/// The Disney PBR material sub-panel (shown only in [`RenderMode::Pbr`]): live
+/// The Disney PBR material sub-panel (shown only in [`RenderMode::Shaded`]): live
 /// sliders for the parameters that most change the look — metallic, roughness,
 /// environment-reflection gain, and tone-map exposure — plus a Reinhard/ACES
 /// tone-map selector. Editing any of them re-renders the scene, so the material

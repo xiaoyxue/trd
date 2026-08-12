@@ -153,7 +153,7 @@ pub async fn start(
     // Per-object mode: start every object in PBR when an env probe is supplied
     // (`?env=`), else Filled — each object's mode is then editable when selected.
     let initial_mode = if env.is_some() || has_gltf {
-        trd_core::RenderMode::Pbr
+        trd_core::RenderMode::Shaded
     } else {
         trd_core::RenderMode::Filled
     };

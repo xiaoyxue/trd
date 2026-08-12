@@ -78,7 +78,7 @@ pub fn texture_from_image(image: image::DynamicImage) -> Result<ImageTexture, Gu
 /// stays within the renderer's portable texture-size limit. Shared by the native
 /// `--env` (file bytes) and browser `?env=` (fetched bytes) paths; HDR decoding
 /// stays in Rust so trd-core remains I/O-free. The probe is reflected by
-/// [`RenderMode::Pbr`](trd_core::RenderMode::Pbr) metallic surfaces.
+/// [`RenderMode::Shaded`](trd_core::RenderMode::Shaded) metallic surfaces.
 pub fn decode_env_hdr(bytes: &[u8]) -> Result<EnvMapData, GuiError> {
     let img = image::load_from_memory_with_format(bytes, image::ImageFormat::Hdr)?.to_rgba32f();
     let (width, height) = img.dimensions();

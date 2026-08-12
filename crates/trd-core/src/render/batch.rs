@@ -34,10 +34,11 @@ pub(super) enum DrawKind {
     /// Textured triangles of a mesh (triangle index buffer + textured pipeline,
     /// sampling the bound texture at each vertex UV) (#20).
     Textured(usize),
-    /// Disney **PBR** triangles of a mesh (its dedicated position+normal+UV
-    /// vertex buffer + `pbr.wgsl` pipeline, lit by the virtual light rig and
-    /// the bound HDR environment map). Reuses the triangle index buffer.
-    Pbr(usize),
+    /// **Shaded** triangles of a mesh: the Disney PBR path (its dedicated
+    /// position+normal+UV vertex buffer + `pbr.wgsl` pipeline, lit by the virtual
+    /// light rig and the bound HDR environment map). Reuses the triangle index
+    /// buffer.
+    Shaded(usize),
     /// A coordinate-plane grid (the shared per-plane grid vertex buffer indexed
     /// by [`GridPlane::index`], non-indexed line draw).
     Grid(usize),
@@ -95,7 +96,7 @@ pub(super) fn build_batches(
                 let kind = match mode {
                     RenderMode::Filled => DrawKind::Filled(mesh_id),
                     RenderMode::Textured => DrawKind::Textured(mesh_id),
-                    RenderMode::Pbr => DrawKind::Pbr(mesh_id),
+                    RenderMode::Shaded => DrawKind::Shaded(mesh_id),
                     RenderMode::Wireframe => DrawKind::Wireframe(mesh_id),
                     RenderMode::Shadow => continue,
                 };
