@@ -291,8 +291,8 @@ thin, non-interactive player/renderer peers.
 | `InteractionController` (events → matrix) | ✅ `interaction.rs` | | |
 | `SceneState` (models + camera) | ✅ `scene.rs` | | |
 | RGBA handoff | ✅ `renderer::ImageRgba` | | |
-| Application shell | | `native/trd-gui-app/src/app.rs` | `crates/trd-gui/src/web_app.rs` |
-| Bootstrap / runner | | `native/trd-gui-app/src/main.rs` | `lib.rs` wasm entry + `web/gui-viewer` |
+| Application shell | | `native/trd-gui-app/src/app.rs` | `crates/trd-wasm/src/gui_web_app.rs` |
+| Bootstrap / runner | | `native/trd-gui-app/src/main.rs` | `crates/trd-wasm/src/gui.rs` (JS ABI) + `web/gui-viewer` |
 | Renderer | ✅ `renderer::GuiRenderer` | (blocks on its async API) | |
 | State → `Scene` assembly | ✅ `renderer::{render_options, scene_for, apply_materials}` | | |
 
@@ -304,13 +304,17 @@ Reusable library and delivery surfaces:
 crates/trd-gui/
   Cargo.toml
   src/
-    lib.rs             # shared modules + wasm-bindgen entry
+    lib.rs             # shared modules (a plain rlib: no wasm-bindgen, #180)
     ui.rs              # shared egui panels/layout/image widget
     interaction.rs     # InteractionController: InteractionEvent → SceneState (SHARED, unit-tested, no egui)
     scene.rs           # SceneState: meshes + per-object model + camera FrameParams (SHARED)
     renderer.rs        # GuiRenderer + shared RGBA type + state→Scene assembly (SHARED)
-    web_app.rs         # browser eframe application
     error.rs
+
+crates/trd-wasm/          # the ONE browser delivery surface (#180)
+  src/
+    gui.rs             # the trd-gui JS ABI: start / startVideoEditing / VideoEditingHandle
+    gui_web_app.rs     # browser eframe application
 
 native/trd-gui-app/
   Cargo.toml

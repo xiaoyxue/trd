@@ -26,7 +26,7 @@ video-edit timeline + VideoFrame RGBA
 Platform-agnostic wgpu logic, shared verbatim by every target:
 
 - **`render/` (module tree) + `shader/*.wgsl`** — `SceneRenderer`
-  (`render/mesh_renderer.rs`) rasterizes a `Scene` of `DrawableObject`s into *any*
+  (`render/scene_renderer.rs`) rasterizes a `Scene` of `DrawableObject`s into *any*
   `wgpu::TextureView`; that one renderer is why the same code targets an offscreen
   texture, a window swapchain, or a browser canvas. That renderer is wrapped by one
   harness, `Renderer<T: RenderTarget>` (`render/renderer.rs`), which owns *GPU
@@ -136,8 +136,8 @@ Each is a *thin shell* that only supplies a render target and calls the core:
 | `native/trd-gui-app` | native eframe shell around the reusable `trd-gui` library |
 | `native/trd-gui-video-editing` | native ffmpeg-backed video timeline/player shell |
 | `web/viewer` | config-driven browser stream player around `trd-wasm` |
-| `web/gui-viewer` | browser eframe shell around the `trd-gui` wasm module |
-| `web/gui-video-editing` | browser video-editing surface with its own generated `trd-gui` wasm package |
+| `web/gui-viewer` | browser eframe shell around the `trd_wasm` GUI entry points |
+| `web/gui-video-editing` | browser video-editing surface with its own copy of the generated `trd_wasm` package |
 | `web/package.json` | shared Bun workspace for all browser delivery surfaces |
 | `scripts/fiba_video_editing_bundle.py` | FIBA video/parquet → `0.1.0` timeline document |
 | `examples/` | demo streams + `render.sh` / `render.ps1` wrappers + producer scripts |

@@ -260,13 +260,14 @@ duration before playback.
 |---|---|
 | `crates/trd-core/src/video_editing.rs` | versioned timeline decoder |
 | `crates/trd-placement/src/lib.rs` | K/quad frame and placement math |
-| `crates/trd-gui/src/video_editing/mod.rs` | editor state, typed scheduler, browser bridge |
+| `crates/trd-gui/src/video_editing/mod.rs` | editor state and typed scheduler |
 | `crates/trd-gui/src/video_editing/editing_ui.rs` | editor panels, quad/catalog wiring, player footer |
 | `crates/trd-gui/src/video_editing/diagnostics.rs` | immutable Details snapshot + pure calculations |
-| `crates/trd-gui/src/video_editing/diagnostics_ui.rs` | Details inspector presentation |
+| `crates/trd-gui/src/video_editing/details_ui.rs` | Details inspector presentation |
 | `crates/trd-gui/src/video_editing_renderer.rs` | shared native/wasm composition and picking |
 | `web/gui-video-editing/src/main.ts` | thin video/file/resource byte bridge |
-| `web/gui-video-editing/pkg` | editor-owned generated `trd-gui` wasm package |
+| `crates/trd-wasm/src/gui.rs` | the browser bridge (`VideoEditingHandle`) and JS ABI |
+| `web/gui-video-editing/pkg` | editor-owned copy of the generated `trd_wasm` package |
 | `native/trd-gui-video-editing` | native ffmpeg-backed host for the shared editor |
 | `scripts/fiba_video_editing_bundle.py` | timeline generator |
 
