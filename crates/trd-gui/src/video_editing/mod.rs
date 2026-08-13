@@ -148,6 +148,11 @@ pub struct VideoEditingShared {
     latest_video_frame: RefCell<Option<IncomingVideoFrame>>,
     rendered_frame: RefCell<Option<RenderedVideoFrame>>,
     context: RefCell<Option<egui::Context>>,
+    /// Set when the host binds the render texture directly into egui: the render
+    /// task then draws without reading the pixels back.
+    skip_readback: Cell<bool>,
+    /// Set when the renderer was built on the UI toolkit's own device.
+    device_shared: Cell<bool>,
     command: Cell<u8>,
     asset_request: Cell<u8>,
     video_url_request: RefCell<Option<String>>,
@@ -185,6 +190,8 @@ impl Default for VideoEditingShared {
             latest_video_frame: RefCell::new(None),
             rendered_frame: RefCell::new(None),
             context: RefCell::new(None),
+            skip_readback: Cell::new(false),
+            device_shared: Cell::new(false),
             command: Cell::new(COMMAND_NONE),
             asset_request: Cell::new(0),
             video_url_request: RefCell::new(None),
@@ -218,6 +225,35 @@ impl Default for VideoEditingShared {
 }
 
 impl VideoEditingShared {
+    /// Switches the render task off the readback path, for a host that binds the
+    /// rendered texture directly into egui.
+    pub fn set_skip_readback(&self, skip: bool) {
+        self.skip_readback.set(skip);
+    }
+
+    /// Declares that the renderer was built on the **UI toolkit's own device**,
+    /// so its texture can be bound directly instead of read back.
+    ///
+    /// Declared by the shell rather than detected: `wgpu::Device` has no
+    /// identity comparison, and the shell is the one that chose the device.
+    /// Binding a texture from a *different* device would be undefined.
+    pub fn set_device_shared(&self, shared: bool) {
+        self.device_shared.set(shared);
+    }
+
+    /// The current renderer's target view + size + identity, for a host binding
+    /// it into its UI toolkit. `None` while a render is in flight (the renderer
+    /// is moved out for the duration) or before one exists.
+    pub fn target_binding(&self) -> Option<(wgpu::TextureView, (u32, u32), usize)> {
+        let renderer = self.renderer.borrow();
+        let renderer = renderer.as_ref()?;
+        Some((
+            renderer.target_view(),
+            renderer.size(),
+            renderer.renderer_generation_key(),
+        ))
+    }
+
     pub fn update_video_frame_rgba(
         &self,
         rgba: Vec<u8>,
@@ -439,6 +475,12 @@ pub struct VideoEditingApp {
     video_url: String,
     pending_seek_target: Option<u32>,
     last_pick_result: Option<Option<u32>>,
+    /// The rendered texture bound directly into egui, when the shell shares
+    /// trd's `wgpu::Device`. `None` means the portable readback path.
+    native_texture: Option<egui::TextureId>,
+    /// The (renderer identity, size) the current `native_texture` was registered
+    /// for, so a resize or asset swap re-registers instead of sampling a stale view.
+    native_texture_key: Option<(usize, (u32, u32))>,
 }
 
 impl VideoEditingApp {
@@ -472,7 +514,42 @@ impl VideoEditingApp {
             video_url: String::new(),
             pending_seek_target: None,
             last_pick_result: None,
+            native_texture: None,
+            native_texture_key: None,
         }
+    }
+
+    /// Binds trd's render texture straight into egui when both share a device.
+    ///
+    /// This is what removes the readback: instead of copying the rendered pixels
+    /// GPU→CPU and re-uploading them through egui, the texture trd just drew into
+    /// is registered once and sampled in place. Re-registered whenever the target
+    /// is recreated (a resize or an asset swap) — the old view is stale then.
+    ///
+    /// A no-op unless the shell built the renderer on the toolkit's own device;
+    /// two devices cannot share a texture, so those shells keep the readback.
+    fn sync_native_texture(&mut self, frame: &mut eframe::Frame) {
+        let Some(state) = frame.wgpu_render_state() else {
+            return;
+        };
+        let Some((view, size, key)) = self.shared.target_binding() else {
+            return;
+        };
+        if !self.shared.device_shared.get() {
+            return;
+        }
+        if self.native_texture_key == Some((key, size)) {
+            return;
+        }
+        let mut renderer = state.renderer.write();
+        if let Some(old) = self.native_texture.take() {
+            renderer.free_texture(&old);
+        }
+        let id = renderer.register_native_texture(&state.device, &view, wgpu::FilterMode::Linear);
+        drop(renderer);
+        self.native_texture = Some(id);
+        self.native_texture_key = Some((key, size));
+        self.shared.set_skip_readback(true);
     }
 
     fn ensure_texture(&mut self, context: &egui::Context) {
@@ -536,6 +613,11 @@ impl VideoEditingApp {
         self.displayed_diagnostics = Some(rendered.diagnostics);
         if self.pending_seek_target == Some(frame.frame_index) {
             self.pending_seek_target = None;
+        }
+        // On the shared-device path the pixels were never read back — the
+        // rendered texture is bound directly — so there is nothing to upload.
+        if frame.rgba.is_empty() {
+            return;
         }
         self.display_image = egui::ColorImage::from_rgba_unmultiplied(
             [self.display_size.0 as usize, self.display_size.1 as usize],
@@ -687,21 +769,41 @@ impl VideoEditingApp {
         let background_media_time = video.media_time_seconds;
         let render_started = Instant::now();
         let render = async move {
-            let result = renderer
-                .render(
-                    &video.rgba,
-                    video.width,
-                    video.height,
-                    (width, height),
-                    &background_frame,
-                    quad_model,
-                    quad_axes,
-                    show_quad_gizmo,
-                    placement_frame.as_ref(),
-                    model,
-                    &state,
-                )
-                .await;
+            let result = if shared.skip_readback.get() {
+                // Shared-device path: the rendered texture is bound straight into
+                // egui, so there is nothing to read back.
+                renderer
+                    .draw(
+                        &video.rgba,
+                        video.width,
+                        video.height,
+                        (width, height),
+                        &background_frame,
+                        quad_model,
+                        quad_axes,
+                        show_quad_gizmo,
+                        placement_frame.as_ref(),
+                        model,
+                        &state,
+                    )
+                    .map(|()| Vec::new())
+            } else {
+                renderer
+                    .render(
+                        &video.rgba,
+                        video.width,
+                        video.height,
+                        (width, height),
+                        &background_frame,
+                        quad_model,
+                        quad_axes,
+                        show_quad_gizmo,
+                        placement_frame.as_ref(),
+                        model,
+                        &state,
+                    )
+                    .await
+            };
             let renderer_diagnostics = renderer.diagnostics();
             if shared.renderer_generation.get() != renderer_generation {
                 shared.render_in_flight.set(false);
@@ -1448,6 +1550,7 @@ pub(super) mod tests {
                 pick_target_size: None,
                 msaa_samples: 4,
                 asset: None,
+                transfers: crate::video_editing_renderer::TransferCounts::default(),
             },
         }
     }

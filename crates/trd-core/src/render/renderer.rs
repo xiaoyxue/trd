@@ -697,6 +697,15 @@ impl Renderer {
         self.set_mesh_texture(0, texture);
     }
 
+    /// The GPU context this harness renders on.
+    ///
+    /// Exposed so a shell can check whether it shares a device with the harness
+    /// — and, when it does, bind the rendered texture directly instead of
+    /// reading it back.
+    pub fn gpu(&self) -> &Arc<GpuContext> {
+        &self.gpu
+    }
+
     /// Binds `texture` as the albedo of mesh `mesh_id` — so a multi-object scene
     /// skins each object with its **own** diffuse (#141). Out-of-range ids are
     /// ignored. The image uploads lazily on the next

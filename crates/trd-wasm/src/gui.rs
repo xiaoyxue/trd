@@ -43,33 +43,117 @@ pub async fn start(
         is_gltf: bool,
     }
 
+    /// TOY BRANCH: starts the editor with **no** document, synthesizing a
+    /// video-only timeline from the media element's own metadata. Lets the web
+    /// editor open an arbitrary video instead of the one a bundled `.arrow`
+    /// describes.
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = startVideoEditingSynthetic)]
+    pub async fn start_video_editing_synthetic(
+        canvas: web_sys::HtmlCanvasElement,
+        width: u32,
+        height: u32,
+        fps_num: u32,
+        fps_den: u32,
+        frame_count: u32,
+    ) -> Result<VideoEditingHandle, wasm_bindgen::JsValue> {
+        let document = synthetic_document(width, height, fps_num, fps_den, frame_count);
+        start_video_editing_with(canvas, document).await
+    }
+
     /// Starts the dedicated `web/gui-video-editing/` poster/document example.
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = startVideoEditing)]
     pub async fn start_video_editing(
         canvas: web_sys::HtmlCanvasElement,
         document_bytes: Vec<u8>,
     ) -> Result<VideoEditingHandle, wasm_bindgen::JsValue> {
+        let document = trd_core::decode_video_editing_document(&document_bytes)
+            .map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()))?;
+        start_video_editing_with(canvas, document).await
+    }
+
+    /// TOY BRANCH: a video-only timeline covering every frame, mirroring the
+    /// native `media::synthesize_document`.
+    fn synthetic_document(
+        width: u32,
+        height: u32,
+        fps_num: u32,
+        fps_den: u32,
+        frame_count: u32,
+    ) -> trd_core::VideoEditingDocument {
+        let fps_num = fps_num.max(1);
+        let fps_den = fps_den.max(1);
+        let frame_count = frame_count.max(1);
+        let frames = (0..frame_count)
+            .map(|index| trd_core::VideoEditingFrame {
+                video_frame_index: index,
+                present_index: index,
+                timestamp_us: i64::from(index) * i64::from(fps_den) * 1_000_000
+                    / i64::from(fps_num),
+                k: None,
+                placement_quad: None,
+                tracked: false,
+            })
+            .collect();
+        trd_core::VideoEditingDocument {
+            video: trd_core::VideoInfo {
+                source_name: String::new(),
+                mime: "video/mp4".to_owned(),
+                codec: "unknown".to_owned(),
+                sha256: String::new(),
+                byte_length: 0,
+                width: width.max(1),
+                height: height.max(1),
+                fps_num,
+                fps_den,
+                frame_count,
+                duration_us: i64::from(frame_count) * i64::from(fps_den) * 1_000_000
+                    / i64::from(fps_num),
+            },
+            poster_bytes: Vec::new(),
+            frames,
+        }
+    }
+
+    async fn start_video_editing_with(
+        canvas: web_sys::HtmlCanvasElement,
+        document: trd_core::VideoEditingDocument,
+    ) -> Result<VideoEditingHandle, wasm_bindgen::JsValue> {
         use std::rc::Rc;
 
         console_error_panic_hook::set_once();
         let _ = eframe::WebLogger::init(log::LevelFilter::Warn);
-        let document = trd_core::decode_video_editing_document(&document_bytes)
-            .map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()))?;
         let shared = Rc::new(trd_gui::video_editing::VideoEditingShared::default());
-        let renderer = trd_gui::video_editing_renderer::VideoPlacementRenderer::new_empty(
-            document.video.width,
-            document.video.height,
-        )
-        .await
-        .map_err(|error| wasm_bindgen::JsValue::from_str(&error))?;
-        shared.set_renderer(renderer);
         let handle = VideoEditingHandle::new(&document, shared.clone());
-        let app = trd_gui::video_editing::VideoEditingApp::new(document, shared);
+        let (width, height) = (document.video.width, document.video.height);
+        let creator_shared = shared.clone();
         eframe::WebRunner::new()
             .start(
                 canvas,
                 eframe::WebOptions::default(),
-                Box::new(|_cc| Ok(Box::new(app))),
+                // Built inside the creator so the renderer can adopt eframe's own
+                // WebGPU device: one device means trd's rendered texture is bound
+                // straight into egui, with no GPU→CPU→GPU round trip per frame.
+                Box::new(move |context| {
+                    let state = context
+                        .wgpu_render_state
+                        .as_ref()
+                        .ok_or("eframe has no wgpu render state")?;
+                    let gpu = trd_core::GpuContext::adopt(
+                        state.adapter.clone(),
+                        state.device.clone(),
+                        state.queue.clone(),
+                    );
+                    let renderer =
+                        trd_gui::video_editing_renderer::VideoPlacementRenderer::new_empty_with_gpu(
+                            gpu, width, height,
+                        )?;
+                    creator_shared.set_renderer(renderer);
+                    creator_shared.set_device_shared(true);
+                    Ok(Box::new(trd_gui::video_editing::VideoEditingApp::new(
+                        document,
+                        creator_shared,
+                    )))
+                }),
             )
             .await?;
         Ok(handle)
@@ -286,15 +370,17 @@ impl VideoEditingHandle {
         filename: &str,
         byte_length: f64,
     ) -> Result<(), wasm_bindgen::JsValue> {
+        // TOY BRANCH: the document/source coupling is off so any video can be
+        // played. Mismatches are reported to the console instead of rejected.
         if filename != self.source_name {
-            return Err(wasm_bindgen::JsValue::from_str(&format!(
-                "expected {}, got {filename}",
+            web_sys::console::warn_1(&wasm_bindgen::JsValue::from_str(&format!(
+                "video-editing (toy): expected {}, got {filename}",
                 self.source_name
             )));
         }
         if byte_length != self.byte_length as f64 {
-            return Err(wasm_bindgen::JsValue::from_str(&format!(
-                "expected {} bytes, got {byte_length:.0}",
+            web_sys::console::warn_1(&wasm_bindgen::JsValue::from_str(&format!(
+                "video-editing (toy): expected {} bytes, got {byte_length:.0}",
                 self.byte_length
             )));
         }
@@ -310,9 +396,11 @@ impl VideoEditingHandle {
     ) -> Result<(), wasm_bindgen::JsValue> {
         self.shared
             .set_video_metadata_observation(width, height, duration_seconds);
+        // TOY BRANCH: resolution and duration mismatches are warnings, not
+        // errors, so an arbitrary video still reaches the frame pump.
         if (width, height) != (self.width, self.height) {
-            return Err(wasm_bindgen::JsValue::from_str(&format!(
-                "expected {}x{} video, got {width}x{height}",
+            web_sys::console::warn_1(&wasm_bindgen::JsValue::from_str(&format!(
+                "video-editing (toy): expected {}x{} video, got {width}x{height}",
                 self.width, self.height
             )));
         }
@@ -322,8 +410,9 @@ impl VideoEditingHandle {
         if !duration_seconds.is_finite()
             || (duration_seconds - expected_duration).abs() > frame_duration
         {
-            return Err(wasm_bindgen::JsValue::from_str(&format!(
-                "expected {expected_duration:.3}s video, got {duration_seconds:.3}s"
+            web_sys::console::warn_1(&wasm_bindgen::JsValue::from_str(&format!(
+                "video-editing (toy): expected {expected_duration:.3}s video, got \
+                 {duration_seconds:.3}s"
             )));
         }
         Ok(())

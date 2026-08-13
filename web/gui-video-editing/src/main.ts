@@ -10,8 +10,7 @@ import beerObjUrl from "../../../assets/meshes/qd_beer/source/3d66.com_JDH545587
 import beerTextureUrl from "../../../assets/meshes/qd_beer/textures/3d66-export-JDH5455878326-001.jpg" with {
   type: "file",
 };
-import editingDocumentUrl from "../data/fiba-shot1.arrow" with { type: "file" };
-import init, { startVideoEditing } from "../pkg/trd_wasm.js";
+import init, { startVideoEditing, startVideoEditingSynthetic } from "../pkg/trd_wasm.js";
 import wasmUrl from "../pkg/trd_wasm_bg.wasm" with { type: "file" };
 
 async function main(): Promise<void> {
@@ -21,14 +20,27 @@ async function main(): Promise<void> {
     throw new Error("missing #video-editing-canvas");
   }
   const query = new URLSearchParams(location.search);
-  const documentUrl = query.get("document") ?? editingDocumentUrl;
-  const response = await fetch(documentUrl);
-  if (!response.ok) {
-    throw new Error(
-      `failed to fetch editing document "${documentUrl}": ${response.status} ${response.statusText}`,
-    );
+  // TOY BRANCH: a document is optional. Without `?document=` the editor starts
+  // on a synthesized video-only timeline, and the real timeline is re-derived
+  // from each video that gets opened.
+  const documentUrl = query.get("document");
+  let editor: Awaited<ReturnType<typeof startVideoEditing>>;
+  if (documentUrl) {
+    const response = await fetch(documentUrl);
+    if (!response.ok) {
+      throw new Error(
+        `failed to fetch editing document "${documentUrl}": ${response.status} ${response.statusText}`,
+      );
+    }
+    editor = await startVideoEditing(canvas, new Uint8Array(await response.arrayBuffer()));
+  } else {
+    // A virtual 30 fps grid spanning an hour: web playback is driven by the
+    // `<video>` element itself, so the document's fps only maps media time to a
+    // frame index. Time mapping stays self-consistent
+    // (`frameIndexAtMediaTime` / `mediaTimeAtFrame` share this grid); only the
+    // displayed frame numbers are virtual rather than the source's own.
+    editor = await startVideoEditingSynthetic(canvas, 1280, 720, 30, 1, 30 * 3600);
   }
-  const editor = await startVideoEditing(canvas, new Uint8Array(await response.arrayBuffer()));
   const catalog = new Map<number, { modelUrl: string; textureUrl?: string }>([
     [1, { modelUrl: cokeObjUrl, textureUrl: cokeTextureUrl }],
     [2, { modelUrl: beerObjUrl, textureUrl: beerTextureUrl }],

@@ -47,12 +47,39 @@ pub struct Controls {
 /// The central image surface: what to draw and how to size it.
 pub struct Image<'a> {
     pub controller: &'a mut InteractionController,
-    pub texture: Option<&'a TextureHandle>,
+    /// What to draw: a CPU-uploaded egui texture, or — when the shell shares
+    /// trd's `wgpu::Device` — the rendered texture bound directly.
+    pub texture: Option<DisplayTexture<'a>>,
     pub render_size: (u32, u32),
     pub sizing: ImageSizing,
     pub camera_locked: bool,
     /// Draw nothing at all (rather than "Rendering…") before the first frame.
     pub hide_when_empty: bool,
+}
+
+/// The two ways a rendered frame reaches the screen.
+///
+/// `Uploaded` is the portable path: trd's pixels are read back and re-uploaded
+/// through egui. `Native` is the shared-device path: the very texture trd
+/// rendered into is sampled in place, so the readback and re-upload disappear.
+#[derive(Clone, Copy)]
+pub enum DisplayTexture<'a> {
+    Uploaded(&'a TextureHandle),
+    Native {
+        id: egui::TextureId,
+        size: (u32, u32),
+    },
+}
+
+impl DisplayTexture<'_> {
+    fn sized(self) -> egui::load::SizedTexture {
+        match self {
+            Self::Uploaded(handle) => egui::load::SizedTexture::from_handle(handle),
+            Self::Native { id, size } => {
+                egui::load::SizedTexture::new(id, [size.0 as f32, size.1 as f32])
+            }
+        }
+    }
 }
 
 /// What a frame of the image surface produced.
@@ -101,7 +128,7 @@ pub fn show(ui: &mut egui::Ui, view: &mut View) -> ImageOutcome {
             ui,
             Image {
                 controller: view.controller,
-                texture: view.texture,
+                texture: view.texture.map(DisplayTexture::Uploaded),
                 render_size: view.render_size,
                 sizing: ImageSizing::default(),
                 camera_locked: controls.camera_locked,
@@ -574,7 +601,7 @@ pub fn image_panel(ui: &mut egui::Ui, image: Image<'_>) -> ImageOutcome {
     };
     let add_image = |ui: &mut egui::Ui, size| {
         ui.add(
-            egui::Image::new(egui::load::SizedTexture::from_handle(texture))
+            egui::Image::new(texture.sized())
                 .fit_to_exact_size(size)
                 .sense(Sense::click_and_drag()),
         )

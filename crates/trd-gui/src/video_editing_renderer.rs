@@ -22,6 +22,31 @@ pub struct ImportedAssetDiagnostics {
     pub imported_material: trd_core::DisneyMaterial,
 }
 
+/// Per-frame CPU↔GPU traffic, so the copy count is **observed** rather than
+/// asserted.
+///
+/// Each field is the bytes that crossed the boundary for the most recent frame.
+/// A zero means that crossing did not happen at all — which is exactly how the
+/// shared-device path is verified: `readback` and `ui_upload` must both be `0`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TransferCounts {
+    /// Video frame CPU→GPU (`queue.write_texture`).
+    pub frame_upload: usize,
+    /// Rendered pixels GPU→CPU (`read_pixels`). Zero on the shared-device path.
+    pub readback: usize,
+    /// Rendered pixels CPU→GPU again, through the UI toolkit. Zero when the
+    /// texture is bound directly.
+    pub ui_upload: usize,
+    /// How many CPU↔GPU crossings the frame actually made.
+    pub crossings: u8,
+}
+
+impl TransferCounts {
+    pub fn total_bytes(self) -> usize {
+        self.frame_upload + self.readback + self.ui_upload
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct VideoRendererDiagnostics {
     pub identity: Rc<RendererIdentity>,
@@ -29,6 +54,7 @@ pub struct VideoRendererDiagnostics {
     pub pick_target_size: Option<(u32, u32)>,
     pub msaa_samples: u32,
     pub asset: Option<ImportedAssetDiagnostics>,
+    pub transfers: TransferCounts,
 }
 
 pub struct VideoPlacementRenderer {
@@ -49,29 +75,32 @@ pub struct VideoPlacementRenderer {
     default_material: trd_core::DisneyMaterial,
     identity: Rc<RendererIdentity>,
     asset_diagnostics: Option<ImportedAssetDiagnostics>,
+    /// Last frame's CPU<->GPU traffic.
+    transfers: TransferCounts,
 }
 
 impl VideoPlacementRenderer {
     pub async fn new_empty(width: u32, height: u32) -> Result<Self, String> {
-        let instance = trd_core::create_instance();
-        let gpu = trd_core::GpuContext::request(
-            &instance,
-            &trd_core::GpuRequest {
-                label: "trd video editing wasm device",
-                ..Default::default()
-            },
-        )
-        .await
-        .map_err(|error| error.to_string())?;
+        let gpu = Self::own_gpu().await?;
+        Self::new_empty_with_gpu(gpu, width, height)
+    }
+
+    /// Builds the placement renderer on an **already-created** GPU context —
+    /// normally the UI toolkit's own device (`eframe`'s `wgpu_render_state`).
+    ///
+    /// Sharing one device is what lets the rendered texture be handed to egui
+    /// directly; two devices on the same adapter cannot share textures, so a
+    /// separate context forces a GPU→CPU→GPU round trip every frame.
+    pub fn new_empty_with_gpu(
+        gpu: std::sync::Arc<trd_core::GpuContext>,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, String> {
         let facts = gpu.adapter_facts();
         let placeholder = assets::default_mesh().map_err(|error| error.to_string())?;
-        let (renderer, target) = trd_core::Renderer::with_gpu(
-            gpu.clone(),
-            width,
-            height,
-            std::slice::from_ref(&placeholder),
-        )
-        .map_err(|error| error.to_string())?;
+        let (renderer, target) =
+            trd_core::Renderer::with_gpu(gpu, width, height, std::slice::from_ref(&placeholder))
+                .map_err(|error| error.to_string())?;
         Ok(Self {
             renderer,
             target,
@@ -83,10 +112,47 @@ impl VideoPlacementRenderer {
                 device_type: facts.device_type,
             }),
             asset_diagnostics: None,
+            transfers: TransferCounts::default(),
         })
     }
 
+    /// Requests a standalone context, for shells with no device to share.
+    async fn own_gpu() -> Result<std::sync::Arc<trd_core::GpuContext>, String> {
+        let instance = trd_core::create_instance();
+        trd_core::GpuContext::request(
+            &instance,
+            &trd_core::GpuRequest {
+                label: "trd video editing wasm device",
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())
+    }
+
     pub async fn new(
+        asset: CatalogAsset,
+        model_bytes: &[u8],
+        texture_bytes: &[u8],
+        env_bytes: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<Self, String> {
+        let gpu = Self::own_gpu().await?;
+        Self::new_with_gpu(
+            gpu,
+            asset,
+            model_bytes,
+            texture_bytes,
+            env_bytes,
+            width,
+            height,
+        )
+    }
+
+    /// Like [`new`](Self::new), on an already-created (shared) GPU context.
+    pub fn new_with_gpu(
+        gpu: std::sync::Arc<trd_core::GpuContext>,
         asset: CatalogAsset,
         model_bytes: &[u8],
         texture_bytes: &[u8],
@@ -108,21 +174,11 @@ impl VideoPlacementRenderer {
                 ImportedAsset::Pbr(Box::new(glb))
             }
         };
-        let instance = trd_core::create_instance();
-        let gpu = trd_core::GpuContext::request(
-            &instance,
-            &trd_core::GpuRequest {
-                label: "trd video editing wasm device",
-                ..Default::default()
-            },
-        )
-        .await
-        .map_err(|error| error.to_string())?;
         let facts = gpu.adapter_facts();
         let asset_diagnostics = imported.diagnostics();
         let mesh = imported.mesh();
         let (mut renderer, target) =
-            trd_core::Renderer::with_gpu(gpu.clone(), width, height, std::slice::from_ref(mesh))
+            trd_core::Renderer::with_gpu(gpu, width, height, std::slice::from_ref(mesh))
                 .map_err(|error| error.to_string())?;
         let (default_mode, default_material) = imported.configure(&mut renderer);
         let env = assets::decode_env_hdr(env_bytes).map_err(|error| error.to_string())?;
@@ -138,6 +194,7 @@ impl VideoPlacementRenderer {
                 device_type: facts.device_type,
             }),
             asset_diagnostics: Some(asset_diagnostics),
+            transfers: TransferCounts::default(),
         })
     }
 
@@ -156,6 +213,7 @@ impl VideoPlacementRenderer {
             pick_target_size: self.renderer.pick_target_size(),
             msaa_samples: 4,
             asset: self.asset_diagnostics.clone(),
+            transfers: self.transfers,
         }
     }
 
@@ -211,6 +269,63 @@ impl VideoPlacementRenderer {
         model: Option<trd_core::Matrix4>,
         state: &crate::scene::SceneState,
     ) -> Result<Vec<u8>, String> {
+        self.draw(
+            rgba,
+            frame_width,
+            frame_height,
+            calibration_size,
+            background_frame,
+            quad_model,
+            quad_axes,
+            selected_quad,
+            placement_frame,
+            model,
+            state,
+        )?;
+        let pixels = self
+            .renderer
+            .read_pixels(&self.target)
+            .await
+            .map_err(|error| error.to_string())?;
+        // GPU→CPU, plus the UI toolkit's own CPU→GPU re-upload of the same bytes.
+        self.transfers.readback = pixels.len();
+        self.transfers.ui_upload = pixels.len();
+        self.transfers.crossings = 4;
+        Ok(pixels)
+    }
+
+    /// Draws the three placement layers into the target **without reading them
+    /// back**.
+    ///
+    /// The readback in [`render`](Self::render) exists only so a shell on a
+    /// *different* device can re-upload the pixels through its UI toolkit. When
+    /// the toolkit shares trd's device, the rendered texture can be bound
+    /// directly (see [`trd_core::TextureTarget::create_view`]) and those two
+    /// GPU↔CPU crossings disappear.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw(
+        &mut self,
+        rgba: &[u8],
+        frame_width: u32,
+        frame_height: u32,
+        calibration_size: (u32, u32),
+        background_frame: &trd_core::VideoEditingFrame,
+        quad_model: Option<trd_core::Matrix4>,
+        quad_axes: Option<trd_core::Matrix4>,
+        selected_quad: bool,
+        placement_frame: Option<&trd_core::VideoEditingFrame>,
+        model: Option<trd_core::Matrix4>,
+        state: &crate::scene::SceneState,
+    ) -> Result<(), String> {
+        // Counted fresh each frame: `render` adds the readback pair afterwards,
+        // so a `draw`-only frame is left with exactly the two crossings it made
+        // (video frame in, nothing out).
+        self.transfers = TransferCounts {
+            frame_upload: rgba.len(),
+            readback: 0,
+            ui_upload: 0,
+            crossings: 2,
+        };
         self.renderer
             .update_frame_texture_rgba(rgba, frame_width, frame_height);
         let identity_camera = trd_core::FrameParams::IDENTITY
@@ -244,17 +359,32 @@ impl VideoPlacementRenderer {
             state,
         );
 
-        self.renderer
-            .render_layers(
-                &[
-                    trd_core::SceneLayer::new(background_camera, &background),
-                    trd_core::SceneLayer::new(foreground_camera, &foreground),
-                    trd_core::SceneLayer::new(foreground_camera, &selection_overlay),
-                ],
-                &self.target,
-            )
-            .await
-            .map_err(|error| error.to_string())
+        self.renderer.draw_layers(
+            &[
+                trd_core::SceneLayer::new(background_camera, &background),
+                trd_core::SceneLayer::new(foreground_camera, &foreground),
+                trd_core::SceneLayer::new(foreground_camera, &selection_overlay),
+            ],
+            &self.target,
+        );
+        Ok(())
+    }
+
+    /// A sampleable view of the rendered target, for a shell sharing trd's device.
+    pub fn target_view(&self) -> wgpu::TextureView {
+        self.target.create_view()
+    }
+
+    /// Identifies *which* target the current view belongs to, so a host can tell
+    /// when its registered texture went stale (the target is recreated on resize
+    /// and on asset swap).
+    pub fn renderer_generation_key(&self) -> usize {
+        std::rc::Rc::as_ptr(&self.identity) as usize
+    }
+
+    /// The device the target lives on, needed to register the view with egui.
+    pub fn device(&self) -> &wgpu::Device {
+        &self.renderer.gpu().device
     }
 
     fn viewport(&self) -> trd_core::Viewport {

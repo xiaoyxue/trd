@@ -42,6 +42,8 @@ pub struct NativeVideoEditingApp {
     pending_frame: Option<DecodedFrame>,
     assets_root: PathBuf,
     env_bytes: Option<Vec<u8>>,
+    /// The UI toolkit's device, when the shell had one to share.
+    gpu: Option<std::sync::Arc<trd_core::GpuContext>>,
 }
 
 impl NativeVideoEditingApp {
@@ -49,6 +51,7 @@ impl NativeVideoEditingApp {
         document: trd_core::VideoEditingDocument,
         video_source: Option<NativeVideoSource>,
         preview_width: u32,
+        gpu: Option<std::sync::Arc<trd_core::GpuContext>>,
     ) -> Result<Self, NativeVideoEditingError> {
         let mut video = video_source
             .clone()
@@ -72,11 +75,20 @@ impl NativeVideoEditingApp {
         }
 
         let shared = Rc::new(VideoEditingShared::default());
-        let renderer = pollster::block_on(VideoPlacementRenderer::new_empty(
-            render_size.0,
-            render_size.1,
-        ))
+        // TOY BRANCH: prefer the UI toolkit's own device so trd's rendered
+        // texture can be handed to egui directly instead of round-tripping
+        // through CPU memory.
+        let renderer = match gpu.clone() {
+            Some(gpu) => {
+                VideoPlacementRenderer::new_empty_with_gpu(gpu, render_size.0, render_size.1)
+            }
+            None => pollster::block_on(VideoPlacementRenderer::new_empty(
+                render_size.0,
+                render_size.1,
+            )),
+        }
         .map_err(NativeVideoEditingError::Renderer)?;
+        shared.set_device_shared(gpu.is_some());
         shared.set_renderer(renderer);
         let editor = VideoEditingApp::new(document.clone(), shared.clone());
         let mut app = Self {
@@ -96,6 +108,7 @@ impl NativeVideoEditingApp {
                 }
             })?,
             env_bytes: None,
+            gpu,
         };
         if app.video_source.is_some() {
             app.shared.set_video_status(false, false);
@@ -225,6 +238,29 @@ impl NativeVideoEditingApp {
 
     fn open_video_source(&mut self, source: NativeVideoSource) {
         self.stop_playback();
+        // TOY BRANCH: re-derive the timeline from the newly opened video instead
+        // of keeping the one frozen at startup. Without this a longer clip is
+        // still clamped to the previous document's frame count and fps.
+        if !crate::media::strict_source() {
+            match crate::media::probe_video_info(&source) {
+                Ok(info) => {
+                    log::info!(
+                        "re-synthesized timeline: {}x{} @ {}/{} fps, {} frames",
+                        info.width,
+                        info.height,
+                        info.fps_num,
+                        info.fps_den,
+                        info.frame_count
+                    );
+                    self.document = crate::media::synthesize_document(info);
+                    self.editor = VideoEditingApp::new(self.document.clone(), self.shared.clone());
+                }
+                Err(error) => {
+                    self.shared.set_error(error.to_string());
+                    return;
+                }
+            }
+        }
         let video =
             match NativeVideo::open(source.clone(), &self.document.video, self.preview_width) {
                 Ok(video) => video,
@@ -330,14 +366,25 @@ impl NativeVideoEditingApp {
             .as_ref()
             .map(|video| (video.width, video.height))
             .unwrap_or((self.document.video.width, self.document.video.height));
-        let renderer = pollster::block_on(VideoPlacementRenderer::new(
-            asset,
-            &model_bytes,
-            &texture_bytes,
-            self.env_bytes.as_deref().expect("loaded above"),
-            width,
-            height,
-        ))?;
+        let renderer = match self.gpu.clone() {
+            Some(gpu) => VideoPlacementRenderer::new_with_gpu(
+                gpu,
+                asset,
+                &model_bytes,
+                &texture_bytes,
+                self.env_bytes.as_deref().expect("loaded above"),
+                width,
+                height,
+            )?,
+            None => pollster::block_on(VideoPlacementRenderer::new(
+                asset,
+                &model_bytes,
+                &texture_bytes,
+                self.env_bytes.as_deref().expect("loaded above"),
+                width,
+                height,
+            ))?,
+        };
         self.shared.set_catalog_renderer(asset, renderer);
         Ok(())
     }
@@ -397,6 +444,8 @@ impl eframe::App for NativeVideoEditingApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.update_playback();
         self.service_editor_requests();
+        // The editor registers trd's texture with egui itself (it is the type
+        // that draws it), so this shell only has to share the device.
         eframe::App::ui(&mut self.editor, ui, frame);
         self.service_editor_requests();
         if self.playback.is_some() {
