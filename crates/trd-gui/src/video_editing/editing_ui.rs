@@ -42,6 +42,7 @@ impl eframe::App for VideoEditingApp {
         let quad = self.document.frames[overlay_frame_index as usize].placement_quad;
         let quad_frame = self.quad_frame_at(overlay_frame_index);
         let mut needs_render = false;
+        let mut pick = None;
 
         egui::Panel::left("controls")
             .resizable(true)
@@ -99,14 +100,19 @@ impl eframe::App for VideoEditingApp {
             if let Some(fitted) = outcome.fitted_size {
                 self.resize_render_target(ui.ctx(), fitted);
             }
-            if let Some(point) = outcome.pick {
-                self.handle_pick(point, quad);
-            }
+            pick = outcome.pick;
         });
 
+        // The scene revision must settle *before* a pick request captures it:
+        // `image_panel` reports `needs_render` for the very click that requests
+        // the pick, so bumping the revision afterwards would invalidate that
+        // pick's own completion (#205).
         if needs_render {
             self.shared.request_overlay();
             ui.ctx().request_repaint();
+        }
+        if let Some(point) = pick {
+            self.handle_pick(point, quad);
         }
     }
 }
@@ -288,7 +294,7 @@ impl VideoEditingApp {
 
     /// Resolves a click on the image into a quad selection, a gizmo reveal, or a
     /// GPU pick request.
-    fn handle_pick(&mut self, (x, y): (u32, u32), quad: Option<[[f32; 2]; 4]>) {
+    pub(super) fn handle_pick(&mut self, (x, y): (u32, u32), quad: Option<[[f32; 2]; 4]>) {
         let video = &self.document.video;
         let clicked_quad = quad.is_some_and(|points| {
             let source = [
