@@ -20,10 +20,11 @@ Guidance for agents working in this repository.
 - **Vertical slicing.** Each increment threads the whole stack and is
   independently end-to-end verifiable.
 - **Everything drawn is a `DrawableObject`** (`visual/drawable.rs`, #41): a small
-  `Copy` enum (`Mesh { mesh_id, model, mode }` | `AabbBox { mesh_id, model }` |
-  `CoordinateAxes { model }` | `PlaneGrid { plane, model }` |
-  `QuadOutline { model, selected }` | `BlobShadow { model }`) — the single base
-  interface for every primitive. **Every variant is a placed primitive**: it
+  `Copy` struct pairing a `Primitive` — *what* to draw — with the `model` that
+  places it (`Primitive::Mesh { mesh_id, mode }` | `AabbBox { mesh_id }` |
+  `CoordinateAxes` | `PlaneGrid { plane }` | `QuadOutline { selected }` |
+  `BlobShadow`) — the single base
+  interface for every primitive. **Every drawable is a placed primitive**: it
   names geometry and carries the model that places it, so it can be instanced.
   What a frame draws *behind* them — the HDR environment probe and the
   background frame plane — is not a primitive but a per-frame setting on
@@ -33,7 +34,10 @@ Guidance for agents working in this repository.
   gizmo buffers); a drawable is a light handle naming *which* primitive + its
   per-frame model. Every front-end hands the same `Scene`
   (objects + background, rebuilt per frame) to `Renderer::render` without
-  per-type branching; the render core batches its objects by draw kind. A single-object
+  per-type branching; the render core batches its objects by primitive — a batch
+  key *is* a drawable minus its model, so there is one taxonomy, not two (#204),
+  and `Primitive::sort_key` spells out the submission order that every
+  depth-disabled overlay depends on. A single-object
   frame is the degenerate one-element scene. Add a primitive by adding a variant,
   not by bolting flags onto the renderer. Wireframe (and PBR) is a *mode* of
   `Mesh`, not a separate variant.

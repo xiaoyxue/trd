@@ -89,7 +89,7 @@ pub(crate) fn frame_fit_uv_scale(
     }
 }
 
-/// Which coordinate plane a [`DrawableObject::PlaneGrid`] lattices, i.e. the two
+/// Which coordinate plane a [`Primitive::PlaneGrid`](super::Primitive::PlaneGrid) lattices, i.e. the two
 /// model-space axes it spans (the third is held at 0): `Xy` → the X/Y plane,
 /// `Xz` → X/Z, `Yz` → Y/Z. For a #77 placement quad (whose local Z is the plane
 /// normal), `Xy` is the quad's own plane — a grid on the reconstructed surface.

@@ -252,7 +252,7 @@ pub(crate) const SHADOW_VERTEX_COUNT: u32 = 6;
 /// in the model-space XY plane (`[-1, 1]²` at `z = 0`). `shadow.wgsl` reads each
 /// vertex's local `position.xy` as the radial coordinate and feathers a soft dark
 /// alpha (darkest under the placed mesh, fading to `0` at the rim), so a
-/// [`DrawableObject::BlobShadow`](super::DrawableObject::BlobShadow) lays a
+/// [`Primitive::BlobShadow`](crate::Primitive::BlobShadow) lays a
 /// grounding shadow on the plane beneath a placed mesh via its per-instance
 /// model. Drawn non-indexed (`draw(0..SHADOW_VERTEX_COUNT, ..)`), alpha-blended
 /// over the background frame plane.

@@ -58,20 +58,23 @@ Platform-agnostic wgpu logic, shared verbatim by every target:
   configurable pixel-width quad and the fragment stage feathers its rectangle
   distance, so axes/AABBs/grids remain anti-aliased without MSAA. Axis cone tips
   reuse the unlit triangle path.
-- **`DrawableObject` + `Scene` (`visual/`)** — the base interface for every
-  primitive (#41). It is a small `Copy` enum — `Mesh { mesh_id, model, mode }`,
-  `AabbBox { mesh_id, model }`, `CoordinateAxes { model }`,
-  `PlaneGrid { plane, model }`, `QuadOutline { model, selected }`, and
-  `BlobShadow { model }`. Every variant names geometry *and* the model that
-  places it, so every one of them can be instanced. Geometry is owned once
+- **`DrawableObject` + `Primitive` + `Scene` (`visual/`)** — the base interface
+  for every primitive (#41). A `DrawableObject` is a small `Copy` struct pairing
+  a `Primitive` — *what* to draw: `Mesh { mesh_id, mode }`, `AabbBox { mesh_id }`,
+  `CoordinateAxes`, `PlaneGrid { plane }`, `QuadOutline { selected }`,
+  `BlobShadow` — with the `model` that places it, so every one of them can be
+  instanced. Geometry is owned once
   (decode-once mesh store + shared
   line-quad/arrow buffers); a drawable is a light handle naming *which* primitive
   + its per-frame model. A `Scene` (an object list plus its `Background`) is
   rebuilt each frame; every front-end hands it to `Renderer::render` without
   per-type branching.
-  The render core walks its objects into a flat list, batches by draw kind, binds
+  The render core walks its objects into a flat list, batches by primitive —
+  a batch key is a drawable minus its model, so the same taxonomy serves both
+  (#204) — binds
   the shared `P·V` camera uniform (plus viewport size for gizmo lines), and
-  records the draws.
+  records the draws in `Primitive::sort_key` order, which is the frame's z-order
+  because every overlay pipeline disables depth.
 - **`Scene::background()` — what a frame draws *behind* its primitives (#204).**
   `Background { environment: Option<EnvironmentBackground>, frame: Option<FrameFit> }`
   holds the camera-centered HDR environment probe and the fullscreen background

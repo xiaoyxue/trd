@@ -403,19 +403,19 @@ pub fn placement_scenes(
         frame: Some(trd_core::FrameFit::Stretch),
     });
     if let Some(quad_model) = quad_model {
-        background.push(trd_core::DrawableObject::QuadOutline {
-            model: quad_model.to_cols_array(),
-            selected: selected_quad,
-        });
+        background.push(trd_core::DrawableObject::quad_outline(
+            quad_model.to_cols_array(),
+            selected_quad,
+        ));
         if selected_quad {
-            background.push(trd_core::DrawableObject::PlaneGrid {
-                plane: trd_core::GridPlane::Xy,
-                model: quad_model.to_cols_array(),
-            });
+            background.push(trd_core::DrawableObject::plane_grid(
+                trd_core::GridPlane::Xy,
+                quad_model.to_cols_array(),
+            ));
             if let Some(axes) = quad_axes {
-                background.push(trd_core::DrawableObject::CoordinateAxes {
-                    model: axes.to_cols_array(),
-                });
+                background.push(trd_core::DrawableObject::coordinate_axes(
+                    axes.to_cols_array(),
+                ));
             }
         }
     }
@@ -423,33 +423,29 @@ pub fn placement_scenes(
     let mut foreground = trd_core::Scene::new();
     let mut selection_overlay = trd_core::Scene::new();
     if let Some(model) = model.map(|model| model.to_cols_array()) {
-        foreground.push(trd_core::DrawableObject::Mesh {
-            mesh_id: 0,
-            model,
-            mode: state.modes[0],
-        });
+        foreground.push(trd_core::DrawableObject::mesh(0, model, state.modes[0]));
         if state.show_aabb || state.selected == Some(0) {
-            selection_overlay.push(trd_core::DrawableObject::AabbBox { mesh_id: 0, model });
+            selection_overlay.push(trd_core::DrawableObject::aabb_box(0, model));
         }
         if state.show_local_axes {
-            foreground.push(trd_core::DrawableObject::CoordinateAxes { model });
+            foreground.push(trd_core::DrawableObject::coordinate_axes(model));
         }
         if state.show_axes {
-            foreground.push(trd_core::DrawableObject::CoordinateAxes {
-                model: trd_core::Matrix4::IDENTITY.to_cols_array(),
-            });
+            foreground.push(trd_core::DrawableObject::coordinate_axes(
+                trd_core::Matrix4::IDENTITY.to_cols_array(),
+            ));
         }
         if state.show_local_grid {
-            foreground.push(trd_core::DrawableObject::PlaneGrid {
-                plane: trd_core::GridPlane::Xz,
+            foreground.push(trd_core::DrawableObject::plane_grid(
+                trd_core::GridPlane::Xz,
                 model,
-            });
+            ));
         }
         if state.show_world_grid {
-            foreground.push(trd_core::DrawableObject::PlaneGrid {
-                plane: trd_core::GridPlane::Xz,
-                model: trd_core::Matrix4::IDENTITY.to_cols_array(),
-            });
+            foreground.push(trd_core::DrawableObject::plane_grid(
+                trd_core::GridPlane::Xz,
+                trd_core::Matrix4::IDENTITY.to_cols_array(),
+            ));
         }
     }
     (background, foreground, selection_overlay)
@@ -461,7 +457,7 @@ mod tests {
     use crate::scene::SceneState;
 
     fn is_axes(d: &trd_core::DrawableObject) -> bool {
-        matches!(d, trd_core::DrawableObject::CoordinateAxes { .. })
+        matches!(d.primitive(), trd_core::Primitive::CoordinateAxes)
     }
 
     /// The video plane is the background of the background layer, so everything
@@ -502,13 +498,17 @@ mod tests {
         };
         let (_, foreground, overlay) =
             placement_scenes(None, None, false, Some(trd_core::Matrix4::IDENTITY), &state);
-        assert!(matches!(
-            overlay.objects(),
-            [trd_core::DrawableObject::AabbBox { mesh_id: 0, .. }]
-        ));
+        assert_eq!(
+            overlay
+                .objects()
+                .iter()
+                .map(|d| d.primitive())
+                .collect::<Vec<_>>(),
+            [trd_core::Primitive::AabbBox { mesh_id: 0 }]
+        );
         assert!(!foreground
             .iter()
-            .any(|d| matches!(d, trd_core::DrawableObject::AabbBox { .. })));
+            .any(|d| matches!(d.primitive(), trd_core::Primitive::AabbBox { .. })));
     }
 
     /// Without a placed object there is no foreground at all — the editor still

@@ -84,7 +84,8 @@ Both render paths build the same value:
 ```
 Scene { background: Background, objects: Vec<DrawableObject> }   // visual/scene.rs
 Background { environment: Option<EnvironmentBackground>, frame: Option<FrameFit> }
-DrawableObject::Mesh { mesh_id, model: [f32;16], mode }   // + AabbBox / CoordinateAxes / PlaneGrid / QuadOutline / BlobShadow
+DrawableObject { primitive: Primitive, model: [f32;16] }  // placed primitive
+Primitive::Mesh { mesh_id, mode }   // + AabbBox / CoordinateAxes / PlaneGrid / QuadOutline / BlobShadow
 Draw { mesh_id, model: [f32;16], mode }                   // wire form, per frame
 FrameParams { model?, k?, pose?, eye?, target?, fovy?, ... }  // camera
 ```

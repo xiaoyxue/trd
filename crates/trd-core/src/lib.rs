@@ -46,7 +46,7 @@ pub use render::{
 // render backend (#203). Public paths (`trd_core::DrawableObject`) are unchanged.
 pub use visual::{
     Background, Draw, DrawSelection, DrawableObject, EnvironmentBackground, FrameFit, GridPlane,
-    RenderMode, Scene,
+    Primitive, RenderMode, Scene,
 };
 // The render harness; available on both platforms since readback became async
 // (#180) — the browser could not use it while it blocked on readback.
