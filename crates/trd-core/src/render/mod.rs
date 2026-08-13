@@ -25,6 +25,7 @@ mod pipeline;
 mod platform;
 mod render_target;
 mod renderer;
+mod scene_pipelines;
 mod tonemap;
 #[cfg(test)]
 mod triangle_renderer;
@@ -79,9 +80,9 @@ pub(crate) use pipeline::{
     create_depth_target, create_env_bind_group_layout, create_frame_bind_group_layout,
     create_frame_plane_pipeline, create_gizmo_bind_group_layout, create_gizmo_binding,
     create_gizmo_line_pipeline, create_mesh_bind_group_layout, create_mesh_pipeline_with,
-    create_msaa_color_target, create_pbr_bind_group_layout, create_pbr_pipeline,
-    create_picking_pipeline, create_shadow_pipeline, create_texture_bind_group_layout,
-    create_textured_pipeline, create_view_proj_binding, overlay_depth_stencil, solid_depth_stencil,
-    write_gizmo_params, write_view_proj, DepthTarget, MsaaColorTarget, MSAA_SAMPLE_COUNT,
-    PICK_FORMAT,
+    create_pbr_bind_group_layout, create_pbr_pipeline, create_picking_pipeline,
+    create_shadow_pipeline, create_texture_bind_group_layout, create_textured_pipeline,
+    create_view_proj_binding, overlay_depth_stencil, solid_depth_stencil, write_gizmo_params,
+    write_view_proj, DepthTarget, MsaaColor, MSAA_SAMPLE_COUNT, PICK_FORMAT,
 };
+pub(crate) use scene_pipelines::{create_scene_pipelines, ScenePipelines, SceneUniforms};

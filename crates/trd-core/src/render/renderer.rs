@@ -38,10 +38,12 @@
 //!
 //! Internally it is still a composition of a few cohesive parts, each with a
 //! single job, so no one struct is a grab-bag of wgpu handles:
-//! - [`MeshPipelines`] — the mesh/gizmo pipelines (filled/wireframe/textured/PBR)
+//! - [`ScenePipelines`] — the mesh/gizmo pipelines (filled/wireframe/textured/PBR)
 //!   and [`SceneUniforms`] — the group-0 uniforms they read (the camera `P·V`,
 //!   the gizmo viewport params, the per-mesh PBR slot array). Two types, because
-//!   *what draws* and *what it reads* are different questions (#203).
+//!   *what draws* and *what it reads* are different questions (#203); both live
+//!   in `scene_pipelines.rs` because both are `f(format, sample_count)` rather
+//!   than a function of any one scene (#221 §2).
 //! - [`MeshStore`] — the uploaded [`MeshGpu`]s (each owning its albedo, material
 //!   maps, material, IBL, tone-map and debug view), the shared axes gizmo, and
 //!   the growable per-instance model buffer; also walks a [`Scene`] into draw
@@ -75,7 +77,7 @@ use super::buffer::{draw_indexed, draw_vertices, VertexGeometry};
 use super::draw_command::build_batches;
 use super::env_background::{EnvBackground, EnvBackgroundSettings};
 use super::frame_plane::FramePlane;
-use super::mesh_store::{MeshGpu, MeshStore};
+use super::mesh_store::MeshStore;
 use super::picking::Picking;
 use super::*;
 use crate::material::DisneyMaterial;
@@ -143,216 +145,6 @@ pub(crate) fn check_dimensions(width: u32, height: u32) -> Result<u32, RenderErr
     Ok(pixels)
 }
 
-/// The mesh, gizmo and PBR **pipelines** — one field per way a draw kind
-/// rasterizes, and nothing else.
-///
-/// It used to be `SceneRenderPipelines`, which also carried the three uniform
-/// buffers, their bind groups and the PBR slot stride: a name that promised a
-/// pipeline collection over a struct holding three different kinds of thing
-/// (#203). The uniforms those pipelines read now live in [`SceneUniforms`], so
-/// each type answers one question — *what draws* vs *what it reads*.
-///
-/// Filled, wireframe, arrowheads, shadows and textured rendering share the
-/// camera group-0 layout; expanded gizmo lines use a viewport-aware one, and PBR
-/// a dynamic-offset one — which is why the encode arm restores the camera bind
-/// group after switching.
-struct MeshPipelines {
-    filled: wgpu::RenderPipeline,
-    wireframe: wgpu::RenderPipeline,
-    /// Screen-space expanded, alpha-feathered AABB/axes/grid line pipeline.
-    gizmo_line: wgpu::RenderPipeline,
-    /// Unlit overlay triangles for coordinate-axis arrowheads.
-    gizmo_solid: wgpu::RenderPipeline,
-    textured: wgpu::RenderPipeline,
-    /// The contact / blob grounding-shadow pipeline (alpha-blended, depth-write
-    /// off); shares the untextured camera bind-group layout (group 0).
-    shadow: wgpu::RenderPipeline,
-    /// The Disney PBR pipeline (`pbr.wgsl`): group 0 = [`SceneUniforms::pbr`]'s
-    /// slot for the drawn mesh, group 1 = the bound albedo texture, group 2 =
-    /// the HDR environment map, group 3 = the material maps.
-    pbr: wgpu::RenderPipeline,
-}
-
-/// The group-0 uniforms a scene pass binds, one per binding discipline (#203).
-///
-/// `camera` and `gizmo` are whole-buffer bindings rewritten once per frame;
-/// `pbr` is a slot array indexed per draw. Each is a buffer + the bind group
-/// exposing it as a single value ([`BoundUniform`] / [`BoundUniformArray`]),
-/// rather than six loose fields kept in step by naming convention — the same
-/// "bound resource" shape as [`BoundTexture`] and [`BoundMaterialMaps`].
-struct SceneUniforms {
-    /// The camera `P·V` read by every non-gizmo, non-PBR pipeline.
-    camera: BoundUniform,
-    /// The viewport-aware params the expanded-line gizmo pipeline reads.
-    gizmo: BoundUniform,
-    /// One `PbrUniform` slot per mesh (each carrying the shared camera/lights +
-    /// that mesh's material), rewritten each `encode`; a PBR draw selects its
-    /// mesh's slot with a dynamic offset.
-    pbr: BoundUniformArray,
-}
-
-/// Builds the scene pipelines and the uniforms they bind, together.
-///
-/// One function for both halves because each group-0 bind-group layout is
-/// shared by exactly one pipeline and the binding feeding it — the camera layout
-/// by the untextured/textured pipelines and `camera`, the gizmo layout by
-/// `gizmo_line` and `gizmo`, the `has_dynamic_offset` PBR layout by `pbr` and
-/// `pbr` — so creating them apart would either duplicate the layouts or leave
-/// that pairing implicit. `texture_layout` is the albedo texture's group-1
-/// layout (from [`BoundTexture`]), shared by the textured and PBR pipelines;
-/// `env_layout` is the PBR pipeline's group-2 environment-map layout (from
-/// [`BoundEnv`]). Every pipeline in the pass shares the one `sample_count`
-/// (`1` = no MSAA, single-sample), and the PBR slot array is sized for
-/// `mesh_count` meshes.
-fn create_scene_pipelines(
-    device: &wgpu::Device,
-    format: wgpu::TextureFormat,
-    texture_layout: &wgpu::BindGroupLayout,
-    material_maps_layout: &wgpu::BindGroupLayout,
-    env_layout: &wgpu::BindGroupLayout,
-    sample_count: u32,
-    mesh_count: usize,
-) -> (MeshPipelines, SceneUniforms) {
-    // One explicit bind-group layout shared by both untextured pipelines, so
-    // the single camera bind group is valid whichever RenderMode is active.
-    let camera_layout = create_mesh_bind_group_layout(device);
-    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("trd mesh pipeline layout"),
-        bind_group_layouts: &[Some(&camera_layout)],
-        immediate_size: 0,
-    });
-    let filled = create_mesh_pipeline_with(
-        device,
-        format,
-        &pipeline_layout,
-        wgpu::PrimitiveTopology::TriangleList,
-        Some(solid_depth_stencil()),
-        sample_count,
-    );
-    let wireframe = create_mesh_pipeline_with(
-        device,
-        format,
-        &pipeline_layout,
-        wgpu::PrimitiveTopology::LineList,
-        Some(overlay_depth_stencil()),
-        sample_count,
-    );
-    let gizmo_solid = create_mesh_pipeline_with(
-        device,
-        format,
-        &pipeline_layout,
-        wgpu::PrimitiveTopology::TriangleList,
-        Some(overlay_depth_stencil()),
-        sample_count,
-    );
-    let gizmo_layout = create_gizmo_bind_group_layout(device);
-    let gizmo_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("trd gizmo pipeline layout"),
-        bind_group_layouts: &[Some(&gizmo_layout)],
-        immediate_size: 0,
-    });
-    let gizmo_line =
-        create_gizmo_line_pipeline(device, format, &gizmo_pipeline_layout, sample_count);
-    // Contact / blob grounding-shadow pipeline (#110 follow-up): shares the
-    // untextured camera layout (group 0), alpha-blended, depth-write off.
-    let shadow = create_shadow_pipeline(device, format, &pipeline_layout, sample_count);
-    // Textured pipeline (#20): group 0 = the shared camera uniform, group 1 =
-    // the bound albedo texture + sampler.
-    let textured_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("trd textured pipeline layout"),
-        bind_group_layouts: &[Some(&camera_layout), Some(texture_layout)],
-        immediate_size: 0,
-    });
-    let textured =
-        create_textured_pipeline(device, format, &textured_pipeline_layout, sample_count);
-    // Disney PBR pipeline (#): group 0 = the PbrUniform, group 1 = the shared
-    // albedo texture layout, group 2 = the HDR environment map. Its group-0
-    // layout differs from the camera layout, so the encode arm restores the
-    // camera bind group after each PBR draw.
-    let pbr_layout = create_pbr_bind_group_layout(device);
-    let pbr_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("trd pbr pipeline layout"),
-        bind_group_layouts: &[
-            Some(&pbr_layout),
-            Some(texture_layout),
-            Some(env_layout),
-            Some(material_maps_layout),
-        ],
-        immediate_size: 0,
-    });
-    let pbr = create_pbr_pipeline(device, format, &pbr_pipeline_layout, sample_count);
-    // A placeholder camera: the buffers only need to exist here, and every
-    // frame's `write_camera` overwrites them with the real one.
-    let placeholder = FrameParams::IDENTITY
-        .to_camera(Viewport {
-            width: 1,
-            height: 1,
-        })
-        .expect("the identity params are a valid camera form");
-    let uniforms = SceneUniforms {
-        camera: create_view_proj_binding(device, &camera_layout, placeholder),
-        gizmo: create_gizmo_binding(device, &gizmo_layout, placeholder),
-        // The per-object PbrUniform slots: one per mesh, each rewritten every
-        // frame with the shared camera/lights + that mesh's material; a PBR
-        // draw selects its slot via a dynamic offset.
-        pbr: BoundUniformArray::new::<PbrUniform>(device, &pbr_layout, "trd pbr", mesh_count),
-    };
-    let pipelines = MeshPipelines {
-        filled,
-        wireframe,
-        gizmo_line,
-        gizmo_solid,
-        textured,
-        shadow,
-        pbr,
-    };
-    (pipelines, uniforms)
-}
-
-impl SceneUniforms {
-    /// Rewrites the camera `P·V` uniform for this frame's `camera`.
-    fn write_camera(&self, queue: &wgpu::Queue, camera: Camera) {
-        write_view_proj(queue, self.camera.buffer(), camera);
-        write_gizmo_params(queue, self.gizmo.buffer(), camera);
-    }
-
-    /// Rewrites the Disney PBR uniform **slots** for this frame: one slot per
-    /// mesh (mesh id → slot id), each carrying the shared camera `P·V` + world
-    /// position + light rig, that mesh's material/IBL/tone-map/debug view, and
-    /// the env gate. A PBR draw then binds its object's slot via a dynamic
-    /// offset.
-    ///
-    /// The per-mesh values are read straight off the [`MeshGpu`]s that own them
-    /// (#203): they used to be four `Vec`s on the renderer, all sized to the mesh
-    /// count with nothing enforcing it, joined here by a four-deep `zip`.
-    fn write_pbr(
-        &self,
-        queue: &wgpu::Queue,
-        camera: Camera,
-        meshes: &[MeshGpu],
-        lighting: Lighting,
-        use_env: bool,
-    ) {
-        let view_proj = camera.view_projection().matrix().to_cols_array();
-        let camera_pos = camera.position();
-        for (slot, mesh) in meshes.iter().enumerate() {
-            let uniform = PbrUniform::new(
-                view_proj,
-                camera_pos,
-                PbrUniformInputs {
-                    material: &mesh.material,
-                    lighting,
-                    ibl: mesh.ibl,
-                    tone_mapping: mesh.tone_mapping,
-                    debug_view: mesh.debug_view,
-                    use_env,
-                },
-            );
-            self.pbr.write_slot(queue, slot, &uniform);
-        }
-    }
-}
-
 /// The render harness: pipelines, decode-once mesh store, materials/lighting,
 /// and picking, drawing one frame's camera and [`Scene`](crate::Scene) per call
 /// into a caller-supplied render target.
@@ -373,7 +165,7 @@ impl SceneUniforms {
 /// owns. Uploads, materials, lighting, mesh count and picking are shared by
 /// every caller regardless of target.
 pub struct Renderer {
-    pipelines: MeshPipelines,
+    pipelines: ScenePipelines,
     /// The group-0 uniforms every pass binds: the camera `P·V`, the gizmo
     /// viewport params, and the per-mesh PBR slot array.
     uniforms: SceneUniforms,
@@ -392,21 +184,15 @@ pub struct Renderer {
     /// The mesh pass's depth attachment, (re)created lazily in `encode` to match
     /// the viewport. Gives solid (filled/textured) meshes real z-occlusion.
     depth: Option<DepthTarget>,
-    /// The mesh pass's multisampled color attachment ([`sample_count`](Self::sample_count)×),
-    /// (re)created lazily in `encode` to match the viewport. The pass renders into
-    /// it and resolves into the caller's single-sample `view`, so every front-end
-    /// gets multisampled mesh/arrowhead edges transparently. Gizmo lines add
-    /// analytic AA separately. `None` when MSAA is disabled (`sample_count == 1`):
-    /// the pass then renders straight into `view`.
-    msaa: Option<MsaaColorTarget>,
-    /// The mesh pass's MSAA sample count — `4` (the default,
-    /// [`MSAA_SAMPLE_COUNT`]) for multisampled edges, or `1` for single-sample
-    /// rasterization. Fixed at construction because every pipeline plus the
-    /// depth/color attachments must share it.
-    sample_count: u32,
-    /// The color format the pipelines were built for; the MSAA color target must
-    /// be created with the same format.
-    format: wgpu::TextureFormat,
+    /// The mesh pass's color attachment: the format and sample count every
+    /// pipeline was built for, plus the multisampled target (re)created lazily
+    /// in `encode` to match the viewport. When MSAA is on the pass renders into
+    /// that target and resolves into the caller's single-sample `view`, so every
+    /// front-end gets multisampled mesh/arrowhead edges transparently; gizmo
+    /// lines add analytic AA separately. With MSAA off the pass renders straight
+    /// into `view`. One owner rather than three loose fields, so "same format,
+    /// same sample count" is structural (#221 §3).
+    msaa: MsaaColor,
     /// The shared GPU context. Retained so `encode` can grow GPU resources and
     /// the setters can upload immediately, without the caller threading handles
     /// through every call. Holding the whole context (rather than a bare device)
@@ -512,9 +298,7 @@ impl Renderer {
             store,
             frame_plane,
             depth: None,
-            msaa: None,
-            sample_count,
-            format,
+            msaa: MsaaColor::new(format, sample_count),
             gpu,
             picking,
         }
@@ -1157,7 +941,8 @@ impl Renderer {
         //    (solid meshes z-occlude; the multisampled color, if any, is resolved
         //    into `view`).
         self.ensure_depth(viewport);
-        self.ensure_msaa(viewport);
+        self.msaa
+            .ensure(&self.gpu.device, viewport.width, viewport.height);
 
         // 4. Background frame-plane fit for this viewport (no-op if the scene
         //    asks for no frame plane or no frame texture is bound yet).
@@ -1196,7 +981,7 @@ impl Renderer {
         } else {
             wgpu::LoadOp::Clear(wgpu::Color::BLACK)
         };
-        let color_attachment = match self.msaa.as_ref() {
+        let color_attachment = match self.msaa.target() {
             Some(msaa) => wgpu::RenderPassColorAttachment {
                 view: &msaa.view,
                 depth_slice: None,
@@ -1363,9 +1148,9 @@ impl Renderer {
     }
 
     /// Ensures the depth attachment matches `viewport` (each dimension clamped to
-    /// ≥ 1) at the renderer's [`sample_count`](Self::sample_count) (the depth
-    /// sample count must match the color attachment), recreating it only when the
-    /// target size changes.
+    /// ≥ 1) at the mesh pass's [`sample_count`](MsaaColor::sample_count) (the
+    /// depth sample count must match the color attachment), recreating it only
+    /// when the target size changes.
     fn ensure_depth(&mut self, viewport: Viewport) {
         let dw = viewport.width.max(1);
         let dh = viewport.height.max(1);
@@ -1378,35 +1163,7 @@ impl Renderer {
                 &self.gpu.device,
                 dw,
                 dh,
-                self.sample_count,
-            ));
-        }
-    }
-
-    /// Ensures the multisampled color attachment matches `viewport` (each
-    /// dimension clamped to ≥ 1) at the renderer's
-    /// [`sample_count`](Self::sample_count) and color `format`, recreating it only
-    /// when the target size changes. When MSAA is disabled (`sample_count == 1`)
-    /// no MSAA target is needed — the pass renders straight into the caller's
-    /// single-sample `view` — so this clears it to `None`.
-    fn ensure_msaa(&mut self, viewport: Viewport) {
-        if self.sample_count <= 1 {
-            self.msaa = None;
-            return;
-        }
-        let dw = viewport.width.max(1);
-        let dh = viewport.height.max(1);
-        if self
-            .msaa
-            .as_ref()
-            .is_none_or(|m| m.width != dw || m.height != dh)
-        {
-            self.msaa = Some(create_msaa_color_target(
-                &self.gpu.device,
-                self.format,
-                dw,
-                dh,
-                self.sample_count,
+                self.msaa.sample_count(),
             ));
         }
     }
