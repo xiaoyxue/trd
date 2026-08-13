@@ -180,6 +180,18 @@ impl Primitive {
 /// batcher relies on — strip the model and the rest *is* the batch key — and
 /// nothing can bolt a third, un-batched component onto a drawable without going
 /// through [`Primitive`] (#204).
+///
+/// **Why the model lives here and not on the mesh.** `mesh_id` names geometry
+/// that is decoded *once* and shared; the model is per-object and per-frame, so
+/// a mesh owning it could be placed only once. It would also destroy the batch
+/// key — equal [`Primitive`]s are drawn as one instanced command, and a key
+/// containing a model makes every object its own batch (and asks `f32` to be
+/// `Eq`). The model is per-*instance* GPU data and is fed through the instance
+/// vertex buffer, exactly where it belongs. Four of the six primitives have no
+/// mesh at all yet still need placing. The matrix that genuinely *is* a property
+/// of the asset does live on the mesh — `MeshGpu::base_model`, the decode-time
+/// normalization — and the renderer composes the two as
+/// `effective = model · base`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DrawableObject {
     primitive: Primitive,

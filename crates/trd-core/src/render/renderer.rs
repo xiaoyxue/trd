@@ -53,16 +53,24 @@
 //!   [`PickTarget`] (#141), the target allocated lazily on the first
 //!   [`pick`](Self::pick) call so a headless CLI stream never pays for it.
 //!
+//! **The draw loop is a dispatch, not a state machine** (#204). `encode_pass`
+//! walks the batched commands and hands each to the `record` body of its
+//! [`Primitive`] — one line per arm — and every body sets its own pipeline and
+//! bind groups at entry while restoring nothing at exit, so no body may depend
+//! on pass state another one left behind. The bodies and that rule are on the
+//! second `impl Renderer` block below.
+//!
 //! Formerly `BatchRenderer`. "Batch" there meant *batch-mode headless output* and
 //! described nothing about the type — instanced batching lives entirely in
 //! this module (`draw_command.rs`) — while colliding with that real meaning. The
 //! name now belongs to one concept: grouping draws into instanced commands
 //! (#180).
 
+use std::ops::Range;
 use std::sync::Arc;
 
 use super::bound_material_maps::BoundMaterialMaps;
-use super::buffer::{draw_indexed, draw_vertices};
+use super::buffer::{draw_indexed, draw_vertices, VertexGeometry};
 use super::draw_command::build_batches;
 use super::env_background::{EnvBackground, EnvBackgroundSettings};
 use super::frame_plane::FramePlane;
@@ -72,7 +80,7 @@ use crate::material::DisneyMaterial;
 use crate::math::Matrix4;
 use crate::output::tightly_pack_rgba;
 use crate::texture::Texture;
-use crate::visual::{Draw, Primitive, RenderMode, Scene};
+use crate::visual::{Draw, GridPlane, Primitive, RenderMode, Scene};
 use crate::Camera;
 use futures_channel::oneshot;
 use thiserror::Error;
@@ -1303,86 +1311,24 @@ impl Renderer {
             self.frame_plane.draw(&mut pass);
         }
 
-        // The instance buffer (slot 1) stays bound across every draw. Most
-        // commands use the camera bind group; expanded lines briefly swap in the
-        // viewport-aware gizmo bind group.
-        pass.set_bind_group(0, self.uniforms.camera.bind_group(), &[]);
-        pass.set_vertex_buffer(1, self.store.instance_buffer.slice(..));
+        // 7. Dispatch each batched command to the `record` body of its primitive
+        //    (see the `record` block below). One line per arm: the loop decides
+        //    *what* is drawn and in which order, never *how*, and it holds no
+        //    pass state of its own — every body sets what it needs at entry and
+        //    restores nothing at exit (#204).
         for command in &batches.commands {
             let range = command.start..command.start + command.count;
             match command.primitive {
-                // The one place a primitive's `mode` selects a pipeline: every
-                // other primitive has exactly one way of being drawn (#204).
                 Primitive::Mesh { mesh_id, mode } => {
-                    let mesh = &self.store.meshes[mesh_id as usize];
-                    match mode {
-                        RenderMode::Filled => {
-                            pass.set_pipeline(&self.pipelines.filled);
-                            draw_indexed(&mut pass, mesh.filled(), range);
-                        }
-                        RenderMode::Textured => {
-                            pass.set_pipeline(&self.pipelines.textured);
-                            pass.set_bind_group(1, mesh.texture.bind_group(), &[]);
-                            draw_indexed(&mut pass, mesh.filled(), range);
-                        }
-                        RenderMode::Shaded => {
-                            pass.set_pipeline(&self.pipelines.pbr);
-                            // group 0 = this mesh's PbrUniform slot (selected by a
-                            // dynamic offset), group 1 = this mesh's albedo,
-                            // group 2 = HDR env map.
-                            let offset = self.uniforms.pbr.offset(mesh_id as usize);
-                            pass.set_bind_group(0, self.uniforms.pbr.bind_group(), &[offset]);
-                            pass.set_bind_group(1, mesh.texture.bind_group(), &[]);
-                            pass.set_bind_group(2, env_bind_group, &[]);
-                            pass.set_bind_group(3, mesh.material_maps.bind_group(), &[]);
-                            draw_indexed(&mut pass, mesh.pbr(), range);
-                            // Restore group 0 = camera for the following non-PBR
-                            // draws (their pipelines' group-0 layout is the camera
-                            // uniform).
-                            pass.set_bind_group(0, self.uniforms.camera.bind_group(), &[]);
-                        }
-                        RenderMode::Wireframe => {
-                            pass.set_pipeline(&self.pipelines.wireframe);
-                            draw_indexed(&mut pass, mesh.wireframe(), range);
-                        }
-                    }
+                    self.record_mesh(&mut pass, mesh_id, mode, range)
                 }
-                Primitive::AabbBox { mesh_id } => {
-                    let mesh = &self.store.meshes[mesh_id as usize];
-                    pass.set_pipeline(&self.pipelines.gizmo_line);
-                    pass.set_bind_group(0, self.uniforms.gizmo.bind_group(), &[]);
-                    draw_vertices(&mut pass, mesh.aabb(), range);
-                    pass.set_bind_group(0, self.uniforms.camera.bind_group(), &[]);
-                }
-                Primitive::PlaneGrid { plane } => {
-                    pass.set_pipeline(&self.pipelines.gizmo_line);
-                    pass.set_bind_group(0, self.uniforms.gizmo.bind_group(), &[]);
-                    draw_vertices(&mut pass, &self.store.grid_lines[plane.index()], range);
-                    pass.set_bind_group(0, self.uniforms.camera.bind_group(), &[]);
-                }
+                Primitive::AabbBox { mesh_id } => self.record_aabb_box(&mut pass, mesh_id, range),
+                Primitive::PlaneGrid { plane } => self.record_plane_grid(&mut pass, plane, range),
                 Primitive::QuadOutline { selected } => {
-                    pass.set_pipeline(&self.pipelines.gizmo_line);
-                    pass.set_bind_group(0, self.uniforms.gizmo.bind_group(), &[]);
-                    draw_vertices(
-                        &mut pass,
-                        &self.store.quad_lines[usize::from(selected)],
-                        range,
-                    );
-                    pass.set_bind_group(0, self.uniforms.camera.bind_group(), &[]);
+                    self.record_quad_outline(&mut pass, selected, range)
                 }
-                Primitive::BlobShadow => {
-                    pass.set_pipeline(&self.pipelines.shadow);
-                    pass.set_vertex_buffer(0, self.store.shadow_vertex_buffer.slice(..));
-                    pass.draw(0..SHADOW_VERTEX_COUNT, range);
-                }
-                Primitive::CoordinateAxes => {
-                    pass.set_pipeline(&self.pipelines.gizmo_line);
-                    pass.set_bind_group(0, self.uniforms.gizmo.bind_group(), &[]);
-                    draw_vertices(&mut pass, &self.store.axes_lines, range.clone());
-                    pass.set_pipeline(&self.pipelines.gizmo_solid);
-                    pass.set_bind_group(0, self.uniforms.camera.bind_group(), &[]);
-                    draw_vertices(&mut pass, &self.store.axes_heads, range);
-                }
+                Primitive::BlobShadow => self.record_blob_shadow(&mut pass, range),
+                Primitive::CoordinateAxes => self.record_coordinate_axes(&mut pass, range),
             }
         }
     }
@@ -1399,6 +1345,16 @@ impl Renderer {
     ///
     /// `pub(crate)`: only [`PickTarget`] calls this, from its own [`pick`](Self::pick)
     /// per-call setup; a front-end reaches it through [`pick`](Self::pick) instead.
+    ///
+    /// **It keeps its own traversal on purpose** (#204). It does *not* batch a
+    /// [`Scene`] and does not go through the per-primitive `record` bodies: this
+    /// is a different pass with different attachments (single-sampled, flat id
+    /// colors, no MSAA resolve) drawing only mesh geometry through
+    /// [`Picking::pipeline`] instead of the visual pipelines, and it needs an
+    /// instance per *object* — never grouped — because the whole point is that
+    /// each one carries a distinct id. Sharing the walk would mean threading a
+    /// pass-kind through every `record` body to couple two loops that agree on
+    /// almost nothing, for little gain.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn encode_picking(
         &mut self,
@@ -1555,6 +1511,179 @@ impl Renderer {
         let id = pick_target.pick(&gpu, self, camera, draws, x, y).await;
         self.picking.target = Some(pick_target);
         id
+    }
+}
+
+/// **The `record` bodies: one per [`Primitive`], each self-contained** (#204).
+///
+/// `encode_pass`'s loop is a dispatch — one line per arm — and every case's GPU
+/// command sequence lives in its own body here. They are methods on `Renderer`
+/// rather than on [`Primitive`] because everything a body binds (pipelines,
+/// group-0 uniforms, the mesh store's geometry) is renderer-owned state: a
+/// per-primitive type would carry nothing of its own and would only borrow the
+/// renderer straight back — and [`Primitive`] is *public*, so hanging GPU code
+/// off it would drag `wgpu` into the API of a type whose whole point is to be
+/// pure data. (A `DrawDescriptor` value applied by one issuing helper was
+/// considered and rejected in #204: it would have to express a mesh's four bind
+/// groups plus a dynamic offset, a gizmo's one, and the shadow's vertex-buffer
+/// swap at once, degenerating into a union of every case.)
+///
+/// **The rule has two halves, and the second is load-bearing:**
+///
+/// > *No `record` may depend on pass state another `record` set* — **and
+/// > therefore every `record` sets what it needs at entry.**
+///
+/// Nothing restores anything at exit. That is what let the trailing
+/// `set_bind_group(0, camera)` "restore" lines go: they existed only so the
+/// *next* arm's assumptions held, which made the loop a hand-maintained pass
+/// state machine (and forced the matching hand-hoisted binds before it). With
+/// every body binding its own group 0, there is nothing left to undo.
+///
+/// Dropping the restores without adding the entry binds would be a wgpu
+/// validation error, not a subtle diff:
+/// [`PlaneGrid`](Primitive::PlaneGrid) and
+/// [`QuadOutline`](Primitive::QuadOutline) swap group 0 to the *gizmo* uniform,
+/// and wireframe meshes are submitted **after** them (layers 2/3 before 4 — see
+/// [`Primitive::sort_key`]), so a mesh body that assumed group 0 was still the
+/// camera binding would hand its pipeline a group-0 layout it was not built for.
+///
+/// Eliding a redundant state change is allowed only *inside* an issuing helper,
+/// where it is provably safe — never by hoisting a bind out to the caller.
+/// Within a single body, later commands may of course rely on what that same
+/// body set ([`record_coordinate_axes`](Self::record_coordinate_axes) draws
+/// twice off one instance binding); the rule is about *cross-body* state.
+impl Renderer {
+    /// Binds the per-frame instance-model buffer at vertex slot 1 — the one piece
+    /// of pass state *every* pipeline in the mesh pass reads.
+    ///
+    /// It used to be bound once before the loop, which is precisely the coupling
+    /// this restructure removes, so each body binds it at entry instead. It is
+    /// the same buffer every time and there is one such call per *batch* (a
+    /// handful per frame, not per object), so the repetition is free next to the
+    /// draw it precedes.
+    fn bind_instances(&self, pass: &mut wgpu::RenderPass<'_>) {
+        pass.set_vertex_buffer(1, self.store.instance_buffer.slice(..));
+    }
+
+    /// Records one instanced batch of mesh `mesh_id` drawn in `mode` — the one
+    /// place a primitive's mode selects a pipeline, because [`Primitive::Mesh`]
+    /// is the only variant carrying one (#204).
+    ///
+    /// Each mode binds its own group 0: the camera `P·V` for the unlit modes, or
+    /// this mesh's [`PbrUniform`] slot (a dynamic offset into the slot array) for
+    /// [`Shaded`](RenderMode::Shaded).
+    fn record_mesh(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        mesh_id: u32,
+        mode: RenderMode,
+        range: Range<u32>,
+    ) {
+        let mesh = &self.store.meshes[mesh_id as usize];
+        self.bind_instances(pass);
+        match mode {
+            RenderMode::Filled => {
+                pass.set_pipeline(&self.pipelines.filled);
+                pass.set_bind_group(0, self.uniforms.camera.bind_group(), &[]);
+                draw_indexed(pass, mesh.filled(), range);
+            }
+            RenderMode::Textured => {
+                pass.set_pipeline(&self.pipelines.textured);
+                pass.set_bind_group(0, self.uniforms.camera.bind_group(), &[]);
+                pass.set_bind_group(1, mesh.texture.bind_group(), &[]);
+                draw_indexed(pass, mesh.filled(), range);
+            }
+            RenderMode::Shaded => {
+                // group 0 = this mesh's PbrUniform slot (selected by a dynamic
+                // offset), group 1 = this mesh's albedo, group 2 = the HDR env
+                // map, group 3 = its material maps.
+                pass.set_pipeline(&self.pipelines.pbr);
+                let offset = self.uniforms.pbr.offset(mesh_id as usize);
+                pass.set_bind_group(0, self.uniforms.pbr.bind_group(), &[offset]);
+                pass.set_bind_group(1, mesh.texture.bind_group(), &[]);
+                pass.set_bind_group(2, self.env.bind_group(), &[]);
+                pass.set_bind_group(3, mesh.material_maps.bind_group(), &[]);
+                draw_indexed(pass, mesh.pbr(), range);
+            }
+            RenderMode::Wireframe => {
+                pass.set_pipeline(&self.pipelines.wireframe);
+                pass.set_bind_group(0, self.uniforms.camera.bind_group(), &[]);
+                draw_indexed(pass, mesh.wireframe(), range);
+            }
+        }
+    }
+
+    /// The shared body of every **screen-space-expanded line gizmo**: the
+    /// analytic-AA line pipeline plus the viewport-aware gizmo uniform at group 0
+    /// (its own layout, *not* the camera one), then `geometry` over `range`.
+    ///
+    /// The AABB box, the plane grid, the quad outline and the axes' shafts differ
+    /// only in which vertex geometry they draw, so they issue through one helper
+    /// instead of repeating the same three lines four times (#204).
+    fn record_gizmo_lines(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        geometry: &VertexGeometry,
+        range: Range<u32>,
+    ) {
+        pass.set_pipeline(&self.pipelines.gizmo_line);
+        pass.set_bind_group(0, self.uniforms.gizmo.bind_group(), &[]);
+        self.bind_instances(pass);
+        draw_vertices(pass, geometry, range);
+    }
+
+    /// Records the AABB outline of mesh `mesh_id` (#42) from that mesh's own
+    /// precomputed corner geometry.
+    fn record_aabb_box(&self, pass: &mut wgpu::RenderPass<'_>, mesh_id: u32, range: Range<u32>) {
+        let mesh = &self.store.meshes[mesh_id as usize];
+        self.record_gizmo_lines(pass, mesh.aabb(), range);
+    }
+
+    /// Records the coordinate-plane grid lattice on `plane`, resolving the plane
+    /// to its shared line buffer.
+    fn record_plane_grid(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        plane: GridPlane,
+        range: Range<u32>,
+    ) {
+        self.record_gizmo_lines(pass, &self.store.grid_lines[plane.index()], range);
+    }
+
+    /// Records the tracked placement-quad outline; `selected` picks the
+    /// highlight-colored line buffer.
+    fn record_quad_outline(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        selected: bool,
+        range: Range<u32>,
+    ) {
+        self.record_gizmo_lines(pass, &self.store.quad_lines[usize::from(selected)], range);
+    }
+
+    /// Records the contact / blob grounding shadow: its own alpha-blended,
+    /// depth-write-off pipeline over the shared shadow quad at vertex slot 0,
+    /// reading the camera `P·V` at group 0.
+    fn record_blob_shadow(&self, pass: &mut wgpu::RenderPass<'_>, range: Range<u32>) {
+        pass.set_pipeline(&self.pipelines.shadow);
+        pass.set_bind_group(0, self.uniforms.camera.bind_group(), &[]);
+        pass.set_vertex_buffer(0, self.store.shadow_vertex_buffer.slice(..));
+        self.bind_instances(pass);
+        pass.draw(0..SHADOW_VERTEX_COUNT, range);
+    }
+
+    /// Records the world-orientation gizmo (#42) as two draws over the same
+    /// instances: the expanded shafts through the shared gizmo-line body, then
+    /// the arrowheads, which are ordinary unlit overlay triangles and so read the
+    /// **camera** uniform at group 0 rather than the gizmo one.
+    ///
+    /// The second draw reuses the instance binding the first made — same body, so
+    /// the rule above is not in play.
+    fn record_coordinate_axes(&self, pass: &mut wgpu::RenderPass<'_>, range: Range<u32>) {
+        self.record_gizmo_lines(pass, &self.store.axes_lines, range.clone());
+        pass.set_pipeline(&self.pipelines.gizmo_solid);
+        pass.set_bind_group(0, self.uniforms.camera.bind_group(), &[]);
+        draw_vertices(pass, &self.store.axes_heads, range);
     }
 }
 

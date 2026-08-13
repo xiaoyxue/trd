@@ -63,9 +63,9 @@ pub(super) fn create_instance_buffer(device: &wgpu::Device, capacity: u32) -> wg
     })
 }
 
-/// Binds `vertex_buffer` at slot 0 and `index`, then draws it over `instances`
-/// (the per-instance model buffer stays bound at slot 1). Pipeline + group
-/// bindings are the caller's responsibility.
+/// Binds `vertex_buffer` at slot 0 and `index`, then draws it over `instances`.
+/// Pipeline, group bindings and the per-instance model buffer at slot 1 are the
+/// caller's responsibility — each `record` body binds its own (#204).
 pub(super) fn draw_indexed(
     pass: &mut wgpu::RenderPass,
     (vertex_buffer, index): (&wgpu::Buffer, &IndexBuf),
