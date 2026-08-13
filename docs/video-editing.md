@@ -152,7 +152,8 @@ Dragon. The material is not reloaded per frame; pose smoothing is pending.
 
 The editor uses `trd-core` `DrawableObject`s and isolated GPU submissions:
 
-1. video `FramePlane` plus the paused quad/grid/axes;
+1. the video background frame plane (`Scene::background().frame`) plus the paused
+   quad/grid/axes;
 2. placed mesh;
 3. optional selection AABB.
 

@@ -1,9 +1,9 @@
 use wasm_bindgen::prelude::*;
 
 use trd_core::{
-    DecodedFrame, DisneyMaterial, Draw, DrawableObject, EnvMapData, FrameBatch, FrameFit,
-    FrameParams, ImageBasedLighting, InputSession, Lighting, OutputSession, RenderMode,
-    RenderOptions, Renderer, Scene, ToneMapping, Tonemap,
+    DecodedFrame, DisneyMaterial, Draw, EnvMapData, FrameBatch, FrameFit, FrameParams,
+    ImageBasedLighting, InputSession, Lighting, OutputSession, RenderMode, RenderOptions, Renderer,
+    Scene, ToneMapping, Tonemap,
 };
 
 use crate::PbrState;
@@ -52,9 +52,10 @@ pub struct OffscreenRenderer {
     /// to describe a frame's appearance; [`Scene::from_draws`] turns it into the
     /// scene. The renderer keeps no overlay state of its own (#180).
     options: RenderOptions,
-    /// Composite the uploaded background frame texture beneath the scene as a
-    /// [`DrawableObject::FramePlane`] (#63); a no-op until a background is
-    /// uploaded via [`update_frame_texture_rgba`](Self::update_frame_texture_rgba).
+    /// Composite the uploaded background frame texture beneath the scene as the
+    /// scene's [`Background::frame`](trd_core::Background::frame) plane (#63); a
+    /// no-op until a background is uploaded via
+    /// [`update_frame_texture_rgba`](Self::update_frame_texture_rgba).
     composite_frame: bool,
     /// The typed Disney PBR configuration for [`RenderMode::Shaded`] draws, set via
     /// [`set_pbr_material`](Self::set_pbr_material) before the first frame and
@@ -264,15 +265,16 @@ impl OffscreenRenderer {
     }
 
     /// Toggles the per-draw **local** coordinate-axes gizmo for later frames — one
-    /// [`DrawableObject::CoordinateAxes`] at each object's own `model`. The
+    /// [`CoordinateAxes`](trd_core::DrawableObject::CoordinateAxes) gizmo at each object's own `model`. The
     /// browser twin of the native `--axes-local` flag.
     #[wasm_bindgen(js_name = setShowLocalAxes)]
     pub fn set_show_local_axes(&mut self, enabled: bool) {
         self.options.show_local_axes = enabled;
     }
 
-    /// Toggles compositing the uploaded background frame beneath the scene as a
-    /// [`DrawableObject::FramePlane`] (#63). Enable it, then upload one background
+    /// Toggles compositing the uploaded background frame beneath the scene as the
+    /// scene's [`Background::frame`](trd_core::Background::frame) plane (#63).
+    /// Enable it, then upload one background
     /// per frame via [`update_frame_texture_rgba`](Self::update_frame_texture_rgba)
     /// before that frame's [`render_index`](Self::render_index).
     #[wasm_bindgen(js_name = setCompositeFrame)]
@@ -519,7 +521,7 @@ impl OffscreenRenderer {
     async fn render_frame(
         &mut self,
         params: FrameParams,
-        scene: &[DrawableObject],
+        scene: &Scene,
     ) -> Result<Vec<u8>, String> {
         let target = self
             .target

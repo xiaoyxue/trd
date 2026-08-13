@@ -6,8 +6,7 @@
 //! by the renderer's decode-once store, so a drawable is a light `Copy` handle
 //! naming *which* primitive plus its per-frame model.
 
-use super::{FrameFit, GridPlane, RenderMode};
-use crate::render::Tonemap;
+use super::{GridPlane, RenderMode};
 
 /// The base interface for every primitive the renderer can draw (#41). A
 /// `DrawableObject` is a light, `Copy` handle: geometry (GPU buffers) is owned
@@ -19,6 +18,12 @@ use crate::render::Tonemap;
 /// Wireframe is a render *mode* of the [`DrawableObject::Mesh`] primitive (not a
 /// separate variant); the coordinate axes and the AABB box are genuinely
 /// distinct gizmo primitives rendered with screen-space-expanded line geometry.
+///
+/// **Every variant is a placed primitive**: it names geometry and carries the
+/// model that places it, so it can be instanced. The two members that did not —
+/// the environment background and the background frame plane — are per-frame
+/// settings, not primitives, and now live on
+/// [`Scene::background`](super::Scene::background) (#204).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DrawableObject {
     /// A decoded mesh (id = row index in the leading mesh table) placed by
@@ -55,24 +60,9 @@ pub enum DrawableObject {
     /// on the plane, sized to the mesh footprint), so the mesh reads as *sitting
     /// on* the reconstructed surface rather than floating over the composited
     /// video plate. A [`DrawSelection::Shadow`](super::DrawSelection) draw becomes this variant. Tied to no
-    /// mesh (no base model); alpha-blended over the [`FramePlane`](Self::FramePlane)
-    /// and drawn *before* the opaque content mesh (depth-write off) so the mesh
-    /// composites on top while the surrounding rim darkens the floor.
+    /// mesh (no base model); alpha-blended over the background frame plane
+    /// ([`Background::frame`](super::Background::frame)) and drawn *before* the
+    /// opaque content mesh (depth-write off) so the mesh composites on top while
+    /// the surrounding rim darkens the floor.
     BlobShadow { model: [f32; 16] },
-    /// Camera-centered spherical HDR environment drawn behind the scene.
-    EnvironmentBackground {
-        rotation: f32,
-        exposure: f32,
-        blur: f32,
-        tonemap: Tonemap,
-    },
-    /// A screen-aligned **background frame plane** (#63): a fullscreen quad that
-    /// samples the renderer's bound background frame texture (set via
-    /// [`crate::render::Renderer::update_frame_texture_rgba`]), composited
-    /// **under** the
-    /// mesh scene. `fit` selects how the image maps to the viewport. Carries no
-    /// model — it is authored directly in clip space and ignores the camera.
-    /// Drawn only when a background texture is bound (else skipped), so an absent
-    /// `frame_path`/`frame_url` renders with no background (back-compat).
-    FramePlane { fit: FrameFit },
 }

@@ -49,12 +49,12 @@ pub fn render_options(state: &SceneState) -> trd_core::RenderOptions {
 
 /// The full per-frame scene for `state`: the shared
 /// [`Scene::from_draws`](trd_core::Scene::from_draws) assembly plus the
-/// optional HDR environment background, which is a scene element rather than an
-/// overlay toggle.
+/// optional HDR environment background, which is a per-frame *background
+/// setting* on the scene rather than a drawable or an overlay toggle (#204).
 pub fn scene_for(state: &SceneState) -> trd_core::Scene {
     let mut scene = trd_core::Scene::from_draws(&state.draws(), &render_options(state), None);
     if state.show_environment_background {
-        scene.push(trd_core::DrawableObject::EnvironmentBackground {
+        scene.background_mut().environment = Some(trd_core::EnvironmentBackground {
             rotation: state
                 .image_based_lighting
                 .first()
@@ -245,7 +245,7 @@ mod tests {
         assert!(mesh_has_uvs(&mapped));
     }
 
-    /// The environment background is a **shared** scene element, not a
+    /// The environment background is a **shared** scene setting, not a
     /// browser-only one.
     ///
     /// It used to be pushed by `WebRenderer` alone, so the side panel's
@@ -253,21 +253,17 @@ mod tests {
     /// window. Collapsing both renderers onto one `scene_for` fixed that; this
     /// pins it so the two can't drift apart again (#180).
     #[test]
-    fn scene_for_pushes_the_environment_background_when_enabled() {
-        let is_background = |d: &trd_core::DrawableObject| {
-            matches!(d, trd_core::DrawableObject::EnvironmentBackground { .. })
-        };
-
+    fn scene_for_sets_the_environment_background_when_enabled() {
         let off = SceneState::default();
         assert!(!off.show_environment_background);
-        assert!(!scene_for(&off).iter().any(is_background));
+        assert_eq!(scene_for(&off).background().environment, None);
 
         let on = SceneState {
             show_environment_background: true,
             ..SceneState::default()
         };
         assert!(
-            scene_for(&on).iter().any(is_background),
+            scene_for(&on).background().environment.is_some(),
             "the environment background toggle must reach the scene on every platform"
         );
     }

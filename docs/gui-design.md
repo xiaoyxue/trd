@@ -82,8 +82,9 @@ record — the locked decisions and the full plan live in issue #97.
 Both render paths build the same value:
 
 ```
-Scene = Vec<DrawableObject>          // render.rs
-DrawableObject::Mesh { mesh_id, model: [f32;16], mode }   // + AabbBox / CoordinateAxes / QuadOutline / FramePlane
+Scene { background: Background, objects: Vec<DrawableObject> }   // visual/scene.rs
+Background { environment: Option<EnvironmentBackground>, frame: Option<FrameFit> }
+DrawableObject::Mesh { mesh_id, model: [f32;16], mode }   // + AabbBox / CoordinateAxes / PlaneGrid / QuadOutline / BlobShadow
 Draw { mesh_id, model: [f32;16], mode }                   // wire form, per frame
 FrameParams { model?, k?, pose?, eye?, target?, fovy?, ... }  // camera
 ```

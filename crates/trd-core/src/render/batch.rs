@@ -8,7 +8,10 @@
 //! Pure data and a pure function — no `wgpu::Device`, no GPU state — so this is
 //! unit-testable on its own. [`build_batches`] flattens every
 //! [`DrawableObject`] into a `(DrawKind, model)` pair, stable-sorts by kind, and
-//! groups equal runs into instanced [`DrawCommand`]s.
+//! groups equal runs into instanced [`DrawCommand`]s. It sees a scene's
+//! *objects* only: the frame's backgrounds are settings on
+//! [`Scene::background`](crate::Scene::background), not primitives to batch
+//! (#204).
 //!
 //! **[`DrawKind`]'s variant order is the draw order**: its derived [`Ord`] is
 //! what sorts the frame, so declaring `Shadow` first and `Axes` last is what
@@ -17,7 +20,7 @@
 
 use super::*;
 use crate::math::Matrix4;
-use crate::visual::{DrawableObject, FrameFit, RenderMode};
+use crate::visual::{DrawableObject, RenderMode};
 
 /// Which geometry a [`DrawCommand`] binds. The `usize` is a mesh id (index into
 /// [`MeshStore::meshes`](super::mesh_store::MeshStore) for the mesh kinds, or a
@@ -61,28 +64,33 @@ pub(super) struct DrawCommand {
     pub(super) count: u32,
 }
 
-/// The result of walking a [`Scene`] once: the flattened per-instance models,
-/// the [`DrawCommand`]s over them (already in draw order), and the singleton
-/// background frame-plane fit (if any).
+/// The result of walking a [`Scene`]'s objects once: the flattened per-instance
+/// models and the [`DrawCommand`]s over them (already in draw order).
+///
+/// Instancing only — the frame's backgrounds are *settings* on
+/// [`Scene::background`](crate::Scene::background), read straight by the encoder
+/// (#204). They used to be drawables the batcher had to recognise and `continue`
+/// past, and were carried out again here as two singleton fields, which is
+/// exactly the round-trip that moving them onto the scene removes.
 pub(super) struct Batches {
     pub(super) instances: Vec<InstanceRaw>,
     pub(super) commands: Vec<DrawCommand>,
-    pub(super) frame_fit: Option<FrameFit>,
-    pub(super) environment_background: Option<([f32; 3], Tonemap)>,
 }
 
-/// Walks `scene` once into a flat draw list, stable-sorts by [`DrawKind`], then
-/// groups equal runs into instanced commands. Out-of-range mesh ids are skipped;
-/// the last background frame plane wins.
+/// Walks `objects` once into a flat draw list, stable-sorts by [`DrawKind`],
+/// then groups equal runs into instanced commands. Out-of-range mesh ids are
+/// skipped.
+///
+/// Takes the objects alone: every one of them is a placed primitive that becomes
+/// an instance, so there is no longer a non-instanced member to filter out
+/// (#204).
 pub(super) fn build_batches(
-    scene: &[DrawableObject],
+    objects: &[DrawableObject],
     mut mesh_base_model: impl FnMut(usize) -> Option<Matrix4>,
 ) -> Batches {
-    let mut draws: Vec<(DrawKind, InstanceRaw)> = Vec::with_capacity(scene.len());
-    let mut frame_fit = None;
-    let mut environment_background = None;
+    let mut draws: Vec<(DrawKind, InstanceRaw)> = Vec::with_capacity(objects.len());
 
-    for object in scene {
+    for object in objects {
         let (kind, model) = match *object {
             DrawableObject::Mesh {
                 mesh_id,
@@ -116,19 +124,6 @@ pub(super) fn build_batches(
                 (DrawKind::QuadOutline(usize::from(selected)), model)
             }
             DrawableObject::BlobShadow { model } => (DrawKind::Shadow, model),
-            DrawableObject::EnvironmentBackground {
-                rotation,
-                exposure,
-                blur,
-                tonemap,
-            } => {
-                environment_background = Some(([rotation, exposure, blur], tonemap));
-                continue;
-            }
-            DrawableObject::FramePlane { fit } => {
-                frame_fit = Some(fit);
-                continue;
-            }
         };
         draws.push((kind, InstanceRaw { model }));
     }
@@ -150,7 +145,5 @@ pub(super) fn build_batches(
     Batches {
         instances,
         commands,
-        frame_fit,
-        environment_background,
     }
 }

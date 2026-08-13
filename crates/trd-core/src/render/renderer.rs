@@ -72,7 +72,7 @@ use crate::material::DisneyMaterial;
 use crate::math::Matrix4;
 use crate::output::tightly_pack_rgba;
 use crate::texture::Texture;
-use crate::visual::{Draw, DrawableObject};
+use crate::visual::{Draw, Scene};
 use crate::Camera;
 use futures_channel::oneshot;
 use thiserror::Error;
@@ -786,8 +786,9 @@ impl Renderer {
     }
 
     /// Uploads `rgba` (tightly-packed, row-major `height`×`width`×4) as the
-    /// **background frame texture** (#63) sampled by a
-    /// [`DrawableObject::FramePlane`]. Delegates to [`FramePlane::upload_rgba`],
+    /// **background frame texture** (#63) sampled by a scene whose
+    /// [`Background::frame`](crate::Background::frame) is set. Delegates to
+    /// [`FramePlane::upload_rgba`],
     /// which reuses the GPU texture across same-resolution frames.
     ///
     /// Panics if `rgba.len() != width * height * 4` or either dimension is zero.
@@ -796,16 +797,16 @@ impl Renderer {
     }
 
     /// Uploads `image` as the **background frame texture** (#63) sampled by a
-    /// [`DrawableObject::FramePlane`]. The GPU texture is reused across frames
-    /// (grown only on a resolution change). Call before a
-    /// [`render`](Self::render) with a `FramePlane` drawable to
-    /// composite the image beneath the mesh scene.
+    /// scene whose [`Background::frame`](crate::Background::frame) is set. The
+    /// GPU texture is reused across frames (grown only on a resolution change).
+    /// Call before a [`render`](Self::render) of such a scene to composite the
+    /// image beneath the mesh scene.
     pub fn update_frame_texture(&mut self, image: &crate::texture::ImageData) {
         self.update_frame_texture_rgba(&image.rgba, image.width, image.height);
     }
 
-    /// Whether a background frame texture is currently bound (so a
-    /// [`DrawableObject::FramePlane`] would render).
+    /// Whether a background frame texture is currently bound (so a scene with a
+    /// [`Background::frame`](crate::Background::frame) would render one).
     pub fn has_frame_texture(&self) -> bool {
         self.frame_plane.is_bound()
     }
@@ -883,7 +884,7 @@ impl Renderer {
     pub fn render(
         &mut self,
         camera: Camera,
-        scene: &[DrawableObject],
+        scene: &Scene,
         target: &mut RenderTarget,
     ) -> Result<Option<SurfaceRepair>, RenderError> {
         match target.kind_mut() {
@@ -907,7 +908,7 @@ impl Renderer {
     fn render_surface(
         &mut self,
         camera: Camera,
-        scene: &[DrawableObject],
+        scene: &Scene,
         target: &mut SurfaceTarget,
     ) -> Result<Option<SurfaceRepair>, SurfaceError> {
         let (texture, repair) = match target.surface().get_current_texture() {
@@ -944,7 +945,7 @@ impl Renderer {
     ///
     /// Private, and the degenerate one-layer [`draw_layers`](Self::draw_layers);
     /// reachable through [`render`](Self::render).
-    fn render_texture(&mut self, camera: Camera, scene: &[DrawableObject], target: &TextureTarget) {
+    fn render_texture(&mut self, camera: Camera, scene: &Scene, target: &TextureTarget) {
         self.draw_layers(&[SceneLayer::new(camera, scene)], target);
     }
 
@@ -1079,7 +1080,7 @@ impl Renderer {
     pub async fn render_params(
         &mut self,
         params: FrameParams,
-        scene: &[DrawableObject],
+        scene: &Scene,
         target: &TextureTarget,
     ) -> Result<Vec<u8>, RenderError> {
         let camera = params.to_camera(target.viewport())?;
@@ -1159,7 +1160,7 @@ impl Renderer {
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
         camera: Camera,
-        scene: &[DrawableObject],
+        scene: &Scene,
     ) {
         self.encode_pass(encoder, view, camera, scene, false);
     }
@@ -1171,7 +1172,7 @@ impl Renderer {
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
         camera: Camera,
-        scene: &[DrawableObject],
+        scene: &Scene,
     ) {
         self.encode_pass(encoder, view, camera, scene, true);
     }
@@ -1182,7 +1183,7 @@ impl Renderer {
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
         camera: Camera,
-        scene: &[DrawableObject],
+        scene: &Scene,
         load_color: bool,
     ) {
         // 1. Camera P·V for this frame.
@@ -1199,9 +1200,12 @@ impl Renderer {
             self.env.has_env(),
         );
 
-        // 2. Walk the scene once into per-geometry instance batches, then upload
-        //    the flattened instance models (growing the buffer if needed).
-        let batches = build_batches(scene, |mesh_id| {
+        // 2. Walk the scene's objects once into per-geometry instance batches,
+        //    then upload the flattened instance models (growing the buffer if
+        //    needed). The backgrounds are not objects: they are settings on the
+        //    scene, read directly below (#204).
+        let background = *scene.background();
+        let batches = build_batches(scene.objects(), |mesh_id| {
             self.store.meshes.get(mesh_id).map(|mesh| mesh.base_model)
         });
         self.store.upload_instances(&self.gpu, &batches.instances);
@@ -1212,9 +1216,9 @@ impl Renderer {
         self.ensure_depth(viewport);
         self.ensure_msaa(viewport);
 
-        // 4. Background frame-plane fit for this viewport (no-op if the scene has
-        //    no FramePlane or no frame texture is bound yet).
-        if let Some(fit) = batches.frame_fit {
+        // 4. Background frame-plane fit for this viewport (no-op if the scene
+        //    asks for no frame plane or no frame texture is bound yet).
+        if let Some(fit) = background.frame {
             self.frame_plane.write_fit(&self.gpu.queue, fit, viewport);
         }
 
@@ -1224,15 +1228,15 @@ impl Renderer {
         //    constructors upload their fallbacks, so `encode` only *reads* bind
         //    groups that are already valid (#180).
         let env_bind_group = self.env.bind_group();
-        if let Some(([rotation, exposure, blur], tonemap)) = batches.environment_background {
+        if let Some(environment) = background.environment {
             self.env_background.write(
                 &self.gpu.queue,
                 camera,
                 EnvBackgroundSettings {
-                    rotation,
-                    exposure,
-                    blur,
-                    tonemap,
+                    rotation: environment.rotation,
+                    exposure: environment.exposure,
+                    blur: environment.blur,
+                    tonemap: environment.tonemap,
                 },
             );
         }
@@ -1285,14 +1289,17 @@ impl Renderer {
             multiview_mask: None,
         });
 
-        if batches.environment_background.is_some() {
+        // The two backgrounds are independent slots drawn in a fixed order (#204):
+        // the environment probe first, then the frame plane over it — a scene may
+        // carry either, both, or neither.
+        if background.environment.is_some() {
             self.env_background.draw(&mut pass, env_bind_group);
         }
 
-        // Draw the background frame plane first (#63): its own pipeline + group-0
+        // Draw the background frame plane next (#63): its own pipeline + group-0
         // bind, depth-write off, so the mesh scene composites on top. Only when
         // the scene requested one (and a frame texture is bound).
-        if batches.frame_fit.is_some() {
+        if background.frame.is_some() {
             self.frame_plane.draw(&mut pass);
         }
 
@@ -1598,7 +1605,7 @@ impl SurfaceError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::visual::{FrameFit, GridPlane, RenderMode};
+    use crate::visual::{DrawableObject, GridPlane, RenderMode};
 
     fn model(tag: f32) -> [f32; 16] {
         let mut model = Matrix4::IDENTITY.to_cols_array();
@@ -1619,9 +1626,6 @@ mod tests {
         let scene = [
             DrawableObject::CoordinateAxes { model: model(80.0) },
             mesh(1, 61.0, RenderMode::Wireframe),
-            DrawableObject::FramePlane {
-                fit: FrameFit::Stretch,
-            },
             mesh(1, 12.0, RenderMode::Filled),
             mesh(0, 30.0, RenderMode::Shaded),
             DrawableObject::BlobShadow { model: model(1.0) },
@@ -1646,9 +1650,6 @@ mod tests {
             },
             mesh(1, 31.0, RenderMode::Shaded),
             mesh(99, 99.0, RenderMode::Filled),
-            DrawableObject::FramePlane {
-                fit: FrameFit::Cover,
-            },
         ];
         let base_models = [Matrix4::IDENTITY, Matrix4::IDENTITY];
 
@@ -1684,6 +1685,5 @@ mod tests {
                 .collect::<Vec<_>>(),
             [1.0, 10.0, 11.0, 12.0, 20.0, 30.0, 31.0, 50.0, 52.0, 61.0, 70.0, 71.0, 80.0,]
         );
-        assert_eq!(batches.frame_fit, Some(FrameFit::Cover));
     }
 }

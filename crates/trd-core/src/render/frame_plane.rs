@@ -4,7 +4,8 @@
 //! This is the second, separately-updated texture subsystem (as opposed to the
 //! mesh [`BoundTexture`](super::BoundTexture) albedo): the frame image is
 //! uploaded at the boundary from `frame_path`/`frame_url`, reused across frames,
-//! and sampled by a [`DrawableObject::FramePlane`](super::DrawableObject). All
+//! and sampled when a scene's [`Background::frame`](crate::Background::frame) is
+//! set (#204). All
 //! of the old `update_frame_texture_rgba` machinery lives here so `Renderer`
 //! only has to delegate to it.
 
@@ -28,7 +29,7 @@ struct FrameTextureGpu {
 /// The background frame-plane subsystem: the fullscreen pipeline, its bind-group
 /// layout, the shared sampler, and the currently-bound frame texture (`None`
 /// until the first [`upload_rgba`](Self::upload_rgba)). While nothing is bound
-/// every method is a no-op, so a [`DrawableObject::FramePlane`] simply renders
+/// every method is a no-op, so a scene asking for a frame plane simply renders
 /// nothing.
 pub(super) struct FramePlane {
     pipeline: wgpu::RenderPipeline,
@@ -71,8 +72,8 @@ impl FramePlane {
         }
     }
 
-    /// Whether a frame texture is currently bound (so a
-    /// [`DrawableObject::FramePlane`] would render).
+    /// Whether a frame texture is currently bound (so a scene asking for a frame
+    /// plane would render one).
     pub(super) fn is_bound(&self) -> bool {
         self.texture.is_some()
     }

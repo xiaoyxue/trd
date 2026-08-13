@@ -380,9 +380,10 @@ impl ImportedAsset {
 
 /// Authors the three layers of an editor frame from the timeline + scene state.
 ///
-/// * **background** — the video plane, plus the placement quad's outline and (when
-///   selected) its floor grid and basis axes. Seen through the *background*
-///   frame's calibration.
+/// * **background** — the video plane (the scene's
+///   [`Background::frame`](trd_core::Background::frame), not a drawable — #204),
+///   plus the placement quad's outline and (when selected) its floor grid and
+///   basis axes. Seen through the *background* frame's calibration.
 /// * **foreground** — the placed object and its world/local gizmos, seen through
 ///   the *placement* frame's calibration.
 /// * **selection overlay** — the selection AABB, drawn last so it is never
@@ -396,14 +397,11 @@ pub fn placement_scenes(
     selected_quad: bool,
     model: Option<trd_core::Matrix4>,
     state: &crate::scene::SceneState,
-) -> (
-    Vec<trd_core::DrawableObject>,
-    Vec<trd_core::DrawableObject>,
-    Vec<trd_core::DrawableObject>,
-) {
-    let mut background = vec![trd_core::DrawableObject::FramePlane {
-        fit: trd_core::FrameFit::Stretch,
-    }];
+) -> (trd_core::Scene, trd_core::Scene, trd_core::Scene) {
+    let mut background = trd_core::Scene::new().with_background(trd_core::Background {
+        environment: None,
+        frame: Some(trd_core::FrameFit::Stretch),
+    });
     if let Some(quad_model) = quad_model {
         background.push(trd_core::DrawableObject::QuadOutline {
             model: quad_model.to_cols_array(),
@@ -422,8 +420,8 @@ pub fn placement_scenes(
         }
     }
 
-    let mut foreground = Vec::new();
-    let mut selection_overlay = Vec::new();
+    let mut foreground = trd_core::Scene::new();
+    let mut selection_overlay = trd_core::Scene::new();
     if let Some(model) = model.map(|model| model.to_cols_array()) {
         foreground.push(trd_core::DrawableObject::Mesh {
             mesh_id: 0,
@@ -466,29 +464,31 @@ mod tests {
         matches!(d, trd_core::DrawableObject::CoordinateAxes { .. })
     }
 
-    /// The video plane is always the first background drawable, so everything else
-    /// composites over it.
+    /// The video plane is the background of the background layer, so everything
+    /// else composites over it. It is a scene *setting* now, not a leading
+    /// drawable (#204).
     #[test]
-    fn the_video_plane_is_always_drawn_first() {
+    fn the_video_plane_is_always_the_background() {
         let (background, _, _) = placement_scenes(None, None, false, None, &SceneState::default());
-        assert!(matches!(
-            background.first(),
-            Some(trd_core::DrawableObject::FramePlane { .. })
-        ));
+        assert_eq!(
+            background.background().frame,
+            Some(trd_core::FrameFit::Stretch)
+        );
     }
 
     /// Selecting the quad reveals its floor grid + basis axes; deselecting hides
-    /// them but keeps the outline.
+    /// them but keeps the outline. The video plane rides on the background, so it
+    /// is not one of the counted objects.
     #[test]
     fn selecting_the_quad_adds_its_grid_and_axes() {
         let quad = trd_core::Matrix4::IDENTITY;
         let state = SceneState::default();
 
         let (unselected, _, _) = placement_scenes(Some(quad), Some(quad), false, None, &state);
-        assert_eq!(unselected.len(), 2, "video plane + quad outline only");
+        assert_eq!(unselected.len(), 1, "quad outline only");
 
         let (selected, _, _) = placement_scenes(Some(quad), Some(quad), true, None, &state);
-        assert_eq!(selected.len(), 4, "+ floor grid + basis axes");
+        assert_eq!(selected.len(), 3, "+ floor grid + basis axes");
         assert!(selected.iter().any(is_axes));
     }
 
@@ -503,7 +503,7 @@ mod tests {
         let (_, foreground, overlay) =
             placement_scenes(None, None, false, Some(trd_core::Matrix4::IDENTITY), &state);
         assert!(matches!(
-            overlay.as_slice(),
+            overlay.objects(),
             [trd_core::DrawableObject::AabbBox { mesh_id: 0, .. }]
         ));
         assert!(!foreground
@@ -517,7 +517,14 @@ mod tests {
     fn a_video_only_frame_has_an_empty_foreground() {
         let (background, foreground, overlay) =
             placement_scenes(None, None, false, None, &SceneState::default());
-        assert_eq!(background.len(), 1);
+        assert!(
+            background.is_empty(),
+            "video plane only, and it is a setting"
+        );
+        assert_eq!(
+            background.background().frame,
+            Some(trd_core::FrameFit::Stretch)
+        );
         assert!(foreground.is_empty());
         assert!(overlay.is_empty());
     }

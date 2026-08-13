@@ -44,7 +44,10 @@ pub use render::{
 // The visual model (scene + primitives) is plain data (no wgpu), so it sits
 // beside `mesh`/`camera`/`material` at the crate root rather than inside the
 // render backend (#203). Public paths (`trd_core::DrawableObject`) are unchanged.
-pub use visual::{Draw, DrawSelection, DrawableObject, FrameFit, GridPlane, RenderMode, Scene};
+pub use visual::{
+    Background, Draw, DrawSelection, DrawableObject, EnvironmentBackground, FrameFit, GridPlane,
+    RenderMode, Scene,
+};
 // The render harness; available on both platforms since readback became async
 // (#180) — the browser could not use it while it blocked on readback.
 pub use render::{RenderError, Renderer};
