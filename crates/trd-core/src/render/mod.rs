@@ -38,7 +38,7 @@ mod gpu_tests;
 pub use frame_params::{CameraFormError, FrameParams, Viewport};
 pub(crate) use gpu_context::LimitsPreset;
 pub use gpu_context::{create_instance, AdapterFacts, GpuContext, GpuInitError, GpuRequest};
-pub use gpu_types::{Mesh, MeshShading, Vertex};
+pub use gpu_types::Vertex;
 pub use ibl::{EnvMapData, ImageBasedLighting};
 pub use light::{Light, Lighting, PointLight};
 pub use options::{Msaa, PbrConfig, RenderOptions};
@@ -61,6 +61,9 @@ pub(crate) use triangle_renderer::TriangleRenderer;
 // Crate-internal items shared across render submodules and sibling modules.
 pub(crate) use bound_uniform::{BoundUniform, BoundUniformArray};
 pub(crate) use color::upload_texture;
+// The CPU mesh is domain vocabulary and lives at the crate root (#221); it is
+// re-exported here so `render/`'s `use super::*` glob imports keep resolving.
+pub(crate) use crate::mesh::Mesh;
 pub(crate) use frame_params::{projection_from_intrinsics, DEFAULT_FAR, DEFAULT_NEAR};
 pub(crate) use gizmo::{
     aabb_line_vertices, axes_arrow_vertices, axes_line_vertices, blob_shadow_vertices,
