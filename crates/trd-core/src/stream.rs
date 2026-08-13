@@ -29,7 +29,9 @@ use arrow::datatypes::Schema;
 
 // `Matrix4` is referenced only by the `#[cfg(test)]` unit tests (imported there).
 use crate::protocol::{ProtocolError, PROTOCOL_VERSION};
-use crate::render::{check_dimensions, FrameParams, Mesh, OffscreenError, RenderOptions, Renderer};
+use crate::render::{
+    check_dimensions, FrameParams, Mesh, RenderOptions, Renderer, TargetError, TextureTarget,
+};
 use crate::texture::ImageTexture;
 use crate::visual::{Draw, FrameFit};
 use crate::OutputSession;
@@ -211,28 +213,28 @@ impl From<ProtocolError> for StreamError {
     }
 }
 
-/// Maps the shared offscreen render harness's [`OffscreenError`] onto this
-/// module's [`StreamError`], so [`Renderer`] keeps its flat error surface
-/// while the target/readback plumbing lives in [`crate::render::OffscreenTarget`].
-impl From<OffscreenError> for StreamError {
-    fn from(error: OffscreenError) -> Self {
+/// Maps a render target's [`TargetError`] onto this module's [`StreamError`],
+/// so [`Renderer`] keeps its flat error surface while the target's allocation
+/// invariants live in [`crate::render::TextureTarget`].
+impl From<TargetError> for StreamError {
+    fn from(error: TargetError) -> Self {
         match error {
-            OffscreenError::InvalidDimensions { width, height } => StreamError::InvalidDimensions {
+            TargetError::InvalidDimensions { width, height } => StreamError::InvalidDimensions {
                 width,
                 height,
                 reason: "dimensions must be non-zero",
             },
-            OffscreenError::ExceedsMaxDimension { width, height, .. } => {
+            TargetError::ExceedsMaxDimension { width, height, .. } => {
                 StreamError::InvalidDimensions {
                     width,
                     height,
                     reason: "exceeds adapter max_texture_dimension_2d",
                 }
             }
-            OffscreenError::RowOverflow { .. } | OffscreenError::Gpu(_) => {
+            TargetError::RowOverflow { .. } | TargetError::Gpu(_) => {
                 StreamError::Render(error.to_string())
             }
-            OffscreenError::Output(e) => StreamError::Output(e),
+            TargetError::Output(e) => StreamError::Output(e),
         }
     }
 }
@@ -425,6 +427,7 @@ fn resolve_inline_frame(
 #[allow(clippy::too_many_arguments)]
 fn render_and_write_batch<W: Write>(
     renderer: &mut Renderer,
+    target: &TextureTarget,
     options: &RenderOptions,
     output_session: &mut OutputSession,
     batch: &crate::FrameBatch,
@@ -467,9 +470,11 @@ fn render_and_write_batch<W: Write>(
         // is async because GPU read-back is (the browser must not block its event
         // loop). Natively blocking here is free: the future is already complete
         // when `poll_for_map` returns. This is the only bridge between the two.
-        planes.push(pollster::block_on(
-            renderer.render_params(frame.params, &scene),
-        )?);
+        planes.push(pollster::block_on(renderer.render_params(
+            frame.params,
+            &scene,
+            target,
+        ))?);
     }
     output_session.write_rgba_batch(&planes)?;
     output.write_all(&output_session.drain_new()?)?;
@@ -505,7 +510,11 @@ pub fn run_stream<R: Read, W: Write>(
 
     let mut session = crate::InputSession::new();
     // Built once the params schema is reached (meshes + texture + fps known).
+    // The renderer and its texture target are a matched pair (#203): the
+    // target is a call argument now, not a field the renderer owns, so the
+    // stream holds both and threads the target through each render call.
     let mut renderer: Option<Renderer> = None;
+    let mut target: Option<TextureTarget> = None;
     let mut output_session: Option<OutputSession> = None;
     // The background currently uploaded, so consecutive frames sharing it skip
     // the decode + re-upload.
@@ -525,12 +534,13 @@ pub fn run_stream<R: Read, W: Write>(
             if session.meshes().is_empty() {
                 return Err(StreamError::MissingMeshStream);
             }
-            let mut built = pollster::block_on(Renderer::with_meshes_sample_count(
-                width,
-                height,
-                session.meshes(),
-                options.msaa.sample_count(),
-            ))?;
+            let (mut built, built_target) =
+                pollster::block_on(Renderer::with_meshes_sample_count(
+                    width,
+                    height,
+                    session.meshes(),
+                    options.msaa.sample_count(),
+                ))?;
             if let Some(pbr) = &options.pbr {
                 built.set_disney_material(pbr.material.clone());
                 built.set_lighting(pbr.lighting);
@@ -544,6 +554,7 @@ pub fn run_stream<R: Read, W: Write>(
                 built.set_texture(texture);
             }
             renderer = Some(built);
+            target = Some(built_target);
 
             let frame_rate = session.frame_rate().unwrap_or(crate::DEFAULT_FRAME_RATE);
             let mut session_out = OutputSession::with_frame_rate(width, height, Some(frame_rate))?;
@@ -551,11 +562,13 @@ pub fn run_stream<R: Read, W: Write>(
             output_session = Some(session_out);
         }
 
-        if let (Some(renderer), Some(output_session)) = (renderer.as_mut(), output_session.as_mut())
+        if let (Some(renderer), Some(target), Some(output_session)) =
+            (renderer.as_mut(), target.as_ref(), output_session.as_mut())
         {
             for batch in &batches {
                 render_and_write_batch(
                     renderer,
+                    target,
                     &options,
                     output_session,
                     batch,

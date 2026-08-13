@@ -121,6 +121,16 @@ pub struct MaterialMaps<'a> {
 /// stays fixed (no GPU device churn on window resize).
 pub struct GuiRenderer {
     renderer: trd_core::Renderer,
+    /// The texture target the renderer draws into and reads back from — a
+    /// plain field now that the harness no longer owns its render target
+    /// (#203). Fixed at construction alongside `width`/`height`, since the GUI
+    /// displays the output scaled to the panel rather than resizing the render.
+    ///
+    /// Held as the concrete [`TextureTarget`](trd_core::TextureTarget), not the
+    /// [`RenderTarget`](trd_core::RenderTarget) enum: this front-end always reads
+    /// pixels back, and readback is only defined for a texture — keeping the type
+    /// concrete makes that a compile-time fact rather than a runtime check.
+    target: trd_core::TextureTarget,
     width: u32,
     height: u32,
 }
@@ -146,7 +156,7 @@ impl GuiRenderer {
         width: u32,
         height: u32,
     ) -> Result<Self, GuiError> {
-        let mut renderer = trd_core::Renderer::with_meshes(width, height, meshes).await?;
+        let (mut renderer, target) = trd_core::Renderer::with_meshes(width, height, meshes).await?;
         for (i, texture) in textures.iter().enumerate() {
             if let Some(texture) = texture {
                 renderer.set_mesh_texture(i, *texture);
@@ -165,6 +175,7 @@ impl GuiRenderer {
         }
         Ok(Self {
             renderer,
+            target,
             width,
             height,
         })
@@ -178,10 +189,12 @@ impl GuiRenderer {
     /// Renders `state` to an RGBA image.
     pub async fn render(&mut self, state: &SceneState) -> Result<ImageRgba, GuiError> {
         apply_materials(&mut self.renderer, state);
-        let rgba = self
-            .renderer
-            .render_scene(state.camera(self.viewport()), &scene_for(state))
-            .await?;
+        let scene = scene_for(state);
+        let layers = [trd_core::SceneLayer::new(
+            state.camera(self.viewport()),
+            &scene,
+        )];
+        let rgba = self.renderer.render_layers(&layers, &self.target).await?;
         Ok(ImageRgba {
             width: self.width,
             height: self.height,
@@ -194,7 +207,9 @@ impl GuiRenderer {
     /// `None` for the background.
     pub async fn pick(&mut self, state: &SceneState, x: u32, y: u32) -> Option<u32> {
         let camera = state.camera(self.viewport());
-        self.renderer.pick(camera, &state.draws(), x, y).await
+        self.renderer
+            .pick(camera, &state.draws(), x, y, self.viewport())
+            .await
     }
 
     fn viewport(&self) -> trd_core::Viewport {

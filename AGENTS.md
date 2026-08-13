@@ -26,21 +26,39 @@ Guidance for agents working in this repository.
   for every primitive. Geometry is owned once (decode-once mesh store + shared
   gizmo buffers); a drawable is a light handle naming *which* primitive + its
   per-frame model. Every front-end hands the same `Scene`
-  (`= Vec<DrawableObject>`, rebuilt per frame) to `SceneRenderer::encode` without
+  (`= Vec<DrawableObject>`, rebuilt per frame) to `Renderer::encode` without
   per-type branching; the render core batches it by draw kind. A single-object
   frame is the degenerate one-element scene. Add a primitive by adding a variant,
   not by bolting flags onto the renderer. Wireframe (and PBR) is a *mode* of
   `Mesh`, not a separate variant.
-- **One render harness, generic over its target.** `trd_core::Renderer<T: RenderTarget>`
-  (`render/renderer.rs`) owns *GPU context + `SceneRenderer` + target* for **every**
-  front-end; `render/render_target.rs` provides both targets. `Renderer<OffscreenTarget>`
-  (the default) renders to a texture and reads it back (`render_scene` → RGBA:
-  `trd-cli`, `trd-gui`, the browser `OffscreenRenderer`); `Renderer<OnscreenTarget>`
-  renders into a swapchain texture and presents it (`present_scene`: `trd-app`,
-  `trd-wasm`'s `CanvasRenderer`). Front-ends are **shells, not renderers** — they
-  create the surface and apply their own **surface-recovery policy** from the
-  returned `PresentOutcome` (native defers to the next redraw; the browser repairs
-  in-call and retries once), reaching the swapchain through `target_mut()`.
+- **One render harness; targets are pure data, behaviour is on the renderer.**
+  `trd_core::Renderer` (`render/renderer.rs`) owns *GPU context +
+  pipelines/materials/mesh store* for **every** front-end, and owns **all** the
+  render behaviour too. `render/render_target.rs` is data only — `TextureTarget`
+  (texture + padded staging buffer), `SurfaceTarget` (surface + config + sRGB view
+  format), and the closed enum `RenderTarget` over the two, which holds *only* the
+  discriminant so each variant stays the single source of truth for its own size.
+  A target carries **no** `render`/`present`/`acquire`/`read_back` method (#203):
+  a swapchain handle knows nothing about pipelines or the mesh store, so
+  `Renderer::render(camera, scene, &mut RenderTarget)` is the **one** public entry
+  — a single match over private `render_surface` (acquire → encode → submit →
+  present) and `render_texture` (encode → submit) — returning
+  `Result<Option<SurfaceRepair>, RenderError>` **synchronously** (no `async fn`
+  may cross the `wasm_bindgen` boundary). The asymmetric tail is typed, not
+  branched: `read_pixels` and the multi-camera
+  `draw_layers`/`render_layers`/`render_params` take the concrete
+  `&TextureTarget`, so asking a *surface* for pixels is a compile error. Target
+  lifecycle lives on the renderer for the same reason (`create_texture_target`,
+  `create_surface_target`, `resize_texture_target`, and the *associated*
+  `resize_surface`/`reconfigure_surface`/`replace_surface`, which take a
+  `&wgpu::Device` because a window is resized and repaired before a mesh has
+  arrived to build a `Renderer` from). Texture targets serve `trd-cli`, `trd-gui`
+  and the browser `OffscreenRenderer`; surface targets serve `trd-app` and
+  `trd-wasm`'s `CanvasRenderer`. Front-ends are **shells, not renderers** — they
+  create the surface, own their target, and apply their own
+  **surface-recovery policy** to the reported
+  `Ok(Some(SurfaceRepair))` / `Err(RenderError::Surface(_))` (native defers to
+  the next redraw; the browser repairs in-call and retries once).
 - Major input data is columnar (Apache Arrow tables) with simple glue logic.
 - **Video editing uses a separate authoring document.**
   `web/gui-video-editing` reads `trd.video_edit.version = 0.1.0` timeline rows

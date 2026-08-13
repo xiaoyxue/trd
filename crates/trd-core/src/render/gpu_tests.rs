@@ -6,7 +6,7 @@ use crate::math::{Matrix4, Point3, Vector3};
 use crate::visual::{Draw, DrawSelection, DrawableObject, FrameFit, RenderMode};
 use glam::{Mat4, Vec3};
 
-/// Test convenience constructor: a [`SceneRenderer`] over a single mesh with an
+/// Test convenience constructor: a [`Renderer`] over a single mesh with an
 /// identity base model (vertices drawn in their own coordinates). Replaces the
 /// former single-mesh `SceneRenderer::new`/`with_base_model` production helpers,
 /// which only the GPU tests used.
@@ -20,8 +20,8 @@ fn camera_of(params: FrameParams, width: u32, height: u32) -> crate::Camera {
         .expect("test params are a valid camera form")
 }
 
-fn single(format: wgpu::TextureFormat, mesh: &Mesh) -> SceneRenderer {
-    SceneRenderer::new(
+fn single(format: wgpu::TextureFormat, mesh: &Mesh) -> Renderer {
+    Renderer::new(
         test_gpu(),
         format,
         std::slice::from_ref(mesh),
@@ -160,26 +160,31 @@ async fn create_test_device() -> std::sync::Arc<GpuContext> {
     })
 }
 
-/// `RenderTarget` must report the format a renderer's pipelines are built for.
+/// A [`TextureTarget`] must report the format a renderer's pipelines are built
+/// for, and its own size, after a resize.
 ///
-/// For [`OffscreenTarget`] that is [`OFFSCREEN_FORMAT`]; the on-screen case is
-/// the interesting one and is covered by `OnscreenTarget`'s own sRGB-view logic
-/// (a surface's preferred format is often *non*-sRGB, so the target renders
+/// For a texture target that format is [`TEXTURE_TARGET_FORMAT`]; the surface
+/// case is the interesting one and is covered by [`SurfaceTarget`]'s sRGB-view
+/// logic (a surface's preferred format is often *non*-sRGB, so it is rendered
 /// through an sRGB view to stay byte-identical with the headless CLI). Pinning
-/// the offscreen side here keeps the trait honest about which of the two a
-/// caller gets.
+/// the texture side here keeps the property accessors honest now that no trait
+/// spans the two (#203).
 #[test]
 #[ignore = "requires a GPU adapter"]
 #[cfg(not(target_arch = "wasm32"))]
-fn offscreen_target_reports_its_render_format_and_size() {
-    let gpu = test_gpu();
+fn texture_target_reports_its_render_format_and_size() {
     let (width, height) = (32, 24);
-    let mut target = OffscreenTarget::new(&gpu.device, width, height).expect("offscreen target");
+    let renderer = single(TEXTURE_TARGET_FORMAT, &Mesh::hello_triangle());
+    let mut target = renderer
+        .create_texture_target(width, height)
+        .expect("texture target");
 
-    assert_eq!(target.view_format(), OFFSCREEN_FORMAT);
+    assert_eq!(target.view_format(), TEXTURE_TARGET_FORMAT);
     assert_eq!(target.viewport(), Viewport { width, height });
 
-    RenderTarget::resize(&mut target, &gpu, 64, 48).expect("resize");
+    renderer
+        .resize_texture_target(&mut target, 64, 48)
+        .expect("resize");
     assert_eq!(
         target.viewport(),
         Viewport {
@@ -187,19 +192,10 @@ fn offscreen_target_reports_its_render_format_and_size() {
             height: 48
         }
     );
-    assert_eq!(target.view_format(), OFFSCREEN_FORMAT);
+    assert_eq!(target.size(), (64, 48));
+    assert_eq!(target.view_format(), TEXTURE_TARGET_FORMAT);
 }
 
-/// `render_layers` must reproduce the fixed-arity passes exactly, and composite.
-///
-/// The video editor builds a frame from three passes through two different camera
-/// calibrations. `render_layers` generalises that to N layers (#180), and #203
-/// deleted the fixed-arity `render_two_pass`/`render_three_pass` wrappers once
-/// this test had shown the loop clears, orders and submits identically.
-///
-/// What is pinned now: one layer is *exactly* `render` (it is literally routed
-/// through `render_layers` today, so this guards the routing), and additional
-/// layers actually composite rather than overwrite.
 /// `draw_layers` + `read_pixels` must equal `render_layers` (#203).
 ///
 /// The split exists so drawing can stay synchronous — only the readback awaits —
@@ -209,13 +205,11 @@ fn offscreen_target_reports_its_render_format_and_size() {
 #[ignore = "requires a GPU adapter"]
 #[cfg(not(target_arch = "wasm32"))]
 fn draw_then_read_pixels_matches_render_layers() {
-    use crate::render::SceneLayer;
-    use crate::OffscreenTarget;
-
-    let gpu = test_gpu();
     let (width, height) = (32, 24);
-    let target = OffscreenTarget::new(&gpu.device, width, height).expect("target builds");
-    let mut renderer = single(OFFSCREEN_FORMAT, &Mesh::hello_triangle());
+    let mut renderer = single(TEXTURE_TARGET_FORMAT, &Mesh::hello_triangle());
+    let target = renderer
+        .create_texture_target(width, height)
+        .expect("target builds");
 
     let camera = camera_of(FrameParams::IDENTITY, width, height);
     let scene = [DrawableObject::Mesh {
@@ -225,11 +219,10 @@ fn draw_then_read_pixels_matches_render_layers() {
     }];
     let layers = [SceneLayer::new(camera, &scene)];
 
-    let fused = pollster::block_on(target.render_layers(&gpu, &mut renderer, &layers))
-        .expect("fused render");
+    let fused = pollster::block_on(renderer.render_layers(&layers, &target)).expect("fused render");
 
-    target.draw_layers(&gpu, &mut renderer, &layers);
-    let split = pollster::block_on(target.read_pixels(&gpu)).expect("split readback");
+    renderer.draw_layers(&layers, &target);
+    let split = pollster::block_on(renderer.read_pixels(&target)).expect("split readback");
 
     assert_eq!(
         split, fused,
@@ -241,17 +234,26 @@ fn draw_then_read_pixels_matches_render_layers() {
     );
 }
 
+/// `render_layers` must reproduce the fixed-arity passes exactly, and composite.
+///
+/// The video editor builds a frame from three passes through two different camera
+/// calibrations. `render_layers` generalises that to N layers (#180), and #203
+/// deleted the fixed-arity `render_two_pass`/`render_three_pass` wrappers once
+/// this test had shown the loop clears, orders and submits identically.
+///
+/// What is pinned now: one layer is *exactly* what [`Renderer::render`] does to a
+/// [`RenderTarget::texture`] — which also exercises the one match dispatcher on
+/// its texture arm, including its `Ok(None)` "nothing to present" answer — and
+/// additional layers actually composite rather than overwrite.
 #[test]
 #[ignore = "requires a GPU adapter"]
 #[cfg(not(target_arch = "wasm32"))]
 fn render_layers_composites_and_matches_render_for_one_layer() {
-    use crate::render::SceneLayer;
-    use crate::OffscreenTarget;
-
-    let gpu = test_gpu();
     let (width, height) = (64, 48);
-    let target = OffscreenTarget::new(&gpu.device, width, height).expect("target builds");
-    let mut renderer = single(OFFSCREEN_FORMAT, &Mesh::hello_triangle());
+    let mut renderer = single(TEXTURE_TARGET_FORMAT, &Mesh::hello_triangle());
+    let target = renderer
+        .create_texture_target(width, height)
+        .expect("target builds");
 
     let at = |x: f32| DrawableObject::Mesh {
         mesh_id: 0,
@@ -264,23 +266,26 @@ fn render_layers_composites_and_matches_render_for_one_layer() {
         model: Matrix4::IDENTITY.to_cols_array(),
     }];
 
-    // One layer must be exactly `render`.
-    let one_layer = pollster::block_on(target.render_layers(
-        &gpu,
-        &mut renderer,
-        &[SceneLayer::new(
-            camera_of(FrameParams::IDENTITY, width, height),
-            &foreground,
-        )],
-    ))
+    let camera = camera_of(FrameParams::IDENTITY, width, height);
+
+    // One layer must be exactly what `render` does to a texture target.
+    let one_layer = pollster::block_on(
+        renderer.render_layers(&[SceneLayer::new(camera, &foreground)], &target),
+    )
     .expect("one layer renders");
-    let single_pass = pollster::block_on(target.render(
-        &gpu,
-        &mut renderer,
-        camera_of(FrameParams::IDENTITY, width, height),
-        &foreground,
-    ))
-    .expect("single pass renders");
+
+    let mut dispatched = RenderTarget::texture(target);
+    assert_eq!(
+        renderer
+            .render(camera, &foreground, &mut dispatched)
+            .expect("the texture arm never fails to present"),
+        None,
+        "a texture target has no surface to repair"
+    );
+    let single_pass = pollster::block_on(
+        renderer.read_pixels(dispatched.as_texture().expect("a texture target")),
+    )
+    .expect("single pass reads back");
     assert_eq!(one_layer, single_pass, "one layer != render");
     assert_eq!(one_layer.len(), (width * height * 4) as usize);
     assert!(
@@ -288,14 +293,14 @@ fn render_layers_composites_and_matches_render_for_one_layer() {
         "a single layer drew nothing"
     );
 
-    let three_layers = pollster::block_on(target.render_layers(
-        &gpu,
-        &mut renderer,
+    let target = dispatched.as_texture().expect("a texture target");
+    let three_layers = pollster::block_on(renderer.render_layers(
         &[
-            SceneLayer::new(camera_of(FrameParams::IDENTITY, width, height), &background),
-            SceneLayer::new(camera_of(FrameParams::IDENTITY, width, height), &foreground),
-            SceneLayer::new(camera_of(FrameParams::IDENTITY, width, height), &overlay),
+            SceneLayer::new(camera, &background),
+            SceneLayer::new(camera, &foreground),
+            SceneLayer::new(camera, &overlay),
         ],
+        target,
     ))
     .expect("three layers render");
     assert_ne!(
@@ -304,64 +309,61 @@ fn render_layers_composites_and_matches_render_for_one_layer() {
     );
 }
 
-/// The generic harness must work through its **target-agnostic** API.
+/// The harness must render correctly into a **caller-owned** target that is
+/// resized independently of the renderer.
 ///
-/// `Renderer<T: RenderTarget>` exists so the on-screen front-ends stop being
-/// renderers (#180): they build one with [`Renderer::with_target`] over an
-/// `OnscreenTarget` and drive it through the same shared surface as the offscreen
-/// callers. A real swapchain needs a window, so this exercises that shared API —
-/// `with_target`, `viewport`, `resize`, `into_target` — over the offscreen target,
-/// which is the same code path with a different `T`.
+/// `Renderer<T: RenderTarget>` used to bundle the render target as a field, with
+/// `with_target`/`viewport`/`resize`/`into_target` forwarding to it — needed
+/// because a live-surface shell had to reconfigure or hand back its swapchain
+/// *through* the renderer. #203 removed the generic and the target field
+/// entirely: the target is a plain call argument, and resizing it is a
+/// [`Renderer`] method taking the target rather than a method *on* the target.
+/// This exercises that shape end-to-end: build once, render, resize the target
+/// out from under the renderer, render again at the new size.
 #[test]
 #[ignore = "requires a GPU adapter"]
 #[cfg(not(target_arch = "wasm32"))]
-fn with_target_builds_resizes_and_unwraps_the_harness() {
-    use crate::{OffscreenTarget, RenderTarget, Renderer};
-
-    let gpu = test_gpu();
+fn render_params_after_resizing_a_caller_owned_target() {
     let scene = vec![DrawableObject::Mesh {
         mesh_id: 0,
         model: Matrix4::IDENTITY.to_cols_array(),
         mode: RenderMode::Filled,
     }];
 
-    let target = OffscreenTarget::new(&gpu.device, 40, 24).expect("target builds");
-    let mut renderer = Renderer::with_target(gpu, target, &[Mesh::hello_triangle()]);
+    let mut renderer = single(TEXTURE_TARGET_FORMAT, &Mesh::hello_triangle());
+    let mut target = renderer
+        .create_texture_target(40, 24)
+        .expect("target builds");
     assert_eq!(
-        renderer.viewport(),
+        target.viewport(),
         Viewport {
             width: 40,
             height: 24
         }
     );
 
-    let small = pollster::block_on(renderer.render_params(FrameParams::IDENTITY, &scene))
+    let small = pollster::block_on(renderer.render_params(FrameParams::IDENTITY, &scene, &target))
         .expect("renders at the initial size");
     assert_eq!(small.len(), 40 * 24 * 4);
 
-    renderer.resize(64, 32).expect("resizes");
+    // The shell resizes its own target through the renderer; the renderer holds
+    // no target of its own to keep in sync (#203).
+    renderer
+        .resize_texture_target(&mut target, 64, 32)
+        .expect("resizes");
     assert_eq!(
-        renderer.viewport(),
+        target.viewport(),
         Viewport {
             width: 64,
             height: 32
         }
     );
-    let large = pollster::block_on(renderer.render_params(FrameParams::IDENTITY, &scene))
+    let large = pollster::block_on(renderer.render_params(FrameParams::IDENTITY, &scene, &target))
         .expect("renders at the new size");
     assert_eq!(large.len(), 64 * 32 * 4);
     assert!(
         large.chunks_exact(4).any(|px| px[..3] != [0, 0, 0]),
-        "the resized harness drew nothing"
-    );
-
-    // A streaming front-end hands the surface back when a new mesh table arrives.
-    assert_eq!(
-        renderer.into_target().viewport(),
-        Viewport {
-            width: 64,
-            height: 32
-        }
+        "the resized target drew nothing"
     );
 }
 
@@ -371,7 +373,7 @@ fn with_target_builds_resizes_and_unwraps_the_harness() {
 /// it builds the harness on an existing [`GpuContext`] instead of letting the
 /// harness request one (#180). That second constructor is only safe if it is a
 /// pure "bring your own device" variant — same auto-fit preview transforms, same
-/// offscreen target, same pixels — so this renders one scene through both and
+/// texture target, same pixels — so this renders one scene through both and
 /// compares them byte for byte.
 #[test]
 #[ignore = "requires a GPU adapter"]
@@ -387,15 +389,18 @@ fn with_gpu_renders_identically_to_with_meshes() {
         mode: RenderMode::Filled,
     }];
 
-    let mut owned = pollster::block_on(Renderer::with_meshes(width, height, &meshes))
-        .expect("the harness requests its own device");
+    let (mut owned, owned_target) =
+        pollster::block_on(Renderer::with_meshes(width, height, &meshes))
+            .expect("the harness requests its own device");
     let expected =
-        pollster::block_on(owned.render_params(FrameParams::IDENTITY, &scene)).expect("renders");
+        pollster::block_on(owned.render_params(FrameParams::IDENTITY, &scene, &owned_target))
+            .expect("renders");
 
-    let mut borrowed = Renderer::with_gpu(test_gpu(), width, height, &meshes)
+    let (mut borrowed, borrowed_target) = Renderer::with_gpu(test_gpu(), width, height, &meshes)
         .expect("the harness accepts an existing device");
     let actual =
-        pollster::block_on(borrowed.render_params(FrameParams::IDENTITY, &scene)).expect("renders");
+        pollster::block_on(borrowed.render_params(FrameParams::IDENTITY, &scene, &borrowed_target))
+            .expect("renders");
 
     assert_eq!(borrowed.mesh_count(), 1);
     assert_eq!(actual.len(), (width * height * 4) as usize);
@@ -553,7 +558,7 @@ fn mesh_renderer_depth_buffer_occludes_far_behind_near() {
         shading: None,
     };
     // mesh 0 = red (drawn first), mesh 1 = green (drawn last).
-    let mut mesh = SceneRenderer::new(
+    let mut mesh = Renderer::new(
         test_gpu(),
         format,
         &[quad([1.0, 0.0, 0.0]), quad([0.0, 1.0, 0.0])],
@@ -905,7 +910,7 @@ fn gizmo_lines_and_arrowheads_stay_smooth_without_msaa() {
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (128, 128);
     let mesh_data = Mesh::hello_triangle();
-    let mut renderer = SceneRenderer::with_sample_count(
+    let mut renderer = Renderer::with_sample_count(
         test_gpu(),
         format,
         std::slice::from_ref(&mesh_data),
@@ -1584,7 +1589,7 @@ fn triangle_renderer_draws_gradient_triangle() {
 /// pixel hit. Two quads are placed side by side (a gap between them) under the
 /// identity camera; clicking the left one returns object index 0, the right one
 /// index 1, and the gap / a corner returns `None` (background). Exercises
-/// `SceneRenderer::encode_picking` + `PickTarget` end-to-end on a real GPU.
+/// `Renderer::encode_picking` + `PickTarget` end-to-end on a real GPU.
 #[test]
 #[ignore = "requires a GPU adapter"]
 #[cfg(not(target_arch = "wasm32"))]

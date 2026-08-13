@@ -1,16 +1,17 @@
 //! The live window surface, plus the per-frame render path driving the shared
 //! [`trd_core::Renderer`] harness.
 //!
-//! This shell is **not** a renderer: `trd-core`'s harness is generic over its
-//! render target, so the on-screen path is `Renderer<OnscreenTarget>` and the only
-//! thing left here is what is genuinely window-specific — creating the surface
-//! from a `winit` window, and the platform's surface-recovery policy (#180).
+//! This shell is **not** a renderer: `trd-core`'s harness takes its render target
+//! as a per-call argument rather than owning one (#203), so the only thing left
+//! here is what is genuinely window-specific — creating the surface from a
+//! `winit` window, owning + resizing it, and the platform's surface-recovery
+//! policy (#180).
 
 use std::sync::Arc;
 
 use trd_core::{
     DisneyMaterial, EnvMapData, FrameFit, ImageBasedLighting, ImageData, ImageTexture, Lighting,
-    Mesh, OnscreenTarget, RenderOptions, Renderer, Scene, ToneMapping,
+    Mesh, RenderOptions, RenderTarget, Renderer, Scene, SurfaceTarget, ToneMapping,
 };
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
@@ -28,12 +29,15 @@ pub(crate) struct WindowRenderer {
     /// The shared GPU context (adapter + device + queue), held as one value
     /// instead of cloned apart into separate fields (#180).
     gpu: Arc<trd_core::GpuContext>,
-    /// The surface, held until the stream's mesh table arrives and the harness
-    /// below can be built around it.
-    target: Option<OnscreenTarget>,
-    /// The shared render harness over the window surface, built lazily once the
-    /// stream's mesh table has arrived from the reader thread.
-    pub(crate) renderer: Option<Renderer<OnscreenTarget>>,
+    /// The window surface, owned directly by the shell (#203): the harness holds
+    /// no target of its own, so this front-end owns the surface and decides how to
+    /// repair it. Held as a [`RenderTarget`] because presenting is reachable only
+    /// through the renderer's one `render` dispatcher — the surface itself carries
+    /// no render behaviour.
+    target: RenderTarget,
+    /// The shared render harness, built lazily once the stream's mesh table has
+    /// arrived from the reader thread.
+    pub(crate) renderer: Option<Renderer>,
     /// CPU image backing the currently uploaded frame-plane texture. Inline
     /// frame reuse preserves the same Arc, so repeated IDs skip GPU writes.
     uploaded_frame_image: Option<Arc<ImageData>>,
@@ -87,7 +91,7 @@ impl WindowRenderer {
             wgpu::PresentMode::Fifo
         };
         log::info!("present mode: {:?} (vsync={vsync})", config.present_mode);
-        let target = Some(OnscreenTarget::new(&gpu.device, surface, config));
+        let target = RenderTarget::surface(SurfaceTarget::new(&gpu.device, surface, config));
 
         Ok(Self {
             window,
@@ -100,14 +104,11 @@ impl WindowRenderer {
     }
 
     pub(crate) fn resize(&mut self, size: PhysicalSize<u32>) {
-        match (self.renderer.as_mut(), self.target.as_mut()) {
-            (Some(renderer), _) => {
-                renderer
-                    .target_mut()
-                    .resize(&self.gpu.device, size.width, size.height)
-            }
-            (None, Some(target)) => target.resize(&self.gpu.device, size.width, size.height),
-            (None, None) => {}
+        // An associated `Renderer` function, not a method: a window is resized
+        // long before the stream's mesh table has arrived, so there may be no
+        // harness yet — but the surface still has to be reconfigured (#203).
+        if let Some(surface) = self.target.as_surface_mut() {
+            Renderer::resize_surface(&self.gpu.device, surface, size.width, size.height);
         }
     }
 
@@ -115,15 +116,11 @@ impl WindowRenderer {
     /// centered + scaled to fit via its preview base model). Idempotent per
     /// stream: called once when the mesh table first arrives.
     pub(crate) fn set_meshes(&mut self, meshes: &[Mesh]) {
-        let target = match self.target.take() {
-            Some(target) => target,
-            // Re-meshing an existing stream: reuse the surface the old harness owns.
-            None => match self.renderer.take() {
-                Some(renderer) => renderer.into_target(),
-                None => return,
-            },
-        };
-        self.renderer = Some(Renderer::with_target(self.gpu.clone(), target, meshes));
+        self.renderer = Some(Renderer::auto_fit(
+            self.gpu.clone(),
+            self.target.view_format(),
+            meshes,
+        ));
         self.uploaded_frame_image = None;
     }
 
@@ -201,7 +198,7 @@ impl WindowRenderer {
         };
         let scene = Scene::from_draws(&frame.draws, options, frame_fit);
 
-        let camera = match frame.params.to_camera(renderer.viewport()) {
+        let camera = match frame.params.to_camera(self.target.viewport()) {
             Ok(camera) => camera,
             Err(error) => {
                 log::warn!("skipping frame with a malformed camera: {error}");
@@ -211,9 +208,13 @@ impl WindowRenderer {
         // The recovery policy is the window's, not the harness's (#180): repair
         // the surface and defer to the next redraw. A frame that *was* presented
         // needs no redraw, only the repair.
-        let (repair, redraw) = match renderer.present_scene(camera, &scene) {
+        let (repair, redraw) = match renderer.render(camera, &scene, &mut self.target) {
             Ok(repair) => (repair, false),
-            Err(error) => (error.repair(), true),
+            Err(trd_core::RenderError::Surface(error)) => (error.repair(), true),
+            Err(error) => {
+                log::warn!("skipping frame: {error}");
+                (None, false)
+            }
         };
         if let Some(repair) = repair {
             self.repair_surface(repair);
@@ -228,23 +229,25 @@ impl WindowRenderer {
     /// `Recreate` really does build a new surface: wgpu reports a *lost* surface
     /// as unusable, and merely reconfiguring it leaves the window blank (#203).
     fn repair_surface(&mut self, repair: trd_core::SurfaceRepair) {
-        let Some(renderer) = self.renderer.as_mut() else {
-            return;
-        };
-        match repair {
-            trd_core::SurfaceRepair::Reconfigure => {
-                renderer.target_mut().reconfigure(&self.gpu.device);
-            }
+        let device = self.gpu.device.clone();
+        let recreated = match repair {
+            trd_core::SurfaceRepair::Reconfigure => None,
             trd_core::SurfaceRepair::Recreate => {
                 match self.instance.create_surface(self.window.clone()) {
-                    Ok(surface) => renderer
-                        .target_mut()
-                        .replace_surface(&self.gpu.device, surface),
+                    Ok(surface) => Some(surface),
                     Err(error) => {
                         log::error!("could not recreate the lost surface: {error}");
+                        return;
                     }
                 }
             }
+        };
+        let Some(target) = self.target.as_surface_mut() else {
+            return;
+        };
+        match recreated {
+            None => Renderer::reconfigure_surface(&device, target),
+            Some(surface) => Renderer::replace_surface(&device, target, surface),
         }
     }
 }

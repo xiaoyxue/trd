@@ -40,7 +40,7 @@ pub(crate) struct PbrUniformInputs<'a> {
 }
 
 /// The **batched** twin of [`PbrUniformInputs`]: the same five inputs, pluralized
-/// per mesh, as `SceneRenderer::encode` receives them for a whole frame.
+/// per mesh, as `Renderer::encode` receives them for a whole frame.
 /// `write_pbr` slices one `PbrUniformInputs` out of it per mesh id.
 ///
 /// `lighting` is singular because the light rig is scene-level, not per mesh —

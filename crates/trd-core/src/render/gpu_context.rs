@@ -6,7 +6,7 @@
 //! how the [`wgpu::Instance`] is built (native honours `WGPU_BACKEND`, wasm is
 //! `default`) and whether an adapter must be compatible with a surface.
 //!
-//! This is the substrate under both [`OffscreenTarget`](super::OffscreenTarget)
+//! This is the substrate under both [`TextureTarget`](super::TextureTarget)
 //! and the on-screen front-ends: device/adapter acquisition is orthogonal to
 //! *what* you render into, and two of the five shells must create a surface
 //! *before* requesting the adapter, so it lives as its own primitive rather than

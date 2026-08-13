@@ -1,19 +1,19 @@
 //! [`PickTarget`] — the object-id ("color index") picking harness (#141).
 //!
-//! A small render target dedicated to [`SceneRenderer::encode_picking`]: a
+//! A small render target dedicated to [`Renderer::encode_picking`]: a
 //! single-sample **linear** [`PICK_FORMAT`] color texture + a depth attachment,
 //! into which each drawn object is rasterized in a flat id color. After the pass,
 //! the **one** texel under the cursor is copied back and decoded to a 0-based
 //! object index (or `None` for the background) — so a click resolves *which*
 //! object it hit without ray-marching. Kept separate from the display
-//! [`OffscreenTarget`](super::OffscreenTarget) because picking must be
+//! [`TextureTarget`](super::TextureTarget) because picking must be
 //! single-sampled (ids must never be averaged at edges) and use a non-sRGB format
 //! (so the id bytes round-trip exactly).
 
 use super::GpuContext;
 use futures_channel::oneshot;
 
-use super::{create_depth_target, DepthTarget, PickInstanceRaw, SceneRenderer, PICK_FORMAT};
+use super::{create_depth_target, DepthTarget, PickInstanceRaw, Renderer, PICK_FORMAT};
 use crate::visual::Draw;
 use crate::Camera;
 
@@ -93,7 +93,7 @@ impl PickTarget {
     pub async fn pick(
         &self,
         gpu: &GpuContext,
-        renderer: &mut SceneRenderer,
+        renderer: &mut Renderer,
         camera: Camera,
         draws: &[Draw],
         x: u32,

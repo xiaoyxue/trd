@@ -36,6 +36,15 @@ pub struct VideoPlacementRenderer {
     /// renderer: it turns the editor's timeline state into layered scenes and hands
     /// them to `trd-core` like every other front-end (#180).
     renderer: trd_core::Renderer,
+    /// The texture target the renderer draws into and reads back from. Owned
+    /// here rather than by the harness (#203): the harness has no opinion about
+    /// *where* a frame lands, and this front-end resizes its own target on the
+    /// editor panel's resize.
+    ///
+    /// The concrete [`TextureTarget`](trd_core::TextureTarget) rather than the
+    /// [`RenderTarget`](trd_core::RenderTarget) enum, because the editor always
+    /// reads its frames back — a surface has no pixels to read.
+    target: trd_core::TextureTarget,
     default_mode: trd_core::RenderMode,
     default_material: trd_core::DisneyMaterial,
     identity: Rc<RendererIdentity>,
@@ -56,11 +65,16 @@ impl VideoPlacementRenderer {
         .map_err(|error| error.to_string())?;
         let facts = gpu.adapter_facts();
         let placeholder = assets::default_mesh().map_err(|error| error.to_string())?;
-        let renderer =
-            trd_core::Renderer::with_gpu(gpu, width, height, std::slice::from_ref(&placeholder))
-                .map_err(|error| error.to_string())?;
+        let (renderer, target) = trd_core::Renderer::with_gpu(
+            gpu.clone(),
+            width,
+            height,
+            std::slice::from_ref(&placeholder),
+        )
+        .map_err(|error| error.to_string())?;
         Ok(Self {
             renderer,
+            target,
             default_mode: trd_core::RenderMode::Filled,
             default_material: trd_core::DisneyMaterial::default(),
             identity: Rc::new(RendererIdentity {
@@ -107,14 +121,15 @@ impl VideoPlacementRenderer {
         let facts = gpu.adapter_facts();
         let asset_diagnostics = imported.diagnostics();
         let mesh = imported.mesh();
-        let mut renderer =
-            trd_core::Renderer::with_gpu(gpu, width, height, std::slice::from_ref(mesh))
+        let (mut renderer, target) =
+            trd_core::Renderer::with_gpu(gpu.clone(), width, height, std::slice::from_ref(mesh))
                 .map_err(|error| error.to_string())?;
         let (default_mode, default_material) = imported.configure(&mut renderer);
         let env = assets::decode_env_hdr(env_bytes).map_err(|error| error.to_string())?;
         renderer.set_env_map(env);
         Ok(Self {
             renderer,
+            target,
             default_mode,
             default_material,
             identity: Rc::new(RendererIdentity {
@@ -131,8 +146,7 @@ impl VideoPlacementRenderer {
     }
 
     pub fn size(&self) -> (u32, u32) {
-        let viewport = self.renderer.viewport();
-        (viewport.width, viewport.height)
+        (self.target.width(), self.target.height())
     }
 
     pub fn diagnostics(&self) -> VideoRendererDiagnostics {
@@ -145,12 +159,16 @@ impl VideoPlacementRenderer {
         }
     }
 
+    /// Resizes the editor's own render target (#203): the harness owns no target
+    /// to resize on its behalf, so this front-end tracks it and asks the renderer
+    /// to rebuild it — `TextureTarget::new`'s zero/`max_texture_dimension_2d`
+    /// checks are all that guards against a degenerate size here.
     pub fn resize(&mut self, width: u32, height: u32) -> Result<(), String> {
         if self.size() == (width, height) {
             return Ok(());
         }
         self.renderer
-            .resize(width, height)
+            .resize_texture_target(&mut self.target, width, height)
             .map_err(|error| error.to_string())
     }
 
@@ -173,6 +191,7 @@ impl VideoPlacementRenderer {
                 }],
                 point.0,
                 point.1,
+                self.viewport(),
             )
             .await)
     }
@@ -195,7 +214,7 @@ impl VideoPlacementRenderer {
         self.renderer
             .update_frame_texture_rgba(rgba, frame_width, frame_height);
         let identity_camera = trd_core::FrameParams::IDENTITY
-            .to_camera(self.renderer.viewport())
+            .to_camera(self.viewport())
             .map_err(|error| error.to_string())?;
         let background_camera = self
             .frame_camera(background_frame, calibration_size)
@@ -226,13 +245,23 @@ impl VideoPlacementRenderer {
         );
 
         self.renderer
-            .render_layers(&[
-                trd_core::SceneLayer::new(background_camera, &background),
-                trd_core::SceneLayer::new(foreground_camera, &foreground),
-                trd_core::SceneLayer::new(foreground_camera, &selection_overlay),
-            ])
+            .render_layers(
+                &[
+                    trd_core::SceneLayer::new(background_camera, &background),
+                    trd_core::SceneLayer::new(foreground_camera, &foreground),
+                    trd_core::SceneLayer::new(foreground_camera, &selection_overlay),
+                ],
+                &self.target,
+            )
             .await
             .map_err(|error| error.to_string())
+    }
+
+    fn viewport(&self) -> trd_core::Viewport {
+        trd_core::Viewport {
+            width: self.target.width(),
+            height: self.target.height(),
+        }
     }
 
     fn frame_camera(
@@ -259,7 +288,7 @@ impl VideoPlacementRenderer {
             ..trd_core::FrameParams::IDENTITY
         };
         params
-            .to_camera(self.renderer.viewport())
+            .to_camera(self.viewport())
             .map_err(|error| error.to_string())
     }
 }
