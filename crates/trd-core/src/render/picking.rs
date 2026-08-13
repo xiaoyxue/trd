@@ -21,6 +21,7 @@
 use super::GpuContext;
 use futures_channel::oneshot;
 
+use super::buffer::InstanceBuffer;
 use super::{
     create_depth_target, create_mesh_bind_group_layout, create_picking_pipeline, DepthTarget,
     PickInstanceRaw, Renderer, PICK_FORMAT,
@@ -37,10 +38,10 @@ pub(super) struct Picking {
     /// Built once. Its group-0 bind-group layout is structurally the camera
     /// layout, so `SceneUniforms::camera`'s bind group binds it.
     pipeline: wgpu::RenderPipeline,
-    /// Per-instance [`PickInstanceRaw`] buffer (model + id color), grown on
-    /// demand like the mesh instance buffer.
-    instances: wgpu::Buffer,
-    instance_capacity: u32,
+    /// Per-instance [`PickInstanceRaw`] buffer (model + id color). The same
+    /// [`InstanceBuffer`] the scene pass uses, so the grow rule is written once
+    /// (#222) — only the record type differs.
+    instances: InstanceBuffer<PickInstanceRaw>,
     /// Created lazily on the first [`pick`](Renderer::pick) call and resized to
     /// track whatever `viewport` the caller passes. `None` until a front-end
     /// actually picks, so the headless CLI never allocates it.
@@ -59,27 +60,16 @@ impl Picking {
             bind_group_layouts: &[Some(&create_mesh_bind_group_layout(device))],
             immediate_size: 0,
         });
-        let instance_capacity = (mesh_count as u32).max(1);
         Self {
             pipeline: create_picking_pipeline(device, &layout),
-            instances: create_pick_instance_buffer(device, instance_capacity),
-            instance_capacity,
+            instances: InstanceBuffer::new(device, "trd pick instance buffer", mesh_count as u32),
             target: None,
         }
     }
 
-    /// Uploads this pass's instances, growing the buffer (to the next power of
-    /// two) when the frame needs more than it holds — the same policy as
-    /// `MeshStore::upload_instances`.
+    /// Uploads this pass's instances through the shared growable buffer.
     pub(super) fn upload_instances(&mut self, gpu: &GpuContext, instances: &[PickInstanceRaw]) {
-        if instances.len() as u32 > self.instance_capacity {
-            self.instance_capacity = (instances.len() as u32).next_power_of_two();
-            self.instances = create_pick_instance_buffer(&gpu.device, self.instance_capacity);
-        }
-        if !instances.is_empty() {
-            gpu.queue
-                .write_buffer(&self.instances, 0, bytemuck::cast_slice(instances));
-        }
+        self.instances.upload(gpu, instances);
     }
 
     /// Binds this pass's pipeline, the caller's group-0 camera bind group, and
@@ -89,7 +79,7 @@ impl Picking {
     pub(super) fn bind(&self, pass: &mut wgpu::RenderPass<'_>, camera: &wgpu::BindGroup) {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, camera, &[]);
-        pass.set_vertex_buffer(1, self.instances.slice(..));
+        pass.set_vertex_buffer(1, self.instances.slice());
     }
 
     /// Moves the pick target out for the duration of one pass, creating it on
@@ -122,15 +112,6 @@ impl Picking {
     pub(super) fn target_size(&self) -> Option<(u32, u32)> {
         self.target.as_ref().map(PickTarget::size)
     }
-}
-
-fn create_pick_instance_buffer(device: &wgpu::Device, capacity: u32) -> wgpu::Buffer {
-    device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("trd pick instance buffer"),
-        size: capacity as u64 * std::mem::size_of::<PickInstanceRaw>() as u64,
-        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    })
 }
 
 /// A single-sample id-color render target + depth + a tiny read-back buffer for

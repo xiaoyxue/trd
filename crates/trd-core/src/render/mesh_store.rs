@@ -2,20 +2,19 @@
 //!
 //! [`MeshGpu`] is one uploaded mesh (vertex/index buffers, its bound albedo and
 //! material maps, its AABB gizmo geometry and base model); [`MeshStore`] owns
-//! every mesh plus the geometry shared by all gizmo drawables (axes, plane
-//! grids, quad outlines, the shadow quad) and the one instance buffer every
-//! draw kind writes through.
+//! every mesh a scene's ids can name, and **only** those — the constant gizmo
+//! geometry and the per-frame instance buffer moved to their own owners in
+//! `gizmo.rs` and `buffer.rs` (#222).
 //!
 //! Named `mesh_store` rather than `mesh` because `crate::mesh` already holds the
 //! CPU-side [`Mesh`]; this is its GPU face.
 
 use super::bound_material_maps::BoundMaterialMaps;
 use super::bound_texture::BoundTexture;
-use super::buffer::{create_instance_buffer, IndexBuf, VertexGeometry};
+use super::buffer::{IndexBuf, VertexGeometry};
 use super::*;
 use crate::material::DisneyMaterial;
 use crate::math::Matrix4;
-use crate::visual::GridPlane;
 
 /// A mesh uploaded to the GPU. Its `vertex_buffer` feeds both the filled
 /// `triangles` and the deduped wireframe `edges` (#38); the `aabb` overlay (#42)
@@ -154,31 +153,21 @@ pub(super) fn upload_mesh(
     }
 }
 
-/// The decode-once geometry store: the uploaded [`MeshGpu`]s (referenced by a
-/// scene's mesh ids), the shared coordinate-axes gizmo vertices, and the
-/// growable per-instance model-matrix buffer.
+/// The **decode-once mesh store**: the uploaded [`MeshGpu`]s a scene's mesh ids
+/// index into, and nothing else (#222).
+///
+/// It used to also own the gizmo geometry and the per-frame instance buffer —
+/// three unrelated lifetimes in one struct, of which the name described one.
+/// Those are now [`GizmoGeometry`](super::gizmo::GizmoGeometry) (constant) and
+/// [`InstanceBuffer`](super::buffer::InstanceBuffer) (per frame), leaving this
+/// type holding exactly what it is called: the caller's meshes, fixed at
+/// construction.
 pub(super) struct MeshStore {
-    pub(super) meshes: Vec<MeshGpu>,
-    /// The coordinate-axis shafts and cone arrowheads.
-    pub(super) axes_lines: VertexGeometry,
-    pub(super) axes_heads: VertexGeometry,
-    /// The coordinate-plane grid geometry, one expanded-line buffer per
-    /// [`GridPlane`] (indexed by [`GridPlane::index`]): XY, XZ, YZ. Each
-    /// [`PlaneGrid`](crate::Primitive::PlaneGrid) draws the buffer for its plane under its own
-    /// model, supplied through the shared instance buffer.
-    pub(super) grid_lines: [VertexGeometry; 3],
-    pub(super) quad_lines: [VertexGeometry; 2],
-    /// The contact / blob **grounding-shadow** quad geometry (six `TriangleList`
-    /// vertices, a unit XY quad); each [`BlobShadow`](crate::Primitive::BlobShadow) draws it
-    /// under its own model through the shared instance buffer, alpha-blended.
-    pub(super) shadow_vertex_buffer: wgpu::Buffer,
-    pub(super) instance_buffer: wgpu::Buffer,
-    pub(super) instance_capacity: u32,
+    meshes: Vec<MeshGpu>,
 }
 
 impl MeshStore {
-    /// Constructs a `MeshStore`, uploading each mesh with its base (preview)
-    /// model and sizing the instance buffer to at least one instance.
+    /// Uploads each mesh with its base (preview) model.
     pub(super) fn new(
         gpu: &GpuContext,
         meshes: &[Mesh],
@@ -186,90 +175,47 @@ impl MeshStore {
         texture_layout: &wgpu::BindGroupLayout,
         material_maps_layout: &wgpu::BindGroupLayout,
     ) -> Self {
-        use wgpu::util::DeviceExt;
-
-        let gpu_meshes = meshes
+        let meshes = meshes
             .iter()
             .zip(base_models)
             .map(|(mesh, &base)| upload_mesh(gpu, mesh, base, texture_layout, material_maps_layout))
             .collect();
-        let instance_capacity = (meshes.len() as u32).max(1);
-        let instance_buffer = create_instance_buffer(&gpu.device, instance_capacity);
-
-        let axes_lines =
-            VertexGeometry::new(&gpu.device, "trd axes line buffer", &axes_line_vertices());
-        let axes_heads =
-            VertexGeometry::new(&gpu.device, "trd axes arrow buffer", &axes_arrow_vertices());
-
-        // Coordinate-plane grids: one expanded-line vertex buffer per plane
-        // (XY/XZ/YZ), drawn under each PlaneGrid object's model.
-        let grid_lines = [
-            VertexGeometry::new(
-                &gpu.device,
-                "trd xy grid line buffer",
-                &grid_line_vertices(GridPlane::Xy),
-            ),
-            VertexGeometry::new(
-                &gpu.device,
-                "trd xz grid line buffer",
-                &grid_line_vertices(GridPlane::Xz),
-            ),
-            VertexGeometry::new(
-                &gpu.device,
-                "trd yz grid line buffer",
-                &grid_line_vertices(GridPlane::Yz),
-            ),
-        ];
-        let quad_lines = [
-            VertexGeometry::new(
-                &gpu.device,
-                "trd placement quad line buffer",
-                &quad_outline_vertices(false),
-            ),
-            VertexGeometry::new(
-                &gpu.device,
-                "trd selected placement quad line buffer",
-                &quad_outline_vertices(true),
-            ),
-        ];
-
-        // Contact / blob grounding-shadow quad: six TriangleList vertices (a unit
-        // XY quad). Each BlobShadow drawable draws them under its own model via
-        // the shared instance buffer, alpha-blended over the frame plane.
-        let shadow_vertex_buffer =
-            gpu.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("trd shadow vertex buffer"),
-                    contents: bytemuck::cast_slice(&blob_shadow_vertices()),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-
-        Self {
-            meshes: gpu_meshes,
-            axes_lines,
-            axes_heads,
-            grid_lines,
-            quad_lines,
-            shadow_vertex_buffer,
-            instance_buffer,
-            instance_capacity,
-        }
+        Self { meshes }
     }
 
     pub(super) fn len(&self) -> usize {
         self.meshes.len()
     }
 
-    /// Uploads the flattened instance models, growing the buffer (to the next
-    /// power of two) when the frame needs more instances than it holds.
-    pub(super) fn upload_instances(&mut self, gpu: &GpuContext, instances: &[InstanceRaw]) {
-        let (device, queue) = (&gpu.device, &gpu.queue);
-        if instances.len() as u32 > self.instance_capacity {
-            self.instance_capacity = (instances.len() as u32).next_power_of_two();
-            self.instance_buffer = create_instance_buffer(device, self.instance_capacity);
-        }
-        if !instances.is_empty() {
-            queue.write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(instances));
-        }
+    /// Every uploaded mesh, in id order — what
+    /// [`SceneUniforms::write_pbr`](super::SceneUniforms::write_pbr) walks to
+    /// fill one PBR slot per mesh.
+    pub(super) fn all(&self) -> &[MeshGpu] {
+        &self.meshes
+    }
+
+    /// The mesh for `id`, or `None` when a draw names one that was never
+    /// uploaded (out-of-range ids are skipped, not an error).
+    pub(super) fn get(&self, id: usize) -> Option<&MeshGpu> {
+        self.meshes.get(id)
+    }
+
+    pub(super) fn get_mut(&mut self, id: usize) -> Option<&mut MeshGpu> {
+        self.meshes.get_mut(id)
+    }
+
+    /// Every mesh, mutably — for the setters that apply one value to all of them.
+    pub(super) fn iter_mut(&mut self) -> impl Iterator<Item = &mut MeshGpu> {
+        self.meshes.iter_mut()
+    }
+}
+
+/// Indexing is for ids a batch already resolved through [`MeshStore::get`];
+/// anything reading straight from a scene must use `get` instead.
+impl std::ops::Index<usize> for MeshStore {
+    type Output = MeshGpu;
+
+    fn index(&self, id: usize) -> &MeshGpu {
+        &self.meshes[id]
     }
 }
