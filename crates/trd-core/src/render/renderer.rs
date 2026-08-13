@@ -73,10 +73,11 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use super::bound_material_maps::BoundMaterialMaps;
-use super::buffer::{draw_indexed, draw_vertices, VertexGeometry};
+use super::buffer::{draw_indexed, draw_vertices, InstanceBuffer, VertexGeometry};
 use super::draw_command::build_batches;
 use super::environment::{EnvBackgroundSettings, Environment};
 use super::frame_plane::FramePlane;
+use super::gizmo::GizmoGeometry;
 use super::mesh_store::MeshStore;
 use super::picking::Picking;
 use super::*;
@@ -180,7 +181,14 @@ pub struct Renderer {
     /// (#203) instead of in four renderer-side `Vec`s parallel to the mesh
     /// store.
     lighting: Lighting,
-    store: MeshStore,
+    /// The caller's uploaded meshes, fixed at construction.
+    meshes: MeshStore,
+    /// The constant overlay geometry (axes, grids, quad outlines, shadow quad):
+    /// a function of nothing, built once.
+    gizmos: GizmoGeometry,
+    /// The per-frame model matrices every draw kind is instanced through,
+    /// rewritten each `encode` and grown on demand (#222).
+    instances: InstanceBuffer<InstanceRaw>,
     frame_plane: FramePlane,
     /// The mesh pass's depth attachment, (re)created lazily in `encode` to match
     /// the viewport. Gives solid (filled/textured) meshes real z-occlusion.
@@ -286,6 +294,9 @@ impl Renderer {
             &texture_layout,
             &material_maps_layout,
         );
+        let gizmos = GizmoGeometry::new(&gpu);
+        let instances =
+            InstanceBuffer::new(&gpu.device, "trd mesh instance buffer", meshes.len() as u32);
         let frame_plane = FramePlane::new(&gpu.device, format, sample_count);
         let picking = Picking::new(&gpu.device, meshes.len());
 
@@ -294,7 +305,9 @@ impl Renderer {
             uniforms,
             environment,
             lighting: Lighting::default(),
-            store,
+            meshes: store,
+            gizmos,
+            instances,
             frame_plane,
             depth: None,
             msaa: MsaaColor::new(format, sample_count),
@@ -402,7 +415,7 @@ impl Renderer {
     /// [`Primitive::Mesh`]/[`Primitive::AabbBox`] are in
     /// `0..mesh_count()`.
     pub fn mesh_count(&self) -> usize {
-        self.store.len()
+        self.meshes.len()
     }
 
     /// Binds `texture` as the albedo of **mesh 0** — the single-mesh /
@@ -420,7 +433,7 @@ impl Renderer {
     /// ignored. The image uploads lazily on the next
     /// [`render`](Self::render).
     pub fn set_mesh_texture(&mut self, mesh_id: usize, texture: &dyn Texture) {
-        if let Some(mesh) = self.store.meshes.get_mut(mesh_id) {
+        if let Some(mesh) = self.meshes.get_mut(mesh_id) {
             mesh.texture.set(&self.gpu, texture);
         }
     }
@@ -429,7 +442,7 @@ impl Renderer {
     /// `mesh_id`, sampled by [`RenderMode::Shaded`] in place of the scalar
     /// material values. Out-of-range ids are ignored.
     pub fn set_mesh_metallic_roughness_texture(&mut self, mesh_id: usize, texture: &dyn Texture) {
-        if let Some(mesh) = self.store.meshes.get_mut(mesh_id) {
+        if let Some(mesh) = self.meshes.get_mut(mesh_id) {
             mesh.material_maps
                 .set_metallic_roughness(&self.gpu, texture);
         }
@@ -438,7 +451,7 @@ impl Renderer {
     /// Binds mesh `mesh_id`'s tangent-space glTF normal map, perturbing the
     /// shading normal in [`RenderMode::Shaded`]. Out-of-range ids are ignored.
     pub fn set_mesh_normal_texture(&mut self, mesh_id: usize, texture: &dyn Texture) {
-        if let Some(mesh) = self.store.meshes.get_mut(mesh_id) {
+        if let Some(mesh) = self.meshes.get_mut(mesh_id) {
             mesh.material_maps.set_normal(&self.gpu, texture);
         }
     }
@@ -448,7 +461,7 @@ impl Renderer {
     /// [`set_mesh_disney_material`](Self::set_mesh_disney_material). Takes effect
     /// on the next [`render`](Self::render).
     pub fn set_disney_material(&mut self, material: DisneyMaterial) {
-        for mesh in &mut self.store.meshes {
+        for mesh in self.meshes.iter_mut() {
             mesh.material = material.clone();
         }
     }
@@ -458,7 +471,7 @@ impl Renderer {
     /// Out-of-range ids are ignored. Takes effect on the next
     /// [`render`](Self::render).
     pub fn set_mesh_disney_material(&mut self, mesh_id: usize, material: DisneyMaterial) {
-        if let Some(mesh) = self.store.meshes.get_mut(mesh_id) {
+        if let Some(mesh) = self.meshes.get_mut(mesh_id) {
             mesh.material = material;
         }
     }
@@ -470,35 +483,35 @@ impl Renderer {
 
     /// Sets image-based-lighting controls for every PBR object.
     pub fn set_image_based_lighting(&mut self, ibl: ImageBasedLighting) {
-        for mesh in &mut self.store.meshes {
+        for mesh in self.meshes.iter_mut() {
             mesh.ibl = ibl;
         }
     }
 
     /// Sets image-based-lighting controls for one PBR object.
     pub fn set_mesh_image_based_lighting(&mut self, mesh_id: usize, ibl: ImageBasedLighting) {
-        if let Some(mesh) = self.store.meshes.get_mut(mesh_id) {
+        if let Some(mesh) = self.meshes.get_mut(mesh_id) {
             mesh.ibl = ibl;
         }
     }
 
     /// Sets the per-object output transform of every PBR object.
     pub fn set_tone_mapping(&mut self, tone_mapping: ToneMapping) {
-        for mesh in &mut self.store.meshes {
+        for mesh in self.meshes.iter_mut() {
             mesh.tone_mapping = tone_mapping;
         }
     }
 
     /// Sets the output transform of one PBR object.
     pub fn set_mesh_tone_mapping(&mut self, mesh_id: usize, tone_mapping: ToneMapping) {
-        if let Some(mesh) = self.store.meshes.get_mut(mesh_id) {
+        if let Some(mesh) = self.meshes.get_mut(mesh_id) {
             mesh.tone_mapping = tone_mapping;
         }
     }
 
     /// Selects a diagnostic PBR output for one mesh.
     pub fn set_mesh_pbr_debug_view(&mut self, mesh_id: usize, debug_view: PbrDebugView) {
-        if let Some(mesh) = self.store.meshes.get_mut(mesh_id) {
+        if let Some(mesh) = self.meshes.get_mut(mesh_id) {
             mesh.debug_view = debug_view;
         }
     }
@@ -921,7 +934,7 @@ impl Renderer {
         self.uniforms.write_pbr(
             &self.gpu.queue,
             camera,
-            &self.store.meshes,
+            self.meshes.all(),
             self.lighting,
             self.environment.has_env(),
         );
@@ -932,9 +945,9 @@ impl Renderer {
         //    scene, read directly below (#204).
         let background = *scene.background();
         let batches = build_batches(scene.objects(), |mesh_id| {
-            self.store.meshes.get(mesh_id).map(|mesh| mesh.base_model)
+            self.meshes.get(mesh_id).map(|mesh| mesh.base_model)
         });
-        self.store.upload_instances(&self.gpu, &batches.instances);
+        self.instances.upload(&self.gpu, &batches.instances);
 
         // 3. Match the depth + (when MSAA is on) color attachments to the viewport
         //    (solid meshes z-occlude; the multisampled color, if any, is resolved
@@ -1097,7 +1110,7 @@ impl Renderer {
             if !draw.selection.is_mesh() {
                 continue;
             }
-            let Some(mesh) = self.store.meshes.get(draw.mesh_id as usize) else {
+            let Some(mesh) = self.meshes.get(draw.mesh_id as usize) else {
                 continue;
             };
             let effective = Matrix4::from_cols_array(&draw.model) * mesh.base_model;
@@ -1140,7 +1153,7 @@ impl Renderer {
         self.picking
             .bind(&mut pass, self.uniforms.camera.bind_group());
         for (mesh_id, slot) in records {
-            let mesh = &self.store.meshes[mesh_id];
+            let mesh = &self.meshes[mesh_id];
             draw_indexed(&mut pass, mesh.filled(), slot..slot + 1);
         }
     }
@@ -1246,7 +1259,7 @@ impl Renderer {
     /// handful per frame, not per object), so the repetition is free next to the
     /// draw it precedes.
     fn bind_instances(&self, pass: &mut wgpu::RenderPass<'_>) {
-        pass.set_vertex_buffer(1, self.store.instance_buffer.slice(..));
+        pass.set_vertex_buffer(1, self.instances.slice());
     }
 
     /// Records one instanced batch of mesh `mesh_id` drawn in `mode` — the one
@@ -1263,7 +1276,7 @@ impl Renderer {
         mode: RenderMode,
         range: Range<u32>,
     ) {
-        let mesh = &self.store.meshes[mesh_id as usize];
+        let mesh = &self.meshes[mesh_id as usize];
         self.bind_instances(pass);
         match mode {
             RenderMode::Filled => {
@@ -1319,7 +1332,7 @@ impl Renderer {
     /// Records the AABB outline of mesh `mesh_id` (#42) from that mesh's own
     /// precomputed corner geometry.
     fn record_aabb_box(&self, pass: &mut wgpu::RenderPass<'_>, mesh_id: u32, range: Range<u32>) {
-        let mesh = &self.store.meshes[mesh_id as usize];
+        let mesh = &self.meshes[mesh_id as usize];
         self.record_gizmo_lines(pass, mesh.aabb(), range);
     }
 
@@ -1331,7 +1344,7 @@ impl Renderer {
         plane: GridPlane,
         range: Range<u32>,
     ) {
-        self.record_gizmo_lines(pass, &self.store.grid_lines[plane.index()], range);
+        self.record_gizmo_lines(pass, &self.gizmos.grid_lines[plane.index()], range);
     }
 
     /// Records the tracked placement-quad outline; `selected` picks the
@@ -1342,7 +1355,7 @@ impl Renderer {
         selected: bool,
         range: Range<u32>,
     ) {
-        self.record_gizmo_lines(pass, &self.store.quad_lines[usize::from(selected)], range);
+        self.record_gizmo_lines(pass, &self.gizmos.quad_lines[usize::from(selected)], range);
     }
 
     /// Records the contact / blob grounding shadow: its own alpha-blended,
@@ -1351,7 +1364,7 @@ impl Renderer {
     fn record_blob_shadow(&self, pass: &mut wgpu::RenderPass<'_>, range: Range<u32>) {
         pass.set_pipeline(&self.pipelines.shadow);
         pass.set_bind_group(0, self.uniforms.camera.bind_group(), &[]);
-        pass.set_vertex_buffer(0, self.store.shadow_vertex_buffer.slice(..));
+        pass.set_vertex_buffer(0, self.gizmos.shadow_vertex_buffer.slice(..));
         self.bind_instances(pass);
         pass.draw(0..SHADOW_VERTEX_COUNT, range);
     }
@@ -1364,10 +1377,10 @@ impl Renderer {
     /// The second draw reuses the instance binding the first made — same body, so
     /// the rule above is not in play.
     fn record_coordinate_axes(&self, pass: &mut wgpu::RenderPass<'_>, range: Range<u32>) {
-        self.record_gizmo_lines(pass, &self.store.axes_lines, range.clone());
+        self.record_gizmo_lines(pass, &self.gizmos.axes_lines, range.clone());
         pass.set_pipeline(&self.pipelines.gizmo_solid);
         pass.set_bind_group(0, self.uniforms.camera.bind_group(), &[]);
-        draw_vertices(pass, &self.store.axes_heads, range);
+        draw_vertices(pass, &self.gizmos.axes_heads, range);
     }
 }
 
