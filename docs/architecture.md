@@ -90,8 +90,17 @@ Platform-agnostic wgpu logic, shared verbatim by every target:
   environment data/binding and reflection intensity in `ibl.rs`; and the
   per-object output transform in `tonemap.rs`. `pbr.rs` contains only the
   unchanged shader-uniform packing and smooth-normal derivation. `trd-core`'s
-  boundary-level `gltf.rs` parses caller-owned bytes into these types without
+  boundary-level `mesh/gltf.rs` parses caller-owned bytes into these types without
   entering the render hot path or performing filesystem I/O.
+- **`mesh/` — the CPU mesh and its loaders (#221).** The crate root holds the
+  universal domain vocabulary (a mesh, a material, a texture, a camera), so the
+  canonical `Mesh`/`MeshShading` container lives in `mesh/mesh.rs` with one
+  loader per format beside it — `mesh/obj.rs` (#36), `mesh/arrow.rs` (#37) and
+  `mesh/gltf.rs` — plus the geometry every source shares (`aabb`, `center`,
+  `preview_transform`, `edge_indices`) in `mesh/mod.rs`. The module is
+  **device-free**: a mesh's GPU residency is its face in `render/mesh_store.rs`,
+  and the `Vertex` layout it is written in stays with the other `repr(C)` + `Pod`
+  types in `render/gpu_types.rs`.
 - **`stream.rs` + `protocol.rs`** — the Arrow input layer. `protocol.rs`'s
   `InputSession` is the **single framing driver** (native + wasm): it feeds byte
   chunks through `arrow`'s `StreamDecoder`, validates explicit `0.0.6`

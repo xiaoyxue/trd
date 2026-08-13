@@ -6,7 +6,6 @@
 
 mod camera;
 mod frame;
-mod gltf;
 mod material;
 mod math;
 mod mesh;
@@ -19,12 +18,18 @@ mod visual;
 
 pub use camera::{Camera, DEFAULT_FIT_MARGIN, DEFAULT_FOV_Y, DEFAULT_VIEW_DIR};
 pub use frame::{FrameError, InlineFrame, FRAME_BYTES_COLUMN, FRAME_PIXELS_COLUMN};
-pub use gltf::{import_glb, import_gltf_materials, GltfAsset, GltfImportError};
 pub use math::{
     Aabb2, Aabb3, Matrix3, Matrix4, Normal3, Point2, Point3, Point4, Rotation, Scalar, ToWgsl,
     Transform, Vector2, Vector3, Vector4, EPSILON,
 };
-pub use mesh::{MeshError, DEFAULT_PREVIEW_TARGET};
+// The CPU mesh, its three loaders (OBJ / Arrow / glTF) and the geometry derived
+// from them are domain vocabulary, not renderer machinery, so they sit at the
+// crate root beside `texture`/`camera`/`material` while their GPU residency
+// stays in `render/` (#221/#224). Public paths are unchanged.
+pub use mesh::{
+    import_glb, import_gltf_materials, GltfAsset, GltfImportError, Mesh, MeshError, MeshShading,
+    DEFAULT_PREVIEW_TARGET,
+};
 pub use output::{output_schema, read_image_stream, OutputError, OutputSession};
 pub use protocol::{
     frame_rate_from_metadata, DecodedFrame, FrameBatch, InputSession, ProtocolError,
@@ -36,10 +41,10 @@ pub use protocol::{
 pub use material::{AlphaMode, Auxiliary, DisneyMaterial, Material, MaterialTextures};
 pub use render::{
     create_instance, AdapterFacts, CameraFormError, EnvMapData, FrameParams, GpuContext,
-    GpuInitError, GpuRequest, ImageBasedLighting, Light, Lighting, Mesh, MeshShading, Msaa,
-    PbrConfig, PbrDebugView, PickTarget, PointLight, RenderOptions, RenderTarget, RenderTargetType,
-    SceneLayer, SurfaceError, SurfaceRepair, SurfaceTarget, TargetError, TextureTarget,
-    ToneMapping, Tonemap, Vertex, Viewport, TEXTURE_TARGET_FORMAT,
+    GpuInitError, GpuRequest, ImageBasedLighting, Light, Lighting, Msaa, PbrConfig, PbrDebugView,
+    PickTarget, PointLight, RenderOptions, RenderTarget, RenderTargetType, SceneLayer,
+    SurfaceError, SurfaceRepair, SurfaceTarget, TargetError, TextureTarget, ToneMapping, Tonemap,
+    Vertex, Viewport, TEXTURE_TARGET_FORMAT,
 };
 // The visual model (scene + primitives) is plain data (no wgpu), so it sits
 // beside `mesh`/`camera`/`material` at the crate root rather than inside the
