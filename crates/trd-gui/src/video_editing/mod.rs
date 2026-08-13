@@ -1294,18 +1294,23 @@ pub(super) mod tests {
         app.selected_asset = Some(CatalogAsset::CocaColaCan);
 
         // A primary click makes `image_panel` report *both* `needs_render` and a
-        // pick point. The app must settle the scene revision before handling the
-        // pick, so the request captures the final revision; bumping afterwards
-        // rejected the pick's own completion and killed selection entirely (#205).
-        shared.request_overlay();
+        // pick point, so drive the real `settle_frame` with exactly that pair
+        // rather than hand-rolling the order here — hand-rolling would pass even
+        // if the app went back to handling the pick before the revision settled,
+        // which is the bug (#205).
+        let before = shared.render_revision.get();
+        app.settle_frame(&egui::Context::default(), true, Some((3, 4)), None);
         let settled = shared.render_revision.get();
-        app.handle_pick((3, 4), None);
+        assert_ne!(settled, before, "the render request must bump the revision");
 
         let pick = shared
             .pending_pick
             .get()
             .expect("the click requested a pick");
-        assert_eq!(pick.render_revision, settled);
+        assert_eq!(
+            pick.render_revision, settled,
+            "the pick must capture the revision the same frame's render request settled on"
+        );
         assert_eq!(
             shared.render_revision.get(),
             settled,

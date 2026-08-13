@@ -103,21 +103,43 @@ impl eframe::App for VideoEditingApp {
             pick = outcome.pick;
         });
 
-        // The scene revision must settle *before* a pick request captures it:
-        // `image_panel` reports `needs_render` for the very click that requests
-        // the pick, so bumping the revision afterwards would invalidate that
-        // pick's own completion (#205).
+        self.settle_frame(ui.ctx(), needs_render, pick, quad);
+    }
+}
+
+impl VideoEditingApp {
+    /// Applies one frame's [`ImageOutcome`](crate::ui::ImageOutcome) **in the
+    /// order the pick contract requires**: the scene revision settles first, and
+    /// only then does a pick request capture it.
+    ///
+    /// The order is the whole point of this function existing, so it is stated
+    /// once here rather than inlined at the call site (#205).
+    /// [`image_panel`](crate::ui::image_panel) reports `needs_render` for the
+    /// *very same* primary click that requests the pick, and both
+    /// [`accepts_pick`](VideoEditingShared::accepts_pick) and the
+    /// [`schedule_pick`](Self::schedule_pick) completion guard reject a result
+    /// whose request captured a stale revision. Handling the pick first —
+    /// as it was until this was hoisted out of the `CentralPanel` closure —
+    /// therefore made the click invalidate *its own* completion, and selection
+    /// was dead. Bumping first is safe because
+    /// [`handle_pick`](Self::handle_pick) never bumps the revision on the GPU
+    /// pick path.
+    pub(super) fn settle_frame(
+        &mut self,
+        ctx: &egui::Context,
+        needs_render: bool,
+        pick: Option<(u32, u32)>,
+        quad: Option<[[f32; 2]; 4]>,
+    ) {
         if needs_render {
             self.shared.request_overlay();
-            ui.ctx().request_repaint();
+            ctx.request_repaint();
         }
         if let Some(point) = pick {
             self.handle_pick(point, quad);
         }
     }
-}
 
-impl VideoEditingApp {
     /// Source heading, the Open button, and the loaded-source readout.
     fn source_controls(&mut self, ui: &mut egui::Ui) {
         ui.heading("Video");
