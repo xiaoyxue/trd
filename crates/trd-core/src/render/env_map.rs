@@ -1,5 +1,17 @@
-use super::create_env_bind_group_layout;
-use super::GpuContext;
+//! The HDR environment probe as **data**: the decoded map, the per-object IBL
+//! controls, and the CPU precompute that turns one into GPU-ready levels.
+//!
+//! Deliberately **device-free** — this file names no GPU type at all (#221
+//! §5). Its GPU face is `environment.rs`, which uploads what these functions
+//! compute: the roughness-prefiltered mip chain
+//! ([`prefilter_environment_level`]), the diffuse irradiance map
+//! ([`build_irradiance_map`]), the split-sum BRDF LUT ([`integrate_brdf`]) and
+//! the half-float conversion they are all stored in ([`f32_to_f16_bits`]).
+//!
+//! Named `env_map`, not `ibl`: `ImageBasedLighting` here is a *per-object*
+//! reflection control, while the probe itself is a scene-wide singleton, and
+//! calling both "ibl" made `renderer.ibl` and `mesh.ibl` two different things
+//! (#221 §5).
 
 /// Per-object image-based-lighting controls.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -79,164 +91,7 @@ impl EnvMapData {
     }
 }
 
-/// The HDR environment-map binding.
-///
-/// Uploaded **eagerly**: the constructor binds a 1×1 black fallback and
-/// [`set`](Self::set) replaces it immediately, so `encode` never has to upload
-/// (#180). `has_env` still reports whether a *real* probe was supplied, which is
-/// what the PBR uniform keys reflections off.
-pub(crate) struct BoundEnv {
-    layout: wgpu::BindGroupLayout,
-    bind_group: wgpu::BindGroup,
-    has_env: bool,
-}
-
-impl BoundEnv {
-    pub(crate) fn new(gpu: &GpuContext) -> Self {
-        let layout = create_env_bind_group_layout(&gpu.device);
-        // 1×1 black: no reflection until a probe is set.
-        let fallback = EnvMapData {
-            width: 1,
-            height: 1,
-            rgba: vec![0.0, 0.0, 0.0, 1.0],
-        };
-        let bind_group = upload_env_texture(gpu, &layout, &fallback);
-        Self {
-            layout,
-            bind_group,
-            has_env: false,
-        }
-    }
-
-    pub(crate) fn layout(&self) -> &wgpu::BindGroupLayout {
-        &self.layout
-    }
-
-    pub(crate) fn set(&mut self, gpu: &GpuContext, data: EnvMapData) {
-        self.bind_group = upload_env_texture(gpu, &self.layout, &data);
-        self.has_env = true;
-    }
-
-    pub(crate) fn has_env(&self) -> bool {
-        self.has_env
-    }
-
-    pub(crate) fn bind_group(&self) -> &wgpu::BindGroup {
-        &self.bind_group
-    }
-}
-
-fn upload_env_texture(
-    gpu: &GpuContext,
-    layout: &wgpu::BindGroupLayout,
-    env: &EnvMapData,
-) -> wgpu::BindGroup {
-    let (device, queue) = (&gpu.device, &gpu.queue);
-    let (width, height, base_rgba) = fit_environment(env, 512);
-    let size = wgpu::Extent3d {
-        width,
-        height,
-        depth_or_array_layers: 1,
-    };
-    let mip_level_count = 1 + width.max(height).ilog2();
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("trd env texture"),
-        size,
-        mip_level_count,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba16Float,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
-    let mut level_width = width;
-    let mut level_height = height;
-    for mip_level in 0..mip_level_count {
-        let roughness = mip_level as f32 / (mip_level_count - 1).max(1) as f32;
-        let level_rgba = if mip_level == 0 {
-            base_rgba.clone()
-        } else {
-            prefilter_environment_level(
-                width,
-                height,
-                &base_rgba,
-                level_width,
-                level_height,
-                roughness,
-                32,
-            )
-        };
-        let half: Vec<u16> = level_rgba
-            .iter()
-            .map(|&c| f32_to_f16_bits(c.clamp(0.0, 65504.0)))
-            .collect();
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            bytemuck::cast_slice(&half),
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(level_width * 8),
-                rows_per_image: Some(level_height),
-            },
-            wgpu::Extent3d {
-                width: level_width,
-                height: level_height,
-                depth_or_array_layers: 1,
-            },
-        );
-        if mip_level + 1 < mip_level_count {
-            level_width = (level_width / 2).max(1);
-            level_height = (level_height / 2).max(1);
-        }
-    }
-    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-        label: Some("trd env sampler"),
-        address_mode_u: wgpu::AddressMode::Repeat,
-        address_mode_v: wgpu::AddressMode::ClampToEdge,
-        address_mode_w: wgpu::AddressMode::ClampToEdge,
-        mag_filter: wgpu::FilterMode::Linear,
-        min_filter: wgpu::FilterMode::Linear,
-        mipmap_filter: wgpu::MipmapFilterMode::Linear,
-        ..Default::default()
-    });
-    let (brdf_view, brdf_sampler) = upload_brdf_lut(gpu);
-    let irradiance = build_irradiance_map(width, height, &base_rgba, 64, 32, 32);
-    let irradiance_view = upload_rgba16f_view(gpu, "trd diffuse irradiance", 64, 32, &irradiance);
-    device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("trd env bind group"),
-        layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::Sampler(&sampler),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: wgpu::BindingResource::TextureView(&brdf_view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: wgpu::BindingResource::Sampler(&brdf_sampler),
-            },
-            wgpu::BindGroupEntry {
-                binding: 4,
-                resource: wgpu::BindingResource::TextureView(&irradiance_view),
-            },
-        ],
-    })
-}
-
-fn fit_environment(env: &EnvMapData, max_dim: u32) -> (u32, u32, Vec<f32>) {
+pub(super) fn fit_environment(env: &EnvMapData, max_dim: u32) -> (u32, u32, Vec<f32>) {
     let mut width = env.width.max(1);
     let mut height = env.height.max(1);
     let mut rgba = env.rgba.clone();
@@ -275,7 +130,7 @@ fn downsample_environment(width: u32, height: u32, rgba: &[f32]) -> Vec<f32> {
     out
 }
 
-fn prefilter_environment_level(
+pub(super) fn prefilter_environment_level(
     source_width: u32,
     source_height: u32,
     source: &[f32],
@@ -326,7 +181,7 @@ fn prefilter_environment_level(
     out
 }
 
-fn build_irradiance_map(
+pub(super) fn build_irradiance_map(
     source_width: u32,
     source_height: u32,
     source: &[f32],
@@ -415,49 +270,6 @@ fn sample_equirectangular(width: u32, height: u32, rgba: &[f32], direction: [f32
     result
 }
 
-fn upload_rgba16f_view(
-    gpu: &GpuContext,
-    label: &str,
-    width: u32,
-    height: u32,
-    rgba: &[f32],
-) -> wgpu::TextureView {
-    let (device, queue) = (&gpu.device, &gpu.queue);
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some(label),
-        size: wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba16Float,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
-    let half: Vec<u16> = rgba
-        .iter()
-        .map(|&value| f32_to_f16_bits(value.clamp(0.0, 65504.0)))
-        .collect();
-    queue.write_texture(
-        texture.as_image_copy(),
-        bytemuck::cast_slice(&half),
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(width * 8),
-            rows_per_image: Some(height),
-        },
-        wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-    );
-    texture.create_view(&wgpu::TextureViewDescriptor::default())
-}
-
 fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [
         a[1] * b[2] - a[2] * b[1],
@@ -471,61 +283,7 @@ fn normalize(vector: [f32; 3]) -> [f32; 3] {
     [vector[0] / length, vector[1] / length, vector[2] / length]
 }
 
-fn upload_brdf_lut(gpu: &GpuContext) -> (wgpu::TextureView, wgpu::Sampler) {
-    let (device, queue) = (&gpu.device, &gpu.queue);
-    const SIZE: u32 = 128;
-    const SAMPLES: u32 = 64;
-    let mut rgba = Vec::with_capacity((SIZE * SIZE * 4) as usize);
-    for y in 0..SIZE {
-        let roughness = (y as f32 + 0.5) / SIZE as f32;
-        for x in 0..SIZE {
-            let n_dot_v = (x as f32 + 0.5) / SIZE as f32;
-            let (a, b) = integrate_brdf(n_dot_v, roughness, SAMPLES);
-            rgba.extend([a, b, 0.0, 1.0]);
-        }
-    }
-    let half: Vec<u16> = rgba.into_iter().map(f32_to_f16_bits).collect();
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("trd BRDF integration LUT"),
-        size: wgpu::Extent3d {
-            width: SIZE,
-            height: SIZE,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba16Float,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
-    queue.write_texture(
-        texture.as_image_copy(),
-        bytemuck::cast_slice(&half),
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(SIZE * 8),
-            rows_per_image: Some(SIZE),
-        },
-        wgpu::Extent3d {
-            width: SIZE,
-            height: SIZE,
-            depth_or_array_layers: 1,
-        },
-    );
-    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-        label: Some("trd BRDF LUT sampler"),
-        address_mode_u: wgpu::AddressMode::ClampToEdge,
-        address_mode_v: wgpu::AddressMode::ClampToEdge,
-        mag_filter: wgpu::FilterMode::Linear,
-        min_filter: wgpu::FilterMode::Linear,
-        ..Default::default()
-    });
-    (view, sampler)
-}
-
-fn integrate_brdf(n_dot_v: f32, roughness: f32, sample_count: u32) -> (f32, f32) {
+pub(super) fn integrate_brdf(n_dot_v: f32, roughness: f32, sample_count: u32) -> (f32, f32) {
     let v = [(1.0 - n_dot_v * n_dot_v).sqrt(), 0.0, n_dot_v];
     let mut a = 0.0;
     let mut b = 0.0;
@@ -573,7 +331,7 @@ fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
-fn f32_to_f16_bits(value: f32) -> u16 {
+pub(super) fn f32_to_f16_bits(value: f32) -> u16 {
     let bits = value.to_bits();
     let sign = ((bits >> 16) & 0x8000) as u16;
     let exp = ((bits >> 23) & 0xff) as i32 - 127 + 15;

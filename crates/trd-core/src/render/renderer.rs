@@ -75,7 +75,7 @@ use std::sync::Arc;
 use super::bound_material_maps::BoundMaterialMaps;
 use super::buffer::{draw_indexed, draw_vertices, VertexGeometry};
 use super::draw_command::build_batches;
-use super::env_background::{EnvBackground, EnvBackgroundSettings};
+use super::environment::{EnvBackgroundSettings, Environment};
 use super::frame_plane::FramePlane;
 use super::mesh_store::MeshStore;
 use super::picking::Picking;
@@ -169,9 +169,10 @@ pub struct Renderer {
     /// The group-0 uniforms every pass binds: the camera `P·V`, the gizmo
     /// viewport params, and the per-mesh PBR slot array.
     uniforms: SceneUniforms,
-    /// The bound HDR environment map reflected by [`RenderMode::Shaded`] draws.
-    env: BoundEnv,
-    env_background: EnvBackground,
+    /// The HDR environment subsystem: the probe reflected by
+    /// [`RenderMode::Shaded`] draws **and** the pipeline drawing it as the
+    /// background sky. One type, like its sibling `FramePlane` (#221 §5).
+    environment: Environment,
     /// Scene light rig controls shared by every PBR object.
     ///
     /// Scene-level, so it stays here — unlike the per-object material, IBL,
@@ -268,14 +269,13 @@ impl Renderer {
         // every per-mesh [`BoundTexture`] (each object skins with its own diffuse).
         let texture_layout = create_texture_bind_group_layout(&gpu.device);
         let material_maps_layout = BoundMaterialMaps::create_layout(&gpu.device);
-        let env = BoundEnv::new(&gpu);
-        let env_background = EnvBackground::new(&gpu.device, format, env.layout(), sample_count);
+        let environment = Environment::new(&gpu, format, sample_count);
         let (pipelines, uniforms) = create_scene_pipelines(
             &gpu.device,
             format,
             &texture_layout,
             &material_maps_layout,
-            env.layout(),
+            environment.layout(),
             sample_count,
             meshes.len(),
         );
@@ -292,8 +292,7 @@ impl Renderer {
         Self {
             pipelines,
             uniforms,
-            env,
-            env_background,
+            environment,
             lighting: Lighting::default(),
             store,
             frame_plane,
@@ -509,7 +508,7 @@ impl Renderer {
     /// [`render`](Self::render). Until set, PBR draws use no
     /// environment reflection (a 1×1 black probe keeps the bind group valid).
     pub fn set_env_map(&mut self, env: EnvMapData) {
-        self.env.set(&self.gpu, env);
+        self.environment.set(&self.gpu, env);
     }
 
     /// Uploads `rgba` (tightly-packed, row-major `height`×`width`×4) as the
@@ -924,7 +923,7 @@ impl Renderer {
             camera,
             &self.store.meshes,
             self.lighting,
-            self.env.has_env(),
+            self.environment.has_env(),
         );
 
         // 2. Walk the scene's objects once into per-geometry instance batches,
@@ -955,16 +954,15 @@ impl Renderer {
         //    renderer holds the &self.gpu.queue, every setter uploads immediately and the
         //    constructors upload their fallbacks, so `encode` only *reads* bind
         //    groups that are already valid (#180).
-        let env_bind_group = self.env.bind_group();
-        if let Some(environment) = background.environment {
-            self.env_background.write(
+        if let Some(settings) = background.environment {
+            self.environment.write_background(
                 &self.gpu.queue,
                 camera,
                 EnvBackgroundSettings {
-                    rotation: environment.rotation,
-                    exposure: environment.exposure,
-                    blur: environment.blur,
-                    tonemap: environment.tonemap,
+                    rotation: settings.rotation,
+                    exposure: settings.exposure,
+                    blur: settings.blur,
+                    tonemap: settings.tonemap,
                 },
             );
         }
@@ -1021,7 +1019,7 @@ impl Renderer {
         // the environment probe first, then the frame plane over it — a scene may
         // carry either, both, or neither.
         if background.environment.is_some() {
-            self.env_background.draw(&mut pass, env_bind_group);
+            self.environment.draw_background(&mut pass);
         }
 
         // Draw the background frame plane next (#63): its own pipeline + group-0
@@ -1287,7 +1285,7 @@ impl Renderer {
                 let offset = self.uniforms.pbr.offset(mesh_id as usize);
                 pass.set_bind_group(0, self.uniforms.pbr.bind_group(), &[offset]);
                 pass.set_bind_group(1, mesh.texture.bind_group(), &[]);
-                pass.set_bind_group(2, self.env.bind_group(), &[]);
+                pass.set_bind_group(2, self.environment.bind_group(), &[]);
                 pass.set_bind_group(3, mesh.material_maps.bind_group(), &[]);
                 draw_indexed(pass, mesh.pbr(), range);
             }
