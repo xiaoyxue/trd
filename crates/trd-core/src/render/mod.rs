@@ -9,13 +9,13 @@ mod bound_uniform;
 mod buffer;
 mod color;
 mod draw_command;
-mod env_background;
+mod env_map;
+mod environment;
 mod frame_params;
 mod frame_plane;
 mod gizmo;
 mod gpu_context;
 mod gpu_types;
-mod ibl;
 mod light;
 mod mesh_store;
 mod options;
@@ -36,11 +36,11 @@ mod gpu_tests;
 // Public API surface (re-exported unchanged by `crate::lib`).
 // The headless offscreen harness is native-only (drives wgpu under
 // `pollster::block_on`), so it and its re-export are gated off wasm.
+pub use env_map::{EnvMapData, ImageBasedLighting};
 pub use frame_params::{CameraFormError, FrameParams, Viewport};
 pub(crate) use gpu_context::LimitsPreset;
 pub use gpu_context::{create_instance, AdapterFacts, GpuContext, GpuInitError, GpuRequest};
 pub use gpu_types::Vertex;
-pub use ibl::{EnvMapData, ImageBasedLighting};
 pub use light::{Light, Lighting, PointLight};
 pub use options::{Msaa, PbrConfig, RenderOptions};
 pub use pbr::PbrDebugView;
@@ -73,7 +73,6 @@ pub(crate) use gizmo::{
 pub(crate) use gpu_types::{
     GizmoLineVertex, GizmoUniform, InstanceRaw, PbrVertex, PickInstanceRaw, Uniform,
 };
-pub(crate) use ibl::BoundEnv;
 pub(crate) use light::{DEFAULT_LIGHTS, DEFAULT_POINT_LIGHTS};
 pub(crate) use pbr::{compute_smooth_normals, compute_tangents, PbrUniform, PbrUniformInputs};
 pub(crate) use pipeline::{
