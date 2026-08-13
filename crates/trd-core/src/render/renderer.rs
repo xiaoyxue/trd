@@ -38,16 +38,20 @@
 //!
 //! Internally it is still a composition of a few cohesive parts, each with a
 //! single job, so no one struct is a grab-bag of wgpu handles:
-//! - [`SceneRenderPipelines`] — the mesh pipelines (filled/wireframe/textured/PBR)
-//!   and the camera `P·V` uniform they share.
-//! - [`MeshStore`] — the uploaded [`MeshGpu`]s, the shared axes gizmo, and the
-//!   growable per-instance model buffer; also walks a [`Scene`] into draw batches.
+//! - [`MeshPipelines`] — the mesh/gizmo pipelines (filled/wireframe/textured/PBR)
+//!   and [`SceneUniforms`] — the group-0 uniforms they read (the camera `P·V`,
+//!   the gizmo viewport params, the per-mesh PBR slot array). Two types, because
+//!   *what draws* and *what it reads* are different questions (#203).
+//! - [`MeshStore`] — the uploaded [`MeshGpu`]s (each owning its albedo, material
+//!   maps, material, IBL, tone-map and debug view), the shared axes gizmo, and
+//!   the growable per-instance model buffer; also walks a [`Scene`] into draw
+//!   batches.
 //! - [`BoundTexture`](super::BoundTexture) — the mesh albedo sampled by textured
 //!   draws (#20).
 //! - [`FramePlane`] — the background video frame plane (#63).
-//! - [`PickTarget`] — the object-id picking target (#141), allocated lazily on
-//!   the first [`pick`](Self::pick) call so a headless CLI stream never pays
-//!   for it.
+//! - [`Picking`] — the object-id picking pipeline, its instance buffer and its
+//!   [`PickTarget`] (#141), the target allocated lazily on the first
+//!   [`pick`](Self::pick) call so a headless CLI stream never pays for it.
 //!
 //! Formerly `BatchRenderer`. "Batch" there meant *batch-mode headless output* and
 //! described nothing about the type — instanced batching lives entirely in
@@ -62,8 +66,7 @@ use super::bound_material_maps::BoundMaterialMaps;
 use super::buffer::{draw_indexed, draw_vertices};
 use super::env_background::{EnvBackground, EnvBackgroundSettings};
 use super::frame_plane::FramePlane;
-use super::mesh_store::MeshStore;
-use super::pbr::PbrBatchInputs;
+use super::mesh_store::{MeshGpu, MeshStore};
 use super::*;
 use crate::material::DisneyMaterial;
 use crate::math::Matrix4;
@@ -130,10 +133,20 @@ pub(crate) fn check_dimensions(width: u32, height: u32) -> Result<u32, RenderErr
     Ok(pixels)
 }
 
-/// The mesh and gizmo pipelines plus their camera/material bindings. Filled,
-/// wireframe, arrowheads, and textured rendering share the camera layout;
-/// expanded gizmo lines use a viewport-aware group-0 uniform.
-struct SceneRenderPipelines {
+/// The mesh, gizmo and PBR **pipelines** — one field per way a draw kind
+/// rasterizes, and nothing else.
+///
+/// It used to be `SceneRenderPipelines`, which also carried the three uniform
+/// buffers, their bind groups and the PBR slot stride: a name that promised a
+/// pipeline collection over a struct holding three different kinds of thing
+/// (#203). The uniforms those pipelines read now live in [`SceneUniforms`], so
+/// each type answers one question — *what draws* vs *what it reads*.
+///
+/// Filled, wireframe, arrowheads, shadows and textured rendering share the
+/// camera group-0 layout; expanded gizmo lines use a viewport-aware one, and PBR
+/// a dynamic-offset one — which is why the encode arm restores the camera bind
+/// group after switching.
+struct MeshPipelines {
     filled: wgpu::RenderPipeline,
     wireframe: wgpu::RenderPipeline,
     /// Screen-space expanded, alpha-feathered AABB/axes/grid line pipeline.
@@ -144,214 +157,257 @@ struct SceneRenderPipelines {
     /// The contact / blob grounding-shadow pipeline (alpha-blended, depth-write
     /// off); shares the untextured camera bind-group layout (group 0).
     shadow: wgpu::RenderPipeline,
-    /// The Disney PBR pipeline (`pbr.wgsl`): group 0 = [`pbr_uniform`], group 1
-    /// = the bound albedo texture, group 2 = the HDR environment map.
+    /// The Disney PBR pipeline (`pbr.wgsl`): group 0 = [`SceneUniforms::pbr`]'s
+    /// slot for the drawn mesh, group 1 = the bound albedo texture, group 2 =
+    /// the HDR environment map, group 3 = the material maps.
     pbr: wgpu::RenderPipeline,
-    /// The per-object `PbrUniform` buffer: `mesh_count` [`pbr_stride`]-spaced
-    /// slots (each carries the shared camera/lights + that mesh's material),
-    /// rewritten each `encode`; a draw binds its slot via a dynamic offset.
-    pbr_uniform: wgpu::Buffer,
-    pbr_bind_group: wgpu::BindGroup,
-    /// The 256-aligned byte stride between adjacent `PbrUniform` slots (the
-    /// `min_uniform_buffer_offset_alignment`-rounded `size_of::<PbrUniform>()`),
-    /// so `slot i` lives at `i * pbr_stride`.
-    pbr_stride: u64,
-    camera_uniform: wgpu::Buffer,
-    camera_bind_group: wgpu::BindGroup,
-    gizmo_uniform: wgpu::Buffer,
-    gizmo_bind_group: wgpu::BindGroup,
 }
 
-impl SceneRenderPipelines {
-    /// Constructs a `SceneRenderPipelines` for `format`, building all pipelines over their
-    /// bind-group layouts at `sample_count`× MSAA. `texture_layout` is the albedo
-    /// texture's group-1 layout (from [`BoundTexture::layout`]), shared by the
-    /// textured and PBR pipelines; `env_layout` is the PBR pipeline's group-2
-    /// environment-map layout (from [`BoundEnv::layout`]). Every pipeline in the
-    /// pass shares the one `sample_count` (`1` = no MSAA, single-sample).
-    fn new(
-        device: &wgpu::Device,
-        format: wgpu::TextureFormat,
-        texture_layout: &wgpu::BindGroupLayout,
-        material_maps_layout: &wgpu::BindGroupLayout,
-        env_layout: &wgpu::BindGroupLayout,
-        sample_count: u32,
-        mesh_count: usize,
-    ) -> Self {
-        // One explicit bind-group layout shared by both untextured pipelines, so
-        // the single camera bind group is valid whichever RenderMode is active.
-        let camera_layout = create_mesh_bind_group_layout(device);
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("trd mesh pipeline layout"),
-            bind_group_layouts: &[Some(&camera_layout)],
-            immediate_size: 0,
-        });
-        let filled = create_mesh_pipeline_with(
-            device,
-            format,
-            &pipeline_layout,
-            wgpu::PrimitiveTopology::TriangleList,
-            Some(solid_depth_stencil()),
-            sample_count,
-        );
-        let wireframe = create_mesh_pipeline_with(
-            device,
-            format,
-            &pipeline_layout,
-            wgpu::PrimitiveTopology::LineList,
-            Some(overlay_depth_stencil()),
-            sample_count,
-        );
-        let gizmo_solid = create_mesh_pipeline_with(
-            device,
-            format,
-            &pipeline_layout,
-            wgpu::PrimitiveTopology::TriangleList,
-            Some(overlay_depth_stencil()),
-            sample_count,
-        );
-        let gizmo_layout = create_gizmo_bind_group_layout(device);
-        let gizmo_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("trd gizmo pipeline layout"),
-                bind_group_layouts: &[Some(&gizmo_layout)],
-                immediate_size: 0,
-            });
-        let gizmo_line =
-            create_gizmo_line_pipeline(device, format, &gizmo_pipeline_layout, sample_count);
-        // Contact / blob grounding-shadow pipeline (#110 follow-up): shares the
-        // untextured camera layout (group 0), alpha-blended, depth-write off.
-        let shadow = create_shadow_pipeline(device, format, &pipeline_layout, sample_count);
-        // Textured pipeline (#20): group 0 = the shared camera uniform, group 1 =
-        // the bound albedo texture + sampler.
-        let textured_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("trd textured pipeline layout"),
-                bind_group_layouts: &[Some(&camera_layout), Some(texture_layout)],
-                immediate_size: 0,
-            });
-        let textured =
-            create_textured_pipeline(device, format, &textured_pipeline_layout, sample_count);
-        // Disney PBR pipeline (#): group 0 = the PbrUniform, group 1 = the shared
-        // albedo texture layout, group 2 = the HDR environment map. Its group-0
-        // layout differs from the camera layout, so the encode arm restores the
-        // camera bind group after each PBR draw.
-        let pbr_layout = create_pbr_bind_group_layout(device);
-        let pbr_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("trd pbr pipeline layout"),
-            bind_group_layouts: &[
-                Some(&pbr_layout),
-                Some(texture_layout),
-                Some(env_layout),
-                Some(material_maps_layout),
-            ],
-            immediate_size: 0,
-        });
-        let pbr = create_pbr_pipeline(device, format, &pbr_pipeline_layout, sample_count);
-        // The per-object PbrUniform buffer: one 256-aligned slot per mesh, each
-        // rewritten every frame with the shared camera/lights + that mesh's
-        // material; a PBR draw selects its slot via a dynamic offset.
-        let align = device.limits().min_uniform_buffer_offset_alignment as u64;
-        let pbr_stride = (std::mem::size_of::<PbrUniform>() as u64).next_multiple_of(align);
-        let pbr_uniform = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("trd pbr uniform"),
-            size: pbr_stride * mesh_count.max(1) as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let pbr_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("trd pbr bind group"),
-            layout: &pbr_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                // A single-slot window; the dynamic offset picks which slot.
-                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: &pbr_uniform,
-                    offset: 0,
-                    size: wgpu::BufferSize::new(std::mem::size_of::<PbrUniform>() as u64),
-                }),
-            }],
-        });
-        // A placeholder camera: the buffers only need to exist here, and every
-        // frame's `write_camera` overwrites them with the real one.
-        let placeholder = FrameParams::IDENTITY
-            .to_camera(Viewport {
-                width: 1,
-                height: 1,
-            })
-            .expect("the identity params are a valid camera form");
-        let (camera_uniform, camera_bind_group) =
-            create_view_proj_binding(device, &camera_layout, placeholder);
-        let (gizmo_uniform, gizmo_bind_group) =
-            create_gizmo_binding(device, &gizmo_layout, placeholder);
-        Self {
-            filled,
-            wireframe,
-            gizmo_line,
-            gizmo_solid,
-            textured,
-            shadow,
-            pbr,
-            pbr_uniform,
-            pbr_bind_group,
-            pbr_stride,
-            camera_uniform,
-            camera_bind_group,
-            gizmo_uniform,
-            gizmo_bind_group,
-        }
-    }
+/// The group-0 uniforms a scene pass binds, one per binding discipline (#203).
+///
+/// `camera` and `gizmo` are whole-buffer bindings rewritten once per frame;
+/// `pbr` is a slot array indexed per draw. Each is a buffer + the bind group
+/// exposing it as a single value ([`BoundUniform`] / [`BoundUniformArray`]),
+/// rather than six loose fields kept in step by naming convention — the same
+/// "bound resource" shape as [`BoundTexture`] and [`BoundMaterialMaps`].
+struct SceneUniforms {
+    /// The camera `P·V` read by every non-gizmo, non-PBR pipeline.
+    camera: BoundUniform,
+    /// The viewport-aware params the expanded-line gizmo pipeline reads.
+    gizmo: BoundUniform,
+    /// One `PbrUniform` slot per mesh (each carrying the shared camera/lights +
+    /// that mesh's material), rewritten each `encode`; a PBR draw selects its
+    /// mesh's slot with a dynamic offset.
+    pbr: BoundUniformArray,
+}
 
+/// Builds the scene pipelines and the uniforms they bind, together.
+///
+/// One function for both halves because each group-0 bind-group layout is
+/// shared by exactly one pipeline and the binding feeding it — the camera layout
+/// by the untextured/textured pipelines and `camera`, the gizmo layout by
+/// `gizmo_line` and `gizmo`, the `has_dynamic_offset` PBR layout by `pbr` and
+/// `pbr` — so creating them apart would either duplicate the layouts or leave
+/// that pairing implicit. `texture_layout` is the albedo texture's group-1
+/// layout (from [`BoundTexture`]), shared by the textured and PBR pipelines;
+/// `env_layout` is the PBR pipeline's group-2 environment-map layout (from
+/// [`BoundEnv`]). Every pipeline in the pass shares the one `sample_count`
+/// (`1` = no MSAA, single-sample), and the PBR slot array is sized for
+/// `mesh_count` meshes.
+fn create_scene_pipelines(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    texture_layout: &wgpu::BindGroupLayout,
+    material_maps_layout: &wgpu::BindGroupLayout,
+    env_layout: &wgpu::BindGroupLayout,
+    sample_count: u32,
+    mesh_count: usize,
+) -> (MeshPipelines, SceneUniforms) {
+    // One explicit bind-group layout shared by both untextured pipelines, so
+    // the single camera bind group is valid whichever RenderMode is active.
+    let camera_layout = create_mesh_bind_group_layout(device);
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("trd mesh pipeline layout"),
+        bind_group_layouts: &[Some(&camera_layout)],
+        immediate_size: 0,
+    });
+    let filled = create_mesh_pipeline_with(
+        device,
+        format,
+        &pipeline_layout,
+        wgpu::PrimitiveTopology::TriangleList,
+        Some(solid_depth_stencil()),
+        sample_count,
+    );
+    let wireframe = create_mesh_pipeline_with(
+        device,
+        format,
+        &pipeline_layout,
+        wgpu::PrimitiveTopology::LineList,
+        Some(overlay_depth_stencil()),
+        sample_count,
+    );
+    let gizmo_solid = create_mesh_pipeline_with(
+        device,
+        format,
+        &pipeline_layout,
+        wgpu::PrimitiveTopology::TriangleList,
+        Some(overlay_depth_stencil()),
+        sample_count,
+    );
+    let gizmo_layout = create_gizmo_bind_group_layout(device);
+    let gizmo_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("trd gizmo pipeline layout"),
+        bind_group_layouts: &[Some(&gizmo_layout)],
+        immediate_size: 0,
+    });
+    let gizmo_line =
+        create_gizmo_line_pipeline(device, format, &gizmo_pipeline_layout, sample_count);
+    // Contact / blob grounding-shadow pipeline (#110 follow-up): shares the
+    // untextured camera layout (group 0), alpha-blended, depth-write off.
+    let shadow = create_shadow_pipeline(device, format, &pipeline_layout, sample_count);
+    // Textured pipeline (#20): group 0 = the shared camera uniform, group 1 =
+    // the bound albedo texture + sampler.
+    let textured_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("trd textured pipeline layout"),
+        bind_group_layouts: &[Some(&camera_layout), Some(texture_layout)],
+        immediate_size: 0,
+    });
+    let textured =
+        create_textured_pipeline(device, format, &textured_pipeline_layout, sample_count);
+    // Disney PBR pipeline (#): group 0 = the PbrUniform, group 1 = the shared
+    // albedo texture layout, group 2 = the HDR environment map. Its group-0
+    // layout differs from the camera layout, so the encode arm restores the
+    // camera bind group after each PBR draw.
+    let pbr_layout = create_pbr_bind_group_layout(device);
+    let pbr_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("trd pbr pipeline layout"),
+        bind_group_layouts: &[
+            Some(&pbr_layout),
+            Some(texture_layout),
+            Some(env_layout),
+            Some(material_maps_layout),
+        ],
+        immediate_size: 0,
+    });
+    let pbr = create_pbr_pipeline(device, format, &pbr_pipeline_layout, sample_count);
+    // A placeholder camera: the buffers only need to exist here, and every
+    // frame's `write_camera` overwrites them with the real one.
+    let placeholder = FrameParams::IDENTITY
+        .to_camera(Viewport {
+            width: 1,
+            height: 1,
+        })
+        .expect("the identity params are a valid camera form");
+    let uniforms = SceneUniforms {
+        camera: create_view_proj_binding(device, &camera_layout, placeholder),
+        gizmo: create_gizmo_binding(device, &gizmo_layout, placeholder),
+        // The per-object PbrUniform slots: one per mesh, each rewritten every
+        // frame with the shared camera/lights + that mesh's material; a PBR
+        // draw selects its slot via a dynamic offset.
+        pbr: BoundUniformArray::new::<PbrUniform>(device, &pbr_layout, "trd pbr", mesh_count),
+    };
+    let pipelines = MeshPipelines {
+        filled,
+        wireframe,
+        gizmo_line,
+        gizmo_solid,
+        textured,
+        shadow,
+        pbr,
+    };
+    (pipelines, uniforms)
+}
+
+impl SceneUniforms {
     /// Rewrites the camera `P·V` uniform for this frame's `camera`.
     fn write_camera(&self, queue: &wgpu::Queue, camera: Camera) {
-        write_view_proj(queue, &self.camera_uniform, camera);
-        write_gizmo_params(queue, &self.gizmo_uniform, camera);
+        write_view_proj(queue, self.camera.buffer(), camera);
+        write_gizmo_params(queue, self.gizmo.buffer(), camera);
     }
 
     /// Rewrites the Disney PBR uniform **slots** for this frame: one slot per
-    /// mesh (`materials[i]` → slot `i` at `i * pbr_stride`), each carrying the
-    /// shared camera `P·V` + world position + light rig, this mesh's material, and
-    /// the env gate. A PBR draw then binds its object's material via a dynamic
-    /// offset. `materials` is indexed by mesh id.
+    /// mesh (mesh id → slot id), each carrying the shared camera `P·V` + world
+    /// position + light rig, that mesh's material/IBL/tone-map/debug view, and
+    /// the env gate. A PBR draw then binds its object's slot via a dynamic
+    /// offset.
+    ///
+    /// The per-mesh values are read straight off the [`MeshGpu`]s that own them
+    /// (#203): they used to be four `Vec`s on the renderer, all sized to the mesh
+    /// count with nothing enforcing it, joined here by a four-deep `zip`.
     fn write_pbr(
         &self,
         queue: &wgpu::Queue,
         camera: Camera,
-        inputs: PbrBatchInputs<'_>,
+        meshes: &[MeshGpu],
+        lighting: Lighting,
         use_env: bool,
     ) {
-        debug_assert_eq!(inputs.materials.len(), inputs.ibl.len());
-        debug_assert_eq!(inputs.materials.len(), inputs.tone_mappings.len());
-        debug_assert_eq!(inputs.materials.len(), inputs.debug_views.len());
         let view_proj = camera.view_projection().matrix().to_cols_array();
         let camera_pos = camera.position();
-        for (i, (((material, ibl), tone_mapping), debug_view)) in inputs
-            .materials
-            .iter()
-            .zip(inputs.ibl)
-            .zip(inputs.tone_mappings)
-            .zip(inputs.debug_views)
-            .enumerate()
-        {
+        for (slot, mesh) in meshes.iter().enumerate() {
             let uniform = PbrUniform::new(
                 view_proj,
                 camera_pos,
                 PbrUniformInputs {
-                    material,
-                    lighting: inputs.lighting,
-                    ibl: *ibl,
-                    tone_mapping: *tone_mapping,
-                    debug_view: *debug_view,
+                    material: &mesh.material,
+                    lighting,
+                    ibl: mesh.ibl,
+                    tone_mapping: mesh.tone_mapping,
+                    debug_view: mesh.debug_view,
                     use_env,
                 },
             );
-            queue.write_buffer(
-                &self.pbr_uniform,
-                i as u64 * self.pbr_stride,
-                bytemuck::bytes_of(&uniform),
-            );
+            self.pbr.write_slot(queue, slot, &uniform);
         }
     }
+}
+
+/// The object-id **picking** pass's own state (#141, grouped in #203).
+///
+/// Its pipeline (`picking.wgsl`) renders each drawn object in a flat id color
+/// into a single-sample linear target; its per-instance buffer carries the
+/// model + id color; its target is the surface that is read back. The three are
+/// used only by [`Renderer::pick`] / [`Renderer::encode_picking`] and are
+/// meaningless apart, so they travel together rather than as three loose
+/// renderer fields.
+struct Picking {
+    /// Built once. Its group-0 bind-group layout is structurally the camera
+    /// layout, so [`SceneUniforms::camera`]'s bind group binds it.
+    pipeline: wgpu::RenderPipeline,
+    /// Per-instance [`PickInstanceRaw`] buffer (model + id color), grown on
+    /// demand like the mesh instance buffer.
+    instances: wgpu::Buffer,
+    instance_capacity: u32,
+    /// Created lazily on the first [`pick`](Renderer::pick) call and resized to
+    /// track whatever `viewport` the caller passes. `None` until a front-end
+    /// actually picks, so the headless CLI never allocates it.
+    target: Option<PickTarget>,
+}
+
+impl Picking {
+    /// Builds the picking pipeline and an instance buffer sized for `mesh_count`
+    /// objects. The target stays unallocated until something is picked.
+    fn new(device: &wgpu::Device, mesh_count: usize) -> Self {
+        // A group-0 camera uniform (structurally identical to the mesh camera
+        // layout, so the scene's camera bind group binds it) + the per-instance
+        // id color, single-sampled into PICK_FORMAT.
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("trd picking pipeline layout"),
+            bind_group_layouts: &[Some(&create_mesh_bind_group_layout(device))],
+            immediate_size: 0,
+        });
+        let instance_capacity = (mesh_count as u32).max(1);
+        Self {
+            pipeline: create_picking_pipeline(device, &layout),
+            instances: create_pick_instance_buffer(device, instance_capacity),
+            instance_capacity,
+            target: None,
+        }
+    }
+
+    /// Uploads this pass's instances, growing the buffer (to the next power of
+    /// two) when the frame needs more than it holds — the same policy as
+    /// [`MeshStore::upload_instances`].
+    fn upload_instances(&mut self, gpu: &GpuContext, instances: &[PickInstanceRaw]) {
+        if instances.len() as u32 > self.instance_capacity {
+            self.instance_capacity = (instances.len() as u32).next_power_of_two();
+            self.instances = create_pick_instance_buffer(&gpu.device, self.instance_capacity);
+        }
+        if !instances.is_empty() {
+            gpu.queue
+                .write_buffer(&self.instances, 0, bytemuck::cast_slice(instances));
+        }
+    }
+}
+
+fn create_pick_instance_buffer(device: &wgpu::Device, capacity: u32) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("trd pick instance buffer"),
+        size: capacity as u64 * std::mem::size_of::<PickInstanceRaw>() as u64,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
 }
 
 /// The render harness: pipelines, decode-once mesh store, materials/lighting,
@@ -374,20 +430,19 @@ impl SceneRenderPipelines {
 /// owns. Uploads, materials, lighting, mesh count and picking are shared by
 /// every caller regardless of target.
 pub struct Renderer {
-    pipelines: SceneRenderPipelines,
+    pipelines: MeshPipelines,
+    /// The group-0 uniforms every pass binds: the camera `P·V`, the gizmo
+    /// viewport params, and the per-mesh PBR slot array.
+    uniforms: SceneUniforms,
     /// The bound HDR environment map reflected by [`RenderMode::Shaded`] draws.
     env: BoundEnv,
     env_background: EnvBackground,
-    /// The Disney material of **each** mesh (indexed by mesh id) applied to its
-    /// [`RenderMode::Shaded`] draws (#141) — so a multi-object scene can give every
-    /// object its own metallic/roughness/base_color.
-    pbr_materials: Vec<DisneyMaterial>,
-    /// Per-object environment reflection gains, parallel to `pbr_materials`.
-    pbr_ibl: Vec<ImageBasedLighting>,
-    /// Per-object output transforms, parallel to `pbr_materials`.
-    pbr_tone_mappings: Vec<ToneMapping>,
-    pbr_debug_views: Vec<PbrDebugView>,
     /// Scene light rig controls shared by every PBR object.
+    ///
+    /// Scene-level, so it stays here — unlike the per-object material, IBL,
+    /// tone-map and debug view, which live on the [`MeshGpu`] they describe
+    /// (#203) instead of in four renderer-side `Vec`s parallel to the mesh
+    /// store.
     lighting: Lighting,
     store: MeshStore,
     frame_plane: FramePlane,
@@ -415,20 +470,9 @@ pub struct Renderer {
     /// is what lets the &self.gpu.queue live here too, which is why uploads no longer have
     /// to be deferred to `encode` (#180).
     gpu: Arc<GpuContext>,
-    /// The object-id **picking** pipeline (`picking.wgsl`): renders each drawn
-    /// object in a flat id color into a single-sample linear target, reused by
-    /// [`encode_picking`](Self::encode_picking). Built once (its own bind-group
-    /// layout is structurally the camera layout, so `camera_bind_group` binds it).
-    pick_pipeline: wgpu::RenderPipeline,
-    /// Per-instance [`PickInstanceRaw`] buffer for the picking pass (model +
-    /// id color), grown on demand like the mesh instance buffer.
-    pick_instances: wgpu::Buffer,
-    pick_instance_capacity: u32,
-    /// The object-id picking target (#141), created lazily on the first
-    /// [`pick`](Self::pick) call and resized to track whatever `viewport` the
-    /// caller passes. `None` until a front-end actually picks, so the headless
-    /// CLI never allocates it.
-    pick_target: Option<PickTarget>,
+    /// Everything the object-id picking pass (#141) needs: its pipeline, its
+    /// instance buffer and its lazily-created target.
+    picking: Picking,
 }
 
 impl Renderer {
@@ -497,7 +541,7 @@ impl Renderer {
         let material_maps_layout = BoundMaterialMaps::create_layout(&gpu.device);
         let env = BoundEnv::new(&gpu);
         let env_background = EnvBackground::new(&gpu.device, format, env.layout(), sample_count);
-        let pass = SceneRenderPipelines::new(
+        let (pipelines, uniforms) = create_scene_pipelines(
             &gpu.device,
             format,
             &texture_layout,
@@ -514,34 +558,13 @@ impl Renderer {
             &material_maps_layout,
         );
         let frame_plane = FramePlane::new(&gpu.device, format, sample_count);
-
-        // The picking pipeline: a group-0 camera uniform (structurally identical
-        // to the mesh camera layout, so `pass.camera_bind_group` binds it) + the
-        // per-instance id color, single-sampled into PICK_FORMAT.
-        let pick_layout = &gpu
-            .device
-            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("trd picking pipeline layout"),
-                bind_group_layouts: &[Some(&create_mesh_bind_group_layout(&gpu.device))],
-                immediate_size: 0,
-            });
-        let pick_pipeline = create_picking_pipeline(&gpu.device, pick_layout);
-        let pick_instance_capacity = (meshes.len() as u32).max(1);
-        let pick_instances = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("trd pick instance buffer"),
-            size: pick_instance_capacity as u64 * std::mem::size_of::<PickInstanceRaw>() as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let picking = Picking::new(&gpu.device, meshes.len());
 
         Self {
-            pipelines: pass,
+            pipelines,
+            uniforms,
             env,
             env_background,
-            pbr_materials: vec![DisneyMaterial::default(); meshes.len()],
-            pbr_ibl: vec![ImageBasedLighting::default(); meshes.len()],
-            pbr_tone_mappings: vec![ToneMapping::default(); meshes.len()],
-            pbr_debug_views: vec![PbrDebugView::default(); meshes.len()],
             lighting: Lighting::default(),
             store,
             frame_plane,
@@ -550,10 +573,7 @@ impl Renderer {
             sample_count,
             format,
             gpu,
-            pick_pipeline,
-            pick_instances,
-            pick_instance_capacity,
-            pick_target: None,
+            picking,
         }
     }
 
@@ -702,8 +722,8 @@ impl Renderer {
     /// [`set_mesh_disney_material`](Self::set_mesh_disney_material). Takes effect
     /// on the next [`render`](Self::render).
     pub fn set_disney_material(&mut self, material: DisneyMaterial) {
-        for m in &mut self.pbr_materials {
-            *m = material.clone();
+        for mesh in &mut self.store.meshes {
+            mesh.material = material.clone();
         }
     }
 
@@ -712,8 +732,8 @@ impl Renderer {
     /// Out-of-range ids are ignored. Takes effect on the next
     /// [`render`](Self::render).
     pub fn set_mesh_disney_material(&mut self, mesh_id: usize, material: DisneyMaterial) {
-        if let Some(m) = self.pbr_materials.get_mut(mesh_id) {
-            *m = material;
+        if let Some(mesh) = self.store.meshes.get_mut(mesh_id) {
+            mesh.material = material;
         }
     }
 
@@ -724,32 +744,36 @@ impl Renderer {
 
     /// Sets image-based-lighting controls for every PBR object.
     pub fn set_image_based_lighting(&mut self, ibl: ImageBasedLighting) {
-        self.pbr_ibl.fill(ibl);
+        for mesh in &mut self.store.meshes {
+            mesh.ibl = ibl;
+        }
     }
 
     /// Sets image-based-lighting controls for one PBR object.
     pub fn set_mesh_image_based_lighting(&mut self, mesh_id: usize, ibl: ImageBasedLighting) {
-        if let Some(current) = self.pbr_ibl.get_mut(mesh_id) {
-            *current = ibl;
+        if let Some(mesh) = self.store.meshes.get_mut(mesh_id) {
+            mesh.ibl = ibl;
         }
     }
 
     /// Sets the per-object output transform of every PBR object.
     pub fn set_tone_mapping(&mut self, tone_mapping: ToneMapping) {
-        self.pbr_tone_mappings.fill(tone_mapping);
+        for mesh in &mut self.store.meshes {
+            mesh.tone_mapping = tone_mapping;
+        }
     }
 
     /// Sets the output transform of one PBR object.
     pub fn set_mesh_tone_mapping(&mut self, mesh_id: usize, tone_mapping: ToneMapping) {
-        if let Some(current) = self.pbr_tone_mappings.get_mut(mesh_id) {
-            *current = tone_mapping;
+        if let Some(mesh) = self.store.meshes.get_mut(mesh_id) {
+            mesh.tone_mapping = tone_mapping;
         }
     }
 
     /// Selects a diagnostic PBR output for one mesh.
     pub fn set_mesh_pbr_debug_view(&mut self, mesh_id: usize, debug_view: PbrDebugView) {
-        if let Some(current) = self.pbr_debug_views.get_mut(mesh_id) {
-            *current = debug_view;
+        if let Some(mesh) = self.store.meshes.get_mut(mesh_id) {
+            mesh.debug_view = debug_view;
         }
     }
 
@@ -790,7 +814,7 @@ impl Renderer {
     /// picked yet (it is allocated on the first [`pick`](Self::pick)). Diagnostic
     /// only — front-ends surface it in their debug panels.
     pub fn pick_target_size(&self) -> Option<(u32, u32)> {
-        self.pick_target.as_ref().map(PickTarget::size)
+        self.picking.target.as_ref().map(PickTarget::size)
     }
 
     // -----------------------------------------------------------------------
@@ -1162,21 +1186,16 @@ impl Renderer {
         load_color: bool,
     ) {
         // 1. Camera P·V for this frame.
-        self.pipelines.write_camera(&self.gpu.queue, camera);
+        self.uniforms.write_camera(&self.gpu.queue, camera);
         // 1b. Disney PBR uniform slots for this frame — one per mesh (each carries
         //     the shared camera/lights + that mesh's material, #141). Written
         //     unconditionally so a PBR draw always has a current material slot.
         let viewport = camera.viewport();
-        self.pipelines.write_pbr(
+        self.uniforms.write_pbr(
             &self.gpu.queue,
             camera,
-            PbrBatchInputs {
-                materials: &self.pbr_materials,
-                ibl: &self.pbr_ibl,
-                tone_mappings: &self.pbr_tone_mappings,
-                debug_views: &self.pbr_debug_views,
-                lighting: self.lighting,
-            },
+            &self.store.meshes,
+            self.lighting,
             self.env.has_env(),
         );
 
@@ -1280,7 +1299,7 @@ impl Renderer {
         // The instance buffer (slot 1) stays bound across every draw. Most
         // commands use the camera bind group; expanded lines briefly swap in the
         // viewport-aware gizmo bind group.
-        pass.set_bind_group(0, &self.pipelines.camera_bind_group, &[]);
+        pass.set_bind_group(0, self.uniforms.camera.bind_group(), &[]);
         pass.set_vertex_buffer(1, self.store.instance_buffer.slice(..));
         for command in &batches.commands {
             let range = command.start..command.start + command.count;
@@ -1301,15 +1320,15 @@ impl Renderer {
                     pass.set_pipeline(&self.pipelines.pbr);
                     // group 0 = this mesh's PbrUniform slot (selected by a dynamic
                     // offset), group 1 = this mesh's albedo, group 2 = HDR env map.
-                    let offset = (id as u64 * self.pipelines.pbr_stride) as u32;
-                    pass.set_bind_group(0, &self.pipelines.pbr_bind_group, &[offset]);
+                    let offset = self.uniforms.pbr.offset(id);
+                    pass.set_bind_group(0, self.uniforms.pbr.bind_group(), &[offset]);
                     pass.set_bind_group(1, mesh.texture.bind_group(), &[]);
                     pass.set_bind_group(2, env_bind_group, &[]);
                     pass.set_bind_group(3, mesh.material_maps.bind_group(), &[]);
                     draw_indexed(&mut pass, mesh.pbr(), range);
                     // Restore group 0 = camera for the following non-PBR draws
                     // (their pipelines' group-0 layout is the camera uniform).
-                    pass.set_bind_group(0, &self.pipelines.camera_bind_group, &[]);
+                    pass.set_bind_group(0, self.uniforms.camera.bind_group(), &[]);
                 }
                 DrawKind::Wireframe(id) => {
                     let mesh = &self.store.meshes[id];
@@ -1319,21 +1338,21 @@ impl Renderer {
                 DrawKind::Aabb(id) => {
                     let mesh = &self.store.meshes[id];
                     pass.set_pipeline(&self.pipelines.gizmo_line);
-                    pass.set_bind_group(0, &self.pipelines.gizmo_bind_group, &[]);
+                    pass.set_bind_group(0, self.uniforms.gizmo.bind_group(), &[]);
                     draw_vertices(&mut pass, mesh.aabb(), range);
-                    pass.set_bind_group(0, &self.pipelines.camera_bind_group, &[]);
+                    pass.set_bind_group(0, self.uniforms.camera.bind_group(), &[]);
                 }
                 DrawKind::Grid(plane) => {
                     pass.set_pipeline(&self.pipelines.gizmo_line);
-                    pass.set_bind_group(0, &self.pipelines.gizmo_bind_group, &[]);
+                    pass.set_bind_group(0, self.uniforms.gizmo.bind_group(), &[]);
                     draw_vertices(&mut pass, &self.store.grid_lines[plane], range);
-                    pass.set_bind_group(0, &self.pipelines.camera_bind_group, &[]);
+                    pass.set_bind_group(0, self.uniforms.camera.bind_group(), &[]);
                 }
                 DrawKind::QuadOutline(selected) => {
                     pass.set_pipeline(&self.pipelines.gizmo_line);
-                    pass.set_bind_group(0, &self.pipelines.gizmo_bind_group, &[]);
+                    pass.set_bind_group(0, self.uniforms.gizmo.bind_group(), &[]);
                     draw_vertices(&mut pass, &self.store.quad_lines[selected], range);
-                    pass.set_bind_group(0, &self.pipelines.camera_bind_group, &[]);
+                    pass.set_bind_group(0, self.uniforms.camera.bind_group(), &[]);
                 }
                 DrawKind::Shadow => {
                     pass.set_pipeline(&self.pipelines.shadow);
@@ -1342,10 +1361,10 @@ impl Renderer {
                 }
                 DrawKind::Axes => {
                     pass.set_pipeline(&self.pipelines.gizmo_line);
-                    pass.set_bind_group(0, &self.pipelines.gizmo_bind_group, &[]);
+                    pass.set_bind_group(0, self.uniforms.gizmo.bind_group(), &[]);
                     draw_vertices(&mut pass, &self.store.axes_lines, range.clone());
                     pass.set_pipeline(&self.pipelines.gizmo_solid);
-                    pass.set_bind_group(0, &self.pipelines.camera_bind_group, &[]);
+                    pass.set_bind_group(0, self.uniforms.camera.bind_group(), &[]);
                     draw_vertices(&mut pass, &self.store.axes_heads, range);
                 }
             }
@@ -1374,8 +1393,8 @@ impl Renderer {
         draws: &[Draw],
     ) {
         // Camera P·V for this frame (writes the shared camera uniform bound by
-        // `camera_bind_group`, which is layout-compatible with the pick pipeline).
-        self.pipelines.write_camera(&self.gpu.queue, camera);
+        // `uniforms.camera`, which is layout-compatible with the pick pipeline).
+        self.uniforms.write_camera(&self.gpu.queue, camera);
 
         // Build one pick instance per drawable object, carrying its index color.
         // Keep the draw index as the id even when an entry is skipped, so a decoded
@@ -1400,21 +1419,7 @@ impl Renderer {
         }
 
         // Grow + upload the pick instance buffer.
-        if instances.len() as u32 > self.pick_instance_capacity {
-            self.pick_instance_capacity = (instances.len() as u32).next_power_of_two();
-            self.pick_instances = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("trd pick instance buffer"),
-                size: self.pick_instance_capacity as u64
-                    * std::mem::size_of::<PickInstanceRaw>() as u64,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-        }
-        if !instances.is_empty() {
-            self.gpu
-                .queue
-                .write_buffer(&self.pick_instances, 0, bytemuck::cast_slice(&instances));
-        }
+        self.picking.upload_instances(&self.gpu, &instances);
 
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("trd picking pass"),
@@ -1441,9 +1446,9 @@ impl Renderer {
             multiview_mask: None,
         });
 
-        pass.set_pipeline(&self.pick_pipeline);
-        pass.set_bind_group(0, &self.pipelines.camera_bind_group, &[]);
-        pass.set_vertex_buffer(1, self.pick_instances.slice(..));
+        pass.set_pipeline(&self.picking.pipeline);
+        pass.set_bind_group(0, self.uniforms.camera.bind_group(), &[]);
+        pass.set_vertex_buffer(1, self.picking.instances.slice(..));
         for (mesh_id, slot) in records {
             let mesh = &self.store.meshes[mesh_id];
             draw_indexed(&mut pass, mesh.filled(), slot..slot + 1);
@@ -1524,7 +1529,7 @@ impl Renderer {
         // Move the pick target out of `self` for the duration of the pass: `pick`
         // takes `&mut Renderer` to encode through, and a field already borrowed
         // out of `self` would conflict with re-borrowing all of `self` (#203).
-        let pick_target = match self.pick_target.take() {
+        let pick_target = match self.picking.target.take() {
             Some(mut target) => {
                 target.resize(&gpu.device, w, h);
                 target
@@ -1532,7 +1537,7 @@ impl Renderer {
             None => PickTarget::new(&gpu.device, w, h),
         };
         let id = pick_target.pick(&gpu, self, camera, draws, x, y).await;
-        self.pick_target = Some(pick_target);
+        self.picking.target = Some(pick_target);
         id
     }
 }

@@ -6,6 +6,7 @@
 mod batch;
 mod bound_material_maps;
 mod bound_texture;
+mod bound_uniform;
 mod buffer;
 mod color;
 mod env_background;
@@ -58,6 +59,7 @@ pub use tonemap::{ToneMapping, Tonemap};
 pub(crate) use triangle_renderer::TriangleRenderer;
 
 // Crate-internal items shared across render submodules and sibling modules.
+pub(crate) use bound_uniform::{BoundUniform, BoundUniformArray};
 pub(crate) use color::upload_texture;
 pub(crate) use frame_params::{projection_from_intrinsics, DEFAULT_FAR, DEFAULT_NEAR};
 pub(crate) use gizmo::{
