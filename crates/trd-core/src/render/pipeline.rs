@@ -226,6 +226,82 @@ pub(crate) fn create_msaa_color_target(
     }
 }
 
+/// The mesh pass's **color attachment policy**: the format and sample count
+/// every pipeline was built for, plus the lazily (re)created multisampled
+/// target (#221 §3).
+///
+/// The three used to be loose [`Renderer`](super::Renderer) fields — `msaa`,
+/// `sample_count`, `format` — kept consistent only by the doc comments saying
+/// they must be: the MSAA target has to be created with the same format and
+/// sample count the pipelines were built for. Owning them together makes that
+/// invariant structural.
+///
+/// [`target`](Self::target) is `None` in **two** cases: when MSAA is disabled
+/// (`sample_count == 1`, so the pass renders straight into the caller's
+/// single-sample view) and, while MSAA is on, before the first
+/// [`ensure`](Self::ensure) allocates it.
+pub(crate) struct MsaaColor {
+    /// The color format the pipelines were built for; the MSAA target must be
+    /// created with the same one.
+    format: wgpu::TextureFormat,
+    /// `4` ([`MSAA_SAMPLE_COUNT`]) for multisampled edges, or `1` for
+    /// single-sample rasterization. Fixed at construction because every pipeline
+    /// plus the depth/color attachments must share it.
+    sample_count: u32,
+    target: Option<MsaaColorTarget>,
+}
+
+impl MsaaColor {
+    /// The attachment policy for pipelines built with `format` and
+    /// `sample_count`. No target is allocated until the first
+    /// [`ensure`](Self::ensure).
+    pub(crate) fn new(format: wgpu::TextureFormat, sample_count: u32) -> Self {
+        Self {
+            format,
+            sample_count,
+            target: None,
+        }
+    }
+
+    /// The sample count every pipeline — and the **depth** attachment, which a
+    /// render pass requires to match its color attachment — was built for. The
+    /// one source of truth, so it stays readable rather than sealed away.
+    pub(crate) fn sample_count(&self) -> u32 {
+        self.sample_count
+    }
+
+    /// The multisampled target to render into, or `None` to render straight
+    /// into the caller's single-sample view (see the type docs).
+    pub(crate) fn target(&self) -> Option<&MsaaColorTarget> {
+        self.target.as_ref()
+    }
+
+    /// Matches the multisampled target to `width` × `height` (each clamped to
+    /// ≥ 1), recreating it only when the size changes. With MSAA disabled
+    /// (`sample_count == 1`) no target is needed, so this clears it.
+    pub(crate) fn ensure(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        if self.sample_count <= 1 {
+            self.target = None;
+            return;
+        }
+        let width = width.max(1);
+        let height = height.max(1);
+        if self
+            .target
+            .as_ref()
+            .is_none_or(|t| t.width != width || t.height != height)
+        {
+            self.target = Some(create_msaa_color_target(
+                device,
+                self.format,
+                width,
+                height,
+                self.sample_count,
+            ));
+        }
+    }
+}
+
 /// Builds an indexed mesh pipeline for `format` and `topology` (filled
 /// `TriangleList` or wireframe `LineList`) over the shared explicit `layout`.
 /// Both topologies use the same `mesh.wgsl` (the vertex shader only transforms
