@@ -49,8 +49,9 @@
 //! - [`BoundTexture`](super::BoundTexture) — the mesh albedo sampled by textured
 //!   draws (#20).
 //! - [`FramePlane`] — the background video frame plane (#63).
-//! - [`Picking`] — the object-id picking pipeline, its instance buffer and its
-//!   [`PickTarget`] (#141), the target allocated lazily on the first
+//! - [`Picking`](super::picking::Picking) — the object-id picking pipeline, its
+//!   instance buffer and its [`PickTarget`] (#141), all three in `picking.rs`
+//!   beside the target they create; the target is allocated lazily on the first
 //!   [`pick`](Self::pick) call so a headless CLI stream never pays for it.
 //!
 //! **The draw loop is a dispatch, not a state machine** (#204). `encode_pass`
@@ -75,6 +76,7 @@ use super::draw_command::build_batches;
 use super::env_background::{EnvBackground, EnvBackgroundSettings};
 use super::frame_plane::FramePlane;
 use super::mesh_store::{MeshGpu, MeshStore};
+use super::picking::Picking;
 use super::*;
 use crate::material::DisneyMaterial;
 use crate::math::Matrix4;
@@ -349,73 +351,6 @@ impl SceneUniforms {
             self.pbr.write_slot(queue, slot, &uniform);
         }
     }
-}
-
-/// The object-id **picking** pass's own state (#141, grouped in #203).
-///
-/// Its pipeline (`picking.wgsl`) renders each drawn object in a flat id color
-/// into a single-sample linear target; its per-instance buffer carries the
-/// model + id color; its target is the surface that is read back. The three are
-/// used only by [`Renderer::pick`] / [`Renderer::encode_picking`] and are
-/// meaningless apart, so they travel together rather than as three loose
-/// renderer fields.
-struct Picking {
-    /// Built once. Its group-0 bind-group layout is structurally the camera
-    /// layout, so [`SceneUniforms::camera`]'s bind group binds it.
-    pipeline: wgpu::RenderPipeline,
-    /// Per-instance [`PickInstanceRaw`] buffer (model + id color), grown on
-    /// demand like the mesh instance buffer.
-    instances: wgpu::Buffer,
-    instance_capacity: u32,
-    /// Created lazily on the first [`pick`](Renderer::pick) call and resized to
-    /// track whatever `viewport` the caller passes. `None` until a front-end
-    /// actually picks, so the headless CLI never allocates it.
-    target: Option<PickTarget>,
-}
-
-impl Picking {
-    /// Builds the picking pipeline and an instance buffer sized for `mesh_count`
-    /// objects. The target stays unallocated until something is picked.
-    fn new(device: &wgpu::Device, mesh_count: usize) -> Self {
-        // A group-0 camera uniform (structurally identical to the mesh camera
-        // layout, so the scene's camera bind group binds it) + the per-instance
-        // id color, single-sampled into PICK_FORMAT.
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("trd picking pipeline layout"),
-            bind_group_layouts: &[Some(&create_mesh_bind_group_layout(device))],
-            immediate_size: 0,
-        });
-        let instance_capacity = (mesh_count as u32).max(1);
-        Self {
-            pipeline: create_picking_pipeline(device, &layout),
-            instances: create_pick_instance_buffer(device, instance_capacity),
-            instance_capacity,
-            target: None,
-        }
-    }
-
-    /// Uploads this pass's instances, growing the buffer (to the next power of
-    /// two) when the frame needs more than it holds — the same policy as
-    /// [`MeshStore::upload_instances`].
-    fn upload_instances(&mut self, gpu: &GpuContext, instances: &[PickInstanceRaw]) {
-        if instances.len() as u32 > self.instance_capacity {
-            self.instance_capacity = (instances.len() as u32).next_power_of_two();
-            self.instances = create_pick_instance_buffer(&gpu.device, self.instance_capacity);
-        }
-        if !instances.is_empty() {
-            gpu.queue
-                .write_buffer(&self.instances, 0, bytemuck::cast_slice(instances));
-        }
-    }
-}
-
-fn create_pick_instance_buffer(device: &wgpu::Device, capacity: u32) -> wgpu::Buffer {
-    device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("trd pick instance buffer"),
-        size: capacity as u64 * std::mem::size_of::<PickInstanceRaw>() as u64,
-        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    })
 }
 
 /// The render harness: pipelines, decode-once mesh store, materials/lighting,
@@ -823,7 +758,7 @@ impl Renderer {
     /// picked yet (it is allocated on the first [`pick`](Self::pick)). Diagnostic
     /// only — front-ends surface it in their debug panels.
     pub fn pick_target_size(&self) -> Option<(u32, u32)> {
-        self.picking.target.as_ref().map(PickTarget::size)
+        self.picking.target_size()
     }
 
     // -----------------------------------------------------------------------
@@ -1349,8 +1284,9 @@ impl Renderer {
     /// **It keeps its own traversal on purpose** (#204). It does *not* batch a
     /// [`Scene`] and does not go through the per-primitive `record` bodies: this
     /// is a different pass with different attachments (single-sampled, flat id
-    /// colors, no MSAA resolve) drawing only mesh geometry through
-    /// [`Picking::pipeline`] instead of the visual pipelines, and it needs an
+    /// colors, no MSAA resolve) drawing only mesh geometry through the
+    /// [`Picking`](super::picking::Picking) pipeline instead of the visual ones,
+    /// and it needs an
     /// instance per *object* — never grouped — because the whole point is that
     /// each one carries a distinct id. Sharing the walk would mean threading a
     /// pass-kind through every `record` body to couple two loops that agree on
@@ -1418,9 +1354,8 @@ impl Renderer {
             multiview_mask: None,
         });
 
-        pass.set_pipeline(&self.picking.pipeline);
-        pass.set_bind_group(0, self.uniforms.camera.bind_group(), &[]);
-        pass.set_vertex_buffer(1, self.picking.instances.slice(..));
+        self.picking
+            .bind(&mut pass, self.uniforms.camera.bind_group());
         for (mesh_id, slot) in records {
             let mesh = &self.store.meshes[mesh_id];
             draw_indexed(&mut pass, mesh.filled(), slot..slot + 1);
@@ -1501,15 +1436,9 @@ impl Renderer {
         // Move the pick target out of `self` for the duration of the pass: `pick`
         // takes `&mut Renderer` to encode through, and a field already borrowed
         // out of `self` would conflict with re-borrowing all of `self` (#203).
-        let pick_target = match self.picking.target.take() {
-            Some(mut target) => {
-                target.resize(&gpu.device, w, h);
-                target
-            }
-            None => PickTarget::new(&gpu.device, w, h),
-        };
+        let pick_target = self.picking.take_target(&gpu.device, w, h);
         let id = pick_target.pick(&gpu, self, camera, draws, x, y).await;
-        self.picking.target = Some(pick_target);
+        self.picking.restore_target(pick_target);
         id
     }
 }

@@ -1,11 +1,19 @@
-//! [`PickTarget`] — the object-id ("color index") picking harness (#141).
+//! [`Picking`] + [`PickTarget`] — the object-id ("color index") picking
+//! harness (#141).
 //!
-//! A small render target dedicated to [`Renderer::encode_picking`]: a
-//! single-sample **linear** [`PICK_FORMAT`] color texture + a depth attachment,
-//! into which each drawn object is rasterized in a flat id color. After the pass,
-//! the **one** texel under the cursor is copied back and decoded to a 0-based
-//! object index (or `None` for the background) — so a click resolves *which*
-//! object it hit without ray-marching. Kept separate from the display
+//! [`Picking`] is the pass's own state — its pipeline (`picking.wgsl`), its
+//! per-instance buffer, and its lazily allocated [`PickTarget`]. The three are
+//! used only by [`Renderer::pick`] / [`Renderer::encode_picking`] and are
+//! meaningless apart, so they travel together rather than as three loose
+//! renderer fields, and they live here beside the target they create rather
+//! than in `renderer.rs` (#221 §4).
+//!
+//! [`PickTarget`] is the target itself: a single-sample **linear**
+//! [`PICK_FORMAT`] color texture + a depth attachment, into which each drawn
+//! object is rasterized in a flat id color. After the pass, the **one** texel
+//! under the cursor is copied back and decoded to a 0-based object index (or
+//! `None` for the background) — so a click resolves *which* object it hit
+//! without ray-marching. Kept separate from the display
 //! [`TextureTarget`](super::TextureTarget) because picking must be
 //! single-sampled (ids must never be averaged at edges) and use a non-sRGB format
 //! (so the id bytes round-trip exactly).
@@ -13,9 +21,117 @@
 use super::GpuContext;
 use futures_channel::oneshot;
 
-use super::{create_depth_target, DepthTarget, PickInstanceRaw, Renderer, PICK_FORMAT};
+use super::{
+    create_depth_target, create_mesh_bind_group_layout, create_picking_pipeline, DepthTarget,
+    PickInstanceRaw, Renderer, PICK_FORMAT,
+};
 use crate::visual::Draw;
 use crate::Camera;
+
+/// The object-id **picking** pass's own state (#141, grouped in #203).
+///
+/// Its pipeline (`picking.wgsl`) renders each drawn object in a flat id color
+/// into a single-sample linear target; its per-instance buffer carries the
+/// model + id color; its target is the surface that is read back.
+pub(super) struct Picking {
+    /// Built once. Its group-0 bind-group layout is structurally the camera
+    /// layout, so `SceneUniforms::camera`'s bind group binds it.
+    pipeline: wgpu::RenderPipeline,
+    /// Per-instance [`PickInstanceRaw`] buffer (model + id color), grown on
+    /// demand like the mesh instance buffer.
+    instances: wgpu::Buffer,
+    instance_capacity: u32,
+    /// Created lazily on the first [`pick`](Renderer::pick) call and resized to
+    /// track whatever `viewport` the caller passes. `None` until a front-end
+    /// actually picks, so the headless CLI never allocates it.
+    target: Option<PickTarget>,
+}
+
+impl Picking {
+    /// Builds the picking pipeline and an instance buffer sized for `mesh_count`
+    /// objects. The target stays unallocated until something is picked.
+    pub(super) fn new(device: &wgpu::Device, mesh_count: usize) -> Self {
+        // A group-0 camera uniform (structurally identical to the mesh camera
+        // layout, so the scene's camera bind group binds it) + the per-instance
+        // id color, single-sampled into PICK_FORMAT.
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("trd picking pipeline layout"),
+            bind_group_layouts: &[Some(&create_mesh_bind_group_layout(device))],
+            immediate_size: 0,
+        });
+        let instance_capacity = (mesh_count as u32).max(1);
+        Self {
+            pipeline: create_picking_pipeline(device, &layout),
+            instances: create_pick_instance_buffer(device, instance_capacity),
+            instance_capacity,
+            target: None,
+        }
+    }
+
+    /// Uploads this pass's instances, growing the buffer (to the next power of
+    /// two) when the frame needs more than it holds — the same policy as
+    /// `MeshStore::upload_instances`.
+    pub(super) fn upload_instances(&mut self, gpu: &GpuContext, instances: &[PickInstanceRaw]) {
+        if instances.len() as u32 > self.instance_capacity {
+            self.instance_capacity = (instances.len() as u32).next_power_of_two();
+            self.instances = create_pick_instance_buffer(&gpu.device, self.instance_capacity);
+        }
+        if !instances.is_empty() {
+            gpu.queue
+                .write_buffer(&self.instances, 0, bytemuck::cast_slice(instances));
+        }
+    }
+
+    /// Binds this pass's pipeline, the caller's group-0 camera bind group, and
+    /// the id-instance buffer — the whole pass-local setup
+    /// [`Renderer::encode_picking`] needs before its per-object draws, so the
+    /// pipeline and instance buffer stay private to this module.
+    pub(super) fn bind(&self, pass: &mut wgpu::RenderPass<'_>, camera: &wgpu::BindGroup) {
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, camera, &[]);
+        pass.set_vertex_buffer(1, self.instances.slice(..));
+    }
+
+    /// Moves the pick target out for the duration of one pass, creating it on
+    /// first use and resizing it to `width` × `height` — the lazy-allocation
+    /// policy the `target` field documents. The caller must hand it back through
+    /// [`restore_target`](Self::restore_target): [`Renderer::pick`] encodes
+    /// through `&mut Renderer`, so a target still borrowed out of `self` would
+    /// conflict with re-borrowing all of `self` (#203).
+    pub(super) fn take_target(
+        &mut self,
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+    ) -> PickTarget {
+        match self.target.take() {
+            Some(mut target) => {
+                target.resize(device, width, height);
+                target
+            }
+            None => PickTarget::new(device, width, height),
+        }
+    }
+
+    /// Returns the target taken by [`take_target`](Self::take_target).
+    pub(super) fn restore_target(&mut self, target: PickTarget) {
+        self.target = Some(target);
+    }
+
+    /// The current pick-target size, or `None` while nothing has been picked yet.
+    pub(super) fn target_size(&self) -> Option<(u32, u32)> {
+        self.target.as_ref().map(PickTarget::size)
+    }
+}
+
+fn create_pick_instance_buffer(device: &wgpu::Device, capacity: u32) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("trd pick instance buffer"),
+        size: capacity as u64 * std::mem::size_of::<PickInstanceRaw>() as u64,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
 
 /// A single-sample id-color render target + depth + a tiny read-back buffer for
 /// one pixel. Sized to the display; rebuilt when the render size changes.
