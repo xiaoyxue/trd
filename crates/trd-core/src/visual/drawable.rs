@@ -68,7 +68,8 @@ pub enum DrawableObject {
     },
     /// A screen-aligned **background frame plane** (#63): a fullscreen quad that
     /// samples the renderer's bound background frame texture (set via
-    /// [`SceneRenderer::update_frame_texture_rgba`]), composited **under** the
+    /// [`crate::render::Renderer::update_frame_texture_rgba`]), composited
+    /// **under** the
     /// mesh scene. `fit` selects how the image maps to the viewport. Carries no
     /// model — it is authored directly in clip space and ignores the camera.
     /// Drawn only when a background texture is bound (else skipped), so an absent

@@ -8,10 +8,10 @@
 //!
 //! It draws one static gradient triangle (three colored vertices) tinted by a
 //! uniform, exercising exactly the explicit wgpu constructs that
-//! [`SceneRenderer`](super::SceneRenderer) uses at scale — a vertex buffer with a
+//! [`Renderer`](super::Renderer) uses at scale — a vertex buffer with a
 //! [`wgpu::VertexBufferLayout`], an explicit [`wgpu::BindGroupLayout`] +
 //! [`wgpu::PipelineLayout`], a uniform bind group, and a render pass with
-//! `set_pipeline`/`set_bind_group`/`set_vertex_buffer`/`draw`. `SceneRenderer` is
+//! `set_pipeline`/`set_bind_group`/`set_vertex_buffer`/`draw`. `Renderer` is
 //! the same shape generalized to instanced, indexed, multi-pipeline drawing with
 //! a depth buffer and per-frame uploads; start here to learn the pattern.
 
@@ -70,7 +70,7 @@ const IDENTITY_TINT: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 /// The minimal wgpu renderer: a gradient triangle tinted by a uniform. Owns the
 /// pipeline, the vertex buffer, and the tint bind group — the smallest complete
 /// set of GPU objects a draw needs. See the module docs for how it relates to
-/// [`SceneRenderer`](super::SceneRenderer).
+/// [`Renderer`](super::Renderer).
 pub struct TriangleRenderer {
     pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
@@ -93,7 +93,7 @@ impl TriangleRenderer {
 
         // A group-0 uniform holding the tint color, bound at draw time — the
         // minimal example of the BindGroupLayout -> BindGroup -> set_bind_group
-        // path that SceneRenderer uses for its camera and textures.
+        // path that Renderer uses for its camera and textures.
         let tint_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("trd triangle tint uniform"),
             contents: bytemuck::cast_slice(&IDENTITY_TINT),
@@ -160,7 +160,7 @@ impl TriangleRenderer {
     }
 
     /// Records a pass into `encoder` that clears `view` to black and draws the
-    /// gradient triangle. Unlike [`SceneRenderer::encode`](super::SceneRenderer::encode)
+    /// gradient triangle. Unlike [`Renderer::encode`](super::Renderer::encode)
     /// this renderer has no per-frame uploads, so it needs neither a queue nor a
     /// scene.
     pub fn encode(&self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {

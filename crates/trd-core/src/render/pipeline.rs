@@ -100,7 +100,7 @@ pub(crate) fn overlay_depth_stencil() -> wgpu::DepthStencilState {
 
 /// The color format of the object-id **picking** target: a **linear** (non-sRGB)
 /// `Rgba8Unorm` so each fragment's flat id color is stored byte-exact and reads
-/// back without an sRGB transfer (unlike the sRGB display [`OFFSCREEN_FORMAT`]).
+/// back without an sRGB transfer (unlike the sRGB display [`TEXTURE_TARGET_FORMAT`]).
 pub(crate) const PICK_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 /// Builds the object-id picking pipeline: the mesh vertex transform (`clip =
@@ -139,7 +139,7 @@ pub(crate) fn create_picking_pipeline(
     })
 }
 
-/// A depth attachment sized to a render target. The [`SceneRenderer`] owns one
+/// A depth attachment sized to a render target. The [`Renderer`](super::Renderer) owns one
 /// and recreates it when the viewport changes, so the mesh pass always has a
 /// matching depth buffer for solid occlusion. `sample_count` must match the
 /// pass's color attachment (MSAA depth is not resolved — it is discardable).
@@ -181,7 +181,7 @@ pub(crate) fn create_depth_target(
     }
 }
 
-/// A multisampled color attachment sized to a render target. The [`SceneRenderer`]
+/// A multisampled color attachment sized to a render target. The [`Renderer`](super::Renderer)
 /// owns one (mirroring [`DepthTarget`]) and recreates it when the viewport
 /// changes; each frame the mesh pass renders into it and resolves it into the
 /// caller's single-sample `view`. Only present when `sample_count > 1`.
@@ -488,7 +488,7 @@ pub(crate) fn create_frame_plane_pipeline(
 /// Creates the camera `P·V` uniform buffer + bind group over an **explicit**
 /// bind-group layout (shared by the filled and wireframe mesh pipelines),
 /// initialised to `camera`'s view-projection. Used by
-/// [`SceneRenderer`], whose two pipelines must share one bind group.
+/// [`Renderer`](super::Renderer), whose two pipelines must share one bind group.
 pub(crate) fn create_view_proj_binding(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
@@ -513,8 +513,8 @@ pub(crate) fn create_view_proj_binding(
 
 /// Writes the camera-only `P · V` transform into an existing uniform buffer (the
 /// instanced mesh path supplies each model matrix per instance). Lets
-/// [`SceneRenderer`] reuse one uniform buffer across frames instead of rebuilding
-/// it.
+/// [`Renderer`](super::Renderer) reuse one uniform buffer across frames instead
+/// of rebuilding it.
 pub(crate) fn write_view_proj(queue: &wgpu::Queue, buffer: &wgpu::Buffer, camera: Camera) {
     queue.write_buffer(buffer, 0, bytemuck::bytes_of(&Uniform::view_proj(camera)));
 }

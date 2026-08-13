@@ -1,7 +1,7 @@
 use trd_core::{
     DecodedFrame, DisneyMaterial, Draw, DrawableObject, EnvMapData, FrameFit, FrameParams,
-    ImageBasedLighting, Lighting, OnscreenTarget, RenderMode, RenderOptions, Renderer, Scene,
-    SurfaceError, SurfaceRepair, ToneMapping, Tonemap,
+    ImageBasedLighting, Lighting, RenderError, RenderMode, RenderOptions, RenderTarget, Renderer,
+    Scene, SurfaceRepair, SurfaceTarget, ToneMapping, Tonemap,
 };
 use wasm_bindgen::prelude::*;
 
@@ -21,13 +21,17 @@ pub struct CanvasRenderer {
     /// The shared GPU context, held as one value rather than cloned apart into
     /// separate `device` + `queue` fields (#180).
     gpu: std::sync::Arc<trd_core::GpuContext>,
-    /// The surface, held until the stream's mesh table arrives and the harness
-    /// below can be built around it.
-    target: Option<OnscreenTarget>,
+    /// The canvas surface, owned directly by the shell (#203): the harness holds
+    /// no target of its own, so this front-end always has a surface to
+    /// resize/recover, whether or not the render harness has been built yet.
+    /// Held as a [`RenderTarget`] because presenting is reachable only through
+    /// the renderer's one `render` dispatcher — the surface itself carries no
+    /// render behaviour.
+    target: RenderTarget,
     /// The shared render harness over the canvas surface, built lazily on the
     /// first rendered frame from the stream's leading mesh table. `None` until the
     /// first frame arrives (the mesh table has been decoded by then).
-    renderer: Option<Renderer<OnscreenTarget>>,
+    renderer: Option<Renderer>,
     /// Draw mode + every overlay toggle, in the **one** type every front-end uses
     /// to describe a frame's appearance; [`Scene::from_draws`] turns it into the
     /// scene. The renderer keeps no overlay state of its own (#180).
@@ -92,11 +96,11 @@ impl CanvasRenderer {
         // The browser's preferred canvas format is non-sRGB (e.g. `Bgra8Unorm`),
         // so a pipeline targeting it writes *linear* fragment values with no
         // linear→sRGB encode — making colors look darker/muddier than the headless
-        // CLI, whose target is `Rgba8UnormSrgb` (hardware-encoded on store). The
-        // shared `OnscreenTarget` renders through an **sRGB view** of the surface
+        // CLI, whose target is `Rgba8UnormSrgb` (hardware-encoded on store). A
+        // `SurfaceTarget` is rendered through an **sRGB view** of the surface
         // (registering it in `view_formats` + configuring), so the browser matches
         // the CLI byte-for-byte; build the mesh renderer with its `view_format()`.
-        let target = OnscreenTarget::new(&gpu.device, surface, config);
+        let target = RenderTarget::surface(SurfaceTarget::new(&gpu.device, surface, config));
 
         Ok(Self {
             renderer: None,
@@ -107,7 +111,7 @@ impl CanvasRenderer {
             instance,
             canvas,
             gpu,
-            target: Some(target),
+            target,
             input: trd_core::InputSession::new(),
             frames: Vec::new(),
             last_inline_frame_id: None,
@@ -474,7 +478,7 @@ impl CanvasRenderer {
             }
             // Nothing was drawn. Repair, then retry exactly once — the browser
             // cannot defer to "the next redraw" the way the native window does.
-            Err(error) => match error.repair() {
+            Err(RenderError::Surface(error)) => match error.repair() {
                 Some(SurfaceRepair::Reconfigure) => {
                     self.reconfigure();
                     self.retry(params, scene, "reconfiguration")
@@ -485,13 +489,17 @@ impl CanvasRenderer {
                         .create_surface(wgpu::SurfaceTarget::Canvas(self.canvas.clone()))
                         .map_err(|error| js_error(format!("surface recreation failed: {error}")))?;
                     let device = self.gpu.device.clone();
-                    self.target_mut().replace_surface(&device, surface);
+                    if let Some(target) = self.target.as_surface_mut() {
+                        Renderer::replace_surface(&device, target, surface);
+                    }
                     self.retry(params, scene, "recreation")
                 }
                 // Transient: skipping the frame is the whole remedy, but the
                 // caller drove this call expecting pixels, so report it.
                 None => Err(js_error(error.to_string())),
             },
+            // Not a surface problem (a malformed camera): nothing to repair.
+            Err(error) => Err(js_error(error.to_string())),
         }
     }
 
@@ -514,37 +522,26 @@ impl CanvasRenderer {
         }
     }
 
+    /// Draws + presents one frame. **Synchronous**: presenting never awaits, and
+    /// no `async fn` may cross the `wasm_bindgen` boundary.
     fn present_once(
         &mut self,
         params: FrameParams,
         scene: &[DrawableObject],
-    ) -> Result<Option<SurfaceRepair>, SurfaceError> {
-        let renderer = self
-            .renderer
-            .as_mut()
-            .expect("renderer built before present");
+    ) -> Result<Option<SurfaceRepair>, RenderError> {
         // Wire-decoded params: resolve against the surface's own size, so the
         // camera's viewport cannot disagree with the attachments (#203).
-        let Ok(camera) = params.to_camera(renderer.viewport()) else {
-            return Err(SurfaceError::Validation);
-        };
-        renderer.present_scene(camera, scene)
+        let camera = params.to_camera(self.target.viewport())?;
+        self.renderer
+            .as_mut()
+            .expect("renderer built before present")
+            .render(camera, scene, &mut self.target)
     }
 
     fn reconfigure(&mut self) {
         let device = self.gpu.device.clone();
-        self.target_mut().reconfigure(&device);
-    }
-
-    /// The live surface, wherever it currently lives: inside the harness once the
-    /// meshes have arrived, in `target` before that.
-    fn target_mut(&mut self) -> &mut OnscreenTarget {
-        match self.renderer.as_mut() {
-            Some(renderer) => renderer.target_mut(),
-            None => self
-                .target
-                .as_mut()
-                .expect("surface held until the harness"),
+        if let Some(target) = self.target.as_surface_mut() {
+            Renderer::reconfigure_surface(&device, target);
         }
     }
 
@@ -575,14 +572,10 @@ impl CanvasRenderer {
     /// produced; builds a multi-mesh renderer with each mesh's
     /// [`preview_transform`](trd_core::Mesh::preview_transform) base model,
     /// targeting the surface's sRGB view format.
-    fn ensure_renderer(&mut self) -> Result<&mut Renderer<OnscreenTarget>, JsValue> {
+    fn ensure_renderer(&mut self) -> Result<&mut Renderer, JsValue> {
         if self.renderer.is_none() {
-            let target = self
-                .target
-                .take()
-                .ok_or_else(|| js_error("the canvas surface is gone"))?;
             let meshes = self.input.meshes();
-            let renderer = Renderer::with_target(self.gpu.clone(), target, meshes);
+            let renderer = Renderer::auto_fit(self.gpu.clone(), self.target.view_format(), meshes);
             self.renderer = Some(renderer);
 
             // Bind the stream's texture (0.0.4) as the sampled albedo so

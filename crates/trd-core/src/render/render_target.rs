@@ -1,88 +1,59 @@
-//! Render targets — where a frame's pixels land.
+//! Render targets — **where** a frame's pixels land, as plain data.
 //!
-//! Both targets are just somewhere to render **into a `wgpu::TextureView`**: the
-//! encoding in between is identical, and only the two ends differ — how the view
-//! is acquired (an owned texture, infallibly, vs a surface that can be outdated
-//! or lost) and what happens after submission (copy + map + read back the pixels
-//! vs present the frame). They live together here so that asymmetry is visible
-//! in one place (#180).
+//! A target is a *place*, not an actor. Both kinds are somewhere to render into
+//! a `wgpu::TextureView`: the encoding in between is identical, and only the two
+//! ends differ — how the view is acquired (an owned texture, infallibly, versus
+//! a surface that can be outdated or lost) and what happens after submission
+//! (copy + map + read the pixels back, versus present the frame).
 //!
-//! [`OffscreenTarget`] is the common case: the headless CLI, the golden tests,
-//! both browser renderers and the video editors all read pixels back.
-//! [`OnscreenTarget`] serves the two live-surface shells (`trd-app`, the browser
-//! canvas). Note the picking target is deliberately **not** here: it is a second
-//! pass producing ids, not a place a frame is rendered to (see `picking.rs`).
+//! **Nothing in this module renders.** Every `render`/`present`/`read_back`/
+//! `acquire` used to hang off the targets while [`Renderer`](super::Renderer)
+//! merely forwarded to them, which had the ownership backwards: the harness owns
+//! the pipelines, the mesh store and the GPU context, so it — not a swapchain
+//! handle — is what knows how to draw. #203 moved all of it onto the renderer as
+//! private per-variant functions behind one public
+//! [`Renderer::render`](super::Renderer::render) match, and left the target
+//! types holding only the resources a frame lands in:
+//!
+//! - [`TextureTarget`] — an owned [`TEXTURE_TARGET_FORMAT`] texture plus its
+//!   `MAP_READ` staging buffer. The common case: the headless CLI, the golden
+//!   tests, both browser renderers and the video editors all read pixels back.
+//! - [`SurfaceTarget`] — a live [`wgpu::Surface`] plus its configuration and the
+//!   sRGB view format it is rendered through. Serves the two live-surface shells
+//!   (`trd-app`, the browser canvas).
+//! - [`RenderTarget`] — the closed enum over the two, and the argument
+//!   [`Renderer::render`](super::Renderer::render) dispatches on. It holds
+//!   *only* the discriminant: each variant already stores its own size
+//!   (`config.width` versus `texture.width()`), and copying that upward would
+//!   create a second source of truth that a resize could put out of date.
+//!
+//! Fields stay private even though there is no behaviour left. Construction is
+//! fallible and GPU-dependent — dimensions are validated against
+//! `max_texture_dimension_2d`, the staging buffer is padded to
+//! [`wgpu::COPY_BYTES_PER_ROW_ALIGNMENT`], the sRGB view format is registered
+//! and the surface configured — and public fields would let a caller assemble a
+//! texture without `COPY_SRC` or a mis-padded readback buffer. Property
+//! accessors ([`size`](TextureTarget::size), [`view_format`](SurfaceTarget::view_format),
+//! …) return data and are fine; they are deliberately *not* unified behind a
+//! trait, because two inherent impls of two accessors duplicate nothing.
+//!
+//! Note the picking target is deliberately **not** here: it is a second pass
+//! producing ids, not a place a frame is rendered to (see `picking.rs`).
 
-use super::GpuContext;
-use crate::Camera;
-use futures_channel::oneshot;
 use thiserror::Error;
 
-use super::{SceneRenderer, Viewport};
-use crate::output::tightly_pack_rgba;
+use super::Viewport;
 use crate::visual::DrawableObject;
+use crate::Camera;
 
-/// What every render target has in common.
-///
-/// Deliberately thin. Both targets are just somewhere to render **into a
-/// `wgpu::TextureView`**, and the encoding in between is identical — only the
-/// two ends differ: how the view is acquired (an owned texture, infallibly,
-/// versus a surface that can be outdated or lost) and what happens after
-/// submission (copy + map + read pixels back, versus present). Those tails
-/// produce different things (`Vec<u8>` versus nothing), so they stay as inherent
-/// methods on each target rather than being forced through this trait; putting
-/// them here would mean returning `Option<Vec<u8>>`, where the `None` is real
-/// on-screen and therefore belongs to a different layer (I5 in #180).
-///
-/// `PickTarget` deliberately does **not** implement this: it is a second pass
-/// producing ids, not a place a frame is rendered to.
-pub trait RenderTarget {
-    /// The texture format a renderer's pipelines must be built for. Offscreen
-    /// this is [`OFFSCREEN_FORMAT`]; on-screen it is the surface's **sRGB view**
-    /// format, which is why it must be read off the target rather than assumed.
-    fn view_format(&self) -> wgpu::TextureFormat;
+/// The fixed texture-target render format. Matches the headless CLI's output
+/// target so native and browser renders are byte-identical (hardware sRGB-encode
+/// on store).
+pub const TEXTURE_TARGET_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
-    /// The current render size in pixels.
-    fn viewport(&self) -> Viewport;
-
-    /// Resizes the target to `width` x `height`.
-    fn resize(&mut self, gpu: &GpuContext, width: u32, height: u32) -> Result<(), OffscreenError>;
-}
-
-// ---------------------------------------------------------------------------
-// Offscreen
-// ---------------------------------------------------------------------------
-
-// [`OffscreenTarget`] — the shared **offscreen** render harness (#103, Part B).
-//
-// Every front-end that renders headless to pixels (the native [`Renderer`]
-// behind the CLI + GUI, `trd-wasm`'s browser `OffscreenRenderer`, `trd-gui`'s
-// browser `WebRenderer`) used to own an identical copy of the same GPU
-// plumbing: a `Rgba8UnormSrgb` target texture, a `MAP_READ` staging buffer, and
-// the per-frame *encode → copy-to-buffer → map → readback → unpad* dance. This
-// module owns that once so a renderer is just *device + queue + [`SceneRenderer`]
-// + `OffscreenTarget`*.
-//
-// **One async core, two waits.** [`OffscreenTarget::render`] is `async` because
-// the browser event loop must not be blocked during GPU readback. The only
-// genuinely target-specific bit is *how the map completes*: native blocks the
-// calling thread (`device.poll(wait_indefinitely)`) so the headless CLI/GUI can
-// drive it under `pollster::block_on`, while wasm kicks the queue once
-// (`device.poll(Poll)`) and yields via `.await` to the browser. That is a
-// two-line `cfg` split; everything else is shared.
-//
-// Device/surface creation stays in each shell (native uses
-// `downlevel_defaults`; the browser uses the adapter's real limits), and the
-// on-screen (surface) path is a separate harness.
-
-/// The fixed offscreen render format. Matches the headless CLI's output target
-/// so native and browser renders are byte-identical (hardware sRGB-encode on
-/// store).
-pub const OFFSCREEN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
-
-/// Errors creating or driving an [`OffscreenTarget`].
+/// Errors creating a render target, or reading one back.
 #[derive(Debug, Error)]
-pub enum OffscreenError {
+pub enum TargetError {
     /// A zero width or height was requested.
     #[error("render dimensions {width}x{height} are invalid (must be non-zero)")]
     InvalidDimensions { width: u32, height: u32 },
@@ -100,9 +71,6 @@ pub enum OffscreenError {
     Output(#[from] crate::OutputError),
 }
 
-/// An offscreen render target: an owned [`OFFSCREEN_FORMAT`] texture plus the
-/// `MAP_READ` staging buffer used to read it back to tightly-packed RGBA. Built
-/// once for a fixed size; [`render`](Self::render) reuses both every frame.
 /// One pass of a layered render: a scene plus the camera it is seen through.
 ///
 /// Layers exist because a composited frame is not one camera's scene — the video
@@ -124,29 +92,46 @@ impl<'a> SceneLayer<'a> {
     }
 }
 
-pub struct OffscreenTarget {
+// ---------------------------------------------------------------------------
+// Texture target
+// ---------------------------------------------------------------------------
+
+/// An owned [`TEXTURE_TARGET_FORMAT`] texture plus the `MAP_READ` staging buffer
+/// its contents are copied into to be read back as tightly-packed RGBA.
+///
+/// Allocated once for a fixed size and reused every frame;
+/// [`Renderer::render`](super::Renderer::render) draws into it and
+/// [`Renderer::read_pixels`](super::Renderer::read_pixels) reads it back.
+pub struct TextureTarget {
     texture: wgpu::Texture,
     staging: wgpu::Buffer,
-    width: u32,
-    height: u32,
+    /// The readback row stride, rounded up to
+    /// [`wgpu::COPY_BYTES_PER_ROW_ALIGNMENT`]. Stored because `copy_texture_to_buffer`
+    /// needs it and the unpad step has to undo exactly the same padding.
     padded_bytes_per_row: u32,
 }
 
-impl OffscreenTarget {
+impl TextureTarget {
     /// Allocates the render target + readback buffer for a fixed `width` ×
     /// `height`, validating non-zero dimensions and the adapter's
     /// `max_texture_dimension_2d`.
-    pub fn new(device: &wgpu::Device, width: u32, height: u32) -> Result<Self, OffscreenError> {
+    ///
+    /// Kept as an inherent constructor (rather than only
+    /// [`Renderer::create_texture_target`](super::Renderer::create_texture_target))
+    /// because a shell may need a target before it has any mesh to build a
+    /// renderer from. Either way the invariants above are established here, which
+    /// is why the fields are private (#203).
+    pub fn new(device: &wgpu::Device, width: u32, height: u32) -> Result<Self, TargetError> {
         if width == 0 || height == 0 {
-            return Err(OffscreenError::InvalidDimensions { width, height });
+            return Err(TargetError::InvalidDimensions { width, height });
         }
         let max = device.limits().max_texture_dimension_2d;
         if width > max || height > max {
-            return Err(OffscreenError::ExceedsMaxDimension { width, height, max });
+            return Err(TargetError::ExceedsMaxDimension { width, height, max });
         }
 
         let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("trd offscreen target"),
+            label: Some("trd texture target"),
             size: wgpu::Extent3d {
                 width,
                 height,
@@ -155,18 +140,18 @@ impl OffscreenTarget {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: OFFSCREEN_FORMAT,
+            format: TEXTURE_TARGET_FORMAT,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
 
         let unpadded = width
             .checked_mul(4)
-            .ok_or(OffscreenError::RowOverflow { width })?;
+            .ok_or(TargetError::RowOverflow { width })?;
         let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
         let padded_bytes_per_row = unpadded.div_ceil(align) * align;
         let staging = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("trd offscreen readback"),
+            label: Some("trd texture target readback"),
             size: u64::from(padded_bytes_per_row) * u64::from(height),
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
@@ -175,209 +160,94 @@ impl OffscreenTarget {
         Ok(Self {
             texture,
             staging,
-            width,
-            height,
             padded_bytes_per_row,
         })
     }
 
+    /// The texture format a renderer's pipelines must be built for — always
+    /// [`TEXTURE_TARGET_FORMAT`].
+    pub fn view_format(&self) -> wgpu::TextureFormat {
+        TEXTURE_TARGET_FORMAT
+    }
+
     /// The fixed render width in pixels.
     pub fn width(&self) -> u32 {
-        self.width
+        self.texture.width()
     }
 
     /// The fixed render height in pixels.
     pub fn height(&self) -> u32 {
-        self.height
+        self.texture.height()
     }
 
-    /// Encodes `scene` through `camera` onto the target with `renderer`, then reads
-    /// the target back to tightly-packed row-major RGBA (`width * height * 4`
-    /// bytes). `async` so the browser event loop is not blocked during readback;
-    /// native callers drive it with `pollster::block_on` (which the
-    /// `wait_indefinitely` poll below keeps correct).
-    pub async fn render(
-        &self,
-        gpu: &GpuContext,
-        renderer: &mut SceneRenderer,
-        camera: Camera,
-        scene: &[DrawableObject],
-    ) -> Result<Vec<u8>, OffscreenError> {
-        self.render_layers(gpu, renderer, &[SceneLayer::new(camera, scene)])
-            .await
+    /// The fixed render size in pixels.
+    pub fn size(&self) -> (u32, u32) {
+        (self.width(), self.height())
     }
 
-    /// Encodes and submits `layers` **without** reading the target back.
-    ///
-    /// Drawing is synchronous: only the readback needs to await, and pairing this
-    /// with [`read_pixels`](Self::read_pixels) keeps that fact visible instead of
-    /// making every draw call `async` (#203). [`render_layers`](Self::render_layers)
-    /// is the two composed.
-    pub fn draw_layers(
-        &self,
-        gpu: &GpuContext,
-        renderer: &mut SceneRenderer,
-        layers: &[SceneLayer<'_>],
-    ) {
-        let (device, queue) = (&gpu.device, &gpu.queue);
-        let view = self
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        for (index, layer) in layers.iter().enumerate() {
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("trd offscreen layer"),
-            });
-            if index == 0 {
-                renderer.encode(&mut encoder, &view, layer.camera, layer.scene);
-            } else {
-                renderer.encode_overlay(&mut encoder, &view, layer.camera, layer.scene);
-            }
-            // Submitted per layer, not once at the end: `SceneRenderer` uploads
-            // instances into one shared buffer, so the next layer's upload must
-            // not race the previous layer's draw.
-            queue.submit(Some(encoder.finish()));
+    /// The fixed render size as a [`Viewport`], for resolving a camera against
+    /// the target the frame actually lands in.
+    pub fn viewport(&self) -> Viewport {
+        Viewport {
+            width: self.width(),
+            height: self.height(),
         }
     }
 
-    /// Reads the target's **current contents** back as tightly-packed row-major
-    /// RGBA (`width * height * 4` bytes).
-    ///
-    /// `async` because the buffer map only resolves while the device is polled —
-    /// which this does itself, natively by blocking and on wasm by yielding, so a
-    /// caller cannot hang by forgetting to drive it.
-    ///
-    /// Reads whatever is in the texture, so calling it without a preceding draw
-    /// yields the cleared (or stale) target rather than failing.
-    pub async fn read_pixels(&self, gpu: &GpuContext) -> Result<Vec<u8>, OffscreenError> {
-        self.read_back(gpu).await
+    /// The texture a frame is drawn into.
+    pub(crate) fn texture(&self) -> &wgpu::Texture {
+        &self.texture
     }
 
-    /// Renders `layers` back-to-front into the target, then reads it back.
-    ///
-    /// The **first** layer clears; every later one preserves the accumulated color
-    /// while clearing depth, so it composites *over* what came before rather than
-    /// z-fighting with it — that is what "layer" means here (an overlay pass), not
-    /// a general depth-sorted scene split. Each layer is submitted separately,
-    /// because [`SceneRenderer`] uploads instances into one shared buffer and the
-    /// next layer's upload must not race the previous layer's draw.
-    ///
-    /// An empty `layers` renders nothing and reads the cleared target back.
-    pub async fn render_layers(
-        &self,
-        gpu: &GpuContext,
-        renderer: &mut SceneRenderer,
-        layers: &[SceneLayer<'_>],
-    ) -> Result<Vec<u8>, OffscreenError> {
-        self.draw_layers(gpu, renderer, layers);
-        self.read_pixels(gpu).await
+    /// The `MAP_READ` buffer the texture is copied into for readback.
+    pub(crate) fn staging(&self) -> &wgpu::Buffer {
+        &self.staging
     }
 
-    async fn read_back(&self, gpu: &GpuContext) -> Result<Vec<u8>, OffscreenError> {
-        let (device, queue) = (&gpu.device, &gpu.queue);
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("trd offscreen readback"),
-        });
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &self.staging,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(self.padded_bytes_per_row),
-                    rows_per_image: Some(self.height),
-                },
-            },
-            wgpu::Extent3d {
-                width: self.width,
-                height: self.height,
-                depth_or_array_layers: 1,
-            },
-        );
-        queue.submit(Some(encoder.finish()));
-
-        let slice = self.staging.slice(..);
-        let (sender, receiver) = oneshot::channel();
-        slice.map_async(wgpu::MapMode::Read, move |result| {
-            let _ = sender.send(result);
-        });
-        // Native blocks until the mapping completes; the browser kicks the queue
-        // and lets the `.await` below yield. See `platform::poll_for_map`.
-        super::platform::poll_for_map(device).map_err(|e| OffscreenError::Gpu(e.to_string()))?;
-        receiver
-            .await
-            .map_err(|_| OffscreenError::Gpu("readback callback cancelled".to_owned()))?
-            .map_err(|e| OffscreenError::Gpu(e.to_string()))?;
-
-        let packed = match slice.get_mapped_range() {
-            Ok(mapped) => {
-                tightly_pack_rgba(&mapped, self.width, self.height, self.padded_bytes_per_row)
-                    .map_err(OffscreenError::Output)
-            }
-            Err(e) => Err(OffscreenError::Gpu(e.to_string())),
-        };
-        self.staging.unmap();
-        packed
+    /// The alignment-padded readback row stride.
+    pub(crate) fn padded_bytes_per_row(&self) -> u32 {
+        self.padded_bytes_per_row
     }
 }
 
 // ---------------------------------------------------------------------------
-// Onscreen
+// Surface target
 // ---------------------------------------------------------------------------
 
-// [`OnscreenTarget`] — the shared **on-screen** (surface) render harness
-// (#103, Part B).
-//
-// The interactive front-ends that present to a live surface — the native
-// windowed `trd-app` and `trd-wasm`'s browser `CanvasRenderer` — used to own an
-// identical copy of the same per-frame present dance: build an **sRGB view** of
-// the acquired surface texture, encode the frame's [`Scene`](crate::Scene) with
-// the shared [`SceneRenderer`], submit, and present. This module owns that once,
-// so a front-end is just *device + queue + [`SceneRenderer`] + `OnscreenTarget`*
-// plus its own surface-acquire recovery policy.
-//
-// **sRGB, once.** The browser's preferred canvas format is non-sRGB (e.g.
-// `Bgra8Unorm`), so a pipeline targeting it writes *linear* values with no
-// linear→sRGB encode — darker/muddier than the headless CLI's `Rgba8UnormSrgb`
-// target. Native surfaces are usually sRGB already. Rather than each shell
-// special-casing this, [`OnscreenTarget`] always renders through the surface's
-// **sRGB view** ([`add_srgb_suffix`](wgpu::TextureFormat::add_srgb_suffix),
-// registered in `view_formats`), so both platforms match the CLI byte-for-byte.
-// Build the front-end's [`SceneRenderer`] with [`OnscreenTarget::view_format`].
-//
-// **What stays in each shell.** Device/adapter/surface creation (a winit window
-// vs a canvas, `downlevel_defaults` vs the adapter's real limits, the
-// `present_mode` choice) and the **surface-acquire recovery policy** are
-// genuinely target-specific: the native app is driven by a winit event loop, so
-// on an outdated/lost surface it reconfigures and defers to the next redraw,
-// while the browser renderer is driven imperatively per frame, so it retries
-// within the call (recreating the surface from the canvas on loss). The harness
-// exposes [`acquire`](Self::acquire), [`reconfigure`](Self::reconfigure), and
-// [`replace_surface`](Self::replace_surface) so each shell keeps its policy
-// while sharing everything mechanical.
-
-/// A live surface plus its configuration, rendered through an sRGB view so
-/// on-screen color matches the headless CLI's `Rgba8UnormSrgb` output. Owns the
-/// [`wgpu::Surface`] and its [`wgpu::SurfaceConfiguration`]; the front-end owns
-/// the device/queue, the [`SceneRenderer`], and its acquire-recovery policy.
-pub struct OnscreenTarget {
+/// A live surface plus its configuration and the **sRGB view format** frames are
+/// rendered through.
+///
+/// The browser's preferred canvas format is non-sRGB (e.g. `Bgra8Unorm`), so a
+/// pipeline targeting it writes *linear* values with no linear→sRGB encode —
+/// darker and muddier than the headless CLI's `Rgba8UnormSrgb` target. Native
+/// surfaces are usually sRGB already. Rather than each shell special-casing
+/// this, a surface target always renders through the surface's sRGB view
+/// ([`add_srgb_suffix`](wgpu::TextureFormat::add_srgb_suffix), registered in
+/// `view_formats`), so both platforms match the CLI byte-for-byte. Build the
+/// front-end's renderer with [`view_format`](Self::view_format).
+///
+/// The shell keeps what is genuinely window-specific: device/adapter/surface
+/// creation, the `present_mode` choice, and the **surface-recovery policy** it
+/// applies to what [`Renderer::render`](super::Renderer::render) reports.
+pub struct SurfaceTarget {
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
-    /// The sRGB view format the frame is rendered through (the sRGB variant of
+    /// The sRGB view format frames are rendered through (the sRGB variant of
     /// `config.format`; equal to `config.format` when it is already sRGB). The
-    /// front-end's [`SceneRenderer`] pipeline must target this format.
+    /// front-end's renderer pipeline must target this format.
     view_format: wgpu::TextureFormat,
 }
 
-impl OnscreenTarget {
+impl SurfaceTarget {
     /// Wraps an already-created surface and its default configuration, registers
     /// the sRGB view format, and configures the surface. `config` is typically
     /// obtained from [`wgpu::Surface::get_default_config`] with the shell's
-    /// chosen `present_mode` applied; this harness owns it from here.
+    /// chosen `present_mode` applied; the target owns it from here.
+    ///
+    /// Inherent rather than only
+    /// [`Renderer::create_surface_target`](super::Renderer::create_surface_target)
+    /// because both live-surface shells create their surface *before* the stream
+    /// has delivered a mesh to build a renderer from (#203).
     pub fn new(
         device: &wgpu::Device,
         surface: wgpu::Surface<'static>,
@@ -395,8 +265,8 @@ impl OnscreenTarget {
         }
     }
 
-    /// The sRGB view format the frame is rendered through. Build the front-end's
-    /// [`SceneRenderer`] with this so its pipeline target matches the view.
+    /// The sRGB view format frames are rendered through. Build the front-end's
+    /// renderer with this so its pipeline target matches the view.
     pub fn view_format(&self) -> wgpu::TextureFormat {
         self.view_format
     }
@@ -411,96 +281,155 @@ impl OnscreenTarget {
         self.config.height
     }
 
-    /// Reapplies the current configuration to the surface — the recovery step
-    /// after an outdated/lost/suboptimal acquire.
-    pub fn reconfigure(&self, device: &wgpu::Device) {
-        self.surface.configure(device, &self.config);
+    /// The current surface size in pixels.
+    pub fn size(&self) -> (u32, u32) {
+        (self.width(), self.height())
     }
 
-    /// Updates the configured size and reconfigures the surface. Ignores a zero
-    /// width or height (e.g. a minimized window).
-    pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
-        if width > 0 && height > 0 {
-            self.config.width = width;
-            self.config.height = height;
-            self.reconfigure(device);
-        }
-    }
-
-    /// Swaps in a freshly created surface (e.g. after the browser reports the
-    /// canvas surface *lost*) and reconfigures it. The new surface must target
-    /// the same canvas/window as the original.
-    pub fn replace_surface(&mut self, device: &wgpu::Device, surface: wgpu::Surface<'static>) {
-        self.surface = surface;
-        self.reconfigure(device);
-    }
-
-    /// Acquires the surface's next texture, returning wgpu's status enum verbatim
-    /// so the front-end applies its own recovery policy (native defers to a
-    /// redraw; the browser retries in-call, recreating the surface on loss).
-    pub fn acquire(&self) -> wgpu::CurrentSurfaceTexture {
-        self.surface.get_current_texture()
-    }
-
-    /// Encodes `scene` through `camera` onto `texture`'s sRGB view with `renderer`,
-    /// submits, and presents. The mechanical per-frame block shared by every
-    /// on-screen front-end; call it with a texture obtained from
-    /// [`acquire`](Self::acquire).
-    pub fn present(
-        &self,
-        gpu: &GpuContext,
-        renderer: &mut SceneRenderer,
-        texture: wgpu::SurfaceTexture,
-        camera: Camera,
-        scene: &[DrawableObject],
-    ) {
-        let (device, queue) = (&gpu.device, &gpu.queue);
-        let view = texture.texture.create_view(&wgpu::TextureViewDescriptor {
-            format: Some(self.view_format),
-            ..Default::default()
-        });
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("trd onscreen frame"),
-        });
-        renderer.encode(&mut encoder, &view, camera, scene);
-        queue.submit(Some(encoder.finish()));
-        queue.present(texture);
-    }
-}
-
-impl RenderTarget for OffscreenTarget {
-    fn view_format(&self) -> wgpu::TextureFormat {
-        OFFSCREEN_FORMAT
-    }
-
-    fn viewport(&self) -> Viewport {
-        Viewport {
-            width: self.width,
-            height: self.height,
-        }
-    }
-
-    fn resize(&mut self, gpu: &GpuContext, width: u32, height: u32) -> Result<(), OffscreenError> {
-        *self = Self::new(&gpu.device, width, height)?;
-        Ok(())
-    }
-}
-
-impl RenderTarget for OnscreenTarget {
-    fn view_format(&self) -> wgpu::TextureFormat {
-        self.view_format
-    }
-
-    fn viewport(&self) -> Viewport {
+    /// The current surface size as a [`Viewport`], for resolving a camera against
+    /// the surface the frame actually lands in.
+    pub fn viewport(&self) -> Viewport {
         Viewport {
             width: self.config.width,
             height: self.config.height,
         }
     }
 
-    /// Never fails: a surface resize reconfigures in place.
-    fn resize(&mut self, gpu: &GpuContext, width: u32, height: u32) -> Result<(), OffscreenError> {
-        OnscreenTarget::resize(self, &gpu.device, width, height);
-        Ok(())
+    /// The surface a frame is presented on.
+    pub(crate) fn surface(&self) -> &wgpu::Surface<'static> {
+        &self.surface
+    }
+
+    /// The configuration the surface was last configured with.
+    pub(crate) fn config(&self) -> &wgpu::SurfaceConfiguration {
+        &self.config
+    }
+
+    /// Records a new size. Purely data: the caller reconfigures the surface,
+    /// because *doing* something to the GPU is the renderer's job (#203).
+    pub(crate) fn set_size(&mut self, width: u32, height: u32) {
+        self.config.width = width;
+        self.config.height = height;
+    }
+
+    /// Swaps in a freshly created surface, e.g. after the browser reports the
+    /// canvas surface *lost*. The new surface must target the same
+    /// canvas/window, so the configuration (and hence the view format) still
+    /// applies; the caller reconfigures it.
+    pub(crate) fn set_surface(&mut self, surface: wgpu::Surface<'static>) {
+        self.surface = surface;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The closed set
+// ---------------------------------------------------------------------------
+
+/// Which kind of place a frame lands in.
+///
+/// A closed enum, not a trait: there are exactly two ends of the render path and
+/// no front-end has ever wanted a third, so the renderer can match on them
+/// exhaustively instead of dispatching through a vtable that could only ever
+/// hide two arms (#203).
+pub enum RenderTargetType {
+    /// A live swapchain surface; a frame is presented.
+    Surface(SurfaceTarget),
+    /// An owned texture; a frame is submitted and can be read back.
+    Texture(TextureTarget),
+}
+
+/// The render target [`Renderer::render`](super::Renderer::render) takes.
+///
+/// Deliberately just the discriminant. Size and view format are **not** mirrored
+/// here: each variant already stores them in its own form (`config.width` versus
+/// `texture.width()`), and a copy on the wrapper would be a second source of
+/// truth that a resize could leave disagreeing with the attachments. The
+/// accessors below delegate instead (#203).
+pub struct RenderTarget {
+    kind: RenderTargetType,
+}
+
+impl RenderTarget {
+    /// Wraps a live surface.
+    pub fn surface(target: SurfaceTarget) -> Self {
+        Self {
+            kind: RenderTargetType::Surface(target),
+        }
+    }
+
+    /// Wraps an owned texture.
+    pub fn texture(target: TextureTarget) -> Self {
+        Self {
+            kind: RenderTargetType::Texture(target),
+        }
+    }
+
+    /// Which kind of target this is.
+    pub fn kind(&self) -> &RenderTargetType {
+        &self.kind
+    }
+
+    /// Which kind of target this is, mutably — what
+    /// [`Renderer::render`](super::Renderer::render) matches on.
+    pub fn kind_mut(&mut self) -> &mut RenderTargetType {
+        &mut self.kind
+    }
+
+    /// The texture variant, or `None` for a surface. Readback
+    /// ([`Renderer::read_pixels`](super::Renderer::read_pixels)) takes the
+    /// concrete [`TextureTarget`], so a shell that reads pixels back projects
+    /// once here rather than the renderer growing a "not readable" runtime arm.
+    pub fn as_texture(&self) -> Option<&TextureTarget> {
+        match &self.kind {
+            RenderTargetType::Texture(target) => Some(target),
+            RenderTargetType::Surface(_) => None,
+        }
+    }
+
+    /// The surface variant, or `None` for a texture. Surface recovery
+    /// (reconfigure / replace / resize) is surface-only, so a live-surface shell
+    /// projects once here and keeps its policy typed.
+    pub fn as_surface_mut(&mut self) -> Option<&mut SurfaceTarget> {
+        match &mut self.kind {
+            RenderTargetType::Surface(target) => Some(target),
+            RenderTargetType::Texture(_) => None,
+        }
+    }
+
+    /// The texture format a renderer's pipelines must be built for: the
+    /// surface's sRGB view format, or [`TEXTURE_TARGET_FORMAT`].
+    pub fn view_format(&self) -> wgpu::TextureFormat {
+        match &self.kind {
+            RenderTargetType::Surface(target) => target.view_format(),
+            RenderTargetType::Texture(target) => target.view_format(),
+        }
+    }
+
+    /// The current render size in pixels.
+    pub fn size(&self) -> (u32, u32) {
+        match &self.kind {
+            RenderTargetType::Surface(target) => target.size(),
+            RenderTargetType::Texture(target) => target.size(),
+        }
+    }
+
+    /// The current render size as a [`Viewport`].
+    pub fn viewport(&self) -> Viewport {
+        match &self.kind {
+            RenderTargetType::Surface(target) => target.viewport(),
+            RenderTargetType::Texture(target) => target.viewport(),
+        }
+    }
+}
+
+impl From<SurfaceTarget> for RenderTarget {
+    fn from(target: SurfaceTarget) -> Self {
+        Self::surface(target)
+    }
+}
+
+impl From<TextureTarget> for RenderTarget {
+    fn from(target: TextureTarget) -> Self {
+        Self::texture(target)
     }
 }

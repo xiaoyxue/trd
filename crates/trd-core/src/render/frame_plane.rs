@@ -5,7 +5,7 @@
 //! mesh [`BoundTexture`](super::BoundTexture) albedo): the frame image is
 //! uploaded at the boundary from `frame_path`/`frame_url`, reused across frames,
 //! and sampled by a [`DrawableObject::FramePlane`](super::DrawableObject). All
-//! of the old `update_frame_texture_rgba` machinery lives here so `SceneRenderer`
+//! of the old `update_frame_texture_rgba` machinery lives here so `Renderer`
 //! only has to delegate to it.
 
 use super::GpuContext;

@@ -41,6 +41,13 @@ pub struct OffscreenRenderer {
     /// table — a streaming front-end owns the device long before it owns the
     /// meshes, so the device above is eager and this is not (#180).
     renderer: Option<Renderer>,
+    /// The texture target the harness renders into and reads back from, built
+    /// alongside `renderer` (#203): the harness owns no target of its own, so
+    /// this front-end holds the one `Renderer::with_gpu` returns. Concretely a
+    /// [`TextureTarget`](trd_core::TextureTarget), not the
+    /// [`RenderTarget`](trd_core::RenderTarget) enum, because this renderer
+    /// always reads its pixels back.
+    target: Option<trd_core::TextureTarget>,
     /// Draw mode + every overlay toggle, in the **one** type every front-end uses
     /// to describe a frame's appearance; [`Scene::from_draws`] turns it into the
     /// scene. The renderer keeps no overlay state of its own (#180).
@@ -96,6 +103,7 @@ impl OffscreenRenderer {
         Ok(Self {
             gpu,
             renderer: None,
+            target: None,
             options: RenderOptions::default(),
             width,
             height,
@@ -392,9 +400,11 @@ impl OffscreenRenderer {
     fn ensure_renderer(&mut self) -> Result<&mut Renderer, String> {
         if self.renderer.is_none() {
             let meshes = self.input.meshes();
-            let renderer = Renderer::with_gpu(self.gpu.clone(), self.width, self.height, meshes)
-                .map_err(|error| error_message("OffscreenRenderer target", error))?;
+            let (renderer, target) =
+                Renderer::with_gpu(self.gpu.clone(), self.width, self.height, meshes)
+                    .map_err(|error| error_message("OffscreenRenderer target", error))?;
             self.renderer = Some(renderer);
+            self.target = Some(target);
 
             // Bind the stream's texture (0.0.4) as the sampled albedo so
             // RenderMode::Textured meshes show it; absent ⇒ the default 1×1 white.
@@ -511,10 +521,14 @@ impl OffscreenRenderer {
         params: FrameParams,
         scene: &[DrawableObject],
     ) -> Result<Vec<u8>, String> {
+        let target = self
+            .target
+            .as_ref()
+            .expect("target built before render_frame");
         self.renderer
             .as_mut()
             .expect("renderer built before render_frame")
-            .render_params(params, scene)
+            .render_params(params, scene, target)
             .await
             .map_err(|error| error_message("offscreen render", error))
     }

@@ -35,7 +35,7 @@ pub fn create_instance() -> wgpu::Instance {
 /// allowed, so the queue is kicked once and the caller's `.await` yields control
 /// back — the readback then completes on a later turn.
 ///
-/// Both readback paths ([`OffscreenTarget`](super::OffscreenTarget) and
+/// Both readback paths ([`TextureTarget`](super::TextureTarget) and
 /// [`PickTarget`](super::PickTarget)) call this, so neither has to know which
 /// platform it is on.
 pub fn poll_for_map(device: &wgpu::Device) -> Result<(), wgpu::PollError> {

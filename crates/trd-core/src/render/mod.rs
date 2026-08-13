@@ -1,7 +1,7 @@
 //! Shared, platform-agnostic mesh rendering.
 //!
-//! [`SceneRenderer`] rasterizes a [`Scene`] of [`DrawableObject`]s through the
-//! vertex/index-buffer path used by the native `Renderer` and the browser.
+//! [`Renderer`] rasterizes a [`Scene`] of [`DrawableObject`]s through the
+//! vertex/index-buffer path used by every native and browser front-end (#203).
 
 mod batch;
 mod bound_material_maps;
@@ -24,7 +24,6 @@ mod pipeline;
 mod platform;
 mod render_target;
 mod renderer;
-mod scene_renderer;
 mod tonemap;
 #[cfg(test)]
 mod triangle_renderer;
@@ -45,12 +44,12 @@ pub use options::{Msaa, PbrConfig, RenderOptions};
 pub use pbr::PbrDebugView;
 pub use picking::PickTarget;
 pub use render_target::{
-    OffscreenError, OffscreenTarget, OnscreenTarget, RenderTarget, SceneLayer, OFFSCREEN_FORMAT,
+    RenderTarget, RenderTargetType, SceneLayer, SurfaceTarget, TargetError, TextureTarget,
+    TEXTURE_TARGET_FORMAT,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use renderer::check_dimensions;
 pub use renderer::{RenderError, Renderer, SurfaceError, SurfaceRepair};
-pub use scene_renderer::SceneRenderer;
 pub use tonemap::{ToneMapping, Tonemap};
 /// Reference + test scaffolding only (#202): the minimal canonical wgpu
 /// renderer, kept to be *read* and exercised by `render::gpu_tests`. It has no

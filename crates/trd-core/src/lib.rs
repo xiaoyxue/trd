@@ -37,15 +37,15 @@ pub use material::{AlphaMode, Auxiliary, DisneyMaterial, Material, MaterialTextu
 pub use render::{
     create_instance, AdapterFacts, CameraFormError, EnvMapData, FrameParams, GpuContext,
     GpuInitError, GpuRequest, ImageBasedLighting, Light, Lighting, Mesh, MeshShading, Msaa,
-    OffscreenError, OffscreenTarget, OnscreenTarget, PbrConfig, PbrDebugView, PickTarget,
-    PointLight, RenderOptions, RenderTarget, SceneLayer, SceneRenderer, SurfaceError,
-    SurfaceRepair, ToneMapping, Tonemap, Vertex, Viewport, OFFSCREEN_FORMAT,
+    PbrConfig, PbrDebugView, PickTarget, PointLight, RenderOptions, RenderTarget, RenderTargetType,
+    SceneLayer, SurfaceError, SurfaceRepair, SurfaceTarget, TargetError, TextureTarget,
+    ToneMapping, Tonemap, Vertex, Viewport, TEXTURE_TARGET_FORMAT,
 };
 // The visual model (scene + primitives) is plain data (no wgpu), so it sits
 // beside `mesh`/`camera`/`material` at the crate root rather than inside the
 // render backend (#203). Public paths (`trd_core::DrawableObject`) are unchanged.
 pub use visual::{Draw, DrawSelection, DrawableObject, FrameFit, GridPlane, RenderMode, Scene};
-// The offscreen harness; available on both platforms since it became async
+// The render harness; available on both platforms since readback became async
 // (#180) — the browser could not use it while it blocked on readback.
 pub use render::{RenderError, Renderer};
 pub use texture::{

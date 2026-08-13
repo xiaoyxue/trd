@@ -53,10 +53,11 @@ impl PbrState {
         }
     }
 
-    /// Pushes the staged material onto the render harness. Generic over the
-    /// render target so the offscreen and canvas surfaces share it — they are the
-    /// same `Renderer` now, differing only in where the frame lands (#180).
-    pub(crate) fn apply<T: trd_core::RenderTarget>(&self, renderer: &mut trd_core::Renderer<T>) {
+    /// Pushes the staged material onto the render harness. Shared by the
+    /// offscreen and canvas renderers — they use the same non-generic
+    /// [`trd_core::Renderer`], differing only in which target they pass to their
+    /// render calls (#203).
+    pub(crate) fn apply(&self, renderer: &mut trd_core::Renderer) {
         renderer.set_disney_material(self.material.clone());
         renderer.set_lighting(self.lighting);
         renderer.set_image_based_lighting(self.ibl);

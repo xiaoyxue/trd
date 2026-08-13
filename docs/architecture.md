@@ -25,22 +25,35 @@ video-edit timeline + VideoFrame RGBA
 
 Platform-agnostic wgpu logic, shared verbatim by every target:
 
-- **`render/` (module tree) + `shader/*.wgsl`** — `SceneRenderer`
-  (`render/scene_renderer.rs`) rasterizes a `Scene` of `DrawableObject`s into *any*
-  `wgpu::TextureView`; that one renderer is why the same code targets an offscreen
-  texture, a window swapchain, or a browser canvas. That renderer is wrapped by one
-  harness, `Renderer<T: RenderTarget>` (`render/renderer.rs`), which owns *GPU
-  context + `SceneRenderer` + target* and is generic over **where the frame lands**
-  — the only thing the two kinds of front-end disagree about.
-  `Renderer<OffscreenTarget>` (the default) renders to a texture and reads it back
-  asynchronously to RGBA (`render_scene`), serving `trd-cli`, `trd-gui`, and the
-  browser `OffscreenRenderer`; `Renderer<OnscreenTarget>` renders into a swapchain
-  texture and presents it (`present_scene`), serving `trd-app` and `trd-wasm`'s
-  `CanvasRenderer`. Both targets live in `render/render_target.rs`. Live-surface
-  shells are **not** renderers: they create the `wgpu::Surface`, then apply their
-  own recovery policy to the `PresentOutcome` the harness reports (the native
-  window defers to the next redraw; the browser reconfigures or recreates the
-  surface in-call and retries once), reaching the swapchain via `target_mut()`. Gizmo segments use
+- **`render/` (module tree) + `shader/*.wgsl`** — `Renderer` (`render/renderer.rs`)
+  is the one persistent render harness: it rasterizes a `Scene` of
+  `DrawableObject`s into *any* `wgpu::TextureView`, owning the GPU context,
+  pipelines, materials, and mesh store, with the render **target** passed as a
+  plain per-call argument rather than a type parameter or an owned field (#203).
+  A target is **pure data** — `render/render_target.rs` holds only the resources
+  a frame lands in (`TextureTarget` = texture + padded staging buffer;
+  `SurfaceTarget` = surface + config + sRGB view format; `RenderTarget` = the
+  closed enum over the two, holding just the discriminant so each variant stays
+  the single source of truth for its own size). **All** the behaviour is on the
+  renderer, behind one match: `Renderer::render(camera, scene, &mut RenderTarget)`
+  is the single render entry, dispatching to a private `render_surface` (acquire →
+  encode through the sRGB view → submit → present) or `render_texture` (encode →
+  submit). It is synchronous, returning `Result<Option<SurfaceRepair>,
+  RenderError>`; the asymmetric tail — `read_pixels`, plus the multi-camera
+  `draw_layers`/`render_layers`/`render_params` — takes the concrete
+  `&TextureTarget`, so asking a *surface* for pixels is a type error rather than a
+  runtime arm. Creating, resizing, reconfiguring and replacing a target are
+  `Renderer` functions too (`create_texture_target`, `resize_texture_target`,
+  `resize_surface`, `reconfigure_surface`, `replace_surface`); the surface ones are
+  *associated* functions taking a `&wgpu::Device`, because a window is resized and
+  repaired before the stream's mesh table has arrived to build a `Renderer` from.
+  Texture targets serve `trd-cli`, `trd-gui` and the browser `OffscreenRenderer`;
+  surface targets serve `trd-app` and `trd-wasm`'s `CanvasRenderer`. Live-surface
+  shells are **not** renderers: they create the `wgpu::Surface`, own the resulting
+  `RenderTarget`, and apply their own recovery policy to the
+  `Ok(Some(SurfaceRepair))` / `Err(RenderError::Surface(_))` the harness reports
+  (the native window defers to the next redraw; the browser reconfigures or
+  recreates the surface in-call and retries once). Gizmo segments use
   `gizmo_line.wgsl`: the vertex stage expands each model-space segment to a
   configurable pixel-width quad and the fragment stage feathers its rectangle
   distance, so axes/AABBs/grids remain anti-aliased without MSAA. Axis cone tips
@@ -52,7 +65,7 @@ Platform-agnostic wgpu logic, shared verbatim by every target:
   (a background still). Geometry is owned once (decode-once mesh store + shared
   line-quad/arrow buffers); a drawable is a light handle naming *which* primitive
   + its per-frame model. A `Scene = Vec<DrawableObject>` is rebuilt each frame;
-  every front-end hands it to `SceneRenderer::encode` without per-type branching.
+  every front-end hands it to `Renderer::encode` without per-type branching.
   The render core walks it into a flat list, batches by draw kind, binds the
   shared `P·V` camera uniform (plus viewport size for gizmo lines), and records
   the draws. Appearance (filled / wireframe / textured / **PBR**) is a *mode* of
@@ -110,7 +123,7 @@ Each is a *thin shell* that only supplies a render target and calls the core:
   `wasm-bindgen`, so one wasm build produces one JS package (`trd_wasm`) that all
   three `web/` packages stage into their own `pkg/` (#180).
   `CanvasRenderer.create(canvas)` holds a
-  persistent `SceneRenderer` + `InputSession` and renders the **same** `Scene` as
+  persistent `Renderer` + `InputSession` and renders the **same** `Scene` as
   the CLI. There is **one** config-driven front-end: `render.sh --web` writes the
   demo's `stream.arrow` + `config.json`, and
   [`web/viewer/src/viewer.ts`](../web/viewer/src/viewer.ts) fetches both and
