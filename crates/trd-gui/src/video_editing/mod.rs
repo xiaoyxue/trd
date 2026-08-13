@@ -1287,6 +1287,45 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn a_pick_click_stays_valid_when_the_same_frame_also_needs_a_render() {
+        let shared = Rc::new(VideoEditingShared::default());
+        let mut app = VideoEditingApp::new(document(), shared.clone());
+        app.selected_quad = true;
+        app.selected_asset = Some(CatalogAsset::CocaColaCan);
+
+        // A primary click makes `image_panel` report *both* `needs_render` and a
+        // pick point, so drive the real `settle_frame` with exactly that pair
+        // rather than hand-rolling the order here — hand-rolling would pass even
+        // if the app went back to handling the pick before the revision settled,
+        // which is the bug (#205).
+        let before = shared.render_revision.get();
+        app.settle_frame(&egui::Context::default(), true, Some((3, 4)), None);
+        let settled = shared.render_revision.get();
+        assert_ne!(settled, before, "the render request must bump the revision");
+
+        let pick = shared
+            .pending_pick
+            .get()
+            .expect("the click requested a pick");
+        assert_eq!(
+            pick.render_revision, settled,
+            "the pick must capture the revision the same frame's render request settled on"
+        );
+        assert_eq!(
+            shared.render_revision.get(),
+            settled,
+            "the pick path must not bump the scene revision"
+        );
+        let result = PickResult {
+            id: pick.id,
+            source_generation: pick.source_generation,
+            render_revision: pick.render_revision,
+            hit: Some(0),
+        };
+        assert!(shared.accepts_pick(&result));
+    }
+
+    #[test]
     fn newer_pick_request_invalidates_older_pick_completion() {
         let shared = VideoEditingShared::default();
         shared.request_pick((1, 2));
