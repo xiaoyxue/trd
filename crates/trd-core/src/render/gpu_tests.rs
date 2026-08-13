@@ -215,11 +215,11 @@ fn draw_then_read_pixels_matches_render_layers() {
         .expect("target builds");
 
     let camera = camera_of(FrameParams::IDENTITY, width, height);
-    let scene: Scene = [DrawableObject::Mesh {
-        mesh_id: 0,
-        model: Matrix4::IDENTITY.to_cols_array(),
-        mode: RenderMode::Filled,
-    }]
+    let scene: Scene = [DrawableObject::mesh(
+        0,
+        Matrix4::IDENTITY.to_cols_array(),
+        RenderMode::Filled,
+    )]
     .into_iter()
     .collect();
     let layers = [SceneLayer::new(camera, &scene)];
@@ -260,16 +260,18 @@ fn render_layers_composites_and_matches_render_for_one_layer() {
         .create_texture_target(width, height)
         .expect("target builds");
 
-    let at = |x: f32| DrawableObject::Mesh {
-        mesh_id: 0,
-        model: Matrix4::from_translation(Vector3::new(x, 0.0, 0.0)).to_cols_array(),
-        mode: RenderMode::Filled,
+    let at = |x: f32| {
+        DrawableObject::mesh(
+            0,
+            Matrix4::from_translation(Vector3::new(x, 0.0, 0.0)).to_cols_array(),
+            RenderMode::Filled,
+        )
     };
     let background: Scene = [at(-0.4)].into_iter().collect();
     let foreground: Scene = [at(0.0)].into_iter().collect();
-    let overlay: Scene = [DrawableObject::CoordinateAxes {
-        model: Matrix4::IDENTITY.to_cols_array(),
-    }]
+    let overlay: Scene = [DrawableObject::coordinate_axes(
+        Matrix4::IDENTITY.to_cols_array(),
+    )]
     .into_iter()
     .collect();
 
@@ -331,11 +333,11 @@ fn render_layers_composites_and_matches_render_for_one_layer() {
 #[ignore = "requires a GPU adapter"]
 #[cfg(not(target_arch = "wasm32"))]
 fn render_params_after_resizing_a_caller_owned_target() {
-    let scene: Scene = vec![DrawableObject::Mesh {
-        mesh_id: 0,
-        model: Matrix4::IDENTITY.to_cols_array(),
-        mode: RenderMode::Filled,
-    }]
+    let scene: Scene = vec![DrawableObject::mesh(
+        0,
+        Matrix4::IDENTITY.to_cols_array(),
+        RenderMode::Filled,
+    )]
     .into();
 
     let mut renderer = single(TEXTURE_TARGET_FORMAT, &Mesh::hello_triangle());
@@ -391,11 +393,11 @@ fn with_gpu_renders_identically_to_with_meshes() {
 
     let (width, height) = (64, 64);
     let meshes = [Mesh::hello_triangle()];
-    let scene: Scene = vec![DrawableObject::Mesh {
-        mesh_id: 0,
-        model: Matrix4::IDENTITY.to_cols_array(),
-        mode: RenderMode::Filled,
-    }]
+    let scene: Scene = vec![DrawableObject::mesh(
+        0,
+        Matrix4::IDENTITY.to_cols_array(),
+        RenderMode::Filled,
+    )]
     .into();
 
     let (mut owned, owned_target) =
@@ -440,11 +442,11 @@ fn first_frame_renders_with_no_setters_called() {
     // Every draw kind that reads a lazily-bound resource: Textured samples the
     // albedo, Pbr samples albedo + material maps + the environment probe.
     for mode in [RenderMode::Textured, RenderMode::Shaded] {
-        let scene: Scene = vec![DrawableObject::Mesh {
-            mesh_id: 0,
-            model: Matrix4::IDENTITY.to_cols_array(),
+        let scene: Scene = vec![DrawableObject::mesh(
+            0,
+            Matrix4::IDENTITY.to_cols_array(),
             mode,
-        }]
+        )]
         .into();
         let pixels = render_with_readback(&gpu, format, width, height, |encoder, view| {
             renderer.encode(
@@ -474,11 +476,11 @@ fn mesh_renderer_draws_multiple_instances() {
     let mut mesh = single(format, &Mesh::hello_triangle());
 
     // One centered instance vs. two instances translated to opposite sides.
-    let single: Scene = [DrawableObject::Mesh {
-        mesh_id: 0,
-        model: Matrix4::IDENTITY.to_cols_array(),
-        mode: RenderMode::Filled,
-    }]
+    let single: Scene = [DrawableObject::mesh(
+        0,
+        Matrix4::IDENTITY.to_cols_array(),
+        RenderMode::Filled,
+    )]
     .into_iter()
     .collect();
     let single_px = render_with_readback(&gpu, format, width, height, |e, v| {
@@ -491,16 +493,16 @@ fn mesh_renderer_draws_multiple_instances() {
     });
 
     let two: Scene = [
-        DrawableObject::Mesh {
-            mesh_id: 0,
-            model: Matrix4::from_translation(Vector3::new(-0.4, 0.0, 0.0)).to_cols_array(),
-            mode: RenderMode::Filled,
-        },
-        DrawableObject::Mesh {
-            mesh_id: 0,
-            model: Matrix4::from_translation(Vector3::new(0.4, 0.0, 0.0)).to_cols_array(),
-            mode: RenderMode::Filled,
-        },
+        DrawableObject::mesh(
+            0,
+            Matrix4::from_translation(Vector3::new(-0.4, 0.0, 0.0)).to_cols_array(),
+            RenderMode::Filled,
+        ),
+        DrawableObject::mesh(
+            0,
+            Matrix4::from_translation(Vector3::new(0.4, 0.0, 0.0)).to_cols_array(),
+            RenderMode::Filled,
+        ),
     ]
     .into_iter()
     .collect();
@@ -579,16 +581,16 @@ fn mesh_renderer_depth_buffer_occludes_far_behind_near() {
         &[Matrix4::IDENTITY, Matrix4::IDENTITY],
     );
     let scene: Scene = [
-        DrawableObject::Mesh {
-            mesh_id: 0,
-            model: Matrix4::from_translation(Vector3::new(0.0, 0.0, 0.25)).to_cols_array(),
-            mode: RenderMode::Filled,
-        },
-        DrawableObject::Mesh {
-            mesh_id: 1,
-            model: Matrix4::from_translation(Vector3::new(0.0, 0.0, 0.75)).to_cols_array(),
-            mode: RenderMode::Filled,
-        },
+        DrawableObject::mesh(
+            0,
+            Matrix4::from_translation(Vector3::new(0.0, 0.0, 0.25)).to_cols_array(),
+            RenderMode::Filled,
+        ),
+        DrawableObject::mesh(
+            1,
+            Matrix4::from_translation(Vector3::new(0.0, 0.0, 0.75)).to_cols_array(),
+            RenderMode::Filled,
+        ),
     ]
     .into_iter()
     .collect();
@@ -618,20 +620,12 @@ fn mesh_renderer_wireframe_lights_edges_only() {
     let (width, height) = (64, 64);
     let mut mesh = single(format, &Mesh::hello_triangle());
     let model = Matrix4::IDENTITY.to_cols_array();
-    let filled_scene: Scene = [DrawableObject::Mesh {
-        mesh_id: 0,
-        model,
-        mode: RenderMode::Filled,
-    }]
-    .into_iter()
-    .collect();
-    let wire_scene: Scene = [DrawableObject::Mesh {
-        mesh_id: 0,
-        model,
-        mode: RenderMode::Wireframe,
-    }]
-    .into_iter()
-    .collect();
+    let filled_scene: Scene = [DrawableObject::mesh(0, model, RenderMode::Filled)]
+        .into_iter()
+        .collect();
+    let wire_scene: Scene = [DrawableObject::mesh(0, model, RenderMode::Wireframe)]
+        .into_iter()
+        .collect();
 
     let filled = render_with_readback(&gpu, format, width, height, |e, v| {
         mesh.encode(
@@ -744,11 +738,11 @@ fn mesh_renderer_textured_samples_bound_texture() {
 
     let mut mesh = single(format, &quad);
     mesh.set_texture(&checker);
-    let scene: Scene = [DrawableObject::Mesh {
-        mesh_id: 0,
-        model: Matrix4::IDENTITY.to_cols_array(),
-        mode: RenderMode::Textured,
-    }]
+    let scene: Scene = [DrawableObject::mesh(
+        0,
+        Matrix4::IDENTITY.to_cols_array(),
+        RenderMode::Textured,
+    )]
     .into_iter()
     .collect();
     let pixels = render_with_readback(&gpu, format, width, height, |e, v| {
@@ -800,20 +794,12 @@ fn mesh_renderer_aabb_overlay_draws_green_box() {
     let (width, height) = (64, 64);
     let mut mesh = single(format, &Mesh::hello_triangle());
     let model = Matrix4::IDENTITY.to_cols_array();
-    let plain_scene: Scene = [DrawableObject::Mesh {
-        mesh_id: 0,
-        model,
-        mode: RenderMode::Filled,
-    }]
-    .into_iter()
-    .collect();
+    let plain_scene: Scene = [DrawableObject::mesh(0, model, RenderMode::Filled)]
+        .into_iter()
+        .collect();
     let box_scene: Scene = [
-        DrawableObject::Mesh {
-            mesh_id: 0,
-            model,
-            mode: RenderMode::Filled,
-        },
-        DrawableObject::AabbBox { mesh_id: 0, model },
+        DrawableObject::mesh(0, model, RenderMode::Filled),
+        DrawableObject::aabb_box(0, model),
     ]
     .into_iter()
     .collect();
@@ -868,22 +854,12 @@ fn mesh_renderer_axes_overlay_draws_rgb_gizmo() {
     let (width, height) = (64, 64);
     let mut mesh = single(format, &Mesh::hello_triangle());
     let model = Matrix4::IDENTITY.to_cols_array();
-    let plain_scene: Scene = [DrawableObject::Mesh {
-        mesh_id: 0,
-        model,
-        mode: RenderMode::Filled,
-    }]
-    .into_iter()
-    .collect();
+    let plain_scene: Scene = [DrawableObject::mesh(0, model, RenderMode::Filled)]
+        .into_iter()
+        .collect();
     let axes_scene: Scene = [
-        DrawableObject::Mesh {
-            mesh_id: 0,
-            model,
-            mode: RenderMode::Filled,
-        },
-        DrawableObject::CoordinateAxes {
-            model: Matrix4::IDENTITY.to_cols_array(),
-        },
+        DrawableObject::mesh(0, model, RenderMode::Filled),
+        DrawableObject::coordinate_axes(Matrix4::IDENTITY.to_cols_array()),
     ]
     .into_iter()
     .collect();
@@ -948,7 +924,7 @@ fn gizmo_lines_and_arrowheads_stay_smooth_without_msaa() {
         1,
     );
     let model = Matrix4::from_scale(Vector3::new(0.5, 0.5, 0.5)).to_cols_array();
-    let scene: Scene = [DrawableObject::CoordinateAxes { model }]
+    let scene: Scene = [DrawableObject::coordinate_axes(model)]
         .into_iter()
         .collect();
 
@@ -1007,28 +983,14 @@ fn scene_composes_all_drawable_kinds_together() {
     let mut mesh = single(format, &Mesh::hello_triangle());
     let model = Matrix4::IDENTITY.to_cols_array();
 
-    let filled_only: Scene = [DrawableObject::Mesh {
-        mesh_id: 0,
-        model,
-        mode: RenderMode::Filled,
-    }]
-    .into_iter()
-    .collect();
+    let filled_only: Scene = [DrawableObject::mesh(0, model, RenderMode::Filled)]
+        .into_iter()
+        .collect();
     let composed: Scene = [
-        DrawableObject::Mesh {
-            mesh_id: 0,
-            model,
-            mode: RenderMode::Filled,
-        },
-        DrawableObject::Mesh {
-            mesh_id: 0,
-            model,
-            mode: RenderMode::Wireframe,
-        },
-        DrawableObject::AabbBox { mesh_id: 0, model },
-        DrawableObject::CoordinateAxes {
-            model: Matrix4::IDENTITY.to_cols_array(),
-        },
+        DrawableObject::mesh(0, model, RenderMode::Filled),
+        DrawableObject::mesh(0, model, RenderMode::Wireframe),
+        DrawableObject::aabb_box(0, model),
+        DrawableObject::coordinate_axes(Matrix4::IDENTITY.to_cols_array()),
     ]
     .into_iter()
     .collect();
@@ -1149,7 +1111,7 @@ fn environment_background_draws_bound_probe() {
 #[cfg(not(target_arch = "wasm32"))]
 fn mesh_renderer_renders_loaded_quad_filled_with_correct_coverage() {
     // #37/#41: a mesh loaded from OBJ (not the baked triangle) renders filled
-    // via `draw_indexed` as a `DrawableObject::Mesh`. Under the identity camera
+    // via `draw_indexed` as a `Primitive::Mesh`. Under the identity camera
     // the unit quad spans NDC [-0.5, 0.5]², i.e. the central quarter of the
     // frame — so the center is lit, the corners are dark, and coverage ≈ 25%.
     let gpu = test_gpu();
@@ -1158,11 +1120,11 @@ fn mesh_renderer_renders_loaded_quad_filled_with_correct_coverage() {
     let quad = Mesh::from_obj(QUAD_OBJ).expect("quad OBJ parses");
     let mut mesh = single(format, &quad);
 
-    let scene: Scene = [DrawableObject::Mesh {
-        mesh_id: 0,
-        model: Matrix4::IDENTITY.to_cols_array(),
-        mode: RenderMode::Filled,
-    }]
+    let scene: Scene = [DrawableObject::mesh(
+        0,
+        Matrix4::IDENTITY.to_cols_array(),
+        RenderMode::Filled,
+    )]
     .into_iter()
     .collect();
     let px = render_with_readback(&gpu, format, width, height, |e, v| {
@@ -1221,11 +1183,11 @@ fn cg_and_cv_cameras_render_matching_output() {
     let quad = Mesh::from_obj(QUAD_OBJ).expect("quad OBJ parses");
     let mut mesh = single(format, &quad);
 
-    let scene: Scene = [DrawableObject::Mesh {
-        mesh_id: 0,
-        model: Matrix4::IDENTITY.to_cols_array(),
-        mode: RenderMode::Filled,
-    }]
+    let scene: Scene = [DrawableObject::mesh(
+        0,
+        Matrix4::IDENTITY.to_cols_array(),
+        RenderMode::Filled,
+    )]
     .into_iter()
     .collect();
 
@@ -1362,11 +1324,11 @@ fn dolly_turntable_bird_eye_cg_cv_wireframe_stays_framed() {
         let k = cam.to_intrinsics();
 
         for &theta in &angles {
-            let scene: Scene = [DrawableObject::Mesh {
-                mesh_id: 0,
-                model: Mat4::from_rotation_y(theta).to_cols_array(),
-                mode: RenderMode::Wireframe,
-            }]
+            let scene: Scene = [DrawableObject::mesh(
+                0,
+                Mat4::from_rotation_y(theta).to_cols_array(),
+                RenderMode::Wireframe,
+            )]
             .into_iter()
             .collect();
 
@@ -1539,11 +1501,11 @@ fn frame_plane_composites_background_under_scene() {
     // (b) Plane + solid green mesh (the plane is the scene's background, the mesh
     // its one object): the whole frame is green, proving the mesh composites over
     // the plane.
-    let composited = Scene::from(vec![DrawableObject::Mesh {
-        mesh_id: 0,
-        model: Matrix4::IDENTITY.to_cols_array(),
-        mode: RenderMode::Filled,
-    }])
+    let composited = Scene::from(vec![DrawableObject::mesh(
+        0,
+        Matrix4::IDENTITY.to_cols_array(),
+        RenderMode::Filled,
+    )])
     .with_background(Background {
         environment: None,
         frame: Some(FrameFit::Stretch),
@@ -1556,11 +1518,11 @@ fn frame_plane_composites_background_under_scene() {
             &composited,
         );
     });
-    let foreground: Scene = [DrawableObject::Mesh {
-        mesh_id: 0,
-        model: Matrix4::IDENTITY.to_cols_array(),
-        mode: RenderMode::Filled,
-    }]
+    let foreground: Scene = [DrawableObject::mesh(
+        0,
+        Matrix4::IDENTITY.to_cols_array(),
+        RenderMode::Filled,
+    )]
     .into_iter()
     .collect();
     let two_pass = render_with_readback(&gpu, format, width, height, |e, v| {

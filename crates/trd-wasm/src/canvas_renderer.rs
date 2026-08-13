@@ -349,7 +349,7 @@ impl CanvasRenderer {
     }
 
     /// Toggles the per-draw **local** coordinate-axes gizmo for later frames — one
-    /// [`CoordinateAxes`](trd_core::DrawableObject::CoordinateAxes) gizmo at each object's own `model` (its
+    /// [`CoordinateAxes`](trd_core::Primitive::CoordinateAxes) gizmo at each object's own `model` (its
     /// reconstructed local frame, e.g. #77's quad basis). The browser twin of the
     /// native `--axes-local` flag.
     #[wasm_bindgen(js_name = setShowLocalAxes)]

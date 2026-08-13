@@ -55,15 +55,15 @@
 //!
 //! Formerly `BatchRenderer`. "Batch" there meant *batch-mode headless output* and
 //! described nothing about the type — instanced batching lives entirely in
-//! this module (`batch.rs`) — while colliding with that real meaning. The
+//! this module (`draw_command.rs`) — while colliding with that real meaning. The
 //! name now belongs to one concept: grouping draws into instanced commands
 //! (#180).
 
 use std::sync::Arc;
 
-use super::batch::{build_batches, DrawKind};
 use super::bound_material_maps::BoundMaterialMaps;
 use super::buffer::{draw_indexed, draw_vertices};
+use super::draw_command::build_batches;
 use super::env_background::{EnvBackground, EnvBackgroundSettings};
 use super::frame_plane::FramePlane;
 use super::mesh_store::{MeshGpu, MeshStore};
@@ -72,7 +72,7 @@ use crate::material::DisneyMaterial;
 use crate::math::Matrix4;
 use crate::output::tightly_pack_rgba;
 use crate::texture::Texture;
-use crate::visual::{Draw, Scene};
+use crate::visual::{Draw, Primitive, RenderMode, Scene};
 use crate::Camera;
 use futures_channel::oneshot;
 use thiserror::Error;
@@ -673,7 +673,7 @@ impl Renderer {
     }
 
     /// The number of meshes this renderer can draw; valid mesh ids in a
-    /// [`DrawableObject::Mesh`]/[`DrawableObject::AabbBox`] are in
+    /// [`Primitive::Mesh`]/[`Primitive::AabbBox`] are in
     /// `0..mesh_count()`.
     pub fn mesh_count(&self) -> usize {
         self.store.len()
@@ -1310,63 +1310,72 @@ impl Renderer {
         pass.set_vertex_buffer(1, self.store.instance_buffer.slice(..));
         for command in &batches.commands {
             let range = command.start..command.start + command.count;
-            match command.kind {
-                DrawKind::Filled(id) => {
-                    let mesh = &self.store.meshes[id];
-                    pass.set_pipeline(&self.pipelines.filled);
-                    draw_indexed(&mut pass, mesh.filled(), range);
+            match command.primitive {
+                // The one place a primitive's `mode` selects a pipeline: every
+                // other primitive has exactly one way of being drawn (#204).
+                Primitive::Mesh { mesh_id, mode } => {
+                    let mesh = &self.store.meshes[mesh_id as usize];
+                    match mode {
+                        RenderMode::Filled => {
+                            pass.set_pipeline(&self.pipelines.filled);
+                            draw_indexed(&mut pass, mesh.filled(), range);
+                        }
+                        RenderMode::Textured => {
+                            pass.set_pipeline(&self.pipelines.textured);
+                            pass.set_bind_group(1, mesh.texture.bind_group(), &[]);
+                            draw_indexed(&mut pass, mesh.filled(), range);
+                        }
+                        RenderMode::Shaded => {
+                            pass.set_pipeline(&self.pipelines.pbr);
+                            // group 0 = this mesh's PbrUniform slot (selected by a
+                            // dynamic offset), group 1 = this mesh's albedo,
+                            // group 2 = HDR env map.
+                            let offset = self.uniforms.pbr.offset(mesh_id as usize);
+                            pass.set_bind_group(0, self.uniforms.pbr.bind_group(), &[offset]);
+                            pass.set_bind_group(1, mesh.texture.bind_group(), &[]);
+                            pass.set_bind_group(2, env_bind_group, &[]);
+                            pass.set_bind_group(3, mesh.material_maps.bind_group(), &[]);
+                            draw_indexed(&mut pass, mesh.pbr(), range);
+                            // Restore group 0 = camera for the following non-PBR
+                            // draws (their pipelines' group-0 layout is the camera
+                            // uniform).
+                            pass.set_bind_group(0, self.uniforms.camera.bind_group(), &[]);
+                        }
+                        RenderMode::Wireframe => {
+                            pass.set_pipeline(&self.pipelines.wireframe);
+                            draw_indexed(&mut pass, mesh.wireframe(), range);
+                        }
+                    }
                 }
-                DrawKind::Textured(id) => {
-                    let mesh = &self.store.meshes[id];
-                    pass.set_pipeline(&self.pipelines.textured);
-                    pass.set_bind_group(1, mesh.texture.bind_group(), &[]);
-                    draw_indexed(&mut pass, mesh.filled(), range);
-                }
-                DrawKind::Shaded(id) => {
-                    let mesh = &self.store.meshes[id];
-                    pass.set_pipeline(&self.pipelines.pbr);
-                    // group 0 = this mesh's PbrUniform slot (selected by a dynamic
-                    // offset), group 1 = this mesh's albedo, group 2 = HDR env map.
-                    let offset = self.uniforms.pbr.offset(id);
-                    pass.set_bind_group(0, self.uniforms.pbr.bind_group(), &[offset]);
-                    pass.set_bind_group(1, mesh.texture.bind_group(), &[]);
-                    pass.set_bind_group(2, env_bind_group, &[]);
-                    pass.set_bind_group(3, mesh.material_maps.bind_group(), &[]);
-                    draw_indexed(&mut pass, mesh.pbr(), range);
-                    // Restore group 0 = camera for the following non-PBR draws
-                    // (their pipelines' group-0 layout is the camera uniform).
-                    pass.set_bind_group(0, self.uniforms.camera.bind_group(), &[]);
-                }
-                DrawKind::Wireframe(id) => {
-                    let mesh = &self.store.meshes[id];
-                    pass.set_pipeline(&self.pipelines.wireframe);
-                    draw_indexed(&mut pass, mesh.wireframe(), range);
-                }
-                DrawKind::Aabb(id) => {
-                    let mesh = &self.store.meshes[id];
+                Primitive::AabbBox { mesh_id } => {
+                    let mesh = &self.store.meshes[mesh_id as usize];
                     pass.set_pipeline(&self.pipelines.gizmo_line);
                     pass.set_bind_group(0, self.uniforms.gizmo.bind_group(), &[]);
                     draw_vertices(&mut pass, mesh.aabb(), range);
                     pass.set_bind_group(0, self.uniforms.camera.bind_group(), &[]);
                 }
-                DrawKind::Grid(plane) => {
+                Primitive::PlaneGrid { plane } => {
                     pass.set_pipeline(&self.pipelines.gizmo_line);
                     pass.set_bind_group(0, self.uniforms.gizmo.bind_group(), &[]);
-                    draw_vertices(&mut pass, &self.store.grid_lines[plane], range);
+                    draw_vertices(&mut pass, &self.store.grid_lines[plane.index()], range);
                     pass.set_bind_group(0, self.uniforms.camera.bind_group(), &[]);
                 }
-                DrawKind::QuadOutline(selected) => {
+                Primitive::QuadOutline { selected } => {
                     pass.set_pipeline(&self.pipelines.gizmo_line);
                     pass.set_bind_group(0, self.uniforms.gizmo.bind_group(), &[]);
-                    draw_vertices(&mut pass, &self.store.quad_lines[selected], range);
+                    draw_vertices(
+                        &mut pass,
+                        &self.store.quad_lines[usize::from(selected)],
+                        range,
+                    );
                     pass.set_bind_group(0, self.uniforms.camera.bind_group(), &[]);
                 }
-                DrawKind::Shadow => {
+                Primitive::BlobShadow => {
                     pass.set_pipeline(&self.pipelines.shadow);
                     pass.set_vertex_buffer(0, self.store.shadow_vertex_buffer.slice(..));
                     pass.draw(0..SHADOW_VERTEX_COUNT, range);
                 }
-                DrawKind::Axes => {
+                Primitive::CoordinateAxes => {
                     pass.set_pipeline(&self.pipelines.gizmo_line);
                     pass.set_bind_group(0, self.uniforms.gizmo.bind_group(), &[]);
                     draw_vertices(&mut pass, &self.store.axes_lines, range.clone());
@@ -1599,91 +1608,5 @@ impl SurfaceError {
             SurfaceError::Lost => Some(SurfaceRepair::Recreate),
             SurfaceError::Timeout | SurfaceError::Occluded | SurfaceError::Validation => None,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::visual::{DrawableObject, GridPlane, RenderMode};
-
-    fn model(tag: f32) -> [f32; 16] {
-        let mut model = Matrix4::IDENTITY.to_cols_array();
-        model[12] = tag;
-        model
-    }
-
-    fn mesh(mesh_id: u32, tag: f32, mode: RenderMode) -> DrawableObject {
-        DrawableObject::Mesh {
-            mesh_id,
-            model: model(tag),
-            mode,
-        }
-    }
-
-    #[test]
-    fn batches_in_layer_order_and_preserves_equal_kind_order() {
-        let scene = [
-            DrawableObject::CoordinateAxes { model: model(80.0) },
-            mesh(1, 61.0, RenderMode::Wireframe),
-            mesh(1, 12.0, RenderMode::Filled),
-            mesh(0, 30.0, RenderMode::Shaded),
-            DrawableObject::BlobShadow { model: model(1.0) },
-            DrawableObject::AabbBox {
-                mesh_id: 1,
-                model: model(71.0),
-            },
-            DrawableObject::PlaneGrid {
-                plane: GridPlane::Yz,
-                model: model(52.0),
-            },
-            mesh(0, 10.0, RenderMode::Filled),
-            mesh(0, 20.0, RenderMode::Textured),
-            DrawableObject::PlaneGrid {
-                plane: GridPlane::Xy,
-                model: model(50.0),
-            },
-            mesh(0, 11.0, RenderMode::Filled),
-            DrawableObject::AabbBox {
-                mesh_id: 0,
-                model: model(70.0),
-            },
-            mesh(1, 31.0, RenderMode::Shaded),
-            mesh(99, 99.0, RenderMode::Filled),
-        ];
-        let base_models = [Matrix4::IDENTITY, Matrix4::IDENTITY];
-
-        let batches = build_batches(&scene, |mesh_id| base_models.get(mesh_id).copied());
-        let commands = batches
-            .commands
-            .iter()
-            .map(|command| (command.kind, command.start, command.count))
-            .collect::<Vec<_>>();
-
-        assert_eq!(
-            commands,
-            [
-                (DrawKind::Shadow, 0, 1),
-                (DrawKind::Filled(0), 1, 2),
-                (DrawKind::Filled(1), 3, 1),
-                (DrawKind::Textured(0), 4, 1),
-                (DrawKind::Shaded(0), 5, 1),
-                (DrawKind::Shaded(1), 6, 1),
-                (DrawKind::Grid(0), 7, 1),
-                (DrawKind::Grid(2), 8, 1),
-                (DrawKind::Wireframe(1), 9, 1),
-                (DrawKind::Aabb(0), 10, 1),
-                (DrawKind::Aabb(1), 11, 1),
-                (DrawKind::Axes, 12, 1),
-            ]
-        );
-        assert_eq!(
-            batches
-                .instances
-                .iter()
-                .map(|instance| instance.model[12])
-                .collect::<Vec<_>>(),
-            [1.0, 10.0, 11.0, 12.0, 20.0, 30.0, 31.0, 50.0, 52.0, 61.0, 70.0, 71.0, 80.0,]
-        );
     }
 }

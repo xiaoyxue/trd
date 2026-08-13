@@ -164,12 +164,12 @@ pub(super) struct MeshStore {
     pub(super) axes_heads: VertexGeometry,
     /// The coordinate-plane grid geometry, one expanded-line buffer per
     /// [`GridPlane`] (indexed by [`GridPlane::index`]): XY, XZ, YZ. Each
-    /// [`DrawableObject::PlaneGrid`] draws the buffer for its plane under its own
+    /// [`PlaneGrid`](crate::Primitive::PlaneGrid) draws the buffer for its plane under its own
     /// model, supplied through the shared instance buffer.
     pub(super) grid_lines: [VertexGeometry; 3],
     pub(super) quad_lines: [VertexGeometry; 2],
     /// The contact / blob **grounding-shadow** quad geometry (six `TriangleList`
-    /// vertices, a unit XY quad); each [`DrawableObject::BlobShadow`] draws it
+    /// vertices, a unit XY quad); each [`BlobShadow`](crate::Primitive::BlobShadow) draws it
     /// under its own model through the shared instance buffer, alpha-blended.
     pub(super) shadow_vertex_buffer: wgpu::Buffer,
     pub(super) instance_buffer: wgpu::Buffer,

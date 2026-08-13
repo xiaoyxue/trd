@@ -3,12 +3,12 @@
 //! [`Renderer`] rasterizes a [`Scene`] of [`DrawableObject`]s through the
 //! vertex/index-buffer path used by every native and browser front-end (#203).
 
-mod batch;
 mod bound_material_maps;
 mod bound_texture;
 mod bound_uniform;
 mod buffer;
 mod color;
+mod draw_command;
 mod env_background;
 mod frame_params;
 mod frame_plane;

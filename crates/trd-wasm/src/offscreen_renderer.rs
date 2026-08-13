@@ -265,7 +265,7 @@ impl OffscreenRenderer {
     }
 
     /// Toggles the per-draw **local** coordinate-axes gizmo for later frames — one
-    /// [`CoordinateAxes`](trd_core::DrawableObject::CoordinateAxes) gizmo at each object's own `model`. The
+    /// [`CoordinateAxes`](trd_core::Primitive::CoordinateAxes) gizmo at each object's own `model`. The
     /// browser twin of the native `--axes-local` flag.
     #[wasm_bindgen(js_name = setShowLocalAxes)]
     pub fn set_show_local_axes(&mut self, enabled: bool) {

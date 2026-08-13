@@ -113,8 +113,8 @@ impl Scene {
         &mut self.background
     }
 
-    /// Appends one primitive. Order is draw order within a kind, so callers push
-    /// in the order the renderer's buckets expect.
+    /// Appends one primitive. Order is draw order within a primitive, so callers
+    /// push in the order the renderer's buckets expect.
     pub fn push(&mut self, object: DrawableObject) {
         self.objects.push(object);
     }
@@ -201,11 +201,11 @@ impl From<Vec<DrawableObject>> for Scene {
 /// [`Background::frame`] fit is set so the mesh scene composites on top of the
 /// bound frame texture (#63); the background is a scene-level setting rather
 /// than a leading drawable, since it carries no model and cannot be instanced
-/// (#204). Each [`Draw`] becomes one [`DrawableObject::Mesh`]
+/// (#204). Each [`Draw`] becomes one [`Primitive::Mesh`](super::Primitive::Mesh)
 /// in the draw's own [`Draw::mode`] when set, else the passed `mode`; with
 /// `show_aabb`, each also emits a tracking
-/// [`DrawableObject::AabbBox`]; with `local_grid = Some(plane)`, each
-/// **wireframe-mode** draw emits a [`DrawableObject::PlaneGrid`] on `plane` at
+/// [`Primitive::AabbBox`](super::Primitive::AabbBox); with `local_grid = Some(plane)`, each
+/// **wireframe-mode** draw emits a [`Primitive::PlaneGrid`](super::Primitive::PlaneGrid) on `plane` at
 /// **its own `model`** (a coordinate-plane lattice in that object's local frame —
 /// e.g. the `Xy` grid on a #77 placement quad's surface; scoped to wireframe
 /// draws so a filled/textured content mesh whose local `Xy` is vertical gets no
@@ -215,8 +215,8 @@ impl From<Vec<DrawableObject>> for Scene {
 /// would otherwise land on every wireframe object; pin it to the placement
 /// quad's `mesh_id` so exactly one floor grid is laid. `grid_mesh = None` keeps
 /// the "all wireframe draws" behaviour. With `show_axes`, one **world-origin**
-/// [`DrawableObject::CoordinateAxes`] is appended; with `show_local_axes`, each
-/// draw also emits a [`DrawableObject::CoordinateAxes`] at **its own `model`** —
+/// [`Primitive::CoordinateAxes`](super::Primitive::CoordinateAxes) is appended; with `show_local_axes`, each
+/// draw also emits a [`Primitive::CoordinateAxes`](super::Primitive::CoordinateAxes) at **its own `model`** —
 /// i.e. that object's *local* coordinate frame (its model-space X/Y/Z axes as
 /// placed, e.g. #77's `(e1,e2,e3)` quad frame). The order (all meshes, then all
 /// boxes, then per-draw grids, then per-draw local axes, then the world-origin
@@ -251,20 +251,13 @@ fn build_scene(
     // primitives, and nothing downstream needs to know a shadow ever existed.
     for draw in draws {
         scene.push(match draw.selection.mesh_mode(mode) {
-            Some(mode) => DrawableObject::Mesh {
-                mesh_id: draw.mesh_id,
-                model: draw.model,
-                mode,
-            },
-            None => DrawableObject::BlobShadow { model: draw.model },
+            Some(mode) => DrawableObject::mesh(draw.mesh_id, draw.model, mode),
+            None => DrawableObject::blob_shadow(draw.model),
         });
     }
     if show_aabb {
         for draw in draws.iter().filter(|d| d.selection.is_mesh()) {
-            scene.push(DrawableObject::AabbBox {
-                mesh_id: draw.mesh_id,
-                model: draw.model,
-            });
+            scene.push(DrawableObject::aabb_box(draw.mesh_id, draw.model));
         }
     }
     if let Some(plane) = local_grid {
@@ -279,10 +272,7 @@ fn build_scene(
             let is_wireframe = draw.selection.mesh_mode(mode) == Some(RenderMode::Wireframe);
             let mesh_selected = grid_mesh.is_none_or(|id| draw.mesh_id == id);
             if is_wireframe && mesh_selected {
-                scene.push(DrawableObject::PlaneGrid {
-                    plane,
-                    model: draw.model,
-                });
+                scene.push(DrawableObject::plane_grid(plane, draw.model));
             }
         }
     }
@@ -290,20 +280,20 @@ fn build_scene(
         // A shadow blob is a floor decal, not a placed object whose local frame
         // warrants an axes gizmo.
         for draw in draws.iter().filter(|d| d.selection.is_mesh()) {
-            scene.push(DrawableObject::CoordinateAxes { model: draw.model });
+            scene.push(DrawableObject::coordinate_axes(draw.model));
         }
     }
     if show_axes {
-        scene.push(DrawableObject::CoordinateAxes {
-            model: Matrix4::IDENTITY.to_cols_array(),
-        });
+        scene.push(DrawableObject::coordinate_axes(
+            Matrix4::IDENTITY.to_cols_array(),
+        ));
     }
     scene
 }
 
 /// Builds **plane-grid overlay** drawables independent of [`build_scene`]'s
 /// wireframe-scoped `local_grid` (#114): a `world_grid` lays one
-/// [`DrawableObject::PlaneGrid`] at the **world origin** (identity model — the
+/// [`Primitive::PlaneGrid`](super::Primitive::PlaneGrid) at the **world origin** (identity model — the
 /// world floor, analogous to `show_axes`), and an `object_grid` lays a
 /// `PlaneGrid` at **each drawn object's own model** frame (analogous to
 /// `show_local_axes`), ungated by render mode. Shadow draws are skipped (a blob
@@ -318,23 +308,20 @@ pub(crate) fn plane_grid_overlays(
 ) -> Vec<DrawableObject> {
     let mut grids = Vec::new();
     if let Some(plane) = world_grid {
-        grids.push(DrawableObject::PlaneGrid {
+        grids.push(DrawableObject::plane_grid(
             plane,
-            model: Matrix4::IDENTITY.to_cols_array(),
-        });
+            Matrix4::IDENTITY.to_cols_array(),
+        ));
     }
     if let Some(plane) = object_grid {
         for draw in draws.iter().filter(|d| d.selection.is_mesh()) {
-            grids.push(DrawableObject::PlaneGrid {
-                plane,
-                model: draw.model,
-            });
+            grids.push(DrawableObject::plane_grid(plane, draw.model));
         }
     }
     grids
 }
 
-/// A **selection-highlight** overlay (#141): the [`DrawableObject::AabbBox`] of a
+/// A **selection-highlight** overlay (#141): the [`Primitive::AabbBox`](super::Primitive::AabbBox) of a
 /// single object — the `selected` 0-based index into `draws` — so *only* that
 /// object's bounding box is drawn (unlike the global "show all AABBs" toggle).
 /// `None`, an out-of-range index, or a `Shadow` draw yields an empty list, so a
@@ -347,16 +334,14 @@ pub(crate) fn selection_aabb_overlay(draws: &[Draw], selected: Option<u32>) -> V
     if !draw.selection.is_mesh() {
         return Vec::new();
     }
-    vec![DrawableObject::AabbBox {
-        mesh_id: draw.mesh_id,
-        model: draw.model,
-    }]
+    vec![DrawableObject::aabb_box(draw.mesh_id, draw.model)]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::visual::DrawSelection;
+    use crate::visual::Primitive;
 
     #[test]
     fn plane_grid_overlays_place_world_and_object_grids() {
@@ -379,24 +364,18 @@ mod tests {
         // World grid ⇒ exactly one identity-model grid on the requested plane.
         let world = plane_grid_overlays(&draws, Some(GridPlane::Xz), None);
         assert_eq!(world.len(), 1);
-        assert!(matches!(
+        assert_eq!(
             world[0],
-            DrawableObject::PlaneGrid {
-                plane: GridPlane::Xz,
-                model,
-            } if model == Matrix4::IDENTITY.to_cols_array()
-        ));
+            DrawableObject::plane_grid(GridPlane::Xz, Matrix4::IDENTITY.to_cols_array())
+        );
 
         // Object grid ⇒ one grid per *non-shadow* draw, at that draw's model.
         let object = plane_grid_overlays(&draws, None, Some(GridPlane::Xz));
         assert_eq!(object.len(), 1);
-        assert!(matches!(
+        assert_eq!(
             object[0],
-            DrawableObject::PlaneGrid {
-                plane: GridPlane::Xz,
-                model,
-            } if model == draws[0].model
-        ));
+            DrawableObject::plane_grid(GridPlane::Xz, draws[0].model)
+        );
     }
 
     #[test]
@@ -440,9 +419,9 @@ mod tests {
             "the frame slot must not touch the environment slot"
         );
         // The objects keep the mesh → aabb → axes order, with nothing prepended.
-        assert!(matches!(scene[0], DrawableObject::Mesh { .. }));
-        assert!(matches!(scene[1], DrawableObject::AabbBox { .. }));
-        assert!(matches!(scene[2], DrawableObject::CoordinateAxes { .. }));
+        assert!(matches!(scene[0].primitive(), Primitive::Mesh { .. }));
+        assert!(matches!(scene[1].primitive(), Primitive::AabbBox { .. }));
+        assert!(matches!(scene[2].primitive(), Primitive::CoordinateAxes));
     }
 
     /// The two background slots are **independent** (#204): a scene may carry an
@@ -513,8 +492,8 @@ mod tests {
         let mesh_modes = |scene: &[DrawableObject]| -> Vec<RenderMode> {
             scene
                 .iter()
-                .filter_map(|o| match o {
-                    DrawableObject::Mesh { mode, .. } => Some(*mode),
+                .filter_map(|o| match o.primitive() {
+                    Primitive::Mesh { mode, .. } => Some(mode),
                     _ => None,
                 })
                 .collect()
@@ -591,8 +570,8 @@ mod tests {
         let axes_models = |scene: &[DrawableObject]| -> Vec<[f32; 16]> {
             scene
                 .iter()
-                .filter_map(|o| match o {
-                    DrawableObject::CoordinateAxes { model } => Some(*model),
+                .filter_map(|o| match o.primitive() {
+                    Primitive::CoordinateAxes => Some(o.model()),
                     _ => None,
                 })
                 .collect()
@@ -615,10 +594,10 @@ mod tests {
         assert_eq!(scene.len(), 7, "scene = {scene:?}");
         assert_eq!(scene.background().frame, Some(FrameFit::Cover));
         // Order: Mesh×2, AabbBox×2, CoordinateAxes(local)×2, CoordinateAxes(world).
-        assert!(matches!(scene[0], DrawableObject::Mesh { .. }));
-        assert!(matches!(scene[1], DrawableObject::Mesh { .. }));
-        assert!(matches!(scene[2], DrawableObject::AabbBox { .. }));
-        assert!(matches!(scene[3], DrawableObject::AabbBox { .. }));
+        assert!(matches!(scene[0].primitive(), Primitive::Mesh { .. }));
+        assert!(matches!(scene[1].primitive(), Primitive::Mesh { .. }));
+        assert!(matches!(scene[2].primitive(), Primitive::AabbBox { .. }));
+        assert!(matches!(scene[3].primitive(), Primitive::AabbBox { .. }));
 
         // The local gizmos carry each draw's own model (in draw order); the world
         // gizmo is last, at the identity (origin).
@@ -674,8 +653,8 @@ mod tests {
         let grids = |scene: &[DrawableObject]| -> Vec<(GridPlane, [f32; 16])> {
             scene
                 .iter()
-                .filter_map(|o| match o {
-                    DrawableObject::PlaneGrid { plane, model } => Some((*plane, *model)),
+                .filter_map(|o| match o.primitive() {
+                    Primitive::PlaneGrid { plane } => Some((plane, o.model())),
                     _ => None,
                 })
                 .collect()
@@ -723,8 +702,8 @@ mod tests {
             None,
             None,
         );
-        assert!(matches!(scene[0], DrawableObject::Mesh { .. }));
-        assert!(matches!(scene[1], DrawableObject::Mesh { .. }));
+        assert!(matches!(scene[0].primitive(), Primitive::Mesh { .. }));
+        assert!(matches!(scene[1].primitive(), Primitive::Mesh { .. }));
         assert_eq!(
             grids(&scene),
             vec![(GridPlane::Yz, model_a), (GridPlane::Yz, model_b)],
@@ -795,8 +774,8 @@ mod tests {
         let grids = |scene: &[DrawableObject]| -> Vec<(GridPlane, [f32; 16])> {
             scene
                 .iter()
-                .filter_map(|o| match o {
-                    DrawableObject::PlaneGrid { plane, model } => Some((*plane, *model)),
+                .filter_map(|o| match o.primitive() {
+                    Primitive::PlaneGrid { plane } => Some((plane, o.model())),
                     _ => None,
                 })
                 .collect()
@@ -900,8 +879,8 @@ mod tests {
 
         let blobs: Vec<[f32; 16]> = scene
             .iter()
-            .filter_map(|o| match o {
-                DrawableObject::BlobShadow { model } => Some(*model),
+            .filter_map(|o| match o.primitive() {
+                Primitive::BlobShadow => Some(o.model()),
                 _ => None,
             })
             .collect();
@@ -915,15 +894,15 @@ mod tests {
         // draws get AABB boxes / local axes gizmos.
         let meshes = scene
             .iter()
-            .filter(|o| matches!(o, DrawableObject::Mesh { .. }))
+            .filter(|o| matches!(o.primitive(), Primitive::Mesh { .. }))
             .count();
         let aabbs = scene
             .iter()
-            .filter(|o| matches!(o, DrawableObject::AabbBox { .. }))
+            .filter(|o| matches!(o.primitive(), Primitive::AabbBox { .. }))
             .count();
         let axes = scene
             .iter()
-            .filter(|o| matches!(o, DrawableObject::CoordinateAxes { .. }))
+            .filter(|o| matches!(o.primitive(), Primitive::CoordinateAxes))
             .count();
         assert_eq!(meshes, 2, "shadow draw is not a Mesh; bunny + quad are");
         assert_eq!(aabbs, 2, "no AABB for the shadow draw");
@@ -963,16 +942,8 @@ mod tests {
                 None
             ),
             [
-                DrawableObject::Mesh {
-                    mesh_id: 0,
-                    model: a,
-                    mode: RenderMode::Filled,
-                },
-                DrawableObject::Mesh {
-                    mesh_id: 1,
-                    model: b,
-                    mode: RenderMode::Filled,
-                },
+                DrawableObject::mesh(0, a, RenderMode::Filled),
+                DrawableObject::mesh(1, b, RenderMode::Filled),
             ]
         );
 
@@ -989,16 +960,8 @@ mod tests {
                 None
             ),
             [
-                DrawableObject::Mesh {
-                    mesh_id: 0,
-                    model: a,
-                    mode: RenderMode::Wireframe,
-                },
-                DrawableObject::Mesh {
-                    mesh_id: 1,
-                    model: b,
-                    mode: RenderMode::Wireframe,
-                },
+                DrawableObject::mesh(0, a, RenderMode::Wireframe),
+                DrawableObject::mesh(1, b, RenderMode::Wireframe),
             ]
         );
 
@@ -1015,27 +978,11 @@ mod tests {
                 None
             ),
             [
-                DrawableObject::Mesh {
-                    mesh_id: 0,
-                    model: a,
-                    mode: RenderMode::Filled,
-                },
-                DrawableObject::Mesh {
-                    mesh_id: 1,
-                    model: b,
-                    mode: RenderMode::Filled,
-                },
-                DrawableObject::AabbBox {
-                    mesh_id: 0,
-                    model: a,
-                },
-                DrawableObject::AabbBox {
-                    mesh_id: 1,
-                    model: b,
-                },
-                DrawableObject::CoordinateAxes {
-                    model: Matrix4::IDENTITY.to_cols_array(),
-                },
+                DrawableObject::mesh(0, a, RenderMode::Filled),
+                DrawableObject::mesh(1, b, RenderMode::Filled),
+                DrawableObject::aabb_box(0, a),
+                DrawableObject::aabb_box(1, b),
+                DrawableObject::coordinate_axes(Matrix4::IDENTITY.to_cols_array()),
             ]
         );
 
@@ -1053,18 +1000,10 @@ mod tests {
                 None
             ),
             [
-                DrawableObject::Mesh {
-                    mesh_id: 0,
-                    model: a,
-                    mode: RenderMode::Filled,
-                },
-                DrawableObject::Mesh {
-                    mesh_id: 1,
-                    model: b,
-                    mode: RenderMode::Filled,
-                },
-                DrawableObject::CoordinateAxes { model: a },
-                DrawableObject::CoordinateAxes { model: b },
+                DrawableObject::mesh(0, a, RenderMode::Filled),
+                DrawableObject::mesh(1, b, RenderMode::Filled),
+                DrawableObject::coordinate_axes(a),
+                DrawableObject::coordinate_axes(b),
             ]
         );
 
@@ -1094,16 +1033,8 @@ mod tests {
                 None
             ),
             [
-                DrawableObject::Mesh {
-                    mesh_id: 0,
-                    model: a,
-                    mode: RenderMode::Textured,
-                },
-                DrawableObject::Mesh {
-                    mesh_id: 1,
-                    model: b,
-                    mode: RenderMode::Wireframe,
-                },
+                DrawableObject::mesh(0, a, RenderMode::Textured),
+                DrawableObject::mesh(1, b, RenderMode::Wireframe),
             ]
         );
     }

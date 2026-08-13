@@ -48,7 +48,7 @@ pub enum DrawSelection {
     Mesh(Option<RenderMode>),
     /// Draw a **contact / blob grounding shadow** on the placed mesh's ground
     /// plane instead of the mesh itself (#110 follow-up). Becomes a
-    /// [`DrawableObject::BlobShadow`](super::DrawableObject::BlobShadow); the
+    /// [`Primitive::BlobShadow`](super::Primitive::BlobShadow); the
     /// draw's `mesh_id` is ignored, since the blob uses shared gizmo geometry.
     Shadow,
 }
