@@ -13,6 +13,7 @@ use super::bound_material_maps::BoundMaterialMaps;
 use super::bound_texture::BoundTexture;
 use super::buffer::{create_instance_buffer, IndexBuf, VertexGeometry};
 use super::*;
+use crate::material::DisneyMaterial;
 use crate::math::Matrix4;
 use crate::visual::GridPlane;
 
@@ -21,6 +22,14 @@ use crate::visual::GridPlane;
 /// is a standalone box of 12 screen-space-expanded edge quads. `base_model` is
 /// the base (preview) transform pre-multiplied beneath every per-frame instance
 /// model (`effective = model · base`).
+///
+/// It owns **all** of one mesh's per-object state, shading included: the
+/// material, IBL gain, tone map and debug view used to sit on the renderer as
+/// four `Vec`s parallel to the mesh store, each allocated to the mesh count with
+/// nothing keeping them that length — one concept in two storage schemes, of
+/// which only the `Vec`s could fall out of sync (#203). They are scalars here
+/// because the `Vec` already exists one level up, in
+/// [`MeshStore::meshes`](super::mesh_store::MeshStore).
 pub(super) struct MeshGpu {
     pub(super) vertex_buffer: wgpu::Buffer,
     /// Parallel vertex buffer for the Disney PBR path (`pbr.wgsl`): the same
@@ -37,6 +46,17 @@ pub(super) struct MeshGpu {
     /// albedo) until [`set`](BoundTexture::set) via `set_mesh_texture`.
     pub(super) texture: BoundTexture,
     pub(super) material_maps: BoundMaterialMaps,
+    /// The Disney material applied to this mesh's [`RenderMode::Shaded`] draws
+    /// (#141) — so a multi-object scene gives every object its own
+    /// metallic/roughness/base_color.
+    pub(super) material: DisneyMaterial,
+    /// This mesh's environment reflection gain.
+    pub(super) ibl: ImageBasedLighting,
+    /// This mesh's output transform (exposure + tone-map curve).
+    pub(super) tone_mapping: ToneMapping,
+    /// Which PBR input this mesh renders diagnostically (`Shaded` = the real
+    /// shading).
+    pub(super) debug_view: PbrDebugView,
 }
 
 impl MeshGpu {
@@ -127,6 +147,10 @@ pub(super) fn upload_mesh(
         base_model,
         texture: BoundTexture::with_layout(gpu, texture_layout.clone()),
         material_maps: BoundMaterialMaps::with_layout(gpu, material_maps_layout.clone()),
+        material: DisneyMaterial::default(),
+        ibl: ImageBasedLighting::default(),
+        tone_mapping: ToneMapping::default(),
+        debug_view: PbrDebugView::default(),
     }
 }
 

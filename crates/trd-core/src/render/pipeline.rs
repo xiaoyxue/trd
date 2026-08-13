@@ -2,7 +2,8 @@
 //! uniform construction helpers.
 
 use super::{
-    GizmoLineVertex, GizmoUniform, InstanceRaw, PbrVertex, PickInstanceRaw, Uniform, Vertex,
+    BoundUniform, GizmoLineVertex, GizmoUniform, InstanceRaw, PbrVertex, PickInstanceRaw, Uniform,
+    Vertex,
 };
 use crate::Camera;
 
@@ -493,7 +494,7 @@ pub(crate) fn create_view_proj_binding(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     camera: Camera,
-) -> (wgpu::Buffer, wgpu::BindGroup) {
+) -> BoundUniform {
     use wgpu::util::DeviceExt;
     let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("trd view-proj uniform"),
@@ -508,7 +509,7 @@ pub(crate) fn create_view_proj_binding(
             resource: buffer.as_entire_binding(),
         }],
     });
-    (buffer, bind_group)
+    BoundUniform::new(buffer, bind_group)
 }
 
 /// Writes the camera-only `P · V` transform into an existing uniform buffer (the
@@ -524,7 +525,7 @@ pub(crate) fn create_gizmo_binding(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     camera: Camera,
-) -> (wgpu::Buffer, wgpu::BindGroup) {
+) -> BoundUniform {
     use wgpu::util::DeviceExt;
     let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("trd gizmo uniform"),
@@ -539,7 +540,7 @@ pub(crate) fn create_gizmo_binding(
             resource: buffer.as_entire_binding(),
         }],
     });
-    (buffer, bind_group)
+    BoundUniform::new(buffer, bind_group)
 }
 
 /// Updates the gizmo camera + viewport uniform for the current frame.
