@@ -1,7 +1,7 @@
 use trd_core::{
-    DecodedFrame, DisneyMaterial, Draw, DrawableObject, EnvMapData, FrameFit, FrameParams,
-    ImageBasedLighting, Lighting, RenderError, RenderMode, RenderOptions, RenderTarget, Renderer,
-    Scene, SurfaceRepair, SurfaceTarget, ToneMapping, Tonemap,
+    DecodedFrame, DisneyMaterial, Draw, EnvMapData, FrameFit, FrameParams, ImageBasedLighting,
+    Lighting, RenderError, RenderMode, RenderOptions, RenderTarget, Renderer, Scene, SurfaceRepair,
+    SurfaceTarget, ToneMapping, Tonemap,
 };
 use wasm_bindgen::prelude::*;
 
@@ -36,11 +36,11 @@ pub struct CanvasRenderer {
     /// to describe a frame's appearance; [`Scene::from_draws`] turns it into the
     /// scene. The renderer keeps no overlay state of its own (#180).
     options: RenderOptions,
-    /// Composite the uploaded background frame texture beneath the scene as a
-    /// [`DrawableObject::FramePlane`] (#63). When `true`, later frames pass
-    /// `Some(FrameFit::Stretch)` to [`build_scene`]; a [`FramePlane`] is a no-op
-    /// until a background is uploaded via
-    /// [`update_frame_texture_rgba`](Self::update_frame_texture_rgba).
+    /// Composite the uploaded background frame texture beneath the scene as the
+    /// scene's [`Background::frame`](trd_core::Background::frame) plane (#63).
+    /// When `true`, later frames pass `Some(FrameFit::Stretch)` to
+    /// [`Scene::from_draws`]; the frame plane is a no-op until a background is
+    /// uploaded via [`update_frame_texture_rgba`](Self::update_frame_texture_rgba).
     composite_frame: bool,
     /// The typed Disney PBR configuration for [`RenderMode::Shaded`] draws, set via
     /// [`set_pbr_material`](Self::set_pbr_material) before the first frame and
@@ -349,7 +349,7 @@ impl CanvasRenderer {
     }
 
     /// Toggles the per-draw **local** coordinate-axes gizmo for later frames — one
-    /// [`DrawableObject::CoordinateAxes`] at each object's own `model` (its
+    /// [`CoordinateAxes`](trd_core::DrawableObject::CoordinateAxes) gizmo at each object's own `model` (its
     /// reconstructed local frame, e.g. #77's quad basis). The browser twin of the
     /// native `--axes-local` flag.
     #[wasm_bindgen(js_name = setShowLocalAxes)]
@@ -357,8 +357,9 @@ impl CanvasRenderer {
         self.options.show_local_axes = enabled;
     }
 
-    /// Toggles compositing the uploaded background frame beneath the scene as a
-    /// [`DrawableObject::FramePlane`] (#63). The browser twin of the native
+    /// Toggles compositing the uploaded background frame beneath the scene as the
+    /// scene's [`Background::frame`](trd_core::Background::frame) plane (#63).
+    /// The browser twin of the native
     /// `--frames-base` compositing: enable it, then push one background per frame
     /// via [`update_frame_texture_rgba`](Self::update_frame_texture_rgba) *before*
     /// that frame's [`push_ipc`](Self::push_ipc). Has no visible effect until a
@@ -466,7 +467,7 @@ impl CanvasRenderer {
     /// so a recoverable outcome is repaired here and the frame retried exactly
     /// once. That policy is the front-end's; the harness only reports what
     /// happened (#180).
-    fn present(&mut self, params: FrameParams, scene: &[DrawableObject]) -> Result<(), JsValue> {
+    fn present(&mut self, params: FrameParams, scene: &Scene) -> Result<(), JsValue> {
         match self.present_once(params, scene) {
             // Presented. A repair (the surface no longer matches the canvas) is
             // applied now so the *next* frame is clean; this one is on screen.
@@ -503,12 +504,7 @@ impl CanvasRenderer {
         }
     }
 
-    fn retry(
-        &mut self,
-        params: FrameParams,
-        scene: &[DrawableObject],
-        recovery: &str,
-    ) -> Result<(), JsValue> {
+    fn retry(&mut self, params: FrameParams, scene: &Scene, recovery: &str) -> Result<(), JsValue> {
         match self.present_once(params, scene) {
             Ok(repair) => {
                 if repair.is_some() {
@@ -527,7 +523,7 @@ impl CanvasRenderer {
     fn present_once(
         &mut self,
         params: FrameParams,
-        scene: &[DrawableObject],
+        scene: &Scene,
     ) -> Result<Option<SurfaceRepair>, RenderError> {
         // Wire-decoded params: resolve against the surface's own size, so the
         // camera's viewport cannot disagree with the attachments (#203).

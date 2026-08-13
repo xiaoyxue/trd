@@ -19,15 +19,21 @@ Guidance for agents working in this repository.
   (`.cargo/config.toml`).
 - **Vertical slicing.** Each increment threads the whole stack and is
   independently end-to-end verifiable.
-- **Everything drawn is a `DrawableObject`** (`render/scene.rs`, #41): a small
+- **Everything drawn is a `DrawableObject`** (`visual/drawable.rs`, #41): a small
   `Copy` enum (`Mesh { mesh_id, model, mode }` | `AabbBox { mesh_id, model }` |
-  `CoordinateAxes { model }` | `QuadOutline { model, selected }` |
-  `FramePlane { fit }`) — the single base interface
-  for every primitive. Geometry is owned once (decode-once mesh store + shared
+  `CoordinateAxes { model }` | `PlaneGrid { plane, model }` |
+  `QuadOutline { model, selected }` | `BlobShadow { model }`) — the single base
+  interface for every primitive. **Every variant is a placed primitive**: it
+  names geometry and carries the model that places it, so it can be instanced.
+  What a frame draws *behind* them — the HDR environment probe and the
+  background frame plane — is not a primitive but a per-frame setting on
+  `Scene::background()` (`Background { environment, frame }`, two **independent**
+  `Option`s, since both are drawn: environment first, frame plane over it — #204).
+  Geometry is owned once (decode-once mesh store + shared
   gizmo buffers); a drawable is a light handle naming *which* primitive + its
   per-frame model. Every front-end hands the same `Scene`
-  (`= Vec<DrawableObject>`, rebuilt per frame) to `Renderer::encode` without
-  per-type branching; the render core batches it by draw kind. A single-object
+  (objects + background, rebuilt per frame) to `Renderer::render` without
+  per-type branching; the render core batches its objects by draw kind. A single-object
   frame is the degenerate one-element scene. Add a primitive by adding a variant,
   not by bolting flags onto the renderer. Wireframe (and PBR) is a *mode* of
   `Mesh`, not a separate variant.

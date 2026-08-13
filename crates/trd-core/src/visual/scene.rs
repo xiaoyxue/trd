@@ -1,40 +1,116 @@
-//! [`Scene`] — a frame's ordered list of primitives, and the one place it is
-//! assembled from a wire draw list.
+//! [`Scene`] — a frame's ordered list of primitives plus the [`Background`] they
+//! composite over, and the one place it is assembled from a wire draw list.
 //!
 //! [`Scene::from_draws`] is the entry point every front-end uses; the overlay
 //! builders it composes are private, so a front-end cannot assemble half a
 //! scene. That is what keeps native and browser rendering the same frame from
 //! the same inputs (#180).
+//!
+//! Objects and background are separate because they *are* separate things
+//! (#204): an object is a placed, instanceable primitive; a background is a
+//! per-frame setting with no model, no instance and no place in the draw list.
 
 use super::{Draw, DrawableObject, FrameFit, GridPlane, RenderMode};
 use crate::math::Matrix4;
+use crate::render::Tonemap;
+
+/// The camera-centered spherical HDR **environment background**: the bound
+/// environment map drawn behind everything else, as seen through this frame's
+/// camera.
+///
+/// Settings, not a primitive (#204): it carries no model and never enters the
+/// instance buffer, so it lives on [`Background`] rather than in the drawable
+/// list. `rotation` turns the probe around the world's up axis (radians),
+/// `exposure` scales its radiance, `blur` (0…1) fades it toward its blurred
+/// mips, and `tonemap` is the operator applied on the way to display.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EnvironmentBackground {
+    /// Yaw applied to the probe, in radians.
+    pub rotation: f32,
+    /// Linear radiance multiplier.
+    pub exposure: f32,
+    /// Blur amount, `0.0` (sharp) … `1.0` (fully blurred).
+    pub blur: f32,
+    /// The tone-map operator applied to the background.
+    pub tonemap: Tonemap,
+}
+
+/// What a frame draws **behind** its primitives: the environment probe and/or
+/// the background video/still frame plane.
+///
+/// Both used to be `DrawableObject` variants, which was a category error (#204):
+/// they are the only members carrying no model, the only ones the batcher had to
+/// `continue` past, and their singleton-ness had no type-level guarantee — two
+/// frame planes in one list simply meant the last one silently won. On `Scene`
+/// they are per-frame *settings*, set once, with no ordering to get wrong.
+///
+/// **Two independent `Option`s, deliberately — not one enum.** The environment
+/// and the frame plane are *not* alternatives: the renderer draws the
+/// environment first and the frame plane over it, in the same pass, and a scene
+/// may legitimately have both, either, or neither. A single
+/// `Option<BackgroundKind>` would make them mutually exclusive and silently drop
+/// one of the two for any frame that uses both.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Background {
+    /// The HDR environment probe drawn first, behind everything.
+    pub environment: Option<EnvironmentBackground>,
+    /// How the renderer's bound background frame texture (see
+    /// [`Renderer::update_frame_texture_rgba`](crate::Renderer::update_frame_texture_rgba))
+    /// maps onto the viewport (#63). A fullscreen quad authored directly in clip
+    /// space, so it ignores the camera; drawn *over* the environment and *under*
+    /// the mesh scene. `Some(fit)` with no bound texture draws nothing.
+    pub frame: Option<FrameFit>,
+}
 
 /// A frame's ordered list of [`DrawableObject`]s the renderer walks and encodes
-/// under the one shared camera `P·V` uniform. The wire authors the mesh draws
-/// (the protocol draw list); the core adds gizmo drawables (axes, AABB boxes).
-/// A single-mesh frame is the degenerate one-element scene — the renderer always
-/// iterates a `Scene`, with no single-object special case.
+/// under the one shared camera `P·V` uniform, plus the [`Background`] they
+/// composite over. The wire authors the mesh draws (the protocol draw list); the
+/// core adds gizmo drawables (axes, AABB boxes). A single-mesh frame is the
+/// degenerate one-element scene — the renderer always iterates a `Scene`, with
+/// no single-object special case.
 ///
 /// A struct rather than a `Vec` alias (#203) so assembly can live on it:
 /// [`Scene::from_draws`] is the one entry point every front-end uses, which is
 /// what keeps them all rendering the same scene from the same inputs. It
-/// [`Deref`]s to `[DrawableObject]`, so it reads like the slice it wraps.
+/// [`Deref`]s to `[DrawableObject]`, so it reads like the slice it wraps — the
+/// background is reached through [`background`](Self::background) instead of
+/// hiding among the primitives (#204).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Scene {
+    background: Background,
     objects: Vec<DrawableObject>,
 }
 
 impl Scene {
-    /// An empty scene.
+    /// An empty scene with no background.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// An empty scene with room for `capacity` objects.
+    /// An empty scene with room for `capacity` objects and no background.
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
+            background: Background::default(),
             objects: Vec::with_capacity(capacity),
         }
+    }
+
+    /// This scene with `background` behind it.
+    #[must_use]
+    pub fn with_background(mut self, background: Background) -> Self {
+        self.background = background;
+        self
+    }
+
+    /// What this frame draws behind its primitives.
+    pub fn background(&self) -> &Background {
+        &self.background
+    }
+
+    /// The background, for a front-end that turns one of its slots on or off
+    /// (e.g. an "environment background" toggle) after assembly.
+    pub fn background_mut(&mut self) -> &mut Background {
+        &mut self.background
     }
 
     /// Appends one primitive. Order is draw order within a kind, so callers push
@@ -63,8 +139,8 @@ impl Scene {
     /// the same inputs (#180), and owning it on `Scene` means the overlay
     /// builders need not be public at all (#203).
     ///
-    /// `frame` prepends a background [`DrawableObject::FramePlane`] (#63) when
-    /// the caller has a frame texture bound.
+    /// `frame` sets the [`Background::frame`] fit (#63) when the caller has a
+    /// frame texture bound.
     pub fn from_draws(
         draws: &[Draw],
         options: &crate::RenderOptions,
@@ -105,6 +181,7 @@ impl std::ops::Deref for Scene {
 impl FromIterator<DrawableObject> for Scene {
     fn from_iter<T: IntoIterator<Item = DrawableObject>>(iter: T) -> Self {
         Self {
+            background: Background::default(),
             objects: iter.into_iter().collect(),
         }
     }
@@ -112,14 +189,19 @@ impl FromIterator<DrawableObject> for Scene {
 
 impl From<Vec<DrawableObject>> for Scene {
     fn from(objects: Vec<DrawableObject>) -> Self {
-        Self { objects }
+        Self {
+            background: Background::default(),
+            objects,
+        }
     }
 }
 
 /// Builds a per-frame [`Scene`] from a wire `draws` list plus the render `mode`
-/// and overlay flags. When `frame` is `Some`, a background
-/// [`DrawableObject::FramePlane`] is pushed **first** so the mesh scene
-/// composites on top of it. Each [`Draw`] becomes one [`DrawableObject::Mesh`]
+/// and overlay flags. When `frame` is `Some`, the scene's
+/// [`Background::frame`] fit is set so the mesh scene composites on top of the
+/// bound frame texture (#63); the background is a scene-level setting rather
+/// than a leading drawable, since it carries no model and cannot be instanced
+/// (#204). Each [`Draw`] becomes one [`DrawableObject::Mesh`]
 /// in the draw's own [`Draw::mode`] when set, else the passed `mode`; with
 /// `show_aabb`, each also emits a tracking
 /// [`DrawableObject::AabbBox`]; with `local_grid = Some(plane)`, each
@@ -136,10 +218,10 @@ impl From<Vec<DrawableObject>> for Scene {
 /// [`DrawableObject::CoordinateAxes`] is appended; with `show_local_axes`, each
 /// draw also emits a [`DrawableObject::CoordinateAxes`] at **its own `model`** —
 /// i.e. that object's *local* coordinate frame (its model-space X/Y/Z axes as
-/// placed, e.g. #77's `(e1,e2,e3)` quad frame). The order (frame plane, then all
-/// meshes, then all boxes, then per-draw grids, then per-draw local axes, then
-/// the world-origin axes) matches the renderer's draw buckets so output is
-/// pixel-identical to the pre-scene, flag-driven path.
+/// placed, e.g. #77's `(e1,e2,e3)` quad frame). The order (all meshes, then all
+/// boxes, then per-draw grids, then per-draw local axes, then the world-origin
+/// axes — all of it over the background) matches the renderer's draw buckets so
+/// output is pixel-identical to the pre-scene, flag-driven path.
 ///
 /// Private: [`Scene::from_draws`] is the entry point, so a front-end cannot
 /// assemble half a scene.
@@ -159,12 +241,12 @@ fn build_scene(
             * (1 + usize::from(show_aabb)
                 + usize::from(show_local_axes)
                 + usize::from(local_grid.is_some()))
-            + usize::from(show_axes)
-            + usize::from(frame.is_some()),
-    );
-    if let Some(fit) = frame {
-        scene.push(DrawableObject::FramePlane { fit });
-    }
+            + usize::from(show_axes),
+    )
+    .with_background(Background {
+        environment: None,
+        frame,
+    });
     // The one place a `DrawSelection` is resolved: past here the scene holds
     // primitives, and nothing downstream needs to know a shadow ever existed.
     for draw in draws {
@@ -318,15 +400,14 @@ mod tests {
     }
 
     #[test]
-    fn build_scene_prepends_frame_plane_first() {
+    fn build_scene_puts_the_frame_on_the_background_not_in_the_objects() {
         let draws = [Draw {
             mesh_id: 0,
             model: Matrix4::IDENTITY.to_cols_array(),
             selection: DrawSelection::INHERIT,
         }];
 
-        // No frame ⇒ no FramePlane in the scene (byte-identical to the pre-0.0.5
-        // scene).
+        // No frame ⇒ no background frame (byte-identical to the pre-0.0.5 scene).
         let scene = build_scene(
             &draws,
             RenderMode::Filled,
@@ -337,15 +418,11 @@ mod tests {
             None,
             None,
         );
-        assert!(
-            !scene
-                .iter()
-                .any(|o| matches!(o, DrawableObject::FramePlane { .. })),
-            "no frame ⇒ no FramePlane, got {scene:?}"
-        );
+        assert_eq!(scene.background().frame, None, "no frame ⇒ no frame plane");
 
-        // Some(fit) ⇒ exactly one FramePlane, pushed FIRST (before every mesh /
-        // aabb / axes), so it composites under the scene.
+        // Some(fit) ⇒ the fit lands on the background, which the renderer draws
+        // under every primitive — so it is *not* an object in the draw list
+        // (#204).
         let scene = build_scene(
             &draws,
             RenderMode::Filled,
@@ -356,28 +433,56 @@ mod tests {
             None,
             Some(FrameFit::Cover),
         );
-        assert!(
-            matches!(
-                scene[0],
-                DrawableObject::FramePlane {
-                    fit: FrameFit::Cover
-                }
-            ),
-            "FramePlane must be first, got {:?}",
-            scene[0]
-        );
+        assert_eq!(scene.background().frame, Some(FrameFit::Cover));
         assert_eq!(
-            scene
-                .iter()
-                .filter(|o| matches!(o, DrawableObject::FramePlane { .. }))
-                .count(),
-            1,
-            "exactly one FramePlane"
+            scene.background().environment,
+            None,
+            "the frame slot must not touch the environment slot"
         );
-        // The remainder keeps the mesh → aabb → axes order.
-        assert!(matches!(scene[1], DrawableObject::Mesh { .. }));
-        assert!(matches!(scene[2], DrawableObject::AabbBox { .. }));
-        assert!(matches!(scene[3], DrawableObject::CoordinateAxes { .. }));
+        // The objects keep the mesh → aabb → axes order, with nothing prepended.
+        assert!(matches!(scene[0], DrawableObject::Mesh { .. }));
+        assert!(matches!(scene[1], DrawableObject::AabbBox { .. }));
+        assert!(matches!(scene[2], DrawableObject::CoordinateAxes { .. }));
+    }
+
+    /// The two background slots are **independent** (#204): a scene may carry an
+    /// environment probe *and* a frame plane, and the renderer draws both (the
+    /// environment first, the frame plane over it). This is the regression the
+    /// two-`Option` shape exists to prevent — a single `Option<enum>` would
+    /// silently drop one of them.
+    #[test]
+    fn both_backgrounds_can_be_set_at_once() {
+        let environment = EnvironmentBackground {
+            rotation: 0.5,
+            exposure: 1.5,
+            blur: 0.25,
+            tonemap: Tonemap::Aces,
+        };
+        let draws = [Draw {
+            mesh_id: 0,
+            model: Matrix4::IDENTITY.to_cols_array(),
+            selection: DrawSelection::INHERIT,
+        }];
+        let options = crate::RenderOptions {
+            mode: RenderMode::Filled,
+            ..Default::default()
+        };
+
+        let mut scene = Scene::from_draws(&draws, &options, Some(FrameFit::Stretch));
+        scene.background_mut().environment = Some(environment);
+
+        assert_eq!(scene.background().environment, Some(environment));
+        assert_eq!(scene.background().frame, Some(FrameFit::Stretch));
+        // Setting one slot must not disturb the objects either.
+        assert_eq!(scene.len(), 1);
+
+        // The same holds for the builder form and a plain `Background`.
+        let built = Scene::new().with_background(Background {
+            environment: Some(environment),
+            frame: Some(FrameFit::Cover),
+        });
+        assert_eq!(built.background().environment, Some(environment));
+        assert_eq!(built.background().frame, Some(FrameFit::Cover));
     }
 
     #[test]
@@ -505,14 +610,15 @@ mod tests {
             Some(FrameFit::Cover), // background frame plane
         );
 
-        // Counts: 1 frame + 2 meshes + 2 aabb + 2 local axes + 1 world axis = 8.
-        assert_eq!(scene.len(), 8, "scene = {scene:?}");
-        // Order: FramePlane, Mesh×2, AabbBox×2, CoordinateAxes(local)×2, CoordinateAxes(world).
-        assert!(matches!(scene[0], DrawableObject::FramePlane { .. }));
+        // Counts: 2 meshes + 2 aabb + 2 local axes + 1 world axis = 7 objects; the
+        // frame plane is a background setting, not an object (#204).
+        assert_eq!(scene.len(), 7, "scene = {scene:?}");
+        assert_eq!(scene.background().frame, Some(FrameFit::Cover));
+        // Order: Mesh×2, AabbBox×2, CoordinateAxes(local)×2, CoordinateAxes(world).
+        assert!(matches!(scene[0], DrawableObject::Mesh { .. }));
         assert!(matches!(scene[1], DrawableObject::Mesh { .. }));
-        assert!(matches!(scene[2], DrawableObject::Mesh { .. }));
+        assert!(matches!(scene[2], DrawableObject::AabbBox { .. }));
         assert!(matches!(scene[3], DrawableObject::AabbBox { .. }));
-        assert!(matches!(scene[4], DrawableObject::AabbBox { .. }));
 
         // The local gizmos carry each draw's own model (in draw order); the world
         // gizmo is last, at the identity (origin).

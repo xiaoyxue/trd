@@ -421,7 +421,7 @@ fn resolve_inline_frame(
 /// batch, mirroring one Arrow output batch per input record batch. When
 /// `frame_resolver` is `Some`, a frame carrying a `frame_path`/`frame_url`
 /// reference has its background image resolved + uploaded and composited
-/// beneath the scene via a [`DrawableObject`](crate::render::DrawableObject)`::FramePlane`.
+/// beneath the scene via the scene's [`Background::frame`](crate::Background::frame).
 /// `last_frame_ref` tracks the currently uploaded background so consecutive
 /// frames sharing it skip the decode + re-upload.
 #[allow(clippy::too_many_arguments)]

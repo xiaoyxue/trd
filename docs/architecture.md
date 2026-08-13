@@ -58,17 +58,28 @@ Platform-agnostic wgpu logic, shared verbatim by every target:
   configurable pixel-width quad and the fragment stage feathers its rectangle
   distance, so axes/AABBs/grids remain anti-aliased without MSAA. Axis cone tips
   reuse the unlit triangle path.
-- **`DrawableObject` + `Scene` (`render/scene.rs`)** — the base interface for every
+- **`DrawableObject` + `Scene` (`visual/`)** — the base interface for every
   primitive (#41). It is a small `Copy` enum — `Mesh { mesh_id, model, mode }`,
   `AabbBox { mesh_id, model }`, `CoordinateAxes { model }`,
-  `QuadOutline { model, selected }`, and `FramePlane { fit }`
-  (a background still). Geometry is owned once (decode-once mesh store + shared
+  `PlaneGrid { plane, model }`, `QuadOutline { model, selected }`, and
+  `BlobShadow { model }`. Every variant names geometry *and* the model that
+  places it, so every one of them can be instanced. Geometry is owned once
+  (decode-once mesh store + shared
   line-quad/arrow buffers); a drawable is a light handle naming *which* primitive
-  + its per-frame model. A `Scene = Vec<DrawableObject>` is rebuilt each frame;
-  every front-end hands it to `Renderer::encode` without per-type branching.
-  The render core walks it into a flat list, batches by draw kind, binds the
-  shared `P·V` camera uniform (plus viewport size for gizmo lines), and records
-  the draws. Appearance (filled / wireframe / textured / **PBR**) is a *mode* of
+  + its per-frame model. A `Scene` (an object list plus its `Background`) is
+  rebuilt each frame; every front-end hands it to `Renderer::render` without
+  per-type branching.
+  The render core walks its objects into a flat list, batches by draw kind, binds
+  the shared `P·V` camera uniform (plus viewport size for gizmo lines), and
+  records the draws.
+- **`Scene::background()` — what a frame draws *behind* its primitives (#204).**
+  `Background { environment: Option<EnvironmentBackground>, frame: Option<FrameFit> }`
+  holds the camera-centered HDR environment probe and the fullscreen background
+  frame plane (#63). Both were `DrawableObject` variants, and were the only two
+  carrying no model and the only two the batcher had to skip; as scene settings
+  they are set once, with no ordering or duplicate to get wrong. The two slots
+  are **independent** — a frame may draw both — and the renderer always draws the
+  environment first, then the frame plane, then the mesh scene over them. Appearance (filled / wireframe / textured / **PBR**) is a *mode* of
   the mesh drawable, not a separate primitive.
 - **Typed PBR domains (`render/{material,light,ibl,tonemap,pbr}`)** — Disney
   surface parameters and preserved glTF auxiliary data live in

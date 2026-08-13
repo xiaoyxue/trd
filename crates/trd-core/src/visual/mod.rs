@@ -10,7 +10,7 @@
 //!
 //! | module | owns |
 //! |---|---|
-//! | [`scene`] | [`Scene`] and its assembly, [`Scene::from_draws`] |
+//! | [`scene`] | [`Scene`], its [`Background`], and its assembly, [`Scene::from_draws`] |
 //! | [`drawable`] | [`DrawableObject`] — the base interface for every primitive |
 //! | [`draw`] | [`Draw`] + [`DrawSelection`], the *wire* instance record and its byte codec |
 //! | [`draw_config`] | [`RenderMode`], [`FrameFit`], [`GridPlane`] — the per-drawable configuration a front-end selects |
@@ -30,4 +30,4 @@ pub use draw::{Draw, DrawSelection};
 pub(crate) use draw_config::frame_fit_uv_scale;
 pub use draw_config::{FrameFit, GridPlane, RenderMode};
 pub use drawable::DrawableObject;
-pub use scene::Scene;
+pub use scene::{Background, EnvironmentBackground, Scene};

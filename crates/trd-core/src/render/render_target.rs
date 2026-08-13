@@ -43,7 +43,7 @@
 use thiserror::Error;
 
 use super::Viewport;
-use crate::visual::DrawableObject;
+use crate::visual::Scene;
 use crate::Camera;
 
 /// The fixed texture-target render format. Matches the headless CLI's output
@@ -81,13 +81,14 @@ pub enum TargetError {
 pub struct SceneLayer<'a> {
     /// The camera this layer is rendered through.
     pub camera: Camera,
-    /// What this layer draws.
-    pub scene: &'a [DrawableObject],
+    /// What this layer draws — its primitives *and* its own
+    /// [`Background`](crate::Background), since a layer is a whole scene.
+    pub scene: &'a Scene,
 }
 
 impl<'a> SceneLayer<'a> {
     /// A layer drawing `scene` through `camera`.
-    pub fn new(camera: Camera, scene: &'a [DrawableObject]) -> Self {
+    pub fn new(camera: Camera, scene: &'a Scene) -> Self {
         Self { camera, scene }
     }
 }

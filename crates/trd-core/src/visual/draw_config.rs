@@ -2,7 +2,7 @@
 //! fit, and which coordinate plane a grid gizmo lattices.
 //!
 //! Each belongs to one [`DrawableObject`](super::DrawableObject) variant —
-//! [`RenderMode`] to `Mesh`, [`FrameFit`] to `FramePlane`, [`GridPlane`] to
+//! [`RenderMode`] to `Mesh`, [`FrameFit`] to the background frame plane, [`GridPlane`] to
 //! `PlaneGrid` — and each is a value a **front-end selects** (all three are
 //! `trd-cli` flags). They are plain configuration: no geometry, no GPU state, no
 //! dependency on the rest of the scene model, so adding a render mode does not
@@ -45,8 +45,8 @@ pub enum RenderMode {
     Shaded,
 }
 
-/// How a [`DrawableObject::FramePlane`] maps its background image onto the
-/// viewport (#63). Both modes fill the whole viewport (no letterbox bars); they
+/// How a scene's [`Background::frame`](super::Background::frame) plane maps its
+/// background image onto the viewport (#63). Both modes fill the whole viewport (no letterbox bars); they
 /// differ only in how a mismatched image/viewport aspect is handled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FrameFit {
