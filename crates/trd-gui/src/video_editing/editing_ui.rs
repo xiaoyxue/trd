@@ -13,6 +13,7 @@ use super::{point_in_quad, CatalogAsset, VideoEditingApp, COMMAND_PAUSE, COMMAND
 impl eframe::App for VideoEditingApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.shared.context.replace(Some(ui.ctx().clone()));
+        self.consume_pending_document();
         self.sync_native_texture(_frame);
         self.consume_video_frame();
         self.consume_rendered_frame();

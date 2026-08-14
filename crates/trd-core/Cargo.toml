@@ -41,3 +41,11 @@ pollster = "0.4"
 [dev-dependencies]
 proptest = "1"
 approx = "0.5"
+
+# The browser's zero-copy video path (#229 follow-up): HtmlVideoElement is the
+# source Queue::copy_external_image_to_texture samples, so a decoded frame
+# reaches the frame-plane texture without a CPU round trip. Deliberately **not**
+# VideoFrame, which is gated behind `--cfg=web_sys_unstable_apis` and would
+# apply to the whole wasm build.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-sys = { version = "0.3", features = ["HtmlVideoElement"] }

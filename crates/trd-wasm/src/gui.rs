@@ -71,49 +71,6 @@ pub async fn start(
         start_video_editing_with(canvas, document).await
     }
 
-    /// TOY BRANCH: a video-only timeline covering every frame, mirroring the
-    /// native `media::synthesize_document`.
-    fn synthetic_document(
-        width: u32,
-        height: u32,
-        fps_num: u32,
-        fps_den: u32,
-        frame_count: u32,
-    ) -> trd_core::VideoEditingDocument {
-        let fps_num = fps_num.max(1);
-        let fps_den = fps_den.max(1);
-        let frame_count = frame_count.max(1);
-        let frames = (0..frame_count)
-            .map(|index| trd_core::VideoEditingFrame {
-                video_frame_index: index,
-                present_index: index,
-                timestamp_us: i64::from(index) * i64::from(fps_den) * 1_000_000
-                    / i64::from(fps_num),
-                k: None,
-                placement_quad: None,
-                tracked: false,
-            })
-            .collect();
-        trd_core::VideoEditingDocument {
-            video: trd_core::VideoInfo {
-                source_name: String::new(),
-                mime: "video/mp4".to_owned(),
-                codec: "unknown".to_owned(),
-                sha256: String::new(),
-                byte_length: 0,
-                width: width.max(1),
-                height: height.max(1),
-                fps_num,
-                fps_den,
-                frame_count,
-                duration_us: i64::from(frame_count) * i64::from(fps_den) * 1_000_000
-                    / i64::from(fps_num),
-            },
-            poster_bytes: Vec::new(),
-            frames,
-        }
-    }
-
     async fn start_video_editing_with(
         canvas: web_sys::HtmlCanvasElement,
         document: trd_core::VideoEditingDocument,
@@ -457,6 +414,115 @@ impl VideoEditingHandle {
             .map_err(|error| wasm_bindgen::JsValue::from_str(&error))
     }
 
+    /// Replaces the timeline from the container's **own** metadata, so frame
+    /// numbers match the source instead of a virtual grid.
+    ///
+    /// `moov` is the complete box, located by the shell (it may sit at either
+    /// end of the file). Returns the frame count on success. Falls back to
+    /// [`setVideoTimeline`](Self::set_video_timeline) if this returns an error —
+    /// an unparsed container still plays, it just cannot be numbered exactly.
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = setVideoTimelineFromMoov)]
+    pub fn set_video_timeline_from_moov(
+        &mut self,
+        moov: &[u8],
+    ) -> Result<u32, wasm_bindgen::JsValue> {
+        let info = trd_core::probe_moov(moov)
+            .ok_or_else(|| wasm_bindgen::JsValue::from_str("no video track in moov"))?;
+        let document = synthetic_document(
+            info.width,
+            info.height,
+            info.fps_num,
+            info.fps_den,
+            info.frame_count,
+        );
+        self.width = document.video.width;
+        self.height = document.video.height;
+        self.fps_num = document.video.fps_num;
+        self.fps_den = document.video.fps_den;
+        self.frame_count = document.video.frame_count;
+        self.shared.set_pending_document(document);
+        Ok(info.frame_count)
+    }
+
+    /// Replaces the timeline with one derived from the loaded video, so the
+    /// scrubber spans the real clip instead of the placeholder the editor
+    /// started with.
+    ///
+    /// `<video>` does not expose a frame rate, so frames are numbered on a
+    /// virtual `fps_num/fps_den` grid; `frameIndexAtMediaTime` and
+    /// `mediaTimeAtFrame` share that grid, so seeking stays self-consistent and
+    /// only the displayed frame *numbers* are synthetic.
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = setVideoTimeline)]
+    pub fn set_video_timeline(
+        &mut self,
+        width: u32,
+        height: u32,
+        fps_num: u32,
+        fps_den: u32,
+        duration_seconds: f64,
+    ) -> Result<(), wasm_bindgen::JsValue> {
+        if !duration_seconds.is_finite() || duration_seconds <= 0.0 {
+            return Err(wasm_bindgen::JsValue::from_str(&format!(
+                "video duration {duration_seconds} is not usable"
+            )));
+        }
+        let fps_num = fps_num.max(1);
+        let fps_den = fps_den.max(1);
+        let frame_count = (duration_seconds * f64::from(fps_num) / f64::from(fps_den)).ceil();
+        let frame_count = (frame_count as u32).max(1);
+        let document = synthetic_document(width, height, fps_num, fps_den, frame_count);
+        // Keep the handle's own copies in step: they back the validation and the
+        // media-time conversions JS calls between frames.
+        self.width = document.video.width;
+        self.height = document.video.height;
+        self.fps_num = document.video.fps_num;
+        self.fps_den = document.video.fps_den;
+        self.frame_count = document.video.frame_count;
+        self.shared.set_pending_document(document);
+        Ok(())
+    }
+
+    /// Registers the `<video>` element to copy background frames from, so the
+    /// decoded frame goes **GPU→GPU** instead of through CPU memory.
+    ///
+    /// With this set, JS stops calling `VideoFrame.copyTo` entirely and pushes
+    /// frames through [`presentVideoFrame`](Self::present_video_frame): the
+    /// browser has already decoded into GPU memory, and
+    /// `copy_external_image_to_texture` samples it there. That removes the three
+    /// full-resolution traversals per frame (`copyTo` download, the wasm
+    /// boundary copy, and the `write_texture` upload) which are the entire
+    /// remaining cost of the web path.
+    ///
+    /// Pass `null` to fall back to the pixel-buffer path.
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = setVideoElement)]
+    pub fn set_video_element(&self, element: Option<web_sys::HtmlVideoElement>) {
+        self.shared.set_video_element(element);
+    }
+
+    /// Presents the element's **current** frame without any pixel payload.
+    ///
+    /// The companion to [`setVideoElement`](Self::set_video_element): identity
+    /// (frame index, media time) still travels with the frame so the Details
+    /// timeline describes what actually reached the screen, but the pixels stay
+    /// on the GPU.
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = presentVideoFrame)]
+    pub fn present_video_frame(
+        &self,
+        width: u32,
+        height: u32,
+        frame_index: u32,
+        media_time_seconds: f64,
+    ) -> Result<(), wasm_bindgen::JsValue> {
+        if frame_index >= self.frame_count {
+            return Err(wasm_bindgen::JsValue::from_str(
+                "video frame index out of range",
+            ));
+        }
+        self.shared
+            .present_video_frame(width, height, frame_index, media_time_seconds)
+            .map_err(|error| wasm_bindgen::JsValue::from_str(&error))
+    }
+
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = setVideoStatus)]
     pub fn set_video_status(&self, loaded: bool, playing: bool) {
         self.shared.set_video_status(loaded, playing);
@@ -532,5 +598,47 @@ impl VideoEditingHandle {
         .map_err(|error| wasm_bindgen::JsValue::from_str(&error))?;
         self.shared.set_catalog_renderer(asset, renderer);
         Ok(())
+    }
+}
+
+/// TOY BRANCH: a video-only timeline covering every frame, mirroring the
+/// native `media::synthesize_document`.
+fn synthetic_document(
+    width: u32,
+    height: u32,
+    fps_num: u32,
+    fps_den: u32,
+    frame_count: u32,
+) -> trd_core::VideoEditingDocument {
+    let fps_num = fps_num.max(1);
+    let fps_den = fps_den.max(1);
+    let frame_count = frame_count.max(1);
+    let frames = (0..frame_count)
+        .map(|index| trd_core::VideoEditingFrame {
+            video_frame_index: index,
+            present_index: index,
+            timestamp_us: i64::from(index) * i64::from(fps_den) * 1_000_000 / i64::from(fps_num),
+            k: None,
+            placement_quad: None,
+            tracked: false,
+        })
+        .collect();
+    trd_core::VideoEditingDocument {
+        video: trd_core::VideoInfo {
+            source_name: String::new(),
+            mime: "video/mp4".to_owned(),
+            codec: "unknown".to_owned(),
+            sha256: String::new(),
+            byte_length: 0,
+            width: width.max(1),
+            height: height.max(1),
+            fps_num,
+            fps_den,
+            frame_count,
+            duration_us: i64::from(frame_count) * i64::from(fps_den) * 1_000_000
+                / i64::from(fps_num),
+        },
+        poster_bytes: Vec::new(),
+        frames,
     }
 }

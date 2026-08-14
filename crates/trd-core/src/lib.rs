@@ -10,6 +10,7 @@ mod gltf;
 mod material;
 mod math;
 mod mesh;
+mod mp4_probe;
 mod output;
 mod protocol;
 mod render;
@@ -25,6 +26,7 @@ pub use math::{
     Transform, Vector2, Vector3, Vector4, EPSILON,
 };
 pub use mesh::{MeshError, DEFAULT_PREVIEW_TARGET};
+pub use mp4_probe::{probe_moov, Mp4VideoInfo};
 pub use output::{output_schema, read_image_stream, OutputError, OutputSession};
 pub use protocol::{
     frame_rate_from_metadata, DecodedFrame, FrameBatch, InputSession, ProtocolError,

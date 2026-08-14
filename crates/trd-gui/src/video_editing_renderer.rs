@@ -328,6 +328,84 @@ impl VideoPlacementRenderer {
         };
         self.renderer
             .update_frame_texture_rgba(rgba, frame_width, frame_height);
+        self.draw_layers_for(
+            frame_width,
+            frame_height,
+            calibration_size,
+            background_frame,
+            quad_model,
+            quad_axes,
+            selected_quad,
+            placement_frame,
+            model,
+            state,
+        )
+    }
+
+    /// Like [`draw`](Self::draw), but the background frame is copied **straight
+    /// from a `<video>` element on the GPU** instead of being handed in as CPU
+    /// bytes (#229 follow-up).
+    ///
+    /// The browser has already decoded the frame in hardware and it lives in GPU
+    /// memory. The `rgba` path drags it down to the CPU (`VideoFrame.copyTo`
+    /// plus a YUV→RGBA conversion), across the wasm boundary, and pushes it back
+    /// up — three full-resolution traversals per frame, which is the entire
+    /// remaining cost of the web path. This leaves it on the GPU throughout, so
+    /// the frame contributes **zero** bytes of CPU traffic.
+    #[cfg(target_arch = "wasm32")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_from_video(
+        &mut self,
+        video: &web_sys::HtmlVideoElement,
+        frame_width: u32,
+        frame_height: u32,
+        calibration_size: (u32, u32),
+        background_frame: &trd_core::VideoEditingFrame,
+        quad_model: Option<trd_core::Matrix4>,
+        quad_axes: Option<trd_core::Matrix4>,
+        selected_quad: bool,
+        placement_frame: Option<&trd_core::VideoEditingFrame>,
+        model: Option<trd_core::Matrix4>,
+        state: &crate::scene::SceneState,
+    ) -> Result<(), String> {
+        self.transfers = TransferCounts {
+            frame_upload: 0, // GPU→GPU: the frame never enters CPU memory
+            readback: 0,
+            ui_upload: 0,
+            crossings: 0,
+        };
+        self.renderer
+            .update_frame_texture_from_video(video, frame_width, frame_height);
+        self.draw_layers_for(
+            frame_width,
+            frame_height,
+            calibration_size,
+            background_frame,
+            quad_model,
+            quad_axes,
+            selected_quad,
+            placement_frame,
+            model,
+            state,
+        )
+    }
+
+    /// The camera/material/scene setup and layer submission shared by both draw
+    /// paths — everything after the background frame has reached its texture.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_layers_for(
+        &mut self,
+        _frame_width: u32,
+        _frame_height: u32,
+        calibration_size: (u32, u32),
+        background_frame: &trd_core::VideoEditingFrame,
+        quad_model: Option<trd_core::Matrix4>,
+        quad_axes: Option<trd_core::Matrix4>,
+        selected_quad: bool,
+        placement_frame: Option<&trd_core::VideoEditingFrame>,
+        model: Option<trd_core::Matrix4>,
+        state: &crate::scene::SceneState,
+    ) -> Result<(), String> {
         let identity_camera = trd_core::FrameParams::IDENTITY
             .to_camera(self.viewport())
             .map_err(|error| error.to_string())?;

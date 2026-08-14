@@ -153,6 +153,14 @@ pub struct VideoEditingShared {
     skip_readback: Cell<bool>,
     /// Set when the renderer was built on the UI toolkit's own device.
     device_shared: Cell<bool>,
+    /// A timeline the host wants to swap in, picked up by the app on its next
+    /// frame. The document is fixed at construction, so a shell that only learns
+    /// the video's real duration *after* the editor started publishes it here.
+    pending_document: RefCell<Option<trd_core::VideoEditingDocument>>,
+    /// The `<video>` element to copy background frames from, GPU→GPU. When set,
+    /// callers push empty pixel buffers and the frame never enters CPU memory.
+    #[cfg(target_arch = "wasm32")]
+    video_element: RefCell<Option<web_sys::HtmlVideoElement>>,
     command: Cell<u8>,
     asset_request: Cell<u8>,
     video_url_request: RefCell<Option<String>>,
@@ -192,6 +200,9 @@ impl Default for VideoEditingShared {
             context: RefCell::new(None),
             skip_readback: Cell::new(false),
             device_shared: Cell::new(false),
+            pending_document: RefCell::new(None),
+            #[cfg(target_arch = "wasm32")]
+            video_element: RefCell::new(None),
             command: Cell::new(COMMAND_NONE),
             asset_request: Cell::new(0),
             video_url_request: RefCell::new(None),
@@ -229,6 +240,26 @@ impl VideoEditingShared {
     /// rendered texture directly into egui.
     pub fn set_skip_readback(&self, skip: bool) {
         self.skip_readback.set(skip);
+    }
+
+    /// Registers the `<video>` element background frames are copied from,
+    /// GPU→GPU. Setting it switches the render task onto
+    /// [`VideoPlacementRenderer::draw_from_video`](crate::video_editing_renderer::VideoPlacementRenderer::draw_from_video)
+    /// for any frame pushed with an empty pixel buffer.
+    #[cfg(target_arch = "wasm32")]
+    pub fn set_video_element(&self, element: Option<web_sys::HtmlVideoElement>) {
+        self.video_element.replace(element);
+    }
+
+    /// Publishes a timeline for the app to adopt on its next frame.
+    ///
+    /// The document is fixed when [`VideoEditingApp::new`] runs, but a browser
+    /// shell only learns the video's real duration on `loadedmetadata` — after
+    /// the editor has started. Without this the timeline keeps whatever span it
+    /// was constructed with, so the scrubber spans the wrong range.
+    pub fn set_pending_document(&self, document: trd_core::VideoEditingDocument) {
+        self.pending_document.replace(Some(document));
+        self.request_repaint();
     }
 
     /// Declares that the renderer was built on the **UI toolkit's own device**,
@@ -269,6 +300,41 @@ impl VideoEditingShared {
                 rgba.len()
             ));
         }
+        self.push_frame(rgba, width, height, frame_index, media_time_seconds)
+    }
+
+    /// Presents a frame whose **pixels stay on the GPU**: only its identity
+    /// crosses, and the renderer copies the image from the registered `<video>`
+    /// element (see [`set_video_element`](Self::set_video_element)).
+    ///
+    /// Separate from [`update_video_frame_rgba`](Self::update_video_frame_rgba)
+    /// rather than a relaxed length check on it, so the pixel-buffer path keeps
+    /// its invariant: an empty buffer there is still an error.
+    #[cfg(target_arch = "wasm32")]
+    pub fn present_video_frame(
+        &self,
+        width: u32,
+        height: u32,
+        frame_index: u32,
+        media_time_seconds: f64,
+    ) -> Result<(), String> {
+        if self.video_element.borrow().is_none() {
+            return Err("no <video> element registered for GPU frame copies".to_owned());
+        }
+        if width == 0 || height == 0 {
+            return Err(format!("video frame has invalid size {width}x{height}"));
+        }
+        self.push_frame(Vec::new(), width, height, frame_index, media_time_seconds)
+    }
+
+    fn push_frame(
+        &self,
+        rgba: Vec<u8>,
+        width: u32,
+        height: u32,
+        frame_index: u32,
+        media_time_seconds: f64,
+    ) -> Result<(), String> {
         self.frame.replace(Some(IncomingVideoFrame {
             rgba,
             width,
@@ -552,6 +618,25 @@ impl VideoEditingApp {
         self.shared.set_skip_readback(true);
     }
 
+    /// Adopts a timeline published by the shell, if any.
+    ///
+    /// Resets playback position and cached frame state: the old indices refer to
+    /// a different timeline and would otherwise be read against the new one.
+    fn consume_pending_document(&mut self) {
+        let Some(document) = self.shared.pending_document.borrow_mut().take() else {
+            return;
+        };
+        self.display_size = (document.video.width, document.video.height);
+        self.document = document;
+        self.current_frame_index = 0;
+        self.displayed_frame_index = 0;
+        self.displayed_frame_ready = false;
+        self.last_rendered_frame_index = None;
+        self.displayed_diagnostics = None;
+        self.pending_seek_target = None;
+        self.last_pick_result = None;
+    }
+
     fn ensure_texture(&mut self, context: &egui::Context) {
         if self.display_texture.is_none() {
             self.display_texture = Some(context.load_texture(
@@ -772,8 +857,26 @@ impl VideoEditingApp {
             let result = if shared.skip_readback.get() {
                 // Shared-device path: the rendered texture is bound straight into
                 // egui, so there is nothing to read back.
-                renderer
-                    .draw(
+                //
+                // When the shell also handed us the `<video>` element, the frame
+                // is copied GPU→GPU and `video.rgba` is empty — see
+                // `VideoEditingShared::set_video_element`.
+                #[cfg(target_arch = "wasm32")]
+                let drawn = match shared.video_element.borrow().as_ref() {
+                    Some(element) if video.rgba.is_empty() => renderer.draw_from_video(
+                        element,
+                        video.width,
+                        video.height,
+                        (width, height),
+                        &background_frame,
+                        quad_model,
+                        quad_axes,
+                        show_quad_gizmo,
+                        placement_frame.as_ref(),
+                        model,
+                        &state,
+                    ),
+                    _ => renderer.draw(
                         &video.rgba,
                         video.width,
                         video.height,
@@ -785,8 +888,23 @@ impl VideoEditingApp {
                         placement_frame.as_ref(),
                         model,
                         &state,
-                    )
-                    .map(|()| Vec::new())
+                    ),
+                };
+                #[cfg(not(target_arch = "wasm32"))]
+                let drawn = renderer.draw(
+                    &video.rgba,
+                    video.width,
+                    video.height,
+                    (width, height),
+                    &background_frame,
+                    quad_model,
+                    quad_axes,
+                    show_quad_gizmo,
+                    placement_frame.as_ref(),
+                    model,
+                    &state,
+                );
+                drawn.map(|()| Vec::new())
             } else {
                 renderer
                     .render(
