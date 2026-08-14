@@ -161,6 +161,7 @@ pub async fn start(
         trd_core::Lighting {
             ambient: 0.0,
             scale: 0.0,
+            ..trd_core::Lighting::default()
         }
     } else {
         trd_core::Lighting::default()

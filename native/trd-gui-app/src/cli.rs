@@ -162,7 +162,6 @@ impl Cli {
     pub fn image_based_lighting(&self) -> ImageBasedLighting {
         ImageBasedLighting {
             intensity: self.env_intensity,
-            ..ImageBasedLighting::default()
         }
     }
 

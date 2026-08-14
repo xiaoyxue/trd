@@ -200,10 +200,7 @@ fn pbr_options(tonemap: Tonemap) -> RenderOptions {
                 ambient: 0.05,
                 ..Lighting::default()
             },
-            ibl: ImageBasedLighting {
-                intensity: 1.0,
-                ..ImageBasedLighting::default()
-            },
+            ibl: ImageBasedLighting { intensity: 1.0 },
             tone_mapping: ToneMapping {
                 operator: tonemap,
                 exposure: 1.4,

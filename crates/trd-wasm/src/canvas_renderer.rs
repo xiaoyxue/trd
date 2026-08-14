@@ -306,7 +306,6 @@ impl CanvasRenderer {
         };
         let ibl = ImageBasedLighting {
             intensity: env_intensity,
-            ..ImageBasedLighting::default()
         };
         let tone_mapping = ToneMapping {
             exposure,
