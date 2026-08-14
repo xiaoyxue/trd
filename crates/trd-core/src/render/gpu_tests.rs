@@ -1085,7 +1085,6 @@ fn environment_background_draws_bound_probe() {
     ));
     let scene = Scene::new().with_background(Background {
         environment: Some(EnvironmentBackground {
-            rotation: 0.0,
             exposure: 1.0,
             blur: 0.0,
             tonemap: Tonemap::Reinhard,

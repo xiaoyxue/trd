@@ -129,9 +129,12 @@ does no file I/O) and downscaled to the renderer's 2048 px limit;
 
 For glTF PBR, trd precomputes a GGX-filtered PMREM mip chain, diffuse irradiance
 map, and split-sum BRDF integration LUT. This avoids view-dependent noise while
-preserving roughness-dependent reflections. The GUI can show/blur/rotate the
-camera-centered environment background independently; its rotation is shared
-with IBL.
+preserving roughness-dependent reflections. The GUI can show and blur the
+camera-centered environment background independently, and rotate it — but the
+**yaw is one value**, `Lighting::environment.rotation` (an
+[`EnvironmentLight`](../crates/trd-core/src/light.rs)), driving the visible sky
+and the reflections together. It used to exist twice, per-mesh and per-scene,
+with nothing keeping them equal (#182).
 
 ## Interactive editing — `trd-gui`
 

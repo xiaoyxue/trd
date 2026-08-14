@@ -32,6 +32,9 @@ struct PbrSceneUniform {
     camera_pos: vec4<f32>,
     // num_dir_lights, num_point_lights, ambient, light_scale
     light_params: vec4<f32>,
+    // env gain, env yaw (radians), reserved, reserved — the yaw is the single
+    // source of truth for both the reflections and the sky behind them (#182).
+    env_params: vec4<f32>,
     // xyz = direction the light travels, w = intensity
     dir_lights: array<vec4<f32>, MAX_LIGHTS>,
     // xyz = world position, w = intensity
@@ -48,7 +51,7 @@ struct PbrUniform {
     mat2: vec4<f32>,
     // baseColorTint.rgb, debug view
     mat3: vec4<f32>,
-    // tonemap mode (0 = reinhard, 1 = aces), env rotation, has normal map, has mr map
+    // tonemap mode (0 = reinhard, 1 = aces), reserved, has normal map, has mr map
     mat4: vec4<f32>,
 };
 
@@ -203,7 +206,7 @@ fn environment_uv(direction: vec3<f32>) -> vec2<f32> {
     let theta = acos(d.y);
     var phi = atan2(d.x, d.z) + PI;
     let two_pi = 2.0 * PI;
-    let rotate = PI - u.mat4.y;
+    let rotate = PI - scene.env_params.y;
     phi = (phi + rotate) - floor((phi + rotate) / two_pi) * two_pi;
     return vec2<f32>(clamp(phi / two_pi, 0.0, 1.0), clamp(theta / PI, 0.0, 1.0));
 }
@@ -239,7 +242,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     }
     let metallic = u.mat0.x * factors.b;
     let roughness = max(0.02, u.mat0.w * factors.g);
-    let env_intensity = u.mat2.z;
+    // Per-object gain × the scene-wide probe gain (#182).
+    let env_intensity = u.mat2.z * scene.env_params.x;
     let exposure = u.mat2.w;
     let ambient = scene.light_params.z;
     let light_scale = scene.light_params.w;

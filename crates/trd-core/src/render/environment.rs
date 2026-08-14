@@ -42,6 +42,9 @@ struct EnvBackgroundUniform {
 /// is why the probe stays here while `Background::environment` stays on the
 /// device-free [`Scene`](crate::Scene).
 pub(super) struct EnvBackgroundSettings {
+    /// The probe yaw, taken from the scene's
+    /// [`EnvironmentLight`](crate::EnvironmentLight) so the sky agrees with the
+    /// reflections (#182).
     pub rotation: f32,
     pub exposure: f32,
     pub blur: f32,

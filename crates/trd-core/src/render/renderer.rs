@@ -959,7 +959,10 @@ impl Renderer {
                 &self.gpu.queue,
                 camera,
                 EnvBackgroundSettings {
-                    rotation: settings.rotation,
+                    // The yaw comes from the scene's environment *light*, not
+                    // from the background settings, so the sky and the
+                    // reflections cannot disagree (#182).
+                    rotation: scene.lighting().environment.rotation,
                     exposure: settings.exposure,
                     blur: settings.blur,
                     tonemap: settings.tonemap,

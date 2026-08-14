@@ -21,7 +21,7 @@ pub use frame::{FrameError, InlineFrame, FRAME_BYTES_COLUMN, FRAME_PIXELS_COLUMN
 // A directional light is universal domain vocabulary — zero wgpu — so it sits
 // at the crate root beside `mesh`/`texture`/`camera`/`material` rather than in
 // the render backend (#223).
-pub use light::{Light, Lighting, PointLight};
+pub use light::{EnvironmentLight, Light, Lighting, PointLight};
 pub use math::{
     Aabb2, Aabb3, Matrix3, Matrix4, Normal3, Point2, Point3, Point4, Rotation, Scalar, ToWgsl,
     Transform, Vector2, Vector3, Vector4, EPSILON,
