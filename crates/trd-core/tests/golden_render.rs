@@ -59,8 +59,10 @@ use std::sync::Mutex;
 use arrow::array::{Array, FixedSizeListArray, UInt8Array};
 use arrow::ipc::reader::StreamReader;
 use trd_core::{
-    run_stream, DisneyMaterial, EnvMapData, ImageBasedLighting, Lighting, Msaa, PbrConfig,
-    RenderMode, RenderOptions, ToneMapping, Tonemap,
+    run_stream, Background, Camera, DisneyMaterial, DrawableObject, EnvMapData,
+    EnvironmentBackground, EnvironmentLight, ImageBasedLighting, Lighting, Matrix4, Mesh, Msaa,
+    PbrConfig, Point3, RenderMode, RenderOptions, Renderer, Scene, SceneLayer, ToneMapping,
+    Tonemap, Vector3, Vertex, Viewport,
 };
 
 /// Golden render resolution (16:9; the fixtures' CV `k` is rescaled to match).
@@ -523,4 +525,167 @@ fn golden_stage2_pbr_reinhard() {
         "stage2.arrow",
         pbr_options(Tonemap::Reinhard),
     );
+}
+
+// ---------------------------------------------------------------------------
+// #182 P9 — the probe yaw as the single source of truth.
+// ---------------------------------------------------------------------------
+
+/// A deliberately **yaw-asymmetric** HDR probe: four saturated quadrants around
+/// the horizon plus one bright lobe in the +X quadrant.
+///
+/// The existing [`synthetic_env`] gradient is nearly rotation-invariant away
+/// from its sun, so it cannot catch a yaw disagreement. This one can: rotating
+/// it swaps which color a given view direction sees, so if the sky and the
+/// reflections read different yaws the golden shows two different colors meeting
+/// at the silhouette.
+fn quadrant_env() -> EnvMapData {
+    const W: u32 = 128;
+    const H: u32 = 64;
+    // +X, +Z, -X, -Z quadrant colors (linear RGB), walking u = 0…1.
+    let quadrants = [
+        [0.90f32, 0.10, 0.10], // red
+        [0.10f32, 0.75, 0.20], // green
+        [0.10f32, 0.20, 0.95], // blue
+        [0.85f32, 0.80, 0.10], // yellow
+    ];
+    let mut rgba = vec![0.0f32; (W * H * 4) as usize];
+    for y in 0..H {
+        let v = y as f32 / (H - 1) as f32;
+        // Darken toward the nadir so the horizon is legible.
+        let shade = 1.0 - 0.65 * v;
+        for x in 0..W {
+            let u = x as f32 / W as f32;
+            let q = quadrants[((u * 4.0) as usize).min(3)];
+            // One bright HDR lobe, inside the first quadrant only.
+            let du = u - 0.12;
+            let dv = v - 0.30;
+            let lobe = (-(du * du * 24.0 + dv * dv * 8.0) * 12.0).exp() * 5.0;
+            let i = ((y * W + x) * 4) as usize;
+            rgba[i] = q[0] * shade + lobe;
+            rgba[i + 1] = q[1] * shade + lobe * 0.9;
+            rgba[i + 2] = q[2] * shade + lobe * 0.7;
+            rgba[i + 3] = 1.0;
+        }
+    }
+    EnvMapData::from_rgba32f(W, H, rgba, 2048)
+}
+
+/// A UV sphere — a mirror ball is the canonical way to pin a probe's
+/// orientation, because it reflects *every* direction at once, so a yaw error
+/// cannot hide behind a flat facet.
+fn uv_sphere(radius: f32, segments: u32, rings: u32) -> Mesh {
+    let mut vertices = Vec::new();
+    for ring in 0..=rings {
+        let phi = std::f32::consts::PI * ring as f32 / rings as f32;
+        for segment in 0..=segments {
+            let theta = std::f32::consts::TAU * segment as f32 / segments as f32;
+            let position = [
+                radius * phi.sin() * theta.cos(),
+                radius * phi.cos(),
+                radius * phi.sin() * theta.sin(),
+            ];
+            vertices.push(Vertex {
+                position,
+                color: [1.0, 1.0, 1.0],
+                uv: [segment as f32 / segments as f32, ring as f32 / rings as f32],
+            });
+        }
+    }
+    let mut indices = Vec::new();
+    let stride = segments + 1;
+    for ring in 0..rings {
+        for segment in 0..segments {
+            let a = ring * stride + segment;
+            let b = a + stride;
+            indices.extend([a, b, a + 1, a + 1, b, b + 1]);
+        }
+    }
+    Mesh {
+        vertices,
+        indices,
+        shading: None,
+    }
+}
+
+/// **The probe yaw is one value** (#182 P9): the sky and the reflections on the
+/// object in front of it are driven by the same scene-level
+/// [`EnvironmentLight::rotation`], so they can no longer disagree.
+///
+/// No fixture can express this scene — `Scene::from_draws` never sets
+/// `Background::environment`, so nothing in the stream path draws a sky — so the
+/// scene is built directly against the public API: a **yaw-asymmetric** probe, a
+/// **non-zero** yaw, a **visible** sky, and a **near-mirror metallic** ball.
+/// Before P9 the same picture needed two rotations set in agreement by hand; a
+/// regression that lets them drift shows up here as a sphere reflecting one
+/// quadrant color against a sky of another.
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn golden_environment_light_syncs_sky_and_reflection() {
+    let _serial = GPU_SERIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let mesh = uv_sphere(0.85, 48, 24);
+    let (mut renderer, target) = pollster::block_on(Renderer::with_meshes(WIDTH, HEIGHT, &[mesh]))
+        .expect("build renderer for the environment-light golden");
+    renderer.set_env_map(quadrant_env());
+    renderer.set_disney_material(DisneyMaterial {
+        base_color: [1.0, 1.0, 1.0],
+        metallic: 1.0,
+        roughness: 0.06,
+        specular: 1.0,
+        ..DisneyMaterial::default()
+    });
+    renderer.set_image_based_lighting(ImageBasedLighting { intensity: 1.0 });
+    renderer.set_tone_mapping(ToneMapping {
+        operator: Tonemap::Aces,
+        exposure: 1.0,
+    });
+
+    // A yaw no symmetry can hide: 2.2 rad ≈ 126°, inside the second quadrant.
+    let scene = Scene::from(vec![DrawableObject::mesh(
+        0,
+        Matrix4::IDENTITY.to_cols_array(),
+        RenderMode::Shaded,
+    )])
+    .with_background(Background {
+        environment: Some(EnvironmentBackground {
+            exposure: 1.0,
+            blur: 0.0,
+            tonemap: Tonemap::Aces,
+        }),
+        frame: None,
+    })
+    .with_lighting(Lighting {
+        // Kill the direct rig so the picture is *only* the probe: any change is
+        // then unambiguously the environment's.
+        ambient: 0.0,
+        scale: 0.0,
+        environment: EnvironmentLight {
+            intensity: 1.0,
+            rotation: 2.2,
+        },
+    });
+
+    let viewport = Viewport {
+        width: WIDTH,
+        height: HEIGHT,
+    };
+    let camera = Camera::look_at(
+        Point3::new(0.0, 0.35, 2.6),
+        Point3::new(0.0, 0.0, 0.0),
+        Vector3::Y,
+        45f32.to_radians(),
+        viewport,
+    );
+    let actual =
+        pollster::block_on(renderer.render_layers(&[SceneLayer::new(camera, &scene)], &target))
+            .expect("render the environment-light golden");
+
+    let golden = golden_dir().join("environment_light.png");
+    if let Err(reason) = compare_or_update(&actual, &golden) {
+        dump_actual("environment_light", 0, &actual, &golden);
+        panic!("{reason}");
+    }
 }

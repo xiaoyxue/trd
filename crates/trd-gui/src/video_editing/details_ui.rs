@@ -466,11 +466,17 @@ fn material_rows(_video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut d
         },
     );
     r.row(
-        "IBL intensity / rotation",
+        "IBL gain (object x scene)",
         &format!(
-            "{:.4} / {:.3} deg",
-            ibl.intensity,
-            ibl.rotation.to_degrees()
+            "{:.4} x {:.4}",
+            ibl.intensity, scene.lighting.environment.intensity
+        ),
+    );
+    r.row(
+        "environment yaw",
+        &format!(
+            "{:.3} deg",
+            scene.lighting.environment.rotation.to_degrees()
         ),
     );
     r.row(

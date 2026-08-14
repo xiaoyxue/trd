@@ -55,6 +55,9 @@ pub(crate) struct PbrSceneUniform {
     camera_pos: [f32; 4],
     /// num_dir_lights, num_point_lights, ambient, light_scale.
     light_params: [f32; 4],
+    /// The probe as a light: scene gain, yaw (radians), reserved, reserved.
+    /// The yaw is the **single** source of truth for reflections *and* sky.
+    env_params: [f32; 4],
     /// xyz = direction the light travels, w = intensity.
     dir_lights: [[f32; 4]; MAX_LIGHTS],
     /// xyz = world position, w = intensity.
@@ -93,6 +96,12 @@ impl PbrSceneUniform {
                 lighting.ambient,
                 lighting.scale,
             ],
+            env_params: [
+                lighting.environment.intensity,
+                lighting.environment.rotation,
+                0.0,
+                0.0,
+            ],
             dir_lights,
             point_lights,
         }
@@ -113,7 +122,8 @@ pub(crate) struct PbrUniform {
     mat2: [f32; 4],
     /// baseColorTint.rgb, debug view
     mat3: [f32; 4],
-    /// tonemap mode, ibl rotation, has normal map, has metallic-roughness map
+    /// tonemap mode, reserved (the probe yaw is scene-wide now), has normal map,
+    /// has metallic-roughness map
     mat4: [f32; 4],
 }
 
@@ -147,7 +157,7 @@ impl PbrUniform {
             ],
             mat4: [
                 inputs.tone_mapping.operator.to_uniform(),
-                inputs.ibl.rotation,
+                0.0,
                 if inputs.material.auxiliary.textures.normal {
                     1.0
                 } else {
@@ -257,7 +267,7 @@ pub(crate) fn compute_tangents(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Tonemap;
+    use crate::{EnvironmentLight, Tonemap};
 
     fn inputs(material: &DisneyMaterial) -> PbrUniformInputs<'_> {
         PbrUniformInputs {
@@ -272,7 +282,7 @@ mod tests {
     fn uniforms_split_by_frequency_of_change() {
         // The rig is written once per frame (224 bytes); a mesh slot carries only
         // its own material (80 bytes), down from 304 when both shared one struct.
-        assert_eq!(std::mem::size_of::<PbrSceneUniform>(), 224);
+        assert_eq!(std::mem::size_of::<PbrSceneUniform>(), 240);
         assert_eq!(std::mem::size_of::<PbrUniform>(), 80);
         assert_eq!(std::mem::size_of::<PbrSceneUniform>() % 16, 0);
         assert_eq!(std::mem::size_of::<PbrUniform>() % 16, 0);
@@ -311,10 +321,17 @@ mod tests {
         let lighting = Lighting {
             ambient: 0.25,
             scale: 3.0,
+            environment: EnvironmentLight {
+                intensity: 0.75,
+                rotation: 1.25,
+            },
         };
         let scene = PbrSceneUniform::new([0.0; 16], [1.0, 2.0, 3.0], lighting, false);
         assert_eq!(scene.light_params[2], 0.25);
         assert_eq!(scene.light_params[3], 3.0);
+        // The probe yaw lives here once, for both the sky and the reflections.
+        assert_eq!(scene.env_params[0], 0.75);
+        assert_eq!(scene.env_params[1], 1.25);
         assert_eq!([scene.camera_pos[0], scene.camera_pos[1]], [1.0, 2.0]);
         // The per-mesh slot has no light rig left to disagree with it.
         let slot = PbrUniform::new(inputs(&DisneyMaterial::default()));
@@ -348,6 +365,8 @@ mod tests {
             camera_pos: [0.0, 0.0, 0.0, 1.0],
             // num dir, num point, ambient (was mat3.w), light scale (was counts.w).
             light_params: [3.0, 0.0, 0.12, 2.5],
+            // The probe as a light: unit gain, unrotated (#182).
+            env_params: [1.0, 0.0, 0.0, 0.0],
             dir_lights: [
                 [-0.5, -0.85, -0.55, 1.0],
                 [0.8, -0.25, 0.35, 0.4],

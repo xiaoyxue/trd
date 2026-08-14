@@ -21,13 +21,14 @@ use crate::Lighting;
 ///
 /// Settings, not a primitive (#204): it carries no model and never enters the
 /// instance buffer, so it lives on [`Background`] rather than in the drawable
-/// list. `rotation` turns the probe around the world's up axis (radians),
-/// `exposure` scales its radiance, `blur` (0…1) fades it toward its blurred
-/// mips, and `tonemap` is the operator applied on the way to display.
+/// list. `exposure` scales its radiance, `blur` (0…1) fades it toward its
+/// blurred mips, and `tonemap` is the operator applied on the way to display.
+///
+/// It carries **no yaw**: the probe's rotation is a scene-level
+/// [`EnvironmentLight`](crate::EnvironmentLight), so the sky drawn here and the
+/// reflections on the objects in front of it cannot disagree (#182).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EnvironmentBackground {
-    /// Yaw applied to the probe, in radians.
-    pub rotation: f32,
     /// Linear radiance multiplier.
     pub exposure: f32,
     /// Blur amount, `0.0` (sharp) … `1.0` (fully blurred).
@@ -467,7 +468,6 @@ mod tests {
     #[test]
     fn both_backgrounds_can_be_set_at_once() {
         let environment = EnvironmentBackground {
-            rotation: 0.5,
             exposure: 1.5,
             blur: 0.25,
             tonemap: Tonemap::Aces,

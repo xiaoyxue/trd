@@ -14,20 +14,22 @@
 //! (#221 §5).
 
 /// Per-object image-based-lighting controls.
+///
+/// A **gain only**: the probe's yaw is scene-wide and lives on
+/// [`EnvironmentLight`](crate::EnvironmentLight), since reflections and the sky
+/// drawn behind them must agree (#182). This value composes multiplicatively
+/// with the scene gain — the effective one is `mesh.intensity *
+/// scene.environment.intensity` — and scales **both** the diffuse irradiance and
+/// the specular reflection, as it always has.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ImageBasedLighting {
-    /// Environment-map reflection gain.
+    /// Environment-map gain for this object.
     pub intensity: f32,
-    /// Rotation around the environment's Y axis, in radians.
-    pub rotation: f32,
 }
 
 impl Default for ImageBasedLighting {
     fn default() -> Self {
-        Self {
-            intensity: 1.0,
-            rotation: 0.0,
-        }
+        Self { intensity: 1.0 }
     }
 }
 

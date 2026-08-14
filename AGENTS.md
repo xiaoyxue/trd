@@ -195,7 +195,11 @@ Each fixture is rendered **twice — 4× MSAA (`Msaa::X4`, the default anti-alia
 mesh pass) and MSAA-off (`Msaa::Off`, single-sample)** — each pinned to its own
 goldens (`stageN_*` vs `stageN_noaa_*`), so both the multisample+resolve path and
 the raw single-sample path are covered; plus PBR tone-map variants
-(`golden_stage2_pbr_{aces,reinhard}`). It is GPU-gated (`#[ignore]`); run it via
+(`golden_stage2_pbr_{aces,reinhard}`), plus
+`golden_environment_light_syncs_sky_and_reflection` — a hand-built scene (no
+fixture can draw a sky) pinning that the scene's one `EnvironmentLight.rotation`
+drives the visible sky **and** the reflections on a near-mirror ball in front of
+it (#182). It is GPU-gated (`#[ignore]`); run it via
 the nixGL wrapper (Linux) or directly on a Windows box with a discrete GPU.
 
 **Mandatory:** any change touching the render path (`crates/trd-core` render code,

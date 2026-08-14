@@ -579,6 +579,7 @@ impl VideoEditingApp {
                 CatalogAsset::Dragon => trd_core::Lighting {
                     ambient: 0.0,
                     scale: 0.0,
+                    ..trd_core::Lighting::default()
                 },
                 CatalogAsset::CocaColaCan | CatalogAsset::BeerCan => trd_core::Lighting::default(),
             };
@@ -1351,6 +1352,7 @@ pub(super) mod tests {
         rendered.scene.lighting = trd_core::Lighting {
             ambient: 0.0,
             scale: 0.0,
+            ..trd_core::Lighting::default()
         };
         rendered.scene.environment_available = true;
         rendered.renderer.asset = Some(crate::video_editing_renderer::ImportedAssetDiagnostics {

@@ -57,11 +57,10 @@ pub fn scene_for(state: &SceneState) -> trd_core::Scene {
         // state (#182).
         .with_lighting(state.lighting);
     if state.show_environment_background {
+        // No `rotation` here any more: the probe yaw is a scene-level
+        // `EnvironmentLight`, so this front-end no longer has to hand-sync the
+        // sky with mesh 0's IBL to keep them from disagreeing (#182).
         scene.background_mut().environment = Some(trd_core::EnvironmentBackground {
-            rotation: state
-                .image_based_lighting
-                .first()
-                .map_or(0.0, |ibl| ibl.rotation),
             exposure: state
                 .tone_mappings
                 .first()

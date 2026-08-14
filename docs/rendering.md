@@ -232,8 +232,8 @@ controls. Everything is **per-object**: click an object to select it, then edit
   Metallic, and Normal diagnostics.
 - **Overlays.** Toggle the **Bounding box** (all objects), **World axes**, **Local
   axes**, **XZ plane grid** (**World** floor / **Local** per-object), and the
-  spherical HDR background; background blur and shared Background/IBL rotation
-  are adjustable.
+  spherical HDR background; background blur and the scene's single
+  Background/IBL rotation are adjustable.
 - **Reset view** restores the camera + every object's transform.
 
 ### Multi-object scenes & URL params (browser)
@@ -257,7 +257,8 @@ http://localhost:8080/?mesh=/assets/meshes/can/coke.obj&texture=/assets/meshes/c
 ```
 
 > Each object carries its own **transform, render mode, Disney material, PBR
-> maps, IBL intensity/rotation, tone mapping, and debug view**. The renderer
+> maps, IBL intensity, tone mapping, and debug view** — the probe's *yaw* is
+> scene-level, so the sky and every reflection share it. The renderer
 > composes those typed values per mesh, so per-object appearance is real, not
 > shared. On the headless RTX Linux box, reach the browser viewer over an SSH
 > port-forward (see [AGENTS.md](../AGENTS.md)).

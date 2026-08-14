@@ -337,16 +337,17 @@ pub fn overlays_section(ui: &mut egui::Ui, controller: &mut InteractionControlle
                 .changed();
         }
         if state.environment_available {
+            // One slider for one value: the probe yaw drives the sky and the
+            // reflections together now (#182).
             ui.label("Background / IBL rotation");
-            if let Some(ibl) = state.image_based_lighting.first_mut() {
-                let mut degrees = ibl.rotation.to_degrees().rem_euclid(360.0);
-                if ui
-                    .add(egui::Slider::new(&mut degrees, 0.0..=360.0).suffix("°"))
-                    .changed()
-                {
-                    ibl.rotation = degrees.to_radians();
-                    c = true;
-                }
+            let rotation = &mut state.lighting.environment.rotation;
+            let mut degrees = rotation.to_degrees().rem_euclid(360.0);
+            if ui
+                .add(egui::Slider::new(&mut degrees, 0.0..=360.0).suffix("°"))
+                .changed()
+            {
+                *rotation = degrees.to_radians();
+                c = true;
             }
         }
         c
