@@ -631,20 +631,36 @@ pub(crate) fn write_gizmo_params(queue: &wgpu::Queue, buffer: &wgpu::Buffer, cam
 pub(crate) fn create_pbr_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("trd pbr bind group layout"),
-        entries: &[wgpu::BindGroupLayoutEntry {
-            binding: 0,
-            visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                // Per-object material (#141): one `PbrUniform` slot per draw,
-                // selected at draw time by a dynamic offset into the shared buffer.
-                has_dynamic_offset: true,
-                min_binding_size: wgpu::BufferSize::new(
-                    std::mem::size_of::<super::PbrUniform>() as u64
-                ),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    // Scene-wide (#182): camera terms + the light rig, written
+                    // once per frame and bound whole.
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<
+                        super::PbrSceneUniform,
+                    >() as u64),
+                },
+                count: None,
             },
-            count: None,
-        }],
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    // Per-object material (#141): one `PbrUniform` slot per draw,
+                    // selected at draw time by a dynamic offset into the shared buffer.
+                    has_dynamic_offset: true,
+                    min_binding_size: wgpu::BufferSize::new(
+                        std::mem::size_of::<super::PbrUniform>() as u64,
+                    ),
+                },
+                count: None,
+            },
+        ],
     })
 }
 

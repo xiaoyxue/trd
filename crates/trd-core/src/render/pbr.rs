@@ -30,39 +30,46 @@ impl PbrDebugView {
 /// Maximum lights per kind, matching `pbr.wgsl`'s `MAX_LIGHTS` array size.
 const MAX_LIGHTS: usize = 4;
 
+/// The per-**mesh** PBR inputs. Every field describes one object; the light rig
+/// and the camera are scene-wide and live in [`PbrSceneUniform`] instead (#182).
 pub(crate) struct PbrUniformInputs<'a> {
     pub material: &'a DisneyMaterial,
-    pub lighting: Lighting,
     pub ibl: ImageBasedLighting,
     pub tone_mapping: ToneMapping,
     pub debug_view: PbrDebugView,
-    pub use_env: bool,
 }
 
-/// GPU byte layout matching `pbr.wgsl`'s `PbrUniform` (std140-compatible: all
-/// members are 16-byte-aligned `vec4`/`mat4`). 304 bytes, uploaded per frame
-/// (the camera terms change; the material + light rig are constant per render).
+/// GPU byte layout matching `pbr.wgsl`'s `PbrSceneUniform` (group 0, binding 0):
+/// **224 bytes written once per frame**, holding everything the whole frame
+/// shares — the camera terms and the light rig.
+///
+/// It used to be re-encoded into every per-mesh slot, so an N-object scene wrote
+/// N identical copies of the same lights each frame (#182). Splitting the group
+/// by *frequency of change* is also what shrinks the per-mesh slot from 304 to
+/// 80 bytes.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-pub(crate) struct PbrUniform {
+pub(crate) struct PbrSceneUniform {
     view_proj: [f32; 16],
+    /// xyz = camera world position, w = the env gate (1 when a probe is bound).
     camera_pos: [f32; 4],
-    mat0: [f32; 4],
-    mat1: [f32; 4],
-    mat2: [f32; 4],
-    mat3: [f32; 4],
-    counts: [f32; 4],
-    mat4: [f32; 4],
+    /// num_dir_lights, num_point_lights, ambient, light_scale.
+    light_params: [f32; 4],
+    /// xyz = direction the light travels, w = intensity.
     dir_lights: [[f32; 4]; MAX_LIGHTS],
+    /// xyz = world position, w = intensity.
     point_lights: [[f32; 4]; MAX_LIGHTS],
 }
 
-impl PbrUniform {
-    /// Composes the typed PBR domains into the shader's unchanged byte layout.
+impl PbrSceneUniform {
+    /// Packs this frame's camera + light rig. `lighting` arrives on the
+    /// [`Scene`](crate::Scene) now, so the rig travels *with* the frame and is
+    /// written *once* for it.
     pub(crate) fn new(
         view_proj: [f32; 16],
         camera_pos: [f32; 3],
-        inputs: PbrUniformInputs<'_>,
+        lighting: Lighting,
+        use_env: bool,
     ) -> Self {
         let mut dir_lights = [[0.0f32; 4]; MAX_LIGHTS];
         for (packed, light) in dir_lights.iter_mut().zip(DEFAULT_LIGHTS) {
@@ -78,8 +85,42 @@ impl PbrUniform {
                 camera_pos[0],
                 camera_pos[1],
                 camera_pos[2],
-                inputs.debug_view.to_uniform(),
+                if use_env { 1.0 } else { 0.0 },
             ],
+            light_params: [
+                DEFAULT_LIGHTS.len() as f32,
+                DEFAULT_POINT_LIGHTS.len() as f32,
+                lighting.ambient,
+                lighting.scale,
+            ],
+            dir_lights,
+            point_lights,
+        }
+    }
+}
+
+/// GPU byte layout matching `pbr.wgsl`'s `PbrUniform` (group 0, binding 1): the
+/// **80-byte per-mesh slot** a draw selects with a dynamic offset — material,
+/// IBL gain, tone map and debug view, and nothing the frame already shares.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct PbrUniform {
+    /// metallic, subsurface, specular, roughness
+    mat0: [f32; 4],
+    /// specularTint, anisotropic, sheen, sheenTint
+    mat1: [f32; 4],
+    /// clearcoat, clearcoatGloss, env_intensity, exposure
+    mat2: [f32; 4],
+    /// baseColorTint.rgb, debug view
+    mat3: [f32; 4],
+    /// tonemap mode, ibl rotation, has normal map, has metallic-roughness map
+    mat4: [f32; 4],
+}
+
+impl PbrUniform {
+    /// Composes the typed per-object PBR domains into the shader's slot layout.
+    pub(crate) fn new(inputs: PbrUniformInputs<'_>) -> Self {
+        Self {
             mat0: [
                 inputs.material.metallic,
                 inputs.material.subsurface,
@@ -102,13 +143,7 @@ impl PbrUniform {
                 inputs.material.base_color[0],
                 inputs.material.base_color[1],
                 inputs.material.base_color[2],
-                inputs.lighting.ambient,
-            ],
-            counts: [
-                DEFAULT_LIGHTS.len() as f32,
-                DEFAULT_POINT_LIGHTS.len() as f32,
-                if inputs.use_env { 1.0 } else { 0.0 },
-                inputs.lighting.scale,
+                inputs.debug_view.to_uniform(),
             ],
             mat4: [
                 inputs.tone_mapping.operator.to_uniform(),
@@ -124,8 +159,6 @@ impl PbrUniform {
                     0.0
                 },
             ],
-            dir_lights,
-            point_lights,
         }
     }
 }
@@ -226,20 +259,22 @@ mod tests {
     use super::*;
     use crate::Tonemap;
 
-    fn inputs(material: &DisneyMaterial, use_env: bool) -> PbrUniformInputs<'_> {
+    fn inputs(material: &DisneyMaterial) -> PbrUniformInputs<'_> {
         PbrUniformInputs {
             material,
-            lighting: Lighting::default(),
             ibl: ImageBasedLighting::default(),
             tone_mapping: ToneMapping::default(),
             debug_view: PbrDebugView::Shaded,
-            use_env,
         }
     }
 
     #[test]
-    fn pbr_uniform_is_304_bytes() {
-        assert_eq!(std::mem::size_of::<PbrUniform>(), 304);
+    fn uniforms_split_by_frequency_of_change() {
+        // The rig is written once per frame (224 bytes); a mesh slot carries only
+        // its own material (80 bytes), down from 304 when both shared one struct.
+        assert_eq!(std::mem::size_of::<PbrSceneUniform>(), 224);
+        assert_eq!(std::mem::size_of::<PbrUniform>(), 80);
+        assert_eq!(std::mem::size_of::<PbrSceneUniform>() % 16, 0);
         assert_eq!(std::mem::size_of::<PbrUniform>() % 16, 0);
     }
 
@@ -262,51 +297,57 @@ mod tests {
     }
 
     #[test]
-    fn use_env_flag_packs_into_counts() {
-        let m = DisneyMaterial::default();
-        let with = PbrUniform::new([0.0; 16], [0.0; 3], inputs(&m, true));
-        let without = PbrUniform::new([0.0; 16], [0.0; 3], inputs(&m, false));
-        assert_eq!(with.counts[2], 1.0);
-        assert_eq!(without.counts[2], 0.0);
-        assert_eq!(with.counts[0], DEFAULT_LIGHTS.len() as f32);
+    fn use_env_flag_packs_into_the_scene_camera_w() {
+        let lighting = Lighting::default();
+        let with = PbrSceneUniform::new([0.0; 16], [0.0; 3], lighting, true);
+        let without = PbrSceneUniform::new([0.0; 16], [0.0; 3], lighting, false);
+        assert_eq!(with.camera_pos[3], 1.0);
+        assert_eq!(without.camera_pos[3], 0.0);
+        assert_eq!(with.light_params[0], DEFAULT_LIGHTS.len() as f32);
+    }
+
+    #[test]
+    fn scene_uniform_carries_the_rig_the_slots_no_longer_repeat() {
+        let lighting = Lighting {
+            ambient: 0.25,
+            scale: 3.0,
+        };
+        let scene = PbrSceneUniform::new([0.0; 16], [1.0, 2.0, 3.0], lighting, false);
+        assert_eq!(scene.light_params[2], 0.25);
+        assert_eq!(scene.light_params[3], 3.0);
+        assert_eq!([scene.camera_pos[0], scene.camera_pos[1]], [1.0, 2.0]);
+        // The per-mesh slot has no light rig left to disagree with it.
+        let slot = PbrUniform::new(inputs(&DisneyMaterial::default()));
+        assert_eq!(std::mem::size_of_val(&slot), 80);
     }
 
     #[test]
     fn tonemap_packs_into_mat4_x_and_defaults_reinhard() {
-        let reinhard = PbrUniform::new(
-            [0.0; 16],
-            [0.0; 3],
-            inputs(&DisneyMaterial::default(), false),
-        );
+        let reinhard = PbrUniform::new(inputs(&DisneyMaterial::default()));
         assert_eq!(reinhard.mat4[0], 0.0);
         let tone_mapping = ToneMapping {
             operator: Tonemap::Aces,
             ..ToneMapping::default()
         };
         let material = DisneyMaterial::default();
-        let mut inputs = inputs(&material, false);
+        let mut inputs = inputs(&material);
         inputs.tone_mapping = tone_mapping;
-        let u = PbrUniform::new([0.0; 16], [0.0; 3], inputs);
+        let u = PbrUniform::new(inputs);
         assert_eq!(u.mat4[0], 1.0);
         assert_eq!([u.mat4[1], u.mat4[2], u.mat4[3]], [0.0, 0.0, 0.0]);
     }
 
     #[test]
-    fn typed_domains_preserve_legacy_default_uniform_bytes() {
-        let uniform = PbrUniform::new(
-            [0.0; 16],
-            [0.0; 3],
-            inputs(&DisneyMaterial::default(), true),
-        );
-        let expected = PbrUniform {
+    fn typed_domains_preserve_the_packed_values_across_the_split() {
+        // The same numbers the single 304-byte uniform used to carry, now in the
+        // two halves: the rig + camera terms once, the material per mesh.
+        let scene = PbrSceneUniform::new([0.0; 16], [0.0; 3], Lighting::default(), true);
+        let expected_scene = PbrSceneUniform {
             view_proj: [0.0; 16],
+            // w = use_env, which used to sit in `counts.z`.
             camera_pos: [0.0, 0.0, 0.0, 1.0],
-            mat0: [0.0, 0.0, 0.5, 0.5],
-            mat1: [0.0, 0.0, 0.0, 0.5],
-            mat2: [0.0, 1.0, 1.0, 1.2],
-            mat3: [1.0, 1.0, 1.0, 0.12],
-            counts: [3.0, 0.0, 1.0, 2.5],
-            mat4: [0.0; 4],
+            // num dir, num point, ambient (was mat3.w), light scale (was counts.w).
+            light_params: [3.0, 0.0, 0.12, 2.5],
             dir_lights: [
                 [-0.5, -0.85, -0.55, 1.0],
                 [0.8, -0.25, 0.35, 0.4],
@@ -315,6 +356,23 @@ mod tests {
             ],
             point_lights: [[0.0; 4]; MAX_LIGHTS],
         };
-        assert_eq!(bytemuck::bytes_of(&uniform), bytemuck::bytes_of(&expected));
+        assert_eq!(
+            bytemuck::bytes_of(&scene),
+            bytemuck::bytes_of(&expected_scene)
+        );
+
+        let slot = PbrUniform::new(inputs(&DisneyMaterial::default()));
+        let expected_slot = PbrUniform {
+            mat0: [0.0, 0.0, 0.5, 0.5],
+            mat1: [0.0, 0.0, 0.0, 0.5],
+            mat2: [0.0, 1.0, 1.0, 1.2],
+            // baseColorTint.rgb + the debug view, which used to sit in camera_pos.w.
+            mat3: [1.0, 1.0, 1.0, 1.0],
+            mat4: [0.0; 4],
+        };
+        assert_eq!(
+            bytemuck::bytes_of(&slot),
+            bytemuck::bytes_of(&expected_slot)
+        );
     }
 }

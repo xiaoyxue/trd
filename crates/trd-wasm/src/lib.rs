@@ -53,13 +53,19 @@ impl PbrState {
         }
     }
 
-    /// Pushes the staged material onto the render harness. Shared by the
-    /// offscreen and canvas renderers — they use the same non-generic
+    /// The staged light rig, which is a **scene** property rather than renderer
+    /// state (#182): the renderers hand it to the `Scene` they build each frame
+    /// instead of pushing it through a setter here.
+    pub(crate) fn lighting(&self) -> Lighting {
+        self.lighting
+    }
+
+    /// Pushes the staged per-object material onto the render harness. Shared by
+    /// the offscreen and canvas renderers — they use the same non-generic
     /// [`trd_core::Renderer`], differing only in which target they pass to their
     /// render calls (#203).
     pub(crate) fn apply(&self, renderer: &mut trd_core::Renderer) {
         renderer.set_disney_material(self.material.clone());
-        renderer.set_lighting(self.lighting);
         renderer.set_image_based_lighting(self.ibl);
         renderer.set_tone_mapping(self.tone_mapping);
     }

@@ -52,7 +52,7 @@ pub(crate) struct ScenePipelines {
 ///
 /// `camera` and `gizmo` are whole-buffer bindings rewritten once per frame;
 /// `pbr` is a slot array indexed per draw. Each is a buffer + the bind group
-/// exposing it as a single value ([`BoundUniform`] / [`BoundUniformArray`]),
+/// exposing it as a single value ([`BoundUniform`] / [`BoundSceneSlots`]),
 /// rather than six loose fields kept in step by naming convention — the same
 /// "bound resource" shape as [`BoundTexture`](super::BoundTexture) and
 /// [`BoundMaterialMaps`](super::bound_material_maps::BoundMaterialMaps).
@@ -61,10 +61,10 @@ pub(crate) struct SceneUniforms {
     pub(super) camera: BoundUniform,
     /// The viewport-aware params the expanded-line gizmo pipeline reads.
     pub(super) gizmo: BoundUniform,
-    /// One `PbrUniform` slot per mesh (each carrying the shared camera/lights +
-    /// that mesh's material), rewritten each `encode`; a PBR draw selects its
-    /// mesh's slot with a dynamic offset.
-    pub(super) pbr: BoundUniformArray,
+    /// Group 0 of the PBR pipeline: the once-per-frame scene uniform (camera +
+    /// light rig) at binding 0, and one `PbrUniform` slot per mesh at binding 1,
+    /// which a PBR draw selects with a dynamic offset (#182).
+    pub(super) pbr: BoundSceneSlots,
 }
 
 /// Builds the scene pipelines and the uniforms they bind, together.
@@ -171,7 +171,12 @@ pub(crate) fn create_scene_pipelines(
         // The per-object PbrUniform slots: one per mesh, each rewritten every
         // frame with the shared camera/lights + that mesh's material; a PBR
         // draw selects its slot via a dynamic offset.
-        pbr: BoundUniformArray::new::<PbrUniform>(device, &pbr_layout, "trd pbr", mesh_count),
+        pbr: BoundSceneSlots::new::<PbrSceneUniform, PbrUniform>(
+            device,
+            &pbr_layout,
+            "trd pbr",
+            mesh_count,
+        ),
     };
     let pipelines = ScenePipelines {
         filled,
@@ -192,15 +197,17 @@ impl SceneUniforms {
         write_gizmo_params(queue, self.gizmo.buffer(), camera);
     }
 
-    /// Rewrites the Disney PBR uniform **slots** for this frame: one slot per
-    /// mesh (mesh id → slot id), each carrying the shared camera `P·V` + world
-    /// position + light rig, that mesh's material/IBL/tone-map/debug view, and
-    /// the env gate. A PBR draw then binds its object's slot via a dynamic
-    /// offset.
+    /// Rewrites the Disney PBR uniforms for this frame, **split by frequency of
+    /// change** (#182): the camera terms + the scene's light rig **once**, then
+    /// one slot per mesh (mesh id → slot id) carrying only that mesh's
+    /// material/IBL/tone-map/debug view. A PBR draw binds its object's slot via
+    /// a dynamic offset.
     ///
-    /// The per-mesh values are read straight off the [`MeshGpu`]s that own them
-    /// (#203): they used to be four `Vec`s on the renderer, all sized to the mesh
-    /// count with nothing enforcing it, joined here by a four-deep `zip`.
+    /// The rig used to be re-encoded into every slot, so an N-object scene wrote
+    /// N identical copies of the same lights each frame. The per-mesh values are
+    /// read straight off the [`MeshGpu`]s that own them (#203): they used to be
+    /// four `Vec`s on the renderer, all sized to the mesh count with nothing
+    /// enforcing it, joined here by a four-deep `zip`.
     pub(super) fn write_pbr(
         &self,
         queue: &wgpu::Queue,
@@ -209,21 +216,20 @@ impl SceneUniforms {
         lighting: Lighting,
         use_env: bool,
     ) {
-        let view_proj = camera.view_projection().matrix().to_cols_array();
-        let camera_pos = camera.position();
+        let scene = PbrSceneUniform::new(
+            camera.view_projection().matrix().to_cols_array(),
+            camera.position(),
+            lighting,
+            use_env,
+        );
+        self.pbr.write_scene(queue, &scene);
         for (slot, mesh) in meshes.iter().enumerate() {
-            let uniform = PbrUniform::new(
-                view_proj,
-                camera_pos,
-                PbrUniformInputs {
-                    material: &mesh.material,
-                    lighting,
-                    ibl: mesh.ibl,
-                    tone_mapping: mesh.tone_mapping,
-                    debug_view: mesh.debug_view,
-                    use_env,
-                },
-            );
+            let uniform = PbrUniform::new(PbrUniformInputs {
+                material: &mesh.material,
+                ibl: mesh.ibl,
+                tone_mapping: mesh.tone_mapping,
+                debug_view: mesh.debug_view,
+            });
             self.pbr.write_slot(queue, slot, &uniform);
         }
     }

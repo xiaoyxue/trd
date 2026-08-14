@@ -7,8 +7,12 @@
 // so metallic materials (e.g. the coke can) read as shiny reflective metal.
 //
 // Bind groups:
-//   group 0 = PbrUniform (camera P·V, camera world pos, Disney material params,
-//             the light rig, and env/exposure controls) — vertex + fragment.
+//   group 0 = binding 0: PbrSceneUniform — camera P·V, camera world pos and the
+//             light rig, written ONCE per frame; binding 1: PbrUniform — this
+//             mesh's Disney material + env/exposure controls, selected by a
+//             dynamic offset. Split by frequency of change (#182); both stay in
+//             group 0 because the portable WebGPU baseline allows only four
+//             groups and this shader already uses all four.
 //   group 1 = albedo texture + sampler (the mesh's base color, sampled at UV).
 //   group 2 = environment map (equirect HDR) + sampler.
 //
@@ -21,29 +25,35 @@
 const PI: f32 = 3.14159265358979323846;
 const MAX_LIGHTS: u32 = 4u;
 
-struct PbrUniform {
+// What the whole frame shares: written once per frame, never per mesh.
+struct PbrSceneUniform {
     view_proj: mat4x4<f32>,
-    // xyz = camera world position, w unused.
+    // xyz = camera world position, w = use_env (1 = a probe is bound).
     camera_pos: vec4<f32>,
-    // metallic, subsurface, specular, roughness
-    mat0: vec4<f32>,
-    // specularTint, anisotropic, sheen, sheenTint
-    mat1: vec4<f32>,
-    // clearcoat, clearcoatGloss, env_intensity, exposure
-    mat2: vec4<f32>,
-    // baseColorTint.rgb, ambient
-    mat3: vec4<f32>,
-    // num_dir_lights, num_point_lights, use_env, light_scale
-    counts: vec4<f32>,
-    // tonemap mode (0 = reinhard, 1 = aces), procedural studio IBL, reserved, reserved
-    mat4: vec4<f32>,
+    // num_dir_lights, num_point_lights, ambient, light_scale
+    light_params: vec4<f32>,
     // xyz = direction the light travels, w = intensity
     dir_lights: array<vec4<f32>, MAX_LIGHTS>,
     // xyz = world position, w = intensity
     point_lights: array<vec4<f32>, MAX_LIGHTS>,
 };
 
-@group(0) @binding(0) var<uniform> u: PbrUniform;
+// What one mesh contributes: selected by a dynamic offset per draw.
+struct PbrUniform {
+    // metallic, subsurface, specular, roughness
+    mat0: vec4<f32>,
+    // specularTint, anisotropic, sheen, sheenTint
+    mat1: vec4<f32>,
+    // clearcoat, clearcoatGloss, env_intensity, exposure
+    mat2: vec4<f32>,
+    // baseColorTint.rgb, debug view
+    mat3: vec4<f32>,
+    // tonemap mode (0 = reinhard, 1 = aces), env rotation, has normal map, has mr map
+    mat4: vec4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> scene: PbrSceneUniform;
+@group(0) @binding(1) var<uniform> u: PbrUniform;
 @group(1) @binding(0) var albedo_tex: texture_2d<f32>;
 @group(1) @binding(1) var albedo_samp: sampler;
 @group(2) @binding(0) var env_tex: texture_2d<f32>;
@@ -86,7 +96,7 @@ fn vs_main(in: VsIn) -> VsOut {
     let m3 = mat3x3<f32>(in.model_col0.xyz, in.model_col1.xyz, in.model_col2.xyz);
 
     var out: VsOut;
-    out.clip_position = u.view_proj * world;
+    out.clip_position = scene.view_proj * world;
     out.world_position = world.xyz;
     out.world_normal = m3 * in.normal;
     out.uv = in.uv;
@@ -222,7 +232,7 @@ fn data_preview(value: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let debug_view = u.camera_pos.w;
+    let debug_view = u.mat3.w;
     var factors = vec4<f32>(1.0);
     if (u.mat4.w > 0.5) {
         factors = textureSample(metallic_roughness_tex, material_samp, in.uv);
@@ -231,9 +241,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let roughness = max(0.02, u.mat0.w * factors.g);
     let env_intensity = u.mat2.z;
     let exposure = u.mat2.w;
-    let ambient = u.mat3.w;
-    let light_scale = u.counts.w;
-    let use_env = u.counts.z > 0.5;
+    let ambient = scene.light_params.z;
+    let light_scale = scene.light_params.w;
+    let use_env = scene.camera_pos.w > 0.5;
     let tonemap_mode = u.mat4.x;
 
     let base_color = textureSample(albedo_tex, albedo_samp, in.uv).rgb * u.mat3.rgb;
@@ -257,7 +267,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     if (debug_view > 3.5) {
         return vec4<f32>(data_preview(normal_sample), 1.0);
     }
-    let v = normalize(u.camera_pos.xyz - in.world_position);
+    let v = normalize(scene.camera_pos.xyz - in.world_position);
     // Arbitrary tangent frame for the (isotropic-by-default) anisotropy terms.
     let x = normalize(cross(n, vec3<f32>(0.0, 0.9999, 0.0001)));
     let y = normalize(cross(n, x));
@@ -269,19 +279,19 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         color = color + irradiance * base_color * (1.0 - metallic) * env_intensity;
     }
 
-    let num_dir = u32(u.counts.x);
+    let num_dir = u32(scene.light_params.x);
     for (var i: u32 = 0u; i < num_dir && i < MAX_LIGHTS; i = i + 1u) {
-        let l = normalize(-u.dir_lights[i].xyz);
-        color = color + light_scale * u.dir_lights[i].w * disney_brdf(l, v, n, x, y, base_color, metallic, roughness);
+        let l = normalize(-scene.dir_lights[i].xyz);
+        color = color + light_scale * scene.dir_lights[i].w * disney_brdf(l, v, n, x, y, base_color, metallic, roughness);
     }
 
-    let num_point = u32(u.counts.y);
+    let num_point = u32(scene.light_params.y);
     for (var i: u32 = 0u; i < num_point && i < MAX_LIGHTS; i = i + 1u) {
-        let to_light = u.point_lights[i].xyz - in.world_position;
+        let to_light = scene.point_lights[i].xyz - in.world_position;
         let l = normalize(to_light);
         let dist = length(to_light);
         let falloff = 1.0 / (0.01 + dist * dist);
-        color = color + light_scale * u.point_lights[i].w * falloff * disney_brdf(l, v, n, x, y, base_color, metallic, roughness);
+        color = color + light_scale * scene.point_lights[i].w * falloff * disney_brdf(l, v, n, x, y, base_color, metallic, roughness);
     }
 
     // Environment reflection: a metallic surface reflects the surrounding HDR

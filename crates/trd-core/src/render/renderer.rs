@@ -174,13 +174,6 @@ pub struct Renderer {
     /// [`RenderMode::Shaded`] draws **and** the pipeline drawing it as the
     /// background sky. One type, like its sibling `FramePlane` (#221 §5).
     environment: Environment,
-    /// Scene light rig controls shared by every PBR object.
-    ///
-    /// Scene-level, so it stays here — unlike the per-object material, IBL,
-    /// tone-map and debug view, which live on the [`MeshGpu`] they describe
-    /// (#203) instead of in four renderer-side `Vec`s parallel to the mesh
-    /// store.
-    lighting: Lighting,
     /// The caller's uploaded meshes, fixed at construction.
     meshes: MeshStore,
     /// The constant overlay geometry (axes, grids, quad outlines, shadow quad):
@@ -304,7 +297,6 @@ impl Renderer {
             pipelines,
             uniforms,
             environment,
-            lighting: Lighting::default(),
             meshes: store,
             gizmos,
             instances,
@@ -474,11 +466,6 @@ impl Renderer {
         if let Some(mesh) = self.meshes.get_mut(mesh_id) {
             mesh.material = material;
         }
-    }
-
-    /// Sets scene lighting controls shared by every PBR object.
-    pub fn set_lighting(&mut self, lighting: Lighting) {
-        self.lighting = lighting;
     }
 
     /// Sets image-based-lighting controls for every PBR object.
@@ -935,7 +922,7 @@ impl Renderer {
             &self.gpu.queue,
             camera,
             self.meshes.all(),
-            self.lighting,
+            scene.lighting(),
             self.environment.has_env(),
         );
 

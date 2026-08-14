@@ -49,14 +49,21 @@ catch-all struct:
   the **11 Burley 2012 surface parameters**, plus unshaded import metadata.
 - [`Lighting`](../crates/trd-core/src/light.rs) owns ambient fill and the
   fixed key/fill/rim rig gain; `Light` and `PointLight` give both uniform arrays
-  typed CPU representations.
-- [`ImageBasedLighting`](../crates/trd-core/src/render/ibl.rs) owns the
-  per-object environment-reflection gain; `EnvMapData` / `BoundEnv` own the HDR
-  probe data and GPU binding.
+  typed CPU representations. It is a **scene** property — set it on the `Scene`
+  you render (`Scene::with_lighting`), not through a renderer setter (#182).
+- [`ImageBasedLighting`](../crates/trd-core/src/render/env_map.rs) owns the
+  per-object environment-reflection gain; `EnvMapData` owns the HDR probe data
+  and `Environment` its GPU binding.
 - [`ToneMapping`](../crates/trd-core/src/render/tonemap.rs) owns the per-object
   operator and exposure.
 
-`PbrUniform` composes these domains into the shader's unchanged 304-byte layout.
+The GPU side is split by **frequency of change** (#182): `PbrSceneUniform`
+(group 0, binding 0) carries the camera terms + the light rig and is written
+**once per frame**, while `PbrUniform` (group 0, binding 1) is an 80-byte
+per-mesh slot a draw selects with a dynamic offset. Both share group 0 because
+`pbr.wgsl` already uses all four bind groups and the portable WebGPU baseline
+guarantees only four. The single 304-byte uniform this replaces re-encoded the
+same rig into every mesh's slot each frame.
 The CLI flags drive the common subset, and the rest use neutral defaults:
 
 | Parameter | Default | CLI flag | Meaning |

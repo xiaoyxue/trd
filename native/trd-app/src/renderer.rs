@@ -38,6 +38,10 @@ pub(crate) struct WindowRenderer {
     /// The shared render harness, built lazily once the stream's mesh table has
     /// arrived from the reader thread.
     pub(crate) renderer: Option<Renderer>,
+    /// The frame's light rig. Held here rather than pushed onto the harness:
+    /// lighting is a `Scene` property now (#182), so it is attached to the scene
+    /// this window builds each frame.
+    lighting: Lighting,
     /// CPU image backing the currently uploaded frame-plane texture. Inline
     /// frame reuse preserves the same Arc, so repeated IDs skip GPU writes.
     uploaded_frame_image: Option<Arc<ImageData>>,
@@ -99,6 +103,7 @@ impl WindowRenderer {
             gpu,
             target,
             renderer: None,
+            lighting: Lighting::default(),
             uploaded_frame_image: None,
         })
     }
@@ -142,9 +147,7 @@ impl WindowRenderer {
     }
 
     pub(crate) fn set_lighting(&mut self, lighting: Lighting) {
-        if let Some(renderer) = self.renderer.as_mut() {
-            renderer.set_lighting(lighting);
-        }
+        self.lighting = lighting;
     }
 
     pub(crate) fn set_image_based_lighting(&mut self, ibl: ImageBasedLighting) {
@@ -196,7 +199,8 @@ impl WindowRenderer {
                 None
             }
         };
-        let scene = Scene::from_draws(&frame.draws, options, frame_fit);
+        let scene =
+            Scene::from_draws(&frame.draws, options, frame_fit).with_lighting(self.lighting);
 
         let camera = match frame.params.to_camera(self.target.viewport()) {
             Ok(camera) => camera,
