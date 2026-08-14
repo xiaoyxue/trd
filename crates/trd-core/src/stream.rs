@@ -32,8 +32,8 @@ use crate::protocol::{ProtocolError, PROTOCOL_VERSION};
 use crate::render::{
     check_dimensions, FrameParams, Mesh, RenderOptions, Renderer, TargetError, TextureTarget,
 };
+use crate::render::{Draw, FrameFit};
 use crate::texture::ImageTexture;
-use crate::visual::{Draw, FrameFit};
 use crate::OutputSession;
 
 /// Errors from decoding, validating, rendering, or encoding a trd stream.
@@ -465,7 +465,7 @@ fn render_and_write_batch<W: Write>(
         // The scene is assembled here, from the wire draw list plus the CLI's
         // appearance options — the same `scene_with_overlays` every other
         // front-end uses, so they cannot drift apart (#180).
-        let scene = crate::visual::Scene::from_draws(&draws, options, frame_fit);
+        let scene = crate::render::Scene::from_draws(&draws, options, frame_fit);
         // `run_stream` is a synchronous `Read`/`Write` filter, while the renderer
         // is async because GPU read-back is (the browser must not block its event
         // loop). Natively blocking here is free: the future is already complete
@@ -596,7 +596,7 @@ mod tests {
     use crate::protocol::{
         MESH_TABLE_KIND, PARAMS_TABLE_KIND, PROTOCOL_VERSION_KEY, TABLE_KIND_KEY,
     };
-    use crate::visual::{DrawSelection, RenderMode};
+    use crate::render::{DrawSelection, RenderMode};
     use arrow::array::{
         Array, ArrayRef, FixedSizeListArray, FixedSizeListArray as U8List, Float32Array, ListArray,
         StringArray, UInt32Array, UInt8Array,

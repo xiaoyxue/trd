@@ -1,14 +1,43 @@
-//! Shared, platform-agnostic mesh rendering.
+//! Shared, platform-agnostic mesh rendering — **this rasterizer**: its frame
+//! description, its primitive taxonomy, its pipelines and its GPU resources.
 //!
 //! [`Renderer`] rasterizes a [`Scene`] of [`DrawableObject`]s through the
 //! vertex/index-buffer path used by every native and browser front-end (#203).
+//!
+//! The **frame description** lives here too (#223). It used to be `src/visual/`,
+//! a module whose members shared no predicate beyond "not the renderer" — but
+//! `Primitive::{Mesh, AabbBox, PlaneGrid, QuadOutline, BlobShadow,
+//! CoordinateAxes}` and `RenderMode::{Filled, Textured, Shaded, Wireframe}` are
+//! not general graphics vocabulary, they are the taxonomy [`Renderer`] dispatches
+//! on, deliberately in lockstep with the batcher (#204). A different renderer
+//! would not reuse them, so they sit beside the renderer they describe:
+//!
+//! | module | owns |
+//! |---|---|
+//! | [`scene`] | [`Scene`], its [`Background`], and its assembly, [`Scene::from_draws`] |
+//! | [`drawable`] | [`Primitive`] — *what* can be drawn — and [`DrawableObject`], one placed by a model |
+//! | [`draw`] | [`Draw`] + [`DrawSelection`], the *wire* instance record and its byte codec |
+//! | [`draw_config`] | [`RenderMode`], [`FrameFit`], [`GridPlane`] — the per-drawable configuration a front-end selects |
+//!
+//! Assembly ([`Scene::from_draws`]) is the **one** place a wire [`Draw`] becomes
+//! a [`DrawableObject`], which is what keeps every front-end rendering the same
+//! scene from the same inputs (#180).
+//!
+//! Nothing in those four files touches wgpu, and the guarantee is carried by the
+//! **derives**: a `wgpu::BindGroup`/`RenderPipeline`/`Buffer` field on [`Scene`]
+//! would break `#[derive(Clone, Default, PartialEq)]` at compile time, since none
+//! of them implement `PartialEq`. Treat any PR dropping those derives as removing
+//! the guard.
 
 mod bound_material_maps;
 mod bound_texture;
 mod bound_uniform;
 mod buffer;
 mod color;
+mod draw;
 mod draw_command;
+mod draw_config;
+mod drawable;
 mod env_map;
 mod environment;
 mod frame_params;
@@ -16,7 +45,6 @@ mod frame_plane;
 mod gizmo;
 mod gpu_context;
 mod gpu_types;
-mod light;
 mod mesh_store;
 mod options;
 mod pbr;
@@ -25,6 +53,7 @@ mod pipeline;
 mod platform;
 mod render_target;
 mod renderer;
+mod scene;
 mod scene_pipelines;
 mod tonemap;
 #[cfg(test)]
@@ -36,12 +65,14 @@ mod gpu_tests;
 // Public API surface (re-exported unchanged by `crate::lib`).
 // The headless offscreen harness is native-only (drives wgpu under
 // `pollster::block_on`), so it and its re-export are gated off wasm.
+pub use draw::{Draw, DrawSelection};
+pub use draw_config::{FrameFit, GridPlane, RenderMode};
+pub use drawable::{DrawableObject, Primitive};
 pub use env_map::{EnvMapData, ImageBasedLighting};
 pub use frame_params::{CameraFormError, FrameParams, Viewport};
 pub(crate) use gpu_context::LimitsPreset;
 pub use gpu_context::{create_instance, AdapterFacts, GpuContext, GpuInitError, GpuRequest};
 pub use gpu_types::Vertex;
-pub use light::{Light, Lighting, PointLight};
 pub use options::{Msaa, PbrConfig, RenderOptions};
 pub use pbr::PbrDebugView;
 pub use picking::PickTarget;
@@ -52,6 +83,7 @@ pub use render_target::{
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use renderer::check_dimensions;
 pub use renderer::{RenderError, Renderer, SurfaceError, SurfaceRepair};
+pub use scene::{Background, EnvironmentBackground, Scene};
 pub use tonemap::{ToneMapping, Tonemap};
 /// Reference + test scaffolding only (#202): the minimal canonical wgpu
 /// renderer, kept to be *read* and exercised by `render::gpu_tests`. It has no
@@ -73,7 +105,12 @@ pub(crate) use gizmo::{aabb_line_vertices, SHADOW_VERTEX_COUNT};
 pub(crate) use gpu_types::{
     GizmoLineVertex, GizmoUniform, InstanceRaw, PbrVertex, PickInstanceRaw, Uniform,
 };
-pub(crate) use light::{DEFAULT_LIGHTS, DEFAULT_POINT_LIGHTS};
+// The light rig is universal domain vocabulary and lives at the crate root
+// (#223); re-exported here so `render/`'s `use super::*` globs keep resolving.
+pub(crate) use crate::light::{Lighting, DEFAULT_LIGHTS, DEFAULT_POINT_LIGHTS};
+#[cfg(test)]
+pub(crate) use draw::DRAW_MODE_INHERIT;
+pub(crate) use draw_config::frame_fit_uv_scale;
 pub(crate) use pbr::{compute_smooth_normals, compute_tangents, PbrUniform, PbrUniformInputs};
 pub(crate) use pipeline::{
     create_depth_target, create_env_bind_group_layout, create_frame_bind_group_layout,

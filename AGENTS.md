@@ -19,7 +19,7 @@ Guidance for agents working in this repository.
   (`.cargo/config.toml`).
 - **Vertical slicing.** Each increment threads the whole stack and is
   independently end-to-end verifiable.
-- **Everything drawn is a `DrawableObject`** (`visual/drawable.rs`, #41): a small
+- **Everything drawn is a `DrawableObject`** (`render/drawable.rs`, #41): a small
   `Copy` struct pairing a `Primitive` — *what* to draw — with the `model` that
   places it (`Primitive::Mesh { mesh_id, mode }` | `AabbBox { mesh_id }` |
   `CoordinateAxes` | `PlaneGrid { plane }` | `QuadOutline { selected }` |

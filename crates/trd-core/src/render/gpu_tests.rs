@@ -2,11 +2,11 @@
 //! readback/device helpers and OBJ fixtures.
 
 use super::*;
-use crate::math::{Matrix4, Point3, Vector3};
-use crate::visual::{
+use super::{
     Background, Draw, DrawSelection, DrawableObject, EnvironmentBackground, FrameFit, RenderMode,
     Scene,
 };
+use crate::math::{Matrix4, Point3, Vector3};
 use glam::{Mat4, Vec3};
 
 /// Test convenience constructor: a [`Renderer`] over a single mesh with an

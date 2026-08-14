@@ -17,7 +17,7 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, Field, Schema};
 
-use crate::visual::{Draw, DrawSelection};
+use crate::render::{Draw, DrawSelection};
 use crate::{CameraFormError, FrameParams};
 
 use super::{ProtocolError, PROTOCOL_VERSION_KEY, SUPPORTED_INPUT_VERSIONS};

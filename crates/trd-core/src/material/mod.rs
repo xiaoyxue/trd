@@ -2,8 +2,9 @@
 //!
 //! `Material` / [`DisneyMaterial`] and friends contain **no `wgpu` and no
 //! `bytemuck`**: they are the CPU-side description of a surface, siblings of
-//! [`crate::mesh`], [`crate::texture`] and [`crate::camera`] rather than part of
-//! the render backend. `render/pbr.rs` is what turns a material into GPU bytes.
+//! [`crate::mesh`], [`crate::texture`], [`crate::camera`] and [`crate::light`]
+//! rather than part of the render backend. `render/pbr.rs` is what turns a
+//! material into GPU bytes.
 
 mod disney;
 

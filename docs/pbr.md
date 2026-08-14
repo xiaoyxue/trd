@@ -47,7 +47,7 @@ catch-all struct:
 
 - [`DisneyMaterial`](../crates/trd-core/src/material/disney.rs) owns only
   the **11 Burley 2012 surface parameters**, plus unshaded import metadata.
-- [`Lighting`](../crates/trd-core/src/render/light.rs) owns ambient fill and the
+- [`Lighting`](../crates/trd-core/src/light.rs) owns ambient fill and the
   fixed key/fill/rim rig gain; `Light` and `PointLight` give both uniform arrays
   typed CPU representations.
 - [`ImageBasedLighting`](../crates/trd-core/src/render/ibl.rs) owns the

@@ -23,8 +23,8 @@
 //! the declaration order of an enum.
 
 use super::InstanceRaw;
+use super::{DrawableObject, Primitive};
 use crate::math::Matrix4;
-use crate::visual::{DrawableObject, Primitive};
 
 /// One instanced draw recorded while walking a scene: the primitive whose
 /// geometry and pipeline to bind, and the contiguous instance-buffer range to
@@ -111,7 +111,7 @@ pub(super) fn build_batches(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::visual::{GridPlane, RenderMode};
+    use crate::render::{GridPlane, RenderMode};
 
     fn model(tag: f32) -> [f32; 16] {
         let mut model = Matrix4::IDENTITY.to_cols_array();

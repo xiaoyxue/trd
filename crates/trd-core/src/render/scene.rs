@@ -340,8 +340,8 @@ pub(crate) fn selection_aabb_overlay(draws: &[Draw], selected: Option<u32>) -> V
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::visual::DrawSelection;
-    use crate::visual::Primitive;
+    use crate::render::DrawSelection;
+    use crate::render::Primitive;
 
     #[test]
     fn plane_grid_overlays_place_world_and_object_grids() {

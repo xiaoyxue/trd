@@ -42,8 +42,8 @@
 
 use thiserror::Error;
 
+use super::Scene;
 use super::Viewport;
-use crate::visual::Scene;
 use crate::Camera;
 
 /// The fixed texture-target render format. Matches the headless CLI's output

@@ -82,7 +82,7 @@ record — the locked decisions and the full plan live in issue #97.
 Both render paths build the same value:
 
 ```
-Scene { background: Background, objects: Vec<DrawableObject> }   // visual/scene.rs
+Scene { background: Background, objects: Vec<DrawableObject> }   // render/scene.rs
 Background { environment: Option<EnvironmentBackground>, frame: Option<FrameFit> }
 DrawableObject { primitive: Primitive, model: [f32;16] }  // placed primitive
 Primitive::Mesh { mesh_id, mode }   // + AabbBox / CoordinateAxes / PlaneGrid / QuadOutline / BlobShadow
