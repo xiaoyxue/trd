@@ -36,6 +36,7 @@ mod gpu_tests;
 // The headless offscreen harness is native-only (drives wgpu under
 // `pollster::block_on`), so it and its re-export are gated off wasm.
 pub use frame_params::{CameraFormError, FrameParams, Viewport};
+pub use frame_plane::FrameRingStats;
 pub(crate) use gpu_context::LimitsPreset;
 pub use gpu_context::{create_instance, AdapterFacts, GpuContext, GpuInitError, GpuRequest};
 pub use gpu_types::{Mesh, MeshShading, Vertex};

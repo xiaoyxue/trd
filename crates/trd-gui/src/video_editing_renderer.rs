@@ -55,6 +55,7 @@ pub struct VideoRendererDiagnostics {
     pub msaa_samples: u32,
     pub asset: Option<ImportedAssetDiagnostics>,
     pub transfers: TransferCounts,
+    pub frame_ring: trd_core::FrameRingStats,
 }
 
 pub struct VideoPlacementRenderer {
@@ -214,6 +215,7 @@ impl VideoPlacementRenderer {
             msaa_samples: 4,
             asset: self.asset_diagnostics.clone(),
             transfers: self.transfers,
+            frame_ring: self.renderer.frame_ring_stats(),
         }
     }
 
@@ -326,8 +328,12 @@ impl VideoPlacementRenderer {
             ui_upload: 0,
             crossings: 2,
         };
-        self.renderer
-            .update_frame_texture_rgba(rgba, frame_width, frame_height);
+        self.renderer.update_frame_texture_indexed(
+            rgba,
+            frame_width,
+            frame_height,
+            background_frame.video_frame_index,
+        );
         self.draw_layers_for(
             frame_width,
             frame_height,
@@ -340,6 +346,67 @@ impl VideoPlacementRenderer {
             model,
             state,
         )
+    }
+
+    /// Presents an already-resident frame from the GPU frame ring, if it is
+    /// still there.
+    ///
+    /// A `true` means the shell can skip decoding **and** uploading this frame
+    /// entirely and go straight to [`draw_resident`](Self::draw_resident) — the
+    /// point of the ring. A `false` means it must decode as usual and call
+    /// [`draw`](Self::draw).
+    pub fn present_resident_frame(&mut self, frame_index: u32) -> bool {
+        self.renderer.present_frame(frame_index)
+    }
+
+    /// Draws the placement layers over the frame **already presented** by
+    /// [`present_resident_frame`](Self::present_resident_frame).
+    ///
+    /// Identical to [`draw`](Self::draw) minus the background upload, so it
+    /// moves **zero** frame bytes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_resident(
+        &mut self,
+        frame_width: u32,
+        frame_height: u32,
+        calibration_size: (u32, u32),
+        background_frame: &trd_core::VideoEditingFrame,
+        quad_model: Option<trd_core::Matrix4>,
+        quad_axes: Option<trd_core::Matrix4>,
+        selected_quad: bool,
+        placement_frame: Option<&trd_core::VideoEditingFrame>,
+        model: Option<trd_core::Matrix4>,
+        state: &crate::scene::SceneState,
+    ) -> Result<(), String> {
+        self.transfers = TransferCounts {
+            frame_upload: 0, // the frame was already resident on the GPU
+            readback: 0,
+            ui_upload: 0,
+            crossings: 0,
+        };
+        self.draw_layers_for(
+            frame_width,
+            frame_height,
+            calibration_size,
+            background_frame,
+            quad_model,
+            quad_axes,
+            selected_quad,
+            placement_frame,
+            model,
+            state,
+        )
+    }
+
+    /// Drops every frame resident in the ring — call on a seek or source change,
+    /// where the resident frames' indices no longer refer to the same images.
+    pub fn invalidate_frame_ring(&mut self) {
+        self.renderer.invalidate_frame_ring();
+    }
+
+    /// Ring occupancy and reuse counters, for the diagnostics panel.
+    pub fn frame_ring_stats(&self) -> trd_core::FrameRingStats {
+        self.renderer.frame_ring_stats()
     }
 
     /// Like [`draw`](Self::draw), but the background frame is copied **straight
@@ -374,8 +441,12 @@ impl VideoPlacementRenderer {
             ui_upload: 0,
             crossings: 0,
         };
-        self.renderer
-            .update_frame_texture_from_video(video, frame_width, frame_height);
+        self.renderer.update_frame_texture_from_video(
+            video,
+            frame_width,
+            frame_height,
+            Some(background_frame.video_frame_index),
+        );
         self.draw_layers_for(
             frame_width,
             frame_height,

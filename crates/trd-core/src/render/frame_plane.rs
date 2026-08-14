@@ -13,29 +13,166 @@ use super::GpuContext;
 use super::{create_frame_bind_group_layout, create_frame_plane_pipeline, Viewport};
 use crate::visual::{frame_fit_uv_scale, FrameFit};
 
-/// The reused GPU frame texture plus its bind group and fit uniform. Recreated
-/// only when the frame resolution changes, so streaming a fixed-resolution video
-/// allocates once and every later frame is a plain `queue.write_texture`.
-struct FrameTextureGpu {
+/// VRAM the frame ring may spend on decoded frames. Capacity is derived from
+/// this and the frame size rather than fixed, because a slot count that is
+/// comfortable at 960×540 (2 MB each) is a gigabyte at 4K (33 MB each).
+const RING_BUDGET_BYTES: usize = 128 * 1024 * 1024;
+
+/// Never fewer than this many slots.
+///
+/// The ring's one hard correctness requirement is that the write cursor must not
+/// wrap onto a slot the GPU is still reading. That is a *capacity* problem, not
+/// a synchronization one: a barrier would serialize the write against the draw
+/// and defeat the pipelining. With at most a couple of frames in flight on the
+/// queue, four slots is already slack; the rest of the budget buys scrub hits.
+const RING_MIN_SLOTS: u32 = 4;
+
+/// Never more than this, however small the frames.
+const RING_MAX_SLOTS: u32 = 64;
+
+/// The ring's **bookkeeping**, free of GPU resources: which frame each layer
+/// holds and which layer is filled next.
+///
+/// Split out from [`FrameRing`] so the eviction and lookup rules — the part with
+/// actual logic — are unit-testable without a device.
+#[derive(Debug)]
+struct RingSlots {
+    /// Which video frame each layer holds; `None` once invalidated or never
+    /// filled. Indexed by layer.
+    occupants: Vec<Option<u32>>,
+    /// Next layer to fill; wraps.
+    write: u32,
+}
+
+impl RingSlots {
+    fn new(capacity: u32) -> Self {
+        Self {
+            occupants: vec![None; capacity.max(1) as usize],
+            write: 0,
+        }
+    }
+
+    fn capacity(&self) -> u32 {
+        self.occupants.len() as u32
+    }
+
+    fn resident(&self) -> u32 {
+        self.occupants.iter().filter(|slot| slot.is_some()).count() as u32
+    }
+
+    /// The layer holding `frame_index`, if it is still resident.
+    fn find(&self, frame_index: u32) -> Option<u32> {
+        self.occupants
+            .iter()
+            .position(|slot| *slot == Some(frame_index))
+            .map(|index| index as u32)
+    }
+
+    /// Claims the next layer for `frame_index`, evicting whatever it held.
+    ///
+    /// Any other layer already claiming `frame_index` is released first, so
+    /// [`find`](Self::find) can never return a stale copy of a re-uploaded frame.
+    fn claim(&mut self, frame_index: Option<u32>) -> u32 {
+        let layer = self.write;
+        self.write = (self.write + 1) % self.capacity();
+        if frame_index.is_some() {
+            for slot in self.occupants.iter_mut() {
+                if *slot == frame_index {
+                    *slot = None;
+                }
+            }
+        }
+        self.occupants[layer as usize] = frame_index;
+        layer
+    }
+
+    /// Drops every resident frame, keeping the allocation.
+    fn invalidate(&mut self) {
+        self.occupants.iter_mut().for_each(|slot| *slot = None);
+        self.write = 0;
+    }
+}
+
+/// A ring of decoded frames resident on the GPU.
+///
+/// The decoder fills slots ahead of the renderer, which presents whichever slot
+/// holds the frame it wants — the "stream the map in behind you" pattern. It
+/// buys two things the single-texture path could not:
+///
+/// * **Decode/render decoupling.** An upload no longer sits on the render path;
+///   a producer that runs ahead simply fills further slots.
+/// * **Scrub hits.** A frame still resident is presented by writing its layer
+///   index into the fit uniform — no decode, no upload, no rebind. See
+///   [`present_resident`](FramePlane::present_resident).
+///
+/// **One array texture, one bind group.** Slots are array layers, not separate
+/// textures: the sampler and the fit uniform are shared by every slot (the fit
+/// depends on the frame *size*, not on which frame), so a single bind group
+/// serves the whole ring and presenting another frame costs a `vec4` write.
+/// `wgpu-core` tracks texture state per subresource (`selector.layers` is a
+/// range), so writing one layer while another is being sampled does not
+/// serialize.
+///
+/// **No memory barriers.** wgpu tracks resource state and inserts transitions
+/// itself; there is no barrier API to call. The one hazard the ring must avoid —
+/// overwriting a slot the GPU is still sampling — is a *capacity* problem, not a
+/// synchronization one: a barrier would serialize the write against the draw and
+/// defeat the pipelining the ring exists to create. [`RING_MIN_SLOTS`] keeps the
+/// write cursor clear of the frames in flight.
+struct FrameRing {
+    /// `capacity` array layers of `width`×`height`.
     texture: wgpu::Texture,
+    /// The one bind group: the whole ring, the sampler, and the fit uniform.
     bind_group: wgpu::BindGroup,
-    /// `vec4` fit uniform (`uv_scale.xy` + padding), rewritten each frame from the
-    /// [`FrameFit`] + texture/viewport aspect.
+    /// `vec4(uv_scale.xy, layer, _pad)` — rewritten when the fit or the
+    /// presented slot changes.
     fit_uniform: wgpu::Buffer,
+    /// Which layer holds which frame, and which is filled next.
+    slots: RingSlots,
+    /// Layer the frame plane draws from, or `None` before the first frame.
+    presented: Option<u32>,
     width: u32,
     height: u32,
 }
 
+impl FrameRing {
+    /// Layers that fit [`RING_BUDGET_BYTES`] at this frame size, clamped to
+    /// [`RING_MIN_SLOTS`]..=[`RING_MAX_SLOTS`].
+    fn capacity_for(device: &wgpu::Device, width: u32, height: u32) -> u32 {
+        let bytes = (width as usize).saturating_mul(height as usize) * 4;
+        let fits = (RING_BUDGET_BYTES / bytes.max(1)) as u32;
+        fits.clamp(RING_MIN_SLOTS, RING_MAX_SLOTS)
+            .min(device.limits().max_texture_array_layers)
+            .max(1)
+    }
+
+    fn matches(&self, width: u32, height: u32) -> bool {
+        self.width == width && self.height == height
+    }
+}
+
+/// Ring occupancy and reuse, for the diagnostics panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FrameRingStats {
+    pub capacity: u32,
+    pub resident: u32,
+    /// Frames presented straight from the ring, with no upload.
+    pub hits: u32,
+    /// Frames that had to be uploaded.
+    pub misses: u32,
+}
+
 /// The background frame-plane subsystem: the fullscreen pipeline, its bind-group
-/// layout, the shared sampler, and the currently-bound frame texture (`None`
-/// until the first [`upload_rgba`](Self::upload_rgba)). While nothing is bound
-/// every method is a no-op, so a scene asking for a frame plane simply renders
-/// nothing.
+/// layout, the shared sampler, and the ring of decoded frames (empty until the
+/// first upload). While nothing is bound every method is a no-op, so a scene
+/// asking for a frame plane simply renders nothing.
 pub(super) struct FramePlane {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
-    texture: Option<FrameTextureGpu>,
+    ring: Option<FrameRing>,
+    hits: u32,
+    misses: u32,
 }
 
 impl FramePlane {
@@ -68,27 +205,76 @@ impl FramePlane {
             pipeline,
             layout,
             sampler,
-            texture: None,
+            ring: None,
+            hits: 0,
+            misses: 0,
         }
     }
 
-    /// Whether a frame texture is currently bound (so a scene asking for a frame
+    /// Whether a frame is currently presentable (so a scene asking for a frame
     /// plane would render one).
     pub(super) fn is_bound(&self) -> bool {
-        self.texture.is_some()
+        self.ring
+            .as_ref()
+            .is_some_and(|ring| ring.presented.is_some())
     }
 
-    /// Uploads `rgba` (tightly-packed, row-major `height`×`width`×4) as the
-    /// background frame texture (formerly `SceneRenderer::update_frame_texture_rgba`).
-    /// The GPU texture is **reused** across frames — recreated only when the
-    /// dimensions change, so streaming a fixed-resolution video allocates once and
-    /// every later frame is a plain `queue.write_texture`. The texture is
-    /// `Rgba8UnormSrgb` (linearized on sample) and carries **no mipmaps** (a
-    /// near-fullscreen background samples ~1:1).
+    /// Ring occupancy and hit/miss counts, for the diagnostics panel.
+    pub(super) fn ring_stats(&self) -> FrameRingStats {
+        let (capacity, resident) = self.ring.as_ref().map_or((0, 0), |ring| {
+            (ring.slots.capacity(), ring.slots.resident())
+        });
+        FrameRingStats {
+            capacity,
+            resident,
+            hits: self.hits,
+            misses: self.misses,
+        }
+    }
+
+    /// Presents an already-resident frame, if the ring still holds it.
+    ///
+    /// This is the ring's payoff for scrubbing: a frame the decoder produced
+    /// earlier is shown by rebinding one bind group — no decode, no upload, no
+    /// CPU traffic at all.
+    pub(super) fn present_resident(&mut self, frame_index: u32) -> bool {
+        let Some(ring) = self.ring.as_mut() else {
+            return false;
+        };
+        let Some(slot) = ring.slots.find(frame_index) else {
+            return false;
+        };
+        ring.presented = Some(slot);
+        self.hits = self.hits.saturating_add(1);
+        true
+    }
+
+    /// Drops every resident frame — a seek or source change makes their indices
+    /// meaningless. Allocations are kept, so the next frame does not reallocate.
+    pub(super) fn invalidate_ring(&mut self) {
+        if let Some(ring) = self.ring.as_mut() {
+            ring.slots.invalidate();
+            ring.presented = None;
+        }
+    }
+
+    /// Uploads `rgba` (tightly-packed, row-major `height`x`width`x4) into the
+    /// ring as `frame_index`, and presents it.
+    ///
+    /// `frame_index` is what makes a later [`present_resident`] hit possible;
+    /// callers with no timeline (a still background) pass `None`, which fills a
+    /// slot that can never be found again — correct, since there is nothing to
+    /// scrub back to.
     ///
     /// Panics if `rgba.len() != width * height * 4` or either dimension is zero.
-    pub(super) fn upload_rgba(&mut self, gpu: &GpuContext, rgba: &[u8], width: u32, height: u32) {
-        let (device, queue) = (&gpu.device, &gpu.queue);
+    pub(super) fn upload_rgba(
+        &mut self,
+        gpu: &GpuContext,
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+        frame_index: Option<u32>,
+    ) {
         assert!(
             width > 0 && height > 0,
             "frame texture dimensions must be non-zero"
@@ -99,13 +285,17 @@ impl FramePlane {
             "frame texture rgba length must be width*height*4"
         );
 
-        self.ensure_texture(device, width, height);
-        let ft = self.texture.as_ref().expect("frame texture set above");
-        queue.write_texture(
+        let layer = self.claim_layer(&gpu.device, width, height, frame_index);
+        let ring = self.ring.as_ref().expect("ring created above");
+        gpu.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
-                texture: &ft.texture,
+                texture: &ring.texture,
                 mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
+                origin: wgpu::Origin3d {
+                    x: 0,
+                    y: 0,
+                    z: layer,
+                },
                 aspect: wgpu::TextureAspect::All,
             },
             rgba,
@@ -122,13 +312,13 @@ impl FramePlane {
         );
     }
 
-    /// Copies the **current frame of a `<video>` element** straight into the
-    /// frame texture, without it ever touching CPU memory (#229 follow-up).
+    /// Copies the **current frame of a `<video>` element** straight into a ring
+    /// slot, without it ever touching CPU memory (#229 follow-up).
     ///
     /// The browser has already decoded the frame in hardware and it lives in GPU
     /// memory; [`upload_rgba`](Self::upload_rgba) would drag it down to the CPU
-    /// (`VideoFrame.copyTo`, plus a YUV→RGBA conversion), across the wasm
-    /// boundary, and push it back up again — three full-resolution traversals of
+    /// (`VideoFrame.copyTo`, plus a YUV->RGBA conversion), across the wasm
+    /// boundary, and push it back up again - three full-resolution traversals of
     /// a frame that never needed to leave the GPU.
     ///
     /// `queue.copy_external_image_to_texture` is a **web-only** wgpu API
@@ -147,12 +337,13 @@ impl FramePlane {
         video: &web_sys::HtmlVideoElement,
         width: u32,
         height: u32,
+        frame_index: Option<u32>,
     ) {
         if width == 0 || height == 0 {
             return;
         }
-        self.ensure_texture(&gpu.device, width, height);
-        let ft = self.texture.as_ref().expect("frame texture set above");
+        let layer = self.claim_layer(&gpu.device, width, height, frame_index);
+        let ring = self.ring.as_ref().expect("ring created above");
         gpu.queue.copy_external_image_to_texture(
             &wgpu::CopyExternalImageSourceInfo {
                 source: wgpu::ExternalImageSource::HTMLVideoElement(video.clone()),
@@ -160,9 +351,13 @@ impl FramePlane {
                 flip_y: false,
             },
             wgpu::CopyExternalImageDestInfo {
-                texture: &ft.texture,
+                texture: &ring.texture,
                 mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
+                origin: wgpu::Origin3d {
+                    x: 0,
+                    y: 0,
+                    z: layer,
+                },
                 aspect: wgpu::TextureAspect::All,
                 color_space: wgpu::PredefinedColorSpace::Srgb,
                 premultiplied_alpha: false,
@@ -175,23 +370,40 @@ impl FramePlane {
         );
     }
 
-    /// (Re)creates the frame texture, its bind group and fit uniform when the
-    /// resolution changes. Shared by both upload paths so a fixed-resolution
-    /// video allocates exactly once.
-    fn ensure_texture(&mut self, device: &wgpu::Device, width: u32, height: u32) {
-        let needs_new = self
-            .texture
+    /// Creates the ring if needed, claims the next layer for `frame_index` and
+    /// presents it. Shared by both upload paths.
+    fn claim_layer(
+        &mut self,
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+        frame_index: Option<u32>,
+    ) -> u32 {
+        // A resolution change invalidates every resident frame, so the ring is
+        // rebuilt rather than resized.
+        if !self
+            .ring
             .as_ref()
-            .is_none_or(|ft| ft.width != width || ft.height != height);
-        if !needs_new {
-            return;
+            .is_some_and(|ring| ring.matches(width, height))
+        {
+            self.ring = Some(self.create_ring(device, width, height));
         }
+        let ring = self.ring.as_mut().expect("ring created above");
+        let layer = ring.slots.claim(frame_index);
+        ring.presented = Some(layer);
+        self.misses = self.misses.saturating_add(1);
+        layer
+    }
+
+    /// Allocates the array texture, its single bind group and the fit uniform.
+    fn create_ring(&self, device: &wgpu::Device, width: u32, height: u32) -> FrameRing {
+        let capacity = FrameRing::capacity_for(device, width, height);
         let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("trd frame texture"),
+            label: Some("trd frame ring"),
             size: wgpu::Extent3d {
                 width,
                 height,
-                depth_or_array_layers: 1,
+                depth_or_array_layers: capacity,
             },
             mip_level_count: 1,
             sample_count: 1,
@@ -204,7 +416,10 @@ impl FramePlane {
                 | wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let view = texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
         let fit_uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("trd frame fit uniform"),
             size: 16,
@@ -229,34 +444,128 @@ impl FramePlane {
                 },
             ],
         });
-        self.texture = Some(FrameTextureGpu {
+        log::debug!("frame ring: {capacity} slots of {width}x{height}");
+        FrameRing {
             texture,
             bind_group,
             fit_uniform,
+            slots: RingSlots::new(capacity),
+            presented: None,
             width,
             height,
-        });
+        }
     }
 
     /// Computes and uploads the centered UV-fit scale that realizes `fit` on
-    /// `viewport` for the bound frame texture. No-op if no texture is bound.
+    /// `viewport`, **together with the presented layer** - the two travel in one
+    /// `vec4`, so moving to another resident frame is this single write. No-op
+    /// while the ring holds nothing.
     pub(super) fn write_fit(&self, queue: &wgpu::Queue, fit: FrameFit, viewport: Viewport) {
-        if let Some(ft) = self.texture.as_ref() {
-            let scale =
-                frame_fit_uv_scale(fit, ft.width, ft.height, viewport.width, viewport.height);
-            let fit_data: [f32; 4] = [scale[0], scale[1], 0.0, 0.0];
-            queue.write_buffer(&ft.fit_uniform, 0, bytemuck::cast_slice(&fit_data));
-        }
+        let Some(ring) = self.ring.as_ref() else {
+            return;
+        };
+        let Some(layer) = ring.presented else {
+            return;
+        };
+        let scale = frame_fit_uv_scale(
+            fit,
+            ring.width,
+            ring.height,
+            viewport.width,
+            viewport.height,
+        );
+        let fit_data: [f32; 4] = [scale[0], scale[1], layer as f32, 0.0];
+        queue.write_buffer(&ring.fit_uniform, 0, bytemuck::cast_slice(&fit_data));
     }
 
     /// Records the fullscreen frame-plane draw (its own pipeline + group-0 bind,
-    /// depth-write off) so the mesh scene composites on top. No-op if no texture
-    /// is bound.
+    /// depth-write off) so the mesh scene composites on top. No-op while the ring
+    /// holds nothing.
     pub(super) fn draw(&self, pass: &mut wgpu::RenderPass) {
-        if let Some(ft) = self.texture.as_ref() {
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &ft.bind_group, &[]);
-            pass.draw(0..3, 0..1);
+        let Some(ring) = self.ring.as_ref() else {
+            return;
+        };
+        if ring.presented.is_none() {
+            return;
         }
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &ring.bind_group, &[]);
+        pass.draw(0..3, 0..1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RingSlots, RING_BUDGET_BYTES, RING_MAX_SLOTS, RING_MIN_SLOTS};
+
+    /// The same `capacity_for` arithmetic as [`super::FrameRing`], minus the
+    /// device limit — that clamp needs a GPU, the budget policy does not.
+    fn capacity_for(width: u32, height: u32) -> u32 {
+        let bytes = (width as usize).saturating_mul(height as usize) * 4;
+        ((RING_BUDGET_BYTES / bytes.max(1)) as u32).clamp(RING_MIN_SLOTS, RING_MAX_SLOTS)
+    }
+
+    #[test]
+    fn claim_wraps_and_evicts_in_order() {
+        let mut slots = RingSlots::new(3);
+        assert_eq!(slots.claim(Some(10)), 0);
+        assert_eq!(slots.claim(Some(11)), 1);
+        assert_eq!(slots.claim(Some(12)), 2);
+        assert_eq!(slots.resident(), 3);
+        // Wraps onto the oldest slot, evicting frame 10.
+        assert_eq!(slots.claim(Some(13)), 0);
+        assert_eq!(slots.find(10), None);
+        assert_eq!(slots.find(13), Some(0));
+        assert_eq!(slots.resident(), 3);
+    }
+
+    #[test]
+    fn find_locates_resident_frames_only() {
+        let mut slots = RingSlots::new(4);
+        slots.claim(Some(7));
+        assert_eq!(slots.find(7), Some(0));
+        assert_eq!(slots.find(8), None);
+    }
+
+    #[test]
+    fn reuploading_a_frame_releases_its_old_slot() {
+        let mut slots = RingSlots::new(4);
+        slots.claim(Some(5));
+        let second = slots.claim(Some(5));
+        assert_eq!(second, 1);
+        // Exactly one slot may claim a frame, so `find` cannot return the stale
+        // layer whose contents were overwritten.
+        assert_eq!(slots.find(5), Some(1));
+        assert_eq!(slots.resident(), 1);
+    }
+
+    #[test]
+    fn unindexed_frames_are_never_found() {
+        let mut slots = RingSlots::new(4);
+        slots.claim(None);
+        assert_eq!(slots.resident(), 0);
+        assert_eq!(slots.find(0), None);
+    }
+
+    #[test]
+    fn invalidate_clears_occupancy_and_rewinds() {
+        let mut slots = RingSlots::new(4);
+        slots.claim(Some(1));
+        slots.claim(Some(2));
+        slots.invalidate();
+        assert_eq!(slots.resident(), 0);
+        assert_eq!(slots.find(1), None);
+        assert_eq!(slots.claim(Some(3)), 0);
+    }
+
+    #[test]
+    fn capacity_scales_with_frame_size_within_bounds() {
+        // 4K frames are 33 MB each, so the 128 MB budget only affords the floor.
+        assert_eq!(capacity_for(3840, 2160), RING_MIN_SLOTS);
+        // 960x540 is 2 MB, so the budget affords far more than the cap allows.
+        assert_eq!(capacity_for(960, 540), RING_MAX_SLOTS);
+        // A degenerate size must not divide by zero; it saturates at the cap,
+        // which is harmless because uploads reject zero dimensions anyway.
+        assert_eq!(capacity_for(0, 0), RING_MAX_SLOTS);
     }
 }

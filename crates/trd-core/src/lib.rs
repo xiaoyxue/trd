@@ -52,6 +52,7 @@ pub use visual::{
 };
 // The render harness; available on both platforms since readback became async
 // (#180) — the browser could not use it while it blocked on readback.
+pub use render::FrameRingStats;
 pub use render::{RenderError, Renderer};
 pub use texture::{
     ConstantTexture, ImageData, ImageTexture, Texture, TextureError, TEXTURE_COLUMN,

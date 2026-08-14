@@ -384,6 +384,11 @@ impl VideoEditingShared {
             self.needs_overlay.set(false);
             self.render_in_flight_frame.set(None);
             self.video_media.set(VideoMediaObservation::default());
+            // Resident frames are keyed by index into the *old* timeline, so a
+            // new source makes every one of them wrong.
+            if let Some(renderer) = self.renderer.borrow_mut().as_mut() {
+                renderer.invalidate_frame_ring();
+            }
         }
         self.video_loaded.set(loaded);
         self.video_playing.set(playing);
@@ -862,9 +867,11 @@ impl VideoEditingApp {
                 // is copied GPU→GPU and `video.rgba` is empty — see
                 // `VideoEditingShared::set_video_element`.
                 #[cfg(target_arch = "wasm32")]
-                let drawn = match shared.video_element.borrow().as_ref() {
-                    Some(element) if video.rgba.is_empty() => renderer.draw_from_video(
-                        element,
+                let drawn = if renderer.present_resident_frame(background_frame_index) {
+                    // Still on the GPU from an earlier render — overlay-only
+                    // repaints (gizmo drags, selection, panel toggles) all land
+                    // here and move no frame bytes at all.
+                    renderer.draw_resident(
                         video.width,
                         video.height,
                         (width, height),
@@ -875,8 +882,53 @@ impl VideoEditingApp {
                         placement_frame.as_ref(),
                         model,
                         &state,
-                    ),
-                    _ => renderer.draw(
+                    )
+                } else {
+                    match shared.video_element.borrow().as_ref() {
+                        Some(element) if video.rgba.is_empty() => renderer.draw_from_video(
+                            element,
+                            video.width,
+                            video.height,
+                            (width, height),
+                            &background_frame,
+                            quad_model,
+                            quad_axes,
+                            show_quad_gizmo,
+                            placement_frame.as_ref(),
+                            model,
+                            &state,
+                        ),
+                        _ => renderer.draw(
+                            &video.rgba,
+                            video.width,
+                            video.height,
+                            (width, height),
+                            &background_frame,
+                            quad_model,
+                            quad_axes,
+                            show_quad_gizmo,
+                            placement_frame.as_ref(),
+                            model,
+                            &state,
+                        ),
+                    }
+                };
+                #[cfg(not(target_arch = "wasm32"))]
+                let drawn = if renderer.present_resident_frame(background_frame_index) {
+                    renderer.draw_resident(
+                        video.width,
+                        video.height,
+                        (width, height),
+                        &background_frame,
+                        quad_model,
+                        quad_axes,
+                        show_quad_gizmo,
+                        placement_frame.as_ref(),
+                        model,
+                        &state,
+                    )
+                } else {
+                    renderer.draw(
                         &video.rgba,
                         video.width,
                         video.height,
@@ -888,22 +940,8 @@ impl VideoEditingApp {
                         placement_frame.as_ref(),
                         model,
                         &state,
-                    ),
+                    )
                 };
-                #[cfg(not(target_arch = "wasm32"))]
-                let drawn = renderer.draw(
-                    &video.rgba,
-                    video.width,
-                    video.height,
-                    (width, height),
-                    &background_frame,
-                    quad_model,
-                    quad_axes,
-                    show_quad_gizmo,
-                    placement_frame.as_ref(),
-                    model,
-                    &state,
-                );
                 drawn.map(|()| Vec::new())
             } else {
                 renderer
@@ -1669,6 +1707,7 @@ pub(super) mod tests {
                 msaa_samples: 4,
                 asset: None,
                 transfers: crate::video_editing_renderer::TransferCounts::default(),
+                frame_ring: trd_core::FrameRingStats::default(),
             },
         }
     }
