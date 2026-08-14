@@ -543,7 +543,6 @@ pub fn run_stream<R: Read, W: Write>(
                 ))?;
             if let Some(pbr) = &options.pbr {
                 built.set_disney_material(pbr.material.clone());
-                built.set_lighting(pbr.lighting);
                 built.set_image_based_lighting(pbr.ibl);
                 built.set_tone_mapping(pbr.tone_mapping);
                 if let Some(env) = &pbr.env_map {

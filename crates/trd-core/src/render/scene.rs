@@ -13,6 +13,7 @@
 use super::{Draw, DrawableObject, FrameFit, GridPlane, RenderMode};
 use crate::math::Matrix4;
 use crate::render::Tonemap;
+use crate::Lighting;
 
 /// The camera-centered spherical HDR **environment background**: the bound
 /// environment map drawn behind everything else, as seen through this frame's
@@ -79,6 +80,14 @@ pub struct Background {
 pub struct Scene {
     background: Background,
     objects: Vec<DrawableObject>,
+    /// The light rig every PBR object in this frame is lit by.
+    ///
+    /// Scene-level like `objects` and `background`, so it arrives **with** the
+    /// frame instead of being sticky renderer state a front-end pokes through a
+    /// setter — two scenes rendered by one renderer used to share it silently
+    /// (#182). `Default` keeps the previous behaviour for a scene that never
+    /// sets it.
+    lighting: Lighting,
 }
 
 impl Scene {
@@ -90,8 +99,8 @@ impl Scene {
     /// An empty scene with room for `capacity` objects and no background.
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            background: Background::default(),
             objects: Vec::with_capacity(capacity),
+            ..Self::default()
         }
     }
 
@@ -100,6 +109,24 @@ impl Scene {
     pub fn with_background(mut self, background: Background) -> Self {
         self.background = background;
         self
+    }
+
+    /// This scene lit by `lighting`.
+    #[must_use]
+    pub fn with_lighting(mut self, lighting: Lighting) -> Self {
+        self.lighting = lighting;
+        self
+    }
+
+    /// The light rig every PBR object in this frame is lit by.
+    pub fn lighting(&self) -> Lighting {
+        self.lighting
+    }
+
+    /// The light rig, for a front-end that adjusts it after assembly (a GUI
+    /// slider) rather than at build time.
+    pub fn lighting_mut(&mut self) -> &mut Lighting {
+        &mut self.lighting
     }
 
     /// What this frame draws behind its primitives.
@@ -166,6 +193,14 @@ impl Scene {
         ));
         // Selection highlight (#141): drawn even when show-all-AABBs is off.
         scene.extend(selection_aabb_overlay(draws, options.selected));
+        // The light rig is part of the frame, not sticky renderer state (#182),
+        // so assembly carries it over from the same options every front-end
+        // already passes.
+        scene.lighting = options
+            .pbr
+            .as_ref()
+            .map(|pbr| pbr.lighting)
+            .unwrap_or_default();
         scene
     }
 }
@@ -181,8 +216,8 @@ impl std::ops::Deref for Scene {
 impl FromIterator<DrawableObject> for Scene {
     fn from_iter<T: IntoIterator<Item = DrawableObject>>(iter: T) -> Self {
         Self {
-            background: Background::default(),
             objects: iter.into_iter().collect(),
+            ..Self::default()
         }
     }
 }
@@ -190,8 +225,8 @@ impl FromIterator<DrawableObject> for Scene {
 impl From<Vec<DrawableObject>> for Scene {
     fn from(objects: Vec<DrawableObject>) -> Self {
         Self {
-            background: Background::default(),
             objects,
+            ..Self::default()
         }
     }
 }

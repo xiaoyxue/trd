@@ -52,7 +52,10 @@ pub fn render_options(state: &SceneState) -> trd_core::RenderOptions {
 /// optional HDR environment background, which is a per-frame *background
 /// setting* on the scene rather than a drawable or an overlay toggle (#204).
 pub fn scene_for(state: &SceneState) -> trd_core::Scene {
-    let mut scene = trd_core::Scene::from_draws(&state.draws(), &render_options(state), None);
+    let mut scene = trd_core::Scene::from_draws(&state.draws(), &render_options(state), None)
+        // The light rig travels with the frame now, not as sticky renderer
+        // state (#182).
+        .with_lighting(state.lighting);
     if state.show_environment_background {
         scene.background_mut().environment = Some(trd_core::EnvironmentBackground {
             rotation: state
@@ -79,7 +82,6 @@ pub fn scene_for(state: &SceneState) -> trd_core::Scene {
 /// and threading them through `encode` is the next step (#180). Sharing the loop
 /// at least means native and browser cannot disagree about it.
 pub fn apply_materials(renderer: &mut trd_core::Renderer, state: &SceneState) {
-    renderer.set_lighting(state.lighting);
     for (i, ((material, ibl), tone_mapping)) in state
         .materials
         .iter()

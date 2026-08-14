@@ -232,7 +232,6 @@ impl VideoPlacementRenderer {
                 .set_mesh_tone_mapping(0, state.tone_mappings[0]);
             self.renderer
                 .set_mesh_pbr_debug_view(0, state.pbr_debug_views[0]);
-            self.renderer.set_lighting(state.lighting);
         }
 
         let has_mesh = self.renderer.mesh_count() > 0;
@@ -448,7 +447,14 @@ pub fn placement_scenes(
             ));
         }
     }
-    (background, foreground, selection_overlay)
+    // Every layer carries the frame's light rig (#182): only the foreground
+    // holds a PBR mesh today, but the rig is a scene property, so each scene
+    // states it rather than depending on what a previous encode left behind.
+    (
+        background.with_lighting(state.lighting),
+        foreground.with_lighting(state.lighting),
+        selection_overlay.with_lighting(state.lighting),
+    )
 }
 
 #[cfg(test)]

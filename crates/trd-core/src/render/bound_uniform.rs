@@ -36,48 +36,66 @@ impl BoundUniform {
     }
 }
 
-/// A **dynamic-offset slot array**: one buffer holding `slots` stride-spaced
-/// copies of a uniform, plus a single-slot *window* bind group whose offset a
-/// draw chooses via [`offset`](Self::offset) (the PBR per-object material, #141).
+/// The PBR pipeline's **frequency-split group 0**: one statically bound uniform
+/// at binding 0 — what the whole frame shares, written once — plus a
+/// dynamic-offset slot array at binding 1, one slot per mesh (#182/#141).
+///
+/// Both live in **one** bind group on purpose: `pbr.wgsl` already occupies all
+/// four groups (camera+material, albedo, environment, material maps), and the
+/// portable WebGPU baseline guarantees only `max_bind_groups = 4`, which the
+/// browser path depends on. So the split had to happen *inside* group 0 rather
+/// than by adding a fifth.
 ///
 /// A separate type from [`BoundUniform`] rather than the same one with an
 /// optional stride, because the stride is not decoration — it is the CPU-side
 /// half of the layout's `has_dynamic_offset: true`
 /// ([`create_pbr_bind_group_layout`](super::create_pbr_bind_group_layout)).
 /// Three things only make sense together: the layout declares a dynamic offset,
-/// the buffer is `stride * slots` bytes while the bind group covers just one
-/// slot, and every `set_bind_group` **must** pass an offset — binding such a
+/// the slot buffer is `stride * slots` bytes while the bind group covers just
+/// one slot, and every `set_bind_group` **must** pass an offset — binding such a
 /// group with `&[]` (or a static one with an offset) is a wgpu validation error,
 /// not a subtle mis-render. Making them distinct types means the two binding
 /// disciplines can't be confused at a call site, and [`offset`](Self::offset)
 /// keeps the slot arithmetic in one place instead of open-coded at each draw.
-pub(crate) struct BoundUniformArray {
-    buffer: wgpu::Buffer,
-    /// A single-slot window over `buffer`; the dynamic offset picks which slot.
+pub(crate) struct BoundSceneSlots {
+    /// Binding 0: the once-per-frame scene uniform.
+    scene: wgpu::Buffer,
+    /// Binding 1: `slots` stride-spaced per-mesh uniforms.
+    slots: wgpu::Buffer,
+    /// One bind group covering both — a single-slot *window* over `slots`, whose
+    /// offset a draw chooses via [`offset`](Self::offset).
     bind_group: wgpu::BindGroup,
-    /// The device-aligned byte distance between adjacent slots — `size_of::<T>()`
+    /// The device-aligned byte distance between adjacent slots — `size_of::<S>()`
     /// rounded up to `min_uniform_buffer_offset_alignment`, because a dynamic
     /// offset must satisfy that alignment.
     stride: u64,
 }
 
-impl BoundUniformArray {
-    /// Allocates `slots` (at least one) uniform slots of `T` over a
-    /// `has_dynamic_offset` `layout`. `label` names the pair: `"<label> uniform"`
-    /// for the buffer, `"<label> bind group"` for the window.
+impl BoundSceneSlots {
+    /// Allocates the scene uniform (`F`) and `slots` (at least one) per-mesh
+    /// slots of `S` over a `layout` whose binding 1 is `has_dynamic_offset`.
+    /// `label` names the group: `"<label> scene uniform"`, `"<label> uniform"`,
+    /// `"<label> bind group"`.
     ///
-    /// The contents are left undefined — every consumer rewrites the slots it
-    /// draws before drawing them.
-    pub(crate) fn new<T: bytemuck::Pod>(
+    /// The contents are left undefined — every consumer rewrites the scene
+    /// uniform each frame and the slots it draws before drawing them.
+    pub(crate) fn new<F: bytemuck::Pod, S: bytemuck::Pod>(
         device: &wgpu::Device,
         layout: &wgpu::BindGroupLayout,
         label: &str,
         slots: usize,
     ) -> Self {
-        let slot_size = std::mem::size_of::<T>() as u64;
+        let scene_size = std::mem::size_of::<F>() as u64;
+        let slot_size = std::mem::size_of::<S>() as u64;
         let align = device.limits().min_uniform_buffer_offset_alignment as u64;
         let stride = slot_size.next_multiple_of(align);
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        let scene = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(&format!("{label} scene uniform")),
+            size: scene_size,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let slot_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(&format!("{label} uniform")),
             size: stride * slots.max(1) as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
@@ -86,17 +104,28 @@ impl BoundUniformArray {
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some(&format!("{label} bind group")),
             layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: &buffer,
-                    offset: 0,
-                    size: wgpu::BufferSize::new(slot_size),
-                }),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &scene,
+                        offset: 0,
+                        size: wgpu::BufferSize::new(scene_size),
+                    }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &slot_buffer,
+                        offset: 0,
+                        size: wgpu::BufferSize::new(slot_size),
+                    }),
+                },
+            ],
         });
         Self {
-            buffer,
+            scene,
+            slots: slot_buffer,
             bind_group,
             stride,
         }
@@ -109,16 +138,21 @@ impl BoundUniformArray {
         self.byte_offset(slot) as u32
     }
 
-    /// The single-slot window bind group. Must be bound **with** an
+    /// The bind group covering both bindings. Must be bound **with** an
     /// [`offset`](Self::offset).
     pub(crate) fn bind_group(&self) -> &wgpu::BindGroup {
         &self.bind_group
     }
 
-    /// Rewrites one slot's uniform for this frame.
-    pub(crate) fn write_slot<T: bytemuck::Pod>(&self, queue: &wgpu::Queue, slot: usize, value: &T) {
+    /// Rewrites the scene uniform — once per frame, whatever the object count.
+    pub(crate) fn write_scene<F: bytemuck::Pod>(&self, queue: &wgpu::Queue, value: &F) {
+        queue.write_buffer(&self.scene, 0, bytemuck::bytes_of(value));
+    }
+
+    /// Rewrites one mesh's slot for this frame.
+    pub(crate) fn write_slot<S: bytemuck::Pod>(&self, queue: &wgpu::Queue, slot: usize, value: &S) {
         queue.write_buffer(
-            &self.buffer,
+            &self.slots,
             self.byte_offset(slot),
             bytemuck::bytes_of(value),
         );
