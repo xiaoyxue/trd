@@ -196,8 +196,14 @@ fn stts_totals(stts: &[u8]) -> Option<(u32, u64)> {
 }
 
 /// `tkhd` track dimensions, stored as 16.16 fixed point at the end of the box.
+///
+/// The offset must clear the `FullBox` header as well as the version-dependent
+/// times — miss those 4 bytes and `width` reads the **last matrix element**
+/// (`0x40000000`, i.e. 1.0 in 2.30 fixed point), which shifts down to exactly
+/// `16384` and looks plausible enough to reach the renderer.
 fn tkhd_size(tkhd: &[u8]) -> Option<(u32, u32)> {
-    let base = if *tkhd.first()? == 1 { 32 } else { 20 };
+    // version + flags, then creation/modification/track_ID/reserved/duration.
+    let base = if *tkhd.first()? == 1 { 4 + 32 } else { 4 + 20 };
     // ...reserved(8) + layer/alternate/volume/reserved(8) + matrix(36)
     let at = base + 8 + 8 + 36;
     let width = u32::from_be_bytes(tkhd.get(at..at + 4)?.try_into().ok()?) >> 16;
@@ -241,12 +247,42 @@ mod tests {
         atom(b"mdhd", &p)
     }
 
+    /// The unity display matrix, as a real file carries it. The last element is
+    /// `0x40000000` (1.0 in 2.30 fixed point), which is what an offset that
+    /// misses the `FullBox` header reads as a width of 16384 — so writing the
+    /// true matrix rather than zeroes is what gives the size tests teeth.
+    fn unity_matrix() -> Vec<u8> {
+        [0x0001_0000u32, 0, 0, 0, 0x0001_0000, 0, 0, 0, 0x4000_0000]
+            .iter()
+            .flat_map(|value| value.to_be_bytes())
+            .collect()
+    }
+
     fn tkhd_v0(width: u32, height: u32) -> Vec<u8> {
         let mut p = vec![0u8; 4]; // version + flags
-        p.extend_from_slice(&[0; 16]); // creation, modification, track id, reserved
-        p.extend_from_slice(&[0; 8]); // duration + reserved... (v0 layout to `at`)
-        p.extend_from_slice(&[0; 8]); // layer/alternate/volume/reserved
-        p.extend_from_slice(&[0; 36]); // matrix
+        p.extend_from_slice(&[0; 4]); // creation_time
+        p.extend_from_slice(&[0; 4]); // modification_time
+        p.extend_from_slice(&[0; 4]); // track_ID
+        p.extend_from_slice(&[0; 4]); // reserved
+        p.extend_from_slice(&[0; 4]); // duration
+        p.extend_from_slice(&[0; 8]); // reserved[2]
+        p.extend_from_slice(&[0; 8]); // layer/alternate_group/volume/reserved
+        p.extend(unity_matrix());
+        p.extend_from_slice(&(width << 16).to_be_bytes());
+        p.extend_from_slice(&(height << 16).to_be_bytes());
+        atom(b"tkhd", &p)
+    }
+
+    fn tkhd_v1(width: u32, height: u32) -> Vec<u8> {
+        let mut p = vec![1u8, 0, 0, 0]; // version 1 + flags
+        p.extend_from_slice(&[0; 8]); // creation_time (64-bit)
+        p.extend_from_slice(&[0; 8]); // modification_time (64-bit)
+        p.extend_from_slice(&[0; 4]); // track_ID
+        p.extend_from_slice(&[0; 4]); // reserved
+        p.extend_from_slice(&[0; 8]); // duration (64-bit)
+        p.extend_from_slice(&[0; 8]); // reserved[2]
+        p.extend_from_slice(&[0; 8]); // layer/alternate_group/volume/reserved
+        p.extend(unity_matrix());
         p.extend_from_slice(&(width << 16).to_be_bytes());
         p.extend_from_slice(&(height << 16).to_be_bytes());
         atom(b"tkhd", &p)
@@ -273,17 +309,53 @@ mod tests {
         atom(b"hdlr", &p)
     }
 
-    /// `timescale`/`delta` express the frame rate; 12800/512 = 25 fps.
-    fn moov(timescale: u32, delta: u32, frames: u32, handler: &[u8; 4]) -> Vec<u8> {
+    /// The `mdia` subtree of a constant-rate video track.
+    fn video_mdia(timescale: u32, delta: u32, frames: u32) -> Vec<u8> {
+        video_mdia_with_handler(timescale, delta, frames, b"vide")
+    }
+
+    fn video_mdia_with_handler(
+        timescale: u32,
+        delta: u32,
+        frames: u32,
+        handler: &[u8; 4],
+    ) -> Vec<u8> {
         let mut stbl = stsz(frames);
         stbl.extend(stts_cfr(frames, delta));
         let minf = atom(b"minf", &atom(b"stbl", &stbl));
         let mut mdia = mdhd_v0(timescale, delta * frames);
         mdia.extend(hdlr(handler));
         mdia.extend(minf);
+        mdia
+    }
+
+    /// `timescale`/`delta` express the frame rate; 12800/512 = 25 fps.
+    fn moov(timescale: u32, delta: u32, frames: u32, handler: &[u8; 4]) -> Vec<u8> {
         let mut trak = tkhd_v0(1920, 1080);
-        trak.extend(atom(b"mdia", &mdia));
+        trak.extend(atom(
+            b"mdia",
+            &video_mdia_with_handler(timescale, delta, frames, handler),
+        ));
         atom(b"moov", &atom(b"trak", &trak))
+    }
+
+    #[test]
+    fn reads_track_size_past_the_display_matrix() {
+        // The regression this guards: an offset 4 bytes short lands on the last
+        // matrix element and reports 16384 x <real width>, which then stretches
+        // the frame plane because the render target takes its aspect from here.
+        let info = probe_moov(&moov(12800, 512, 250, b"vide")).expect("probe");
+        assert_eq!((info.width, info.height), (1920, 1080));
+        assert_ne!(info.width, 16384, "read the matrix instead of the width");
+    }
+
+    #[test]
+    fn reads_track_size_from_a_version_1_tkhd() {
+        let mut trak = tkhd_v1(3840, 2160);
+        trak.extend(atom(b"mdia", &video_mdia(12800, 512, 250)));
+        let moov = atom(b"moov", &atom(b"trak", &trak));
+        let info = probe_moov(&moov).expect("probe");
+        assert_eq!((info.width, info.height), (3840, 2160));
     }
 
     #[test]

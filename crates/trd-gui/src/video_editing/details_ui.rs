@@ -500,6 +500,60 @@ fn bytes_label(bytes: usize) -> String {
         b => format!("{:.2} MiB", b as f64 / (1024.0 * 1024.0)),
     }
 }
+/// GPU frame ring rows (#229).
+///
+/// Decoded frames stay resident in VRAM, so a repeat render of the same frame —
+/// an overlay repaint, or a scrub back into the resident window — is a `hit`
+/// costing no decode and no upload. **A scrub that raises `hits` while leaving
+/// `misses` flat is the ring doing its job**, which is why the counters are
+/// reported next to the transfer bytes rather than hidden behind a feature flag.
+fn frame_ring_rows(ring: Option<trd_core::FrameRingStats>, r: &mut dyn Rows) {
+    let Some(ring) = ring else {
+        return;
+    };
+    r.row(
+        "frame ring",
+        &format!("{}/{} resident", ring.resident, ring.capacity),
+    );
+    if ring.capacity == 0 {
+        // No frame has arrived yet, so there is no allocation to describe.
+        return;
+    }
+    r.row(
+        "  slot size",
+        &format!("{}x{}", ring.slot_size.0, ring.slot_size.1),
+    );
+    // Every layer is allocated up front, so this is the full cost whether or not
+    // the slots are filled.
+    r.row("  vram", &bytes_label(ring.bytes()));
+    r.row(
+        "  presented layer",
+        &ring
+            .presented_layer
+            .map_or_else(|| "none".to_owned(), |layer| layer.to_string()),
+    );
+    r.row(
+        "  resident frames",
+        &ring.resident_range.map_or_else(
+            || "none".to_owned(),
+            |(lo, hi)| {
+                if lo == hi {
+                    lo.to_string()
+                } else {
+                    format!("{lo}-{hi}")
+                }
+            },
+        ),
+    );
+    r.row(
+        "  hits / misses",
+        &match ring.hit_rate() {
+            Some(rate) => format!("{} / {} ({:.0}% hit)", ring.hits, ring.misses, rate * 100.0),
+            None => format!("{} / {}", ring.hits, ring.misses),
+        },
+    );
+}
+
 fn renderer_rows(video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut dyn Rows) {
     let renderer = facts.renderer.as_ref();
     let identity = renderer.map(|renderer| &renderer.identity);
@@ -532,18 +586,7 @@ fn renderer_rows(video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut dy
         r.row("  ui upload", &bytes_label(transfers.ui_upload));
         r.row("  total / frame", &bytes_label(transfers.total_bytes()));
     }
-    // GPU frame ring (#229): `hits` counts frames presented straight from VRAM,
-    // with no decode and no upload.
-    if let Some(ring) = renderer.map(|renderer| renderer.frame_ring) {
-        r.row(
-            "frame ring",
-            &format!("{}/{} resident", ring.resident, ring.capacity),
-        );
-        r.row(
-            "  hits / misses",
-            &format!("{} / {}", ring.hits, ring.misses),
-        );
-    }
+    frame_ring_rows(renderer.map(|renderer| renderer.frame_ring), r);
     r.row(
         "MSAA",
         &renderer.map_or_else(
@@ -662,5 +705,44 @@ mod tests {
              error: none\n\
              last render error: device lost [ERROR]\n"
         );
+    }
+
+    #[test]
+    fn frame_ring_rows_report_occupancy_vram_and_reuse() {
+        let mut rows = TextRows::default();
+        frame_ring_rows(
+            Some(trd_core::FrameRingStats {
+                capacity: 16,
+                resident: 16,
+                hits: 12,
+                misses: 100,
+                slot_size: (1920, 1080),
+                presented_layer: Some(7),
+                resident_range: Some((85, 100)),
+            }),
+            &mut rows,
+        );
+
+        assert_eq!(
+            rows.0,
+            concat!(
+                "frame ring: 16/16 resident\n",
+                "  slot size: 1920x1080\n",
+                // 1920*1080*4 * 16 layers
+                "  vram: 126.56 MiB\n",
+                "  presented layer: 7\n",
+                "  resident frames: 85-100\n",
+                "  hits / misses: 12 / 100 (11% hit)\n",
+            )
+        );
+    }
+
+    #[test]
+    fn frame_ring_rows_stay_quiet_before_the_first_frame() {
+        let mut rows = TextRows::default();
+        frame_ring_rows(Some(trd_core::FrameRingStats::default()), &mut rows);
+        // Nothing is allocated yet, so only the occupancy line is meaningful —
+        // reporting a 0x0 slot and 0 B of VRAM would be noise.
+        assert_eq!(rows.0, "frame ring: 0/0 resident\n");
     }
 }

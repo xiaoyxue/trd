@@ -60,6 +60,19 @@ impl RingSlots {
         self.occupants.iter().filter(|slot| slot.is_some()).count() as u32
     }
 
+    /// Lowest and highest resident frame index, or `None` while empty.
+    ///
+    /// The frames in between need not all be present — the ring evicts in write
+    /// order, not by index — so this is the window a scrub can land in, not a
+    /// guarantee about every frame inside it.
+    fn resident_range(&self) -> Option<(u32, u32)> {
+        let mut resident = self.occupants.iter().flatten().copied();
+        let first = resident.next()?;
+        Some(resident.fold((first, first), |(lo, hi), index| {
+            (lo.min(index), hi.max(index))
+        }))
+    }
+
     /// The layer holding `frame_index`, if it is still resident.
     fn find(&self, frame_index: u32) -> Option<u32> {
         self.occupants
@@ -152,14 +165,48 @@ impl FrameRing {
 }
 
 /// Ring occupancy and reuse, for the diagnostics panel.
+///
+/// Everything here is observed, not asserted: the panel is how the ring's
+/// behaviour is *verified* (a scrub that raises `hits` while leaving `misses`
+/// flat is a frame served from VRAM), so it reports what the ring actually holds
+/// rather than what it was configured to hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FrameRingStats {
+    /// Array layers allocated. Derived from a VRAM budget and the frame size, so
+    /// it varies with resolution rather than being fixed.
     pub capacity: u32,
+    /// Layers currently holding a findable frame.
     pub resident: u32,
     /// Frames presented straight from the ring, with no upload.
     pub hits: u32,
     /// Frames that had to be uploaded.
     pub misses: u32,
+    /// Per-slot resolution. Not necessarily the source resolution — a native
+    /// producer may downscale before the frame ever reaches the GPU.
+    pub slot_size: (u32, u32),
+    /// Layer the frame plane is drawing from, if any.
+    pub presented_layer: Option<u32>,
+    /// Lowest and highest resident frame index — the window a scrub can land in
+    /// and still hit. Frames need not be contiguous within it.
+    pub resident_range: Option<(u32, u32)>,
+}
+
+impl FrameRingStats {
+    /// VRAM the ring occupies: every layer is allocated up front, so this is the
+    /// full cost whether or not the slots are filled.
+    pub fn bytes(&self) -> usize {
+        (self.slot_size.0 as usize)
+            .saturating_mul(self.slot_size.1 as usize)
+            .saturating_mul(4)
+            .saturating_mul(self.capacity as usize)
+    }
+
+    /// Share of presentations served from the ring, or `None` before the first
+    /// frame.
+    pub fn hit_rate(&self) -> Option<f32> {
+        let total = self.hits.saturating_add(self.misses);
+        (total > 0).then(|| self.hits as f32 / total as f32)
+    }
 }
 
 /// The background frame-plane subsystem: the fullscreen pipeline, its bind-group
@@ -221,14 +268,21 @@ impl FramePlane {
 
     /// Ring occupancy and hit/miss counts, for the diagnostics panel.
     pub(super) fn ring_stats(&self) -> FrameRingStats {
-        let (capacity, resident) = self.ring.as_ref().map_or((0, 0), |ring| {
-            (ring.slots.capacity(), ring.slots.resident())
-        });
+        let Some(ring) = self.ring.as_ref() else {
+            return FrameRingStats {
+                hits: self.hits,
+                misses: self.misses,
+                ..Default::default()
+            };
+        };
         FrameRingStats {
-            capacity,
-            resident,
+            capacity: ring.slots.capacity(),
+            resident: ring.slots.resident(),
             hits: self.hits,
             misses: self.misses,
+            slot_size: (ring.width, ring.height),
+            presented_layer: ring.presented,
+            resident_range: ring.slots.resident_range(),
         }
     }
 
