@@ -58,7 +58,7 @@ Platform-agnostic wgpu logic, shared verbatim by every target:
   configurable pixel-width quad and the fragment stage feathers its rectangle
   distance, so axes/AABBs/grids remain anti-aliased without MSAA. Axis cone tips
   reuse the unlit triangle path.
-- **`DrawableObject` + `Primitive` + `Scene` (`visual/`)** — the base interface
+- **`DrawableObject` + `Primitive` + `Scene` (`render/`)** — the base interface
   for every primitive (#41). A `DrawableObject` is a small `Copy` struct pairing
   a `Primitive` — *what* to draw: `Mesh { mesh_id, mode }`, `AabbBox { mesh_id }`,
   `CoordinateAxes`, `PlaneGrid { plane }`, `QuadOutline { selected }`,
@@ -84,11 +84,13 @@ Platform-agnostic wgpu logic, shared verbatim by every target:
   are **independent** — a frame may draw both — and the renderer always draws the
   environment first, then the frame plane, then the mesh scene over them. Appearance (filled / wireframe / textured / **PBR**) is a *mode* of
   the mesh drawable, not a separate primitive.
-- **Typed PBR domains (`render/{material,light,ibl,tonemap,pbr}`)** — Disney
+- **Typed PBR domains** — Disney
   surface parameters and preserved glTF auxiliary data live in
-  `material/disney.rs`; analytic lights and rig controls in `light.rs`; HDR
-  environment data/binding and reflection intensity in `ibl.rs`; and the
-  per-object output transform in `tonemap.rs`. `pbr.rs` contains only the
+  `material/disney.rs`; analytic lights and rig controls in `light.rs` (both at
+  the crate root, since a material and a light are universal domain vocabulary —
+  #223); HDR environment data + its CPU precompute in `render/env_map.rs`, its
+  binding and the sky pipeline in `render/environment.rs`; and the
+  per-object output transform in `render/tonemap.rs`. `pbr.rs` contains only the
   unchanged shader-uniform packing and smooth-normal derivation. `trd-core`'s
   boundary-level `mesh/gltf.rs` parses caller-owned bytes into these types without
   entering the render hot path or performing filesystem I/O.

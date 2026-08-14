@@ -22,11 +22,11 @@ use super::GpuContext;
 use futures_channel::oneshot;
 
 use super::buffer::InstanceBuffer;
+use super::Draw;
 use super::{
     create_depth_target, create_mesh_bind_group_layout, create_picking_pipeline, DepthTarget,
     PickInstanceRaw, Renderer, PICK_FORMAT,
 };
-use crate::visual::Draw;
 use crate::Camera;
 
 /// The object-id **picking** pass's own state (#141, grouped in #203).

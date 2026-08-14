@@ -7,10 +7,10 @@ use arrow::error::ArrowError;
 use arrow::ipc::reader::StreamDecoder;
 
 use crate::frame::validate_schema as validate_frames_schema;
+use crate::render::{Draw, DrawSelection};
 #[cfg(test)]
 use crate::texture::TEXTURE_COLUMN;
 use crate::texture::{ImageTexture, TextureError};
-use crate::visual::{Draw, DrawSelection};
 use crate::{FrameError, FrameParams, InlineFrame, Mesh, MeshError};
 
 mod arrow_decode;

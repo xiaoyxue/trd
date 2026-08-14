@@ -6,6 +6,7 @@
 
 mod camera;
 mod frame;
+mod light;
 mod material;
 mod math;
 mod mesh;
@@ -14,10 +15,13 @@ mod protocol;
 mod render;
 mod texture;
 mod video_editing;
-mod visual;
 
 pub use camera::{Camera, DEFAULT_FIT_MARGIN, DEFAULT_FOV_Y, DEFAULT_VIEW_DIR};
 pub use frame::{FrameError, InlineFrame, FRAME_BYTES_COLUMN, FRAME_PIXELS_COLUMN};
+// A directional light is universal domain vocabulary — zero wgpu — so it sits
+// at the crate root beside `mesh`/`texture`/`camera`/`material` rather than in
+// the render backend (#223).
+pub use light::{Light, Lighting, PointLight};
 pub use math::{
     Aabb2, Aabb3, Matrix3, Matrix4, Normal3, Point2, Point3, Point4, Rotation, Scalar, ToWgsl,
     Transform, Vector2, Vector3, Vector4, EPSILON,
@@ -41,15 +45,15 @@ pub use protocol::{
 pub use material::{AlphaMode, Auxiliary, DisneyMaterial, Material, MaterialTextures};
 pub use render::{
     create_instance, AdapterFacts, CameraFormError, EnvMapData, FrameParams, GpuContext,
-    GpuInitError, GpuRequest, ImageBasedLighting, Light, Lighting, Msaa, PbrConfig, PbrDebugView,
-    PickTarget, PointLight, RenderOptions, RenderTarget, RenderTargetType, SceneLayer,
-    SurfaceError, SurfaceRepair, SurfaceTarget, TargetError, TextureTarget, ToneMapping, Tonemap,
-    Vertex, Viewport, TEXTURE_TARGET_FORMAT,
+    GpuInitError, GpuRequest, ImageBasedLighting, Msaa, PbrConfig, PbrDebugView, PickTarget,
+    RenderOptions, RenderTarget, RenderTargetType, SceneLayer, SurfaceError, SurfaceRepair,
+    SurfaceTarget, TargetError, TextureTarget, ToneMapping, Tonemap, Vertex, Viewport,
+    TEXTURE_TARGET_FORMAT,
 };
-// The visual model (scene + primitives) is plain data (no wgpu), so it sits
-// beside `mesh`/`camera`/`material` at the crate root rather than inside the
-// render backend (#203). Public paths (`trd_core::DrawableObject`) are unchanged.
-pub use visual::{
+// The frame description (scene + primitives) is this rasterizer's own taxonomy
+// — `Primitive` *is* the batch key (#204) — so it lives in `render/` beside the
+// renderer that dispatches on it (#223). Public paths are unchanged.
+pub use render::{
     Background, Draw, DrawSelection, DrawableObject, EnvironmentBackground, FrameFit, GridPlane,
     Primitive, RenderMode, Scene,
 };
