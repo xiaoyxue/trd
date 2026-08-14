@@ -22,12 +22,25 @@ pub struct ImportedAssetDiagnostics {
     pub imported_material: trd_core::DisneyMaterial,
 }
 
-/// Per-frame CPU↔GPU traffic, so the copy count is **observed** rather than
-/// asserted.
+/// Per-frame CPU↔GPU traffic **on the video frame path**, so the copy count is
+/// **observed** rather than asserted.
 ///
 /// Each field is the bytes that crossed the boundary for the most recent frame.
 /// A zero means that crossing did not happen at all — which is exactly how the
 /// shared-device path is verified: `readback` and `ui_upload` must both be `0`.
+///
+/// **Scope, so `0` is not over-read.** This counts *full-resolution image data*
+/// only. A frame reading `0` still involves small CPU→GPU writes that are not
+/// tracked here and never go away:
+///
+/// * the per-frame uniforms (camera, lighting, the frame-plane fit, instance
+///   models) — tens to hundreds of bytes each;
+/// * egui's own tessellated UI geometry and font atlas, re-uploaded each frame
+///   by `egui-wgpu`, which is far larger than the uniforms though still far
+///   smaller than a frame.
+///
+/// So `0` means *no frame-sized buffer crossed the boundary*, not that the
+/// renderer touched the GPU without any CPU writes at all.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TransferCounts {
     /// Video frame CPU→GPU (`queue.write_texture`).
@@ -37,7 +50,8 @@ pub struct TransferCounts {
     /// Rendered pixels CPU→GPU again, through the UI toolkit. Zero when the
     /// texture is bound directly.
     pub ui_upload: usize,
-    /// How many CPU↔GPU crossings the frame actually made.
+    /// How many CPU↔GPU crossings the **frame** made. Small uniform writes and
+    /// egui's own geometry upload are out of scope — see the type docs.
     pub crossings: u8,
 }
 

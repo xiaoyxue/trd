@@ -579,8 +579,12 @@ fn renderer_rows(video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut dy
     // Observed CPU<->GPU traffic for the last frame. The shared-device path is
     // verified here rather than asserted: `readback` and `ui upload` read `0 B`
     // exactly when the rendered texture is bound directly into egui.
+    //
+    // Labelled "frame path" because that is the scope: full-resolution image
+    // data. Per-frame uniforms and egui's own geometry upload still cross the
+    // boundary and are not counted here.
     if let Some(transfers) = renderer.map(|renderer| renderer.transfers) {
-        r.row("CPU<->GPU crossings", &transfers.crossings.to_string());
+        r.row("frame-path crossings", &transfers.crossings.to_string());
         r.row("  frame upload", &bytes_label(transfers.frame_upload));
         r.row("  readback", &bytes_label(transfers.readback));
         r.row("  ui upload", &bytes_label(transfers.ui_upload));
