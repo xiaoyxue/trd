@@ -223,6 +223,16 @@ pub struct Renderer {
     /// Everything the object-id picking pass (#141) needs: its pipeline, its
     /// instance buffer and its lazily-created target.
     picking: Picking,
+    /// Whether the per-mesh PBR slot array still matches the meshes' appearance
+    /// (#235 R5).
+    ///
+    /// A slot's contents — material / IBL / tone map / debug view — depend on **no
+    /// per-frame value** (the camera and light rig live in the once-per-frame
+    /// scene uniform, #182), so re-uploading all of them every frame is redundant
+    /// whenever nothing has changed. Appearance is renderer-owned state written
+    /// through the setters below, so "changed" is exactly "a setter ran": each
+    /// flips this, `prepare_frame` clears it after rewriting the slots.
+    slots_dirty: bool,
 }
 
 impl Renderer {
@@ -342,6 +352,8 @@ impl Renderer {
             msaa: MsaaColor::new(format, sample_count),
             gpu,
             picking,
+            // Nothing has been uploaded yet, so the first frame writes them all.
+            slots_dirty: true,
         })
     }
 
@@ -493,6 +505,7 @@ impl Renderer {
         for mesh in self.meshes.iter_mut() {
             mesh.material = material.clone();
         }
+        self.slots_dirty = true;
     }
 
     /// Sets the [`DisneyMaterial`] of mesh `mesh_id` only (#141) — so each
@@ -503,6 +516,7 @@ impl Renderer {
         if let Some(mesh) = self.meshes.get_mut(mesh_id) {
             mesh.material = material;
         }
+        self.slots_dirty = true;
     }
 
     /// Sets image-based-lighting controls for every PBR object.
@@ -510,6 +524,7 @@ impl Renderer {
         for mesh in self.meshes.iter_mut() {
             mesh.ibl = ibl;
         }
+        self.slots_dirty = true;
     }
 
     /// Sets image-based-lighting controls for one PBR object.
@@ -517,6 +532,7 @@ impl Renderer {
         if let Some(mesh) = self.meshes.get_mut(mesh_id) {
             mesh.ibl = ibl;
         }
+        self.slots_dirty = true;
     }
 
     /// Sets the per-object output transform of every PBR object.
@@ -524,6 +540,7 @@ impl Renderer {
         for mesh in self.meshes.iter_mut() {
             mesh.tone_mapping = tone_mapping;
         }
+        self.slots_dirty = true;
     }
 
     /// Sets the output transform of one PBR object.
@@ -531,6 +548,7 @@ impl Renderer {
         if let Some(mesh) = self.meshes.get_mut(mesh_id) {
             mesh.tone_mapping = tone_mapping;
         }
+        self.slots_dirty = true;
     }
 
     /// Selects a diagnostic PBR output for one mesh.
@@ -538,6 +556,7 @@ impl Renderer {
         if let Some(mesh) = self.meshes.get_mut(mesh_id) {
             mesh.debug_view = debug_view;
         }
+        self.slots_dirty = true;
     }
 
     /// Binds `env` as the equirectangular HDR environment map reflected by
@@ -955,13 +974,18 @@ impl Renderer {
         //     the shared camera/lights + that mesh's material, #141). Written
         //     unconditionally so a PBR draw always has a current material slot.
         let viewport = camera.viewport();
+        //     The per-mesh **slots** are rewritten only when a setter has changed
+        //     one since the last frame (#235 R5): their inputs carry no per-frame
+        //     value, so an unchanged scene would upload the same bytes again.
         self.uniforms.write_pbr(
             &self.gpu.queue,
             camera,
             self.meshes.all(),
             scene.lighting(),
             self.environment.has_env(),
+            self.slots_dirty,
         );
+        self.slots_dirty = false;
 
         // 2. Walk the scene's objects once into per-geometry instance batches,
         //    then upload the flattened instance models (growing the buffer if
