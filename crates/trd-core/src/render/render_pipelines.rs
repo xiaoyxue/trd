@@ -1,10 +1,10 @@
-//! The scene pass's **machinery**: the pipelines every draw kind rasterizes
+//! The render pass's **machinery**: the pipelines every draw kind rasterizes
 //! through, and the group-0 uniforms they read.
 //!
 //! Both are `f(format, sample_count, mesh_count)` — a function of the *device*
 //! and the pipeline setup, not of any particular [`Scene`](crate::Scene): two
 //! scenes rendered by one [`Renderer`](super::Renderer) share them. They are
-//! built together by [`create_scene_pipelines`] and live here rather than in
+//! built together by [`create_render_pipelines`] and live here rather than in
 //! `renderer.rs` (#221 §2) or on the scene (which is `Clone + PartialEq` and
 //! device-free).
 
@@ -21,17 +21,21 @@ use crate::Camera;
 /// (#203). The uniforms those pipelines read now live in [`SceneUniforms`], so
 /// each type answers one question — *what draws* vs *what it reads*.
 ///
-/// Named for the **scene** pass, not for meshes: of its seven pipelines four
-/// (`gizmo_line`, `gizmo_solid`, `shadow`, and the background draws routed
-/// beside them) draw no mesh geometry at all. It pairs with its sibling
-/// [`SceneUniforms`], and the one function building both is already
-/// [`create_scene_pipelines`] (#221 §2).
+/// Named for the **renderer**, not for the scene and not for meshes: it is
+/// `f(format, sample_count, mesh_count)` — device-level state a
+/// [`Renderer`](super::Renderer) builds once and every [`Scene`](crate::Scene)
+/// it draws shares (#235 R10) — and of its seven pipelines four (`gizmo_line`,
+/// `gizmo_solid`, `shadow`, and the background draws routed beside them) draw no
+/// mesh geometry at all. Its sibling [`SceneUniforms`] keeps the *scene* name
+/// because that half genuinely is per-frame scene state (camera + light rig,
+/// #182), and the one function building both is [`create_render_pipelines`]
+/// (#221 §2).
 ///
 /// Filled, wireframe, arrowheads, shadows and textured rendering share the
 /// camera group-0 layout; expanded gizmo lines use a viewport-aware one, and PBR
 /// a dynamic-offset one — which is why the encode arm restores the camera bind
 /// group after switching.
-pub(crate) struct ScenePipelines {
+pub(crate) struct RenderPipelines {
     pub(super) filled: wgpu::RenderPipeline,
     pub(super) wireframe: wgpu::RenderPipeline,
     /// Screen-space expanded, alpha-feathered AABB/axes/grid line pipeline.
@@ -67,7 +71,7 @@ pub(crate) struct SceneUniforms {
     pub(super) pbr: BoundSceneSlots,
 }
 
-/// Builds the scene pipelines and the uniforms they bind, together.
+/// Builds the render pipelines and the uniforms they bind, together.
 ///
 /// One function for both halves because each group-0 bind-group layout is
 /// shared by exactly one pipeline and the binding feeding it — the camera layout
@@ -80,7 +84,7 @@ pub(crate) struct SceneUniforms {
 /// environment-map layout (from [`BoundEnv`]). Every pipeline in the pass shares
 /// the one `sample_count` (`1` = no MSAA, single-sample), and the PBR slot array
 /// is sized for `mesh_count` meshes.
-pub(crate) fn create_scene_pipelines(
+pub(crate) fn create_render_pipelines(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
     texture_layout: &wgpu::BindGroupLayout,
@@ -88,7 +92,7 @@ pub(crate) fn create_scene_pipelines(
     env_layout: &wgpu::BindGroupLayout,
     sample_count: u32,
     mesh_count: usize,
-) -> (ScenePipelines, SceneUniforms) {
+) -> (RenderPipelines, SceneUniforms) {
     // One explicit bind-group layout shared by both untextured pipelines, so
     // the single camera bind group is valid whichever RenderMode is active.
     let camera_layout = create_mesh_bind_group_layout(device);
@@ -178,7 +182,7 @@ pub(crate) fn create_scene_pipelines(
             mesh_count,
         ),
     };
-    let pipelines = ScenePipelines {
+    let pipelines = RenderPipelines {
         filled,
         wireframe,
         gizmo_line,

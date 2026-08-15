@@ -51,10 +51,10 @@ mod pbr;
 mod picking;
 mod pipeline;
 mod platform;
+mod render_pipelines;
 mod render_target;
 mod renderer;
 mod scene;
-mod scene_pipelines;
 mod tonemap;
 #[cfg(test)]
 mod triangle_renderer;
@@ -123,4 +123,4 @@ pub(crate) use pipeline::{
     create_view_proj_binding, overlay_depth_stencil, solid_depth_stencil, write_gizmo_params,
     write_view_proj, DepthTarget, MsaaColor, MSAA_SAMPLE_COUNT, PICK_FORMAT,
 };
-pub(crate) use scene_pipelines::{create_scene_pipelines, ScenePipelines, SceneUniforms};
+pub(crate) use render_pipelines::{create_render_pipelines, RenderPipelines, SceneUniforms};
