@@ -11,7 +11,7 @@
 
 use super::bound_material_maps::BoundMaterialMaps;
 use super::bound_texture::BoundTexture;
-use super::buffer::{IndexBuf, VertexGeometry};
+use super::buffer::{IndexBuffer, VertexGeometry};
 use super::*;
 use crate::material::DisneyMaterial;
 use crate::math::Matrix4;
@@ -36,8 +36,8 @@ pub(super) struct MeshGpu {
     /// **normal** in place of the vertex color. Reuses the `triangles` index
     /// buffer. Built once per mesh; only bound by [`RenderMode::Shaded`] draws.
     pub(super) pbr_vertex_buffer: wgpu::Buffer,
-    pub(super) triangles: IndexBuf,
-    pub(super) edges: IndexBuf,
+    pub(super) triangles: IndexBuffer,
+    pub(super) edges: IndexBuffer,
     pub(super) aabb: VertexGeometry,
     pub(super) base_model: Matrix4,
     /// This mesh's **own** albedo texture (group 1), so a multi-object scene skins
@@ -59,15 +59,15 @@ pub(super) struct MeshGpu {
 }
 
 impl MeshGpu {
-    pub(super) fn filled(&self) -> (&wgpu::Buffer, &IndexBuf) {
+    pub(super) fn filled(&self) -> (&wgpu::Buffer, &IndexBuffer) {
         (&self.vertex_buffer, &self.triangles)
     }
 
-    pub(super) fn pbr(&self) -> (&wgpu::Buffer, &IndexBuf) {
+    pub(super) fn pbr(&self) -> (&wgpu::Buffer, &IndexBuffer) {
         (&self.pbr_vertex_buffer, &self.triangles)
     }
 
-    pub(super) fn wireframe(&self) -> (&wgpu::Buffer, &IndexBuf) {
+    pub(super) fn wireframe(&self) -> (&wgpu::Buffer, &IndexBuffer) {
         (&self.vertex_buffer, &self.edges)
     }
 
@@ -92,9 +92,9 @@ pub(super) fn upload_mesh(
             contents: bytemuck::cast_slice(&mesh.vertices),
             usage: wgpu::BufferUsages::VERTEX,
         });
-    let triangles = IndexBuf::new(&gpu.device, "trd mesh index buffer", &mesh.indices);
+    let triangles = IndexBuffer::new(&gpu.device, "trd mesh index buffer", &mesh.indices);
     let edges = mesh.edge_indices();
-    let edges = IndexBuf::new(&gpu.device, "trd mesh edge buffer", &edges);
+    let edges = IndexBuffer::new(&gpu.device, "trd mesh edge buffer", &edges);
 
     // PBR vertex buffer (#): derive area-weighted smooth normals (the assets have
     // no `vn`) and pack position + normal + UV for `pbr.wgsl`, reusing the
