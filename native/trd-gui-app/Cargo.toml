@@ -11,6 +11,9 @@ path = "src/main.rs"
 
 # The native eframe shell is a delivery surface around the reusable trd-gui
 # library. Native-only, so its dependencies are plain rather than target-gated.
+[lints]
+workspace = true
+
 [dependencies]
 trd-core.workspace = true
 trd-gui = { path = "../../crates/trd-gui" }

@@ -12,6 +12,9 @@ path = "src/main.rs"
 # trd-app is a native-only delivery surface (winit window + live wgpu surface),
 # so its dependencies are plain, not target-gated: nothing ever builds this
 # binary for wasm.
+[lints]
+workspace = true
+
 [dependencies]
 trd-core.workspace = true
 wgpu = "30"

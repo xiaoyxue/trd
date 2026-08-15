@@ -713,8 +713,12 @@ mod tests {
         );
         let schema = valid_schema(Some(PROTOCOL_VERSION));
         // SAFETY: This fixture intentionally violates non-nullability metadata
-        // to verify runtime null rejection after IPC decoding.
-        unsafe { RecordBatch::new_unchecked(schema, vec![Arc::new(model) as ArrayRef], 1) }
+        // to verify runtime null rejection after IPC decoding. The workspace
+        // denies `unsafe_code`, so the one place that needs it says so (#235 R9).
+        #[allow(unsafe_code)]
+        unsafe {
+            RecordBatch::new_unchecked(schema, vec![Arc::new(model) as ArrayRef], 1)
+        }
     }
 
     fn version_stream(version: &str) -> Vec<u8> {

@@ -196,14 +196,6 @@ impl Scene {
     }
 }
 
-impl std::ops::Deref for Scene {
-    type Target = [DrawableObject];
-
-    fn deref(&self) -> &Self::Target {
-        &self.objects
-    }
-}
-
 impl FromIterator<DrawableObject> for Scene {
     fn from_iter<T: IntoIterator<Item = DrawableObject>>(iter: T) -> Self {
         Self {
@@ -453,9 +445,18 @@ mod tests {
             "the frame slot must not touch the environment slot"
         );
         // The objects keep the mesh → aabb → axes order, with nothing prepended.
-        assert!(matches!(scene[0].primitive(), Primitive::Mesh { .. }));
-        assert!(matches!(scene[1].primitive(), Primitive::AabbBox { .. }));
-        assert!(matches!(scene[2].primitive(), Primitive::CoordinateAxes));
+        assert!(matches!(
+            scene.objects()[0].primitive(),
+            Primitive::Mesh { .. }
+        ));
+        assert!(matches!(
+            scene.objects()[1].primitive(),
+            Primitive::AabbBox { .. }
+        ));
+        assert!(matches!(
+            scene.objects()[2].primitive(),
+            Primitive::CoordinateAxes
+        ));
     }
 
     /// The two background slots are **independent** (#204): a scene may carry an
@@ -488,7 +489,7 @@ mod tests {
         assert_eq!(scene.background().environment, Some(environment));
         assert_eq!(scene.background().frame, Some(FrameFit::Stretch));
         // Setting one slot must not disturb the objects either.
-        assert_eq!(scene.len(), 1);
+        assert_eq!(scene.objects().len(), 1);
 
         // The same holds for the builder form and a plain `Background`.
         let built = Scene::new().with_background(Background {
@@ -577,7 +578,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            mesh_modes(&scene),
+            mesh_modes(scene.objects()),
             vec![
                 RenderMode::Filled,
                 RenderMode::Wireframe,
@@ -597,7 +598,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            mesh_modes(&scene),
+            mesh_modes(scene.objects()),
             vec![
                 RenderMode::Wireframe,
                 RenderMode::Wireframe,
@@ -654,18 +655,30 @@ mod tests {
 
         // Counts: 2 meshes + 2 aabb + 2 local axes + 1 world axis = 7 objects; the
         // frame plane is a background setting, not an object (#204).
-        assert_eq!(scene.len(), 7, "scene = {scene:?}");
+        assert_eq!(scene.objects().len(), 7, "scene = {scene:?}");
         assert_eq!(scene.background().frame, Some(FrameFit::Cover));
         // Order: Mesh×2, AabbBox×2, CoordinateAxes(local)×2, CoordinateAxes(world).
-        assert!(matches!(scene[0].primitive(), Primitive::Mesh { .. }));
-        assert!(matches!(scene[1].primitive(), Primitive::Mesh { .. }));
-        assert!(matches!(scene[2].primitive(), Primitive::AabbBox { .. }));
-        assert!(matches!(scene[3].primitive(), Primitive::AabbBox { .. }));
+        assert!(matches!(
+            scene.objects()[0].primitive(),
+            Primitive::Mesh { .. }
+        ));
+        assert!(matches!(
+            scene.objects()[1].primitive(),
+            Primitive::Mesh { .. }
+        ));
+        assert!(matches!(
+            scene.objects()[2].primitive(),
+            Primitive::AabbBox { .. }
+        ));
+        assert!(matches!(
+            scene.objects()[3].primitive(),
+            Primitive::AabbBox { .. }
+        ));
 
         // The local gizmos carry each draw's own model (in draw order); the world
         // gizmo is last, at the identity (origin).
         assert_eq!(
-            axes_models(&scene),
+            axes_models(scene.objects()),
             vec![model_a, model_b, Matrix4::IDENTITY],
             "two local gizmos (per draw model) then one world gizmo at identity"
         );
@@ -682,7 +695,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            axes_models(&scene),
+            axes_models(scene.objects()),
             vec![model_a, model_b],
             "local gizmos only; no extra world-origin gizmo"
         );
@@ -729,7 +742,10 @@ mod tests {
             },
             None,
         );
-        assert!(grids(&scene).is_empty(), "no grid when local_grid is None");
+        assert!(
+            grids(scene.objects()).is_empty(),
+            "no grid when local_grid is None"
+        );
 
         // Global wireframe mode ⇒ both draws are wireframe ⇒ one PlaneGrid per
         // draw, on that plane, at the draw's model.
@@ -743,7 +759,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            grids(&scene),
+            grids(scene.objects()),
             vec![(GridPlane::Xy, model_a), (GridPlane::Xy, model_b)],
             "one Xy grid per wireframe draw at its own model"
         );
@@ -758,10 +774,16 @@ mod tests {
             },
             None,
         );
-        assert!(matches!(scene[0].primitive(), Primitive::Mesh { .. }));
-        assert!(matches!(scene[1].primitive(), Primitive::Mesh { .. }));
+        assert!(matches!(
+            scene.objects()[0].primitive(),
+            Primitive::Mesh { .. }
+        ));
+        assert!(matches!(
+            scene.objects()[1].primitive(),
+            Primitive::Mesh { .. }
+        ));
         assert_eq!(
-            grids(&scene),
+            grids(scene.objects()),
             vec![(GridPlane::Yz, model_a), (GridPlane::Yz, model_b)],
         );
 
@@ -789,7 +811,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            grids(&scene),
+            grids(scene.objects()),
             vec![(GridPlane::Xy, model_b)],
             "only the wireframe quad draw gets a grid, not the textured mesh"
         );
@@ -846,7 +868,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            grids(&scene).len(),
+            grids(scene.objects()).len(),
             3,
             "unscoped grid lands on every wireframe draw"
         );
@@ -864,7 +886,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            grids(&scene),
+            grids(scene.objects()),
             vec![(GridPlane::Xy, model_quad)],
             "grid_mesh = Some(1) lays exactly one grid, under the placement quad only"
         );
@@ -881,7 +903,7 @@ mod tests {
             None,
         );
         assert!(
-            grids(&scene).is_empty(),
+            grids(scene.objects()).is_empty(),
             "grid_mesh naming an absent mesh yields no grid"
         );
     }
@@ -927,6 +949,7 @@ mod tests {
         );
 
         let blobs: Vec<Matrix4> = scene
+            .objects()
             .iter()
             .filter_map(|o| match o.primitive() {
                 Primitive::BlobShadow => Some(o.model()),
@@ -942,14 +965,17 @@ mod tests {
         // The shadow draw must NOT produce a Mesh, and only the two non-shadow
         // draws get AABB boxes / local axes gizmos.
         let meshes = scene
+            .objects()
             .iter()
             .filter(|o| matches!(o.primitive(), Primitive::Mesh { .. }))
             .count();
         let aabbs = scene
+            .objects()
             .iter()
             .filter(|o| matches!(o.primitive(), Primitive::AabbBox { .. }))
             .count();
         let axes = scene
+            .objects()
             .iter()
             .filter(|o| matches!(o.primitive(), Primitive::CoordinateAxes))
             .count();
@@ -980,14 +1006,15 @@ mod tests {
 
         // Plain filled: exactly one Mesh drawable per draw, no gizmos.
         assert_eq!(
-            *build_scene(
+            build_scene(
                 &draws,
                 &RenderOptions {
                     mode: RenderMode::Filled,
                     ..Default::default()
                 },
                 None
-            ),
+            )
+            .objects(),
             [
                 DrawableObject::mesh(0, a, RenderMode::Filled),
                 DrawableObject::mesh(1, b, RenderMode::Filled),
@@ -996,14 +1023,15 @@ mod tests {
 
         // Wireframe propagates the mode to every mesh drawable.
         assert_eq!(
-            *build_scene(
+            build_scene(
                 &draws,
                 &RenderOptions {
                     mode: RenderMode::Wireframe,
                     ..Default::default()
                 },
                 None
-            ),
+            )
+            .objects(),
             [
                 DrawableObject::mesh(0, a, RenderMode::Wireframe),
                 DrawableObject::mesh(1, b, RenderMode::Wireframe),
@@ -1012,7 +1040,7 @@ mod tests {
 
         // Both overlays: meshes, then a tracking box per draw, then one gizmo.
         assert_eq!(
-            *build_scene(
+            build_scene(
                 &draws,
                 &RenderOptions {
                     mode: RenderMode::Filled,
@@ -1021,7 +1049,8 @@ mod tests {
                     ..Default::default()
                 },
                 None
-            ),
+            )
+            .objects(),
             [
                 DrawableObject::mesh(0, a, RenderMode::Filled),
                 DrawableObject::mesh(1, b, RenderMode::Filled),
@@ -1034,7 +1063,7 @@ mod tests {
         // Local axes: one CoordinateAxes per draw at its own model (in the mesh
         // bucket order, before the world-origin gizmo), each tracking its draw.
         assert_eq!(
-            *build_scene(
+            build_scene(
                 &draws,
                 &RenderOptions {
                     mode: RenderMode::Filled,
@@ -1042,7 +1071,8 @@ mod tests {
                     ..Default::default()
                 },
                 None
-            ),
+            )
+            .objects(),
             [
                 DrawableObject::mesh(0, a, RenderMode::Filled),
                 DrawableObject::mesh(1, b, RenderMode::Filled),
@@ -1066,14 +1096,15 @@ mod tests {
             },
         ];
         assert_eq!(
-            *build_scene(
+            build_scene(
                 &mixed,
                 &RenderOptions {
                     mode: RenderMode::Textured,
                     ..Default::default()
                 },
                 None
-            ),
+            )
+            .objects(),
             [
                 DrawableObject::mesh(0, a, RenderMode::Textured),
                 DrawableObject::mesh(1, b, RenderMode::Wireframe),

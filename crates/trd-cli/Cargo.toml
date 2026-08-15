@@ -9,6 +9,9 @@ repository.workspace = true
 name = "trd-cli"
 path = "src/main.rs"
 
+[lints]
+workspace = true
+
 [dependencies]
 trd-core.workspace = true
 clap = { version = "4", features = ["derive"] }

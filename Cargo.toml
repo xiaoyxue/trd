@@ -21,6 +21,27 @@ repository = "https://github.com/Hong-Xiang/trd"
 trd-core = { path = "crates/trd-core" }
 trd-placement = { path = "crates/trd-placement" }
 
+# The lint floor every crate inherits with `[lints] workspace = true` (#235 R9),
+# so the policy lives in the manifest instead of only in the CI command line
+# (`nix flake check` still runs clippy with `-D warnings` on top).
+#
+# `unsafe_code` is denied rather than warned: the tree has exactly **one**
+# `unsafe` block — a test fixture calling `RecordBatch::new_unchecked` to build
+# a deliberately invalid batch — which opts back in locally with
+# `#[allow(unsafe_code)]`, so any *new* one has to say so out loud.
+#
+# Deliberately *not* here: `rust_2018_idioms` and `unused_qualifications` (61
+# existing violations) and `missing_docs` (289 undocumented public items). Each
+# is a worthwhile ratchet and each is its own change — turning them on here would
+# bury this slice under mechanical edits.
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+# The gates already deny warnings; these two catch placeholders that compile.
+todo = "warn"
+dbg_macro = "warn"
+
 [workspace.metadata.crane]
 name = "trd"
 
