@@ -36,6 +36,8 @@ set.
 | `--clearcoat` | `0.0` | `0..1` | A second, colorless specular layer (car-paint / lacquer). |
 | `--env <FILE>` | — | `.hdr` | Equirectangular HDR environment map reflected by metallic surfaces (see [Environment probe](#hdr-environment-probe)). |
 | `--env-intensity` | `1.0` | `≥ 0` | Environment-reflection gain (0 disables the probe reflection). |
+| `--env-background` | off | — | Also draw the `--env` probe as the frame's **background sky**, behind every primitive (see [Environment probe](#hdr-environment-probe)). |
+| `--env-background-blur` | `0.0` | `0..1` | Blur of the `--env-background` sky (0 = sharp, 1 = fully blurred). |
 | `--exposure` | `1.2` | `≥ 0` | Tone-map exposure applied to the linear radiance before the curve. |
 | `--ambient` | `0.12` | `≥ 0` | Constant ambient fill (× base color) so shadowed regions aren't pure black. |
 | `--tonemap` | `reinhard` | `reinhard`\|`aces` | Tone-map operator (see [Tone mapping](#tone-mapping)). |
@@ -129,8 +131,17 @@ does no file I/O) and downscaled to the renderer's 2048 px limit;
 
 For glTF PBR, trd precomputes a GGX-filtered PMREM mip chain, diffuse irradiance
 map, and split-sum BRDF integration LUT. This avoids view-dependent noise while
-preserving roughness-dependent reflections. The GUI can show and blur the
-camera-centered environment background independently, and rotate it — but the
+preserving roughness-dependent reflections.
+
+The probe can also be **drawn as the background sky**, camera-centered behind
+every primitive: `--env-background` (blurred by `--env-background-blur`,
+tone-mapped with `--exposure` / `--tonemap`) in `trd-cli` and `trd-app`, the
+**Environment background** toggle in `trd-gui`, and `setEnvBackground(enabled,
+blur)` in the browser renderers. It is a `RenderOptions` field
+(`env_background`) applied by the shared `Scene::from_draws` assembly, so every
+front-end gets it from the same inputs (#235 R2) — before that only `trd-gui`
+could draw a sky, by reaching around the assembly. The sky needs a bound probe:
+with no `--env` the placeholder 1×1 black one is drawn. Its
 **yaw is one value**, `Lighting::environment.rotation` (an
 [`EnvironmentLight`](../crates/trd-core/src/light.rs)), driving the visible sky
 and the reflections together. It used to exist twice, per-mesh and per-scene,

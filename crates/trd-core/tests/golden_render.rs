@@ -59,10 +59,10 @@ use std::sync::Mutex;
 use arrow::array::{Array, FixedSizeListArray, UInt8Array};
 use arrow::ipc::reader::StreamReader;
 use trd_core::{
-    run_stream, Background, Camera, DisneyMaterial, DrawableObject, EnvMapData,
-    EnvironmentBackground, EnvironmentLight, ImageBasedLighting, Lighting, Matrix4, Mesh, Msaa,
-    PbrConfig, Point3, RenderMode, RenderOptions, Renderer, Scene, SceneLayer, ToneMapping,
-    Tonemap, Vector3, Vertex, Viewport,
+    run_stream, Camera, DisneyMaterial, Draw, DrawSelection, EnvMapData, EnvironmentBackground,
+    EnvironmentLight, ImageBasedLighting, Lighting, Matrix4, Mesh, Msaa, PbrConfig, Point3,
+    RenderMode, RenderOptions, Renderer, Scene, SceneLayer, ToneMapping, Tonemap, Vector3, Vertex,
+    Viewport,
 };
 
 /// Golden render resolution (16:9; the fixtures' CV `k` is rescaled to match).
@@ -193,6 +193,8 @@ fn pbr_options(tonemap: Tonemap) -> RenderOptions {
         show_object_grid: None,
 
         selected: None,
+
+        env_background: None,
 
         pbr: Some(PbrConfig {
             material: pbr_material(),
@@ -396,6 +398,8 @@ fn golden_stage1_placement_quad() {
 
             selected: None,
 
+            env_background: None,
+
             pbr: None,
             msaa: Msaa::X4,
         },
@@ -424,6 +428,8 @@ fn golden_stage1_placement_quad_no_msaa() {
             show_object_grid: None,
 
             selected: None,
+
+            env_background: None,
 
             pbr: None,
             msaa: Msaa::Off,
@@ -456,6 +462,8 @@ fn golden_stage2_textured_bunny() {
 
             selected: None,
 
+            env_background: None,
+
             pbr: None,
             msaa: Msaa::X4,
         },
@@ -484,6 +492,8 @@ fn golden_stage2_textured_bunny_no_msaa() {
             show_object_grid: None,
 
             selected: None,
+
+            env_background: None,
 
             pbr: None,
             msaa: Msaa::Off,
@@ -609,10 +619,18 @@ fn uv_sphere(radius: f32, segments: u32, rings: u32) -> Mesh {
 /// object in front of it are driven by the same scene-level
 /// [`EnvironmentLight::rotation`], so they can no longer disagree.
 ///
-/// No fixture can express this scene — `Scene::from_draws` never sets
-/// `Background::environment`, so nothing in the stream path draws a sky — so the
-/// scene is built directly against the public API: a **yaw-asymmetric** probe, a
-/// **non-zero** yaw, a **visible** sky, and a **near-mirror metallic** ball.
+/// The scene is assembled through the **shared** [`Scene::from_draws`] path from
+/// a wire draw list plus [`RenderOptions`], exactly as every front-end assembles
+/// a frame: a **yaw-asymmetric** probe, a **non-zero** yaw, a **visible** sky
+/// (`env_background`), and a **near-mirror metallic** ball. Before #235 R2 this
+/// had to bypass that assembly and set `Background::environment` by hand,
+/// because `from_draws` hard-coded it to `None` — so the CLI and both browser
+/// renderers could never draw a sky at all. The golden is unchanged by that
+/// move, which is the point: the shared assembly yields the same frame the
+/// hand-built scene did.
+///
+/// No *fixture* can express it — every golden fixture composites a frames-table
+/// background plane **over** the sky — so the draw list is built here.
 /// Before P9 the same picture needed two rotations set in agreement by hand; a
 /// regression that lets them drift shows up here as a sphere reflecting one
 /// quadrant color against a sky of another.
@@ -641,19 +659,25 @@ fn golden_environment_light_syncs_sky_and_reflection() {
     });
 
     // A yaw no symmetry can hide: 2.2 rad ≈ 126°, inside the second quadrant.
-    let scene = Scene::from(vec![DrawableObject::mesh(
-        0,
-        Matrix4::IDENTITY.to_cols_array(),
-        RenderMode::Shaded,
-    )])
-    .with_background(Background {
-        environment: Some(EnvironmentBackground {
-            exposure: 1.0,
-            blur: 0.0,
-            tonemap: Tonemap::Aces,
-        }),
-        frame: None,
-    })
+    let scene = Scene::from_draws(
+        &[Draw {
+            mesh_id: 0,
+            model: Matrix4::IDENTITY.to_cols_array(),
+            selection: DrawSelection::Mesh(Some(RenderMode::Shaded)),
+        }],
+        &RenderOptions {
+            mode: RenderMode::Shaded,
+            // The sky is an ordinary appearance option (#235 R2) — the same one
+            // `--env-background` and the browsers' `setEnvBackground` set.
+            env_background: Some(EnvironmentBackground {
+                exposure: 1.0,
+                blur: 0.0,
+                tonemap: Tonemap::Aces,
+            }),
+            ..RenderOptions::default()
+        },
+        None,
+    )
     .with_lighting(Lighting {
         // Kill the direct rig so the picture is *only* the probe: any change is
         // then unambiguously the environment's.

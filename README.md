@@ -202,7 +202,8 @@ choice, **not** a wire column, so the same stream renders any way.
 bound albedo lit by a virtual key/fill/rim light rig plus an optional HDR
 environment probe, with filmic tone mapping. The material + lighting are tunable
 from the CLI: `--metallic` / `--roughness` / `--specular` / `--clearcoat`,
-`--env <file.hdr>` / `--env-intensity`, `--exposure` / `--ambient`, and
+`--env <file.hdr>` / `--env-intensity`, `--env-background` (draw the probe as the
+background sky) / `--env-background-blur`, `--exposure` / `--ambient`, and
 `--tonemap reinhard|aces`. Full parameter reference + material model:
 **[`docs/pbr.md`](docs/pbr.md)**.
 

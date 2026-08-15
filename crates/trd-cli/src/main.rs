@@ -81,6 +81,17 @@ struct Cli {
     /// downscaled to the renderer's 2048px limit. Only used with `--pbr`.
     #[arg(long, value_name = "FILE")]
     env: Option<PathBuf>,
+    /// Also draw the `--env` probe as the frame's **background sky**, behind
+    /// every primitive, tone-mapped with `--exposure` / `--tonemap`. Needs
+    /// `--env` (with no probe bound the sky is black); independent of `--pbr`,
+    /// so a filled or wireframe scene can sit against the HDR too.
+    #[arg(long)]
+    env_background: bool,
+    /// Blur applied to the `--env-background` sky, `0.0` (sharp) … `1.0` (fully
+    /// blurred toward the probe's smallest mip) — a soft backdrop that keeps the
+    /// foreground reflections sharp.
+    #[arg(long, default_value_t = 0.0, value_name = "AMOUNT")]
+    env_background_blur: f32,
     /// PBR metallic parameter (0 = dielectric, 1 = metal).
     #[arg(long, default_value_t = 0.0)]
     metallic: f32,
@@ -166,7 +177,10 @@ fn main() -> Result<(), trd_core::StreamError> {
     // Assemble the Disney PBR config (material + optional HDR environment probe)
     // when `--pbr` is set. The `.hdr` file is decoded here so trd-core does no
     // file/codec I/O; it is downscaled to the renderer's portable 2048px limit.
-    let pbr = if cli.pbr {
+    // `--env-background` also needs it: the probe drawn as the sky is the same
+    // bound environment map the shaded surfaces reflect (#235 R2), so a filled or
+    // wireframe scene asking for a sky gets the config too.
+    let pbr = if cli.pbr || cli.env_background {
         let material = trd_core::DisneyMaterial {
             metallic: cli.metallic,
             roughness: cli.roughness,
@@ -248,6 +262,14 @@ fn main() -> Result<(), trd_core::StreamError> {
             show_object_grid: None,
             selected: None,
             pbr,
+            // The sky is a scene background, not a surface material, so it is a
+            // top-level option (#235 R2) — assembled by `Scene::from_draws` like
+            // every other appearance setting.
+            env_background: cli.env_background.then(|| trd_core::EnvironmentBackground {
+                exposure: cli.exposure,
+                blur: cli.env_background_blur,
+                tonemap: cli.tonemap.into(),
+            }),
             msaa: if cli.no_msaa {
                 trd_core::Msaa::Off
             } else {

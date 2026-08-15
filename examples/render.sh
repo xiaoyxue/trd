@@ -230,6 +230,8 @@ canvas_renderer=0
 wireframe=0
 pbr=0
 env=""
+env_background=0
+env_background_blur="0.0"
 metallic="0.0"
 roughness="0.35"
 env_intensity="1.0"
@@ -262,6 +264,9 @@ while [ $# -gt 0 ]; do
     --pbr) pbr=1 ;;
     --env) shift; env="${1:?--env requires an .hdr path}" ;;
     --env=*) env="${1#--env=}" ;;
+    --env-background) env_background=1 ;;
+    --env-background-blur) shift; env_background_blur="${1:?--env-background-blur requires a float}"; env_background=1 ;;
+    --env-background-blur=*) env_background_blur="${1#--env-background-blur=}"; env_background=1 ;;
     --metallic) shift; metallic="${1:?--metallic requires a float}" ;;
     --metallic=*) metallic="${1#--metallic=}" ;;
     --roughness) shift; roughness="${1:?--roughness requires a float}" ;;
@@ -524,6 +529,13 @@ if [ "$pbr" -eq 1 ]; then
   pbr_flag=(--pbr --metallic "$metallic" --roughness "$roughness" --env-intensity "$env_intensity" --exposure "$exposure" --ambient "$ambient" --specular "$specular" --clearcoat "$clearcoat" --tonemap "$tonemap")
   [ -n "$env" ] && pbr_flag+=(--env "$env")
 fi
+# The HDR sky is a scene background, not a material, so it is forwarded on its
+# own — with or without --pbr (#235 R2). It needs --env to show anything.
+env_background_flag=()
+if [ "$env_background" -eq 1 ]; then
+  env_background_flag=(--env-background --env-background-blur "$env_background_blur")
+  [ "$pbr" -eq 0 ] && [ -n "$env" ] && env_background_flag+=(--env "$env" --exposure "$exposure" --tonemap "$tonemap")
+fi
 aabb_flag=()
 [ "$aabb" -eq 1 ] && aabb_flag=(--aabb)
 axes_flag=()
@@ -625,6 +637,19 @@ if [ "$web" -eq 1 ]; then
   }$env_json"
   fi
 
+  # The HDR sky travels beside the material (it follows its tone mapping, but is
+  # a scene background rather than a surface property — #235 R2). The browser
+  # loads the probe as part of the PBR setup, so the sky needs --pbr here.
+  env_background_json=""
+  if [ "$env_background" -eq 1 ]; then
+    if [ "$pbr" -eq 1 ] && [ -n "$env" ]; then
+      env_background_json=",
+  \"envBackground\": { \"blur\": $env_background_blur }"
+    else
+      echo "warning: --env-background needs --pbr --env in --web mode; skipping the sky" >&2
+    fi
+  fi
+
   cat > "$serve/config.json" <<CFG
 {
   "target": "$target",
@@ -635,7 +660,7 @@ if [ "$web" -eq 1 ]; then
   "background": $background,
   "width": $width,
   "height": $height,
-  "fps": $fps$pbr_json
+  "fps": $fps$pbr_json$env_background_json
 }
 CFG
 
@@ -677,12 +702,12 @@ if [ "$native" -eq 1 ]; then
   # The appearance flags pass through to trd-app too (it now renders the mesh
   # Scene via the shared trd-core MeshRenderer, like trd-cli).
   stream \
-    | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-app -- --width "$width" --height "$height" --fps "$fps" "${wireframe_flag[@]}" "${textured_flag[@]}" "${pbr_flag[@]}" "${aabb_flag[@]}" "${axes_flag[@]}" "${axes_local_flag[@]}" "${grid_local_flag[@]}" "${grid_mesh_flag[@]}" "${frames_base_flag[@]}"
+    | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-app -- --width "$width" --height "$height" --fps "$fps" "${wireframe_flag[@]}" "${textured_flag[@]}" "${pbr_flag[@]}" "${env_background_flag[@]}" "${aabb_flag[@]}" "${axes_flag[@]}" "${axes_local_flag[@]}" "${grid_local_flag[@]}" "${grid_mesh_flag[@]}" "${frames_base_flag[@]}"
   echo "streamed $input to the trd-app window (${width}x${height}, ${fps}fps)"
 else
   mkdir -p "$(dirname "$output")"
   stream \
-    | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-cli -- --width "$width" --height "$height" "${wireframe_flag[@]}" "${textured_flag[@]}" "${pbr_flag[@]}" "${aabb_flag[@]}" "${axes_flag[@]}" "${axes_local_flag[@]}" "${grid_local_flag[@]}" "${grid_mesh_flag[@]}" "${frames_base_flag[@]}" \
+    | cargo run --manifest-path "$root/Cargo.toml" -q -p trd-cli -- --width "$width" --height "$height" "${wireframe_flag[@]}" "${textured_flag[@]}" "${pbr_flag[@]}" "${env_background_flag[@]}" "${aabb_flag[@]}" "${axes_flag[@]}" "${axes_local_flag[@]}" "${grid_local_flag[@]}" "${grid_mesh_flag[@]}" "${frames_base_flag[@]}" \
     | uv run --with pyarrow --with numpy "$root/scripts/encode.py" --fps "$fps" -o "$output"
   echo "wrote $output (${width}x${height}, ${fps}fps) from $input"
 fi

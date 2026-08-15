@@ -51,6 +51,12 @@ pub struct CanvasRenderer {
     /// [`RenderMode::Shaded`] draws, set via [`set_env_map_hdr`](Self::set_env_map_hdr)
     /// and applied when the renderer is built. `None` ⇒ no probe reflection.
     env_map: Option<EnvMapData>,
+    /// Blur of the HDR **background sky** requested via
+    /// [`set_env_background`](Self::set_env_background); `None` ⇒ no sky. The
+    /// exposure and operator come from the staged PBR tone mapping, so the two
+    /// are re-derived together into `options.env_background` whenever either
+    /// changes (#235 R2).
+    env_background_blur: Option<f32>,
     input: trd_core::InputSession,
     /// Frames decoded by [`load_ipc`](Self::load_ipc) but not yet rendered,
     /// replayed on demand by [`render_index`](Self::render_index). The generic
@@ -108,6 +114,7 @@ impl CanvasRenderer {
             composite_frame: false,
             pbr: None,
             env_map: None,
+            env_background_blur: None,
             instance,
             canvas,
             gpu,
@@ -319,6 +326,30 @@ impl CanvasRenderer {
             pbr.apply(renderer);
         }
         self.pbr = Some(pbr);
+        // The sky follows the same output transform as the objects in front of
+        // it, so re-derive it whenever the tone mapping changes (#235 R2).
+        self.refresh_env_background();
+    }
+
+    /// Draws the bound HDR environment probe as the frame's **background sky**
+    /// behind every primitive — the browser twin of trd-cli's `--env-background`
+    /// and the `trd-gui` "Environment background" toggle. `blur` is `0.0` (sharp)
+    /// … `1.0` (fully blurred); the exposure and tone-map operator follow
+    /// [`set_pbr_material`](Self::set_pbr_material), so the sky and the objects
+    /// cannot be tone-mapped differently. Needs a probe from
+    /// [`set_env_map_hdr`](Self::set_env_map_hdr) — with none bound the sky is
+    /// black. Takes effect on the next rendered frame.
+    #[wasm_bindgen(js_name = setEnvBackground)]
+    pub fn set_env_background(&mut self, enabled: bool, blur: f32) {
+        self.env_background_blur = enabled.then_some(blur);
+        self.refresh_env_background();
+    }
+
+    /// Re-derives the scene's sky from the requested blur + the staged PBR tone
+    /// mapping. The **one** place the two are combined in this front-end.
+    fn refresh_env_background(&mut self) {
+        self.options.env_background =
+            crate::env_background(self.env_background_blur, self.pbr.as_ref());
     }
 
     /// Decodes an equirectangular Radiance `.hdr` buffer and binds it as the

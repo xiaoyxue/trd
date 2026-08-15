@@ -87,6 +87,20 @@ pub struct RenderOptions {
     /// Disney PBR material + environment map, applied when `mode` is
     /// [`RenderMode::Shaded`] (also honoured for any per-draw PBR-mode draws).
     pub pbr: Option<PbrConfig>,
+    /// Draw the bound HDR environment probe as the frame's **background sky**,
+    /// behind every primitive. `None` (the default) ⇒ no sky.
+    ///
+    /// A top-level option rather than a [`PbrConfig`] field (#235 R2): the sky is
+    /// a [`Background`](crate::Background) setting on the assembled scene, not a
+    /// surface material, and the front-end that draws it today (`trd-gui`) passes
+    /// `pbr: None`. Requires an environment probe to be bound (`--env` /
+    /// [`PbrConfig::env_map`] / `Renderer::set_env_map`); with no probe the
+    /// placeholder 1×1 black one is drawn.
+    ///
+    /// It carries **no yaw**: the probe's rotation is the scene-level
+    /// [`EnvironmentLight`](crate::EnvironmentLight), so the sky and the
+    /// reflections on the objects in front of it cannot disagree (#182).
+    pub env_background: Option<crate::EnvironmentBackground>,
     /// Mesh-pass multisample anti-aliasing (default [`Msaa::X4`]).
     pub msaa: Msaa,
 }

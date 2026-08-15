@@ -43,36 +43,39 @@ pub fn render_options(state: &SceneState) -> trd_core::RenderOptions {
         show_object_grid: xz(state.show_local_grid),
         selected: state.selected,
         pbr: None,
+        // The HDR sky is an ordinary appearance option now (#235 R2), so this
+        // front-end no longer reaches around `Scene::from_draws` to set it.
+        //
+        // No `rotation` here either: the probe yaw is a scene-level
+        // `EnvironmentLight`, so the sky and the reflections in front of it
+        // cannot disagree (#182).
+        env_background: state.show_environment_background.then(|| {
+            trd_core::EnvironmentBackground {
+                exposure: state
+                    .tone_mappings
+                    .first()
+                    .map_or(1.0, |tone_mapping| tone_mapping.exposure),
+                blur: state.environment_background_blur,
+                tonemap: state
+                    .tone_mappings
+                    .first()
+                    .map_or(trd_core::Tonemap::Reinhard, |t| t.operator),
+            }
+        }),
         msaa: trd_core::Msaa::X4,
     }
 }
 
 /// The full per-frame scene for `state`: the shared
-/// [`Scene::from_draws`](trd_core::Scene::from_draws) assembly plus the
+/// [`Scene::from_draws`](trd_core::Scene::from_draws) assembly — including the
 /// optional HDR environment background, which is a per-frame *background
-/// setting* on the scene rather than a drawable or an overlay toggle (#204).
+/// setting* on the scene rather than a drawable or an overlay toggle (#204) —
+/// plus the frame's light rig.
 pub fn scene_for(state: &SceneState) -> trd_core::Scene {
-    let mut scene = trd_core::Scene::from_draws(&state.draws(), &render_options(state), None)
+    trd_core::Scene::from_draws(&state.draws(), &render_options(state), None)
         // The light rig travels with the frame now, not as sticky renderer
         // state (#182).
-        .with_lighting(state.lighting);
-    if state.show_environment_background {
-        // No `rotation` here any more: the probe yaw is a scene-level
-        // `EnvironmentLight`, so this front-end no longer has to hand-sync the
-        // sky with mesh 0's IBL to keep them from disagreeing (#182).
-        scene.background_mut().environment = Some(trd_core::EnvironmentBackground {
-            exposure: state
-                .tone_mappings
-                .first()
-                .map_or(1.0, |tone_mapping| tone_mapping.exposure),
-            blur: state.environment_background_blur,
-            tonemap: state
-                .tone_mappings
-                .first()
-                .map_or(trd_core::Tonemap::Reinhard, |t| t.operator),
-        });
-    }
-    scene
+        .with_lighting(state.lighting)
 }
 
 /// Pushes `state`'s per-object PBR material state onto the renderer.
