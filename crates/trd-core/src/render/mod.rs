@@ -75,7 +75,6 @@ pub use gpu_context::{create_instance, AdapterFacts, GpuContext, GpuInitError, G
 pub use gpu_types::Vertex;
 pub use options::{Msaa, PbrConfig, RenderOptions};
 pub use pbr::PbrDebugView;
-pub use picking::PickTarget;
 pub use render_target::{
     RenderTarget, RenderTargetType, SceneLayer, SurfaceTarget, TargetError, TextureTarget,
     TEXTURE_TARGET_FORMAT,

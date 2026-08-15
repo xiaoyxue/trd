@@ -36,7 +36,7 @@ pub fn create_instance() -> wgpu::Instance {
 /// back — the readback then completes on a later turn.
 ///
 /// Both readback paths ([`TextureTarget`](super::TextureTarget) and
-/// [`PickTarget`](super::PickTarget)) call this, so neither has to know which
+/// the pick read-back) call this, so neither has to know which
 /// platform it is on.
 pub fn poll_for_map(device: &wgpu::Device) -> Result<(), wgpu::PollError> {
     #[cfg(not(target_arch = "wasm32"))]
