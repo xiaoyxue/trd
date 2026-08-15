@@ -1,6 +1,6 @@
 //! Small GPU buffer primitives: a buffer plus its element count.
 //!
-//! [`IndexBuf`] and [`VertexGeometry`] are twins — same shape, same
+//! [`IndexBuffer`] and [`VertexGeometry`] are twins — same shape, same
 //! `create_buffer_init` construction — so they live together rather than being
 //! split along "index versus vertex". The two `draw_*` helpers issue the
 //! instanced draw for each. [`InstanceBuffer`] is the growable third: a buffer
@@ -12,12 +12,12 @@ use std::ops::Range;
 use super::GpuContext;
 
 /// An index buffer plus its element count — one `draw_indexed` range.
-pub(super) struct IndexBuf {
+pub(super) struct IndexBuffer {
     buffer: wgpu::Buffer,
     count: u32,
 }
 
-impl IndexBuf {
+impl IndexBuffer {
     pub(super) fn new(device: &wgpu::Device, label: &str, indices: &[u32]) -> Self {
         use wgpu::util::DeviceExt;
         let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -119,7 +119,7 @@ impl<T: bytemuck::Pod> InstanceBuffer<T> {
 /// caller's responsibility — each `record` body binds its own (#204).
 pub(super) fn draw_indexed(
     pass: &mut wgpu::RenderPass,
-    (vertex_buffer, index): (&wgpu::Buffer, &IndexBuf),
+    (vertex_buffer, index): (&wgpu::Buffer, &IndexBuffer),
     instances: Range<u32>,
 ) {
     pass.set_vertex_buffer(0, vertex_buffer.slice(..));
