@@ -217,7 +217,7 @@ fn draw_then_read_pixels_matches_render_layers() {
     let camera = camera_of(FrameParams::IDENTITY, width, height);
     let scene: Scene = [DrawableObject::mesh(
         0,
-        Matrix4::IDENTITY.to_cols_array(),
+        Matrix4::IDENTITY,
         RenderMode::Filled,
     )]
     .into_iter()
@@ -263,17 +263,15 @@ fn render_layers_composites_and_matches_render_for_one_layer() {
     let at = |x: f32| {
         DrawableObject::mesh(
             0,
-            Matrix4::from_translation(Vector3::new(x, 0.0, 0.0)).to_cols_array(),
+            Matrix4::from_translation(Vector3::new(x, 0.0, 0.0)),
             RenderMode::Filled,
         )
     };
     let background: Scene = [at(-0.4)].into_iter().collect();
     let foreground: Scene = [at(0.0)].into_iter().collect();
-    let overlay: Scene = [DrawableObject::coordinate_axes(
-        Matrix4::IDENTITY.to_cols_array(),
-    )]
-    .into_iter()
-    .collect();
+    let overlay: Scene = [DrawableObject::coordinate_axes(Matrix4::IDENTITY)]
+        .into_iter()
+        .collect();
 
     let camera = camera_of(FrameParams::IDENTITY, width, height);
 
@@ -335,7 +333,7 @@ fn render_layers_composites_and_matches_render_for_one_layer() {
 fn render_params_after_resizing_a_caller_owned_target() {
     let scene: Scene = vec![DrawableObject::mesh(
         0,
-        Matrix4::IDENTITY.to_cols_array(),
+        Matrix4::IDENTITY,
         RenderMode::Filled,
     )]
     .into();
@@ -395,7 +393,7 @@ fn with_gpu_renders_identically_to_with_meshes() {
     let meshes = [Mesh::hello_triangle()];
     let scene: Scene = vec![DrawableObject::mesh(
         0,
-        Matrix4::IDENTITY.to_cols_array(),
+        Matrix4::IDENTITY,
         RenderMode::Filled,
     )]
     .into();
@@ -442,12 +440,7 @@ fn first_frame_renders_with_no_setters_called() {
     // Every draw kind that reads a lazily-bound resource: Textured samples the
     // albedo, Pbr samples albedo + material maps + the environment probe.
     for mode in [RenderMode::Textured, RenderMode::Shaded] {
-        let scene: Scene = vec![DrawableObject::mesh(
-            0,
-            Matrix4::IDENTITY.to_cols_array(),
-            mode,
-        )]
-        .into();
+        let scene: Scene = vec![DrawableObject::mesh(0, Matrix4::IDENTITY, mode)].into();
         let pixels = render_with_readback(&gpu, format, width, height, |encoder, view| {
             renderer.encode(
                 encoder,
@@ -478,7 +471,7 @@ fn mesh_renderer_draws_multiple_instances() {
     // One centered instance vs. two instances translated to opposite sides.
     let single: Scene = [DrawableObject::mesh(
         0,
-        Matrix4::IDENTITY.to_cols_array(),
+        Matrix4::IDENTITY,
         RenderMode::Filled,
     )]
     .into_iter()
@@ -495,12 +488,12 @@ fn mesh_renderer_draws_multiple_instances() {
     let two: Scene = [
         DrawableObject::mesh(
             0,
-            Matrix4::from_translation(Vector3::new(-0.4, 0.0, 0.0)).to_cols_array(),
+            Matrix4::from_translation(Vector3::new(-0.4, 0.0, 0.0)),
             RenderMode::Filled,
         ),
         DrawableObject::mesh(
             0,
-            Matrix4::from_translation(Vector3::new(0.4, 0.0, 0.0)).to_cols_array(),
+            Matrix4::from_translation(Vector3::new(0.4, 0.0, 0.0)),
             RenderMode::Filled,
         ),
     ]
@@ -583,12 +576,12 @@ fn mesh_renderer_depth_buffer_occludes_far_behind_near() {
     let scene: Scene = [
         DrawableObject::mesh(
             0,
-            Matrix4::from_translation(Vector3::new(0.0, 0.0, 0.25)).to_cols_array(),
+            Matrix4::from_translation(Vector3::new(0.0, 0.0, 0.25)),
             RenderMode::Filled,
         ),
         DrawableObject::mesh(
             1,
-            Matrix4::from_translation(Vector3::new(0.0, 0.0, 0.75)).to_cols_array(),
+            Matrix4::from_translation(Vector3::new(0.0, 0.0, 0.75)),
             RenderMode::Filled,
         ),
     ]
@@ -619,7 +612,7 @@ fn mesh_renderer_wireframe_lights_edges_only() {
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (64, 64);
     let mut mesh = single(format, &Mesh::hello_triangle());
-    let model = Matrix4::IDENTITY.to_cols_array();
+    let model = Matrix4::IDENTITY;
     let filled_scene: Scene = [DrawableObject::mesh(0, model, RenderMode::Filled)]
         .into_iter()
         .collect();
@@ -740,7 +733,7 @@ fn mesh_renderer_textured_samples_bound_texture() {
     mesh.set_texture(&checker);
     let scene: Scene = [DrawableObject::mesh(
         0,
-        Matrix4::IDENTITY.to_cols_array(),
+        Matrix4::IDENTITY,
         RenderMode::Textured,
     )]
     .into_iter()
@@ -793,7 +786,7 @@ fn mesh_renderer_aabb_overlay_draws_green_box() {
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (64, 64);
     let mut mesh = single(format, &Mesh::hello_triangle());
-    let model = Matrix4::IDENTITY.to_cols_array();
+    let model = Matrix4::IDENTITY;
     let plain_scene: Scene = [DrawableObject::mesh(0, model, RenderMode::Filled)]
         .into_iter()
         .collect();
@@ -853,13 +846,13 @@ fn mesh_renderer_axes_overlay_draws_rgb_gizmo() {
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (64, 64);
     let mut mesh = single(format, &Mesh::hello_triangle());
-    let model = Matrix4::IDENTITY.to_cols_array();
+    let model = Matrix4::IDENTITY;
     let plain_scene: Scene = [DrawableObject::mesh(0, model, RenderMode::Filled)]
         .into_iter()
         .collect();
     let axes_scene: Scene = [
         DrawableObject::mesh(0, model, RenderMode::Filled),
-        DrawableObject::coordinate_axes(Matrix4::IDENTITY.to_cols_array()),
+        DrawableObject::coordinate_axes(Matrix4::IDENTITY),
     ]
     .into_iter()
     .collect();
@@ -923,7 +916,7 @@ fn gizmo_lines_and_arrowheads_stay_smooth_without_msaa() {
         &[Matrix4::IDENTITY],
         1,
     );
-    let model = Matrix4::from_scale(Vector3::new(0.5, 0.5, 0.5)).to_cols_array();
+    let model = Matrix4::from_scale(Vector3::new(0.5, 0.5, 0.5));
     let scene: Scene = [DrawableObject::coordinate_axes(model)]
         .into_iter()
         .collect();
@@ -981,7 +974,7 @@ fn scene_composes_all_drawable_kinds_together() {
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (64, 64);
     let mut mesh = single(format, &Mesh::hello_triangle());
-    let model = Matrix4::IDENTITY.to_cols_array();
+    let model = Matrix4::IDENTITY;
 
     let filled_only: Scene = [DrawableObject::mesh(0, model, RenderMode::Filled)]
         .into_iter()
@@ -990,7 +983,7 @@ fn scene_composes_all_drawable_kinds_together() {
         DrawableObject::mesh(0, model, RenderMode::Filled),
         DrawableObject::mesh(0, model, RenderMode::Wireframe),
         DrawableObject::aabb_box(0, model),
-        DrawableObject::coordinate_axes(Matrix4::IDENTITY.to_cols_array()),
+        DrawableObject::coordinate_axes(Matrix4::IDENTITY),
     ]
     .into_iter()
     .collect();
@@ -1121,7 +1114,7 @@ fn mesh_renderer_renders_loaded_quad_filled_with_correct_coverage() {
 
     let scene: Scene = [DrawableObject::mesh(
         0,
-        Matrix4::IDENTITY.to_cols_array(),
+        Matrix4::IDENTITY,
         RenderMode::Filled,
     )]
     .into_iter()
@@ -1184,7 +1177,7 @@ fn cg_and_cv_cameras_render_matching_output() {
 
     let scene: Scene = [DrawableObject::mesh(
         0,
-        Matrix4::IDENTITY.to_cols_array(),
+        Matrix4::IDENTITY,
         RenderMode::Filled,
     )]
     .into_iter()
@@ -1325,7 +1318,7 @@ fn dolly_turntable_bird_eye_cg_cv_wireframe_stays_framed() {
         for &theta in &angles {
             let scene: Scene = [DrawableObject::mesh(
                 0,
-                Mat4::from_rotation_y(theta).to_cols_array(),
+                Matrix4::from_glam(Mat4::from_rotation_y(theta)),
                 RenderMode::Wireframe,
             )]
             .into_iter()
@@ -1502,7 +1495,7 @@ fn frame_plane_composites_background_under_scene() {
     // the plane.
     let composited = Scene::from(vec![DrawableObject::mesh(
         0,
-        Matrix4::IDENTITY.to_cols_array(),
+        Matrix4::IDENTITY,
         RenderMode::Filled,
     )])
     .with_background(Background {
@@ -1519,7 +1512,7 @@ fn frame_plane_composites_background_under_scene() {
     });
     let foreground: Scene = [DrawableObject::mesh(
         0,
-        Matrix4::IDENTITY.to_cols_array(),
+        Matrix4::IDENTITY,
         RenderMode::Filled,
     )]
     .into_iter()
@@ -1615,8 +1608,9 @@ fn picking_resolves_object_ids_and_background() {
     // Two objects: a 0.35-scaled quad at NDC x = -0.5 (object 0) and +0.5
     // (object 1), leaving the center a background gap.
     let model = |x: f32| {
-        (Mat4::from_translation(Vec3::new(x, 0.0, 0.0)) * Mat4::from_scale(Vec3::splat(0.35)))
-            .to_cols_array()
+        Matrix4::from_glam(
+            Mat4::from_translation(Vec3::new(x, 0.0, 0.0)) * Mat4::from_scale(Vec3::splat(0.35)),
+        )
     };
     let draws = [
         Draw {

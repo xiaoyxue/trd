@@ -15,8 +15,8 @@
 //! authored around the world origin — the camera targets the origin by default.
 
 use trd_core::{
-    Camera, DisneyMaterial, Draw, DrawSelection, ImageBasedLighting, Lighting, PbrDebugView,
-    Point3, RenderMode, Rotation, ToneMapping, Transform, Vector3, Viewport,
+    Camera, DisneyMaterial, Draw, DrawSelection, ImageBasedLighting, Lighting, Matrix4,
+    PbrDebugView, Point3, RenderMode, Rotation, ToneMapping, Transform, Vector3, Viewport,
 };
 
 /// The minimum orbit distance (never let the camera cross the target).
@@ -132,8 +132,10 @@ impl ObjectTransform {
 
     /// The column-major model matrix `T · R · S`: scale, then rotate about `+Y`,
     /// `+X`, `+Z`, then translate. Built with the typed `trd-core` transforms so
-    /// the affine composition rule (`a.then(b) == b · a`) holds.
-    pub fn model_matrix(&self) -> [f32; 16] {
+    /// the affine composition rule (`a.then(b) == b · a`) holds, and handed out
+    /// typed — a `Draw`'s model is a `Matrix4` (#235 R3), so there is no array
+    /// round-trip left in between.
+    pub fn model_matrix(&self) -> Matrix4 {
         self.model_matrix_offset([0.0, 0.0, 0.0])
     }
 
@@ -141,7 +143,7 @@ impl ObjectTransform {
     /// `T·R·S` shifted by a **world-space** `offset` (applied after rotation, like
     /// the translation). Used to lay out a multi-object scene: each object keeps
     /// its own transform while a per-object layout `offset` spreads them apart.
-    pub fn model_matrix_offset(&self, offset: [f32; 3]) -> [f32; 16] {
+    pub fn model_matrix_offset(&self, offset: [f32; 3]) -> Matrix4 {
         let rotation = self.rotation();
         let scale = Vector3::new(self.scale[0], self.scale[1], self.scale[2]);
         let translation = Vector3::new(
@@ -149,9 +151,7 @@ impl ObjectTransform {
             self.translation[1] + offset[1],
             self.translation[2] + offset[2],
         );
-        Transform::from_scale_rotation_translation(scale, rotation, translation)
-            .matrix()
-            .to_cols_array()
+        Transform::from_scale_rotation_translation(scale, rotation, translation).matrix()
     }
 
     /// Translates the object by a world-space delta.
@@ -478,7 +478,7 @@ mod tests {
     #[test]
     fn identity_object_model_is_identity() {
         let obj = ObjectTransform::default();
-        assert_eq!(obj.model_matrix(), Matrix4::IDENTITY.to_cols_array());
+        assert_eq!(obj.model_matrix(), Matrix4::IDENTITY);
     }
 
     #[test]
@@ -487,7 +487,7 @@ mod tests {
             translation: [1.0, 2.0, 3.0],
             ..ObjectTransform::default()
         };
-        let m = obj.model_matrix();
+        let m = obj.model_matrix().to_cols_array();
         // Column-major: the translation is the 4th column (indices 12..15).
         approx([m[12], m[13], m[14]], [1.0, 2.0, 3.0]);
     }
@@ -498,7 +498,7 @@ mod tests {
         assert_eq!(obj.scale, [1.0, 1.0, 1.0]);
         assert_eq!(obj.roll, 0.0);
         // Unit scale + zero rotation/translation ⇒ identity model.
-        assert_eq!(obj.model_matrix(), Matrix4::IDENTITY.to_cols_array());
+        assert_eq!(obj.model_matrix(), Matrix4::IDENTITY);
     }
 
     #[test]
@@ -507,7 +507,7 @@ mod tests {
             scale: [2.0, 3.0, 4.0],
             ..ObjectTransform::default()
         };
-        let m = obj.model_matrix();
+        let m = obj.model_matrix().to_cols_array();
         // No rotation ⇒ T·R·S is diagonal in its upper-left 3×3 (column-major).
         approx([m[0], m[5], m[10]], [2.0, 3.0, 4.0]);
     }
@@ -531,7 +531,7 @@ mod tests {
         let mut obj = ObjectTransform::default();
         obj.roll_by(std::f32::consts::FRAC_PI_2);
         // +90° roll about +Z maps object +X to +Y (column 0 of the model).
-        let m = obj.model_matrix();
+        let m = obj.model_matrix().to_cols_array();
         approx([m[0], m[1], m[2]], [0.0, 1.0, 0.0]);
     }
 
@@ -588,7 +588,7 @@ mod tests {
         assert_eq!(draws.len(), 3);
         // mesh_id follows the object index; world X (model col 3, index 12) is
         // centered and increasing left→right.
-        let x = |d: &Draw| d.model[12];
+        let x = |d: &Draw| d.model.to_cols_array()[12];
         assert_eq!(
             (draws[0].mesh_id, draws[1].mesh_id, draws[2].mesh_id),
             (0, 1, 2)

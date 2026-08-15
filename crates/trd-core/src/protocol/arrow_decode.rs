@@ -17,6 +17,7 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, Field, Schema};
 
+use crate::math::Matrix4;
 use crate::render::{Draw, DrawSelection};
 use crate::{CameraFormError, FrameParams};
 
@@ -270,7 +271,9 @@ pub(crate) fn decode_draws(batch: &RecordBatch) -> Result<Option<Vec<Vec<Draw>>>
         let draws = (0..ids.len())
             .map(|j| Draw {
                 mesh_id: ids.value(j),
-                model: read_fixed::<16>(models, model_values, j),
+                // The wire is raw column-major floats; this is the one place it
+                // becomes a typed `Matrix4` (#235 R3).
+                model: Matrix4::from_cols_array(&read_fixed::<16>(models, model_values, j)),
                 selection: selections.get(j).copied().unwrap_or_default(),
             })
             .collect();

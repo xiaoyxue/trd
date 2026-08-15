@@ -95,7 +95,7 @@ impl DecodedFrame {
             Some(draws) => draws.clone(),
             None => vec![Draw {
                 mesh_id: 0,
-                model: self.params.model_matrix().to_cols_array(),
+                model: self.params.model_matrix(),
                 selection: DrawSelection::INHERIT,
             }],
         }
@@ -583,6 +583,7 @@ pub(crate) fn decode_params_stream(bytes: &[u8]) -> Result<Vec<DecodedFrame>, Pr
 
 #[cfg(test)]
 mod tests {
+    use crate::math::Matrix4;
     use std::sync::Arc;
 
     use arrow::array::{
@@ -1449,7 +1450,7 @@ mod tests {
         // Explicit non-empty list ⇒ used verbatim.
         let one = Draw {
             mesh_id: 3,
-            model: [1.0_f32; 16],
+            model: Matrix4::from_cols_array(&[1.0_f32; 16]),
             selection: DrawSelection::INHERIT,
         };
         let explicit = DecodedFrame {
@@ -1480,12 +1481,12 @@ mod tests {
             Some(vec![
                 Draw {
                     mesh_id: 0,
-                    model: a,
+                    model: Matrix4::from_cols_array(&a),
                     selection: DrawSelection::INHERIT
                 },
                 Draw {
                     mesh_id: 1,
-                    model: b,
+                    model: Matrix4::from_cols_array(&b),
                     selection: DrawSelection::INHERIT
                 },
             ])

@@ -880,7 +880,7 @@ impl VideoEditingApp {
         };
         let quad_basis = trd_placement::placement_model(frame, placement).ok()?;
         let object = self.controller.state.objects.first()?;
-        let object_model = trd_core::Matrix4::from_cols_array(&object.model_matrix());
+        let object_model = object.model_matrix();
         Some(quad_basis * object_model)
     }
 

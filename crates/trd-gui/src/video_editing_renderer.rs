@@ -186,7 +186,7 @@ impl VideoPlacementRenderer {
                 camera,
                 &[trd_core::Draw {
                     mesh_id: 0,
-                    model: model.to_cols_array(),
+                    model,
                     selection: trd_core::DrawSelection::INHERIT,
                 }],
                 point.0,
@@ -403,25 +403,23 @@ pub fn placement_scenes(
     });
     if let Some(quad_model) = quad_model {
         background.push(trd_core::DrawableObject::quad_outline(
-            quad_model.to_cols_array(),
+            quad_model,
             selected_quad,
         ));
         if selected_quad {
             background.push(trd_core::DrawableObject::plane_grid(
                 trd_core::GridPlane::Xy,
-                quad_model.to_cols_array(),
+                quad_model,
             ));
             if let Some(axes) = quad_axes {
-                background.push(trd_core::DrawableObject::coordinate_axes(
-                    axes.to_cols_array(),
-                ));
+                background.push(trd_core::DrawableObject::coordinate_axes(axes));
             }
         }
     }
 
     let mut foreground = trd_core::Scene::new();
     let mut selection_overlay = trd_core::Scene::new();
-    if let Some(model) = model.map(|model| model.to_cols_array()) {
+    if let Some(model) = model {
         foreground.push(trd_core::DrawableObject::mesh(0, model, state.modes[0]));
         if state.show_aabb || state.selected == Some(0) {
             selection_overlay.push(trd_core::DrawableObject::aabb_box(0, model));
@@ -431,7 +429,7 @@ pub fn placement_scenes(
         }
         if state.show_axes {
             foreground.push(trd_core::DrawableObject::coordinate_axes(
-                trd_core::Matrix4::IDENTITY.to_cols_array(),
+                trd_core::Matrix4::IDENTITY,
             ));
         }
         if state.show_local_grid {
@@ -443,7 +441,7 @@ pub fn placement_scenes(
         if state.show_world_grid {
             foreground.push(trd_core::DrawableObject::plane_grid(
                 trd_core::GridPlane::Xz,
-                trd_core::Matrix4::IDENTITY.to_cols_array(),
+                trd_core::Matrix4::IDENTITY,
             ));
         }
     }

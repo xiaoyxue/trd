@@ -6,6 +6,7 @@
 //! *supplies* those bytes is not one of them and lives at the crate root
 //! (`crate::mesh`, #221).
 
+use crate::math::Matrix4;
 use crate::Camera;
 
 /// GPU uniform matching the WGSL `Params` layout: a single column-major 4×4
@@ -187,7 +188,10 @@ impl PbrVertex {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct InstanceRaw {
-    pub(crate) model: [f32; 16],
+    /// Typed, but byte-identical to the old `[f32; 16]`: `Matrix4` is
+    /// `#[repr(transparent)]` over `glam::Mat4` and already `Pod`, so the record
+    /// keeps its 64-byte stride and column-major layout (#235 R3).
+    pub(crate) model: Matrix4,
 }
 
 impl InstanceRaw {
@@ -231,7 +235,7 @@ impl InstanceRaw {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct PickInstanceRaw {
-    pub(crate) model: [f32; 16],
+    pub(crate) model: Matrix4,
     pub(crate) id_color: [f32; 4],
 }
 
@@ -268,7 +272,7 @@ impl PickInstanceRaw {
     /// stored id is `index + 1` so `0` is reserved for the cleared background;
     /// the 24-bit RGB packing round-trips through the linear `Rgba8Unorm` pick
     /// target (each byte `/ 255.0`).
-    pub(crate) fn new(model: [f32; 16], index: u32) -> Self {
+    pub(crate) fn new(model: Matrix4, index: u32) -> Self {
         let id = index + 1;
         let id_color = [
             (id & 0xFF) as f32 / 255.0,
@@ -306,7 +310,7 @@ mod tests {
     fn pick_instance_id_round_trips_through_rgba() {
         // index 0 -> id 1, encoded low byte, decodes back to 0.
         for index in [0u32, 1, 2, 42, 255, 256, 300, 65_535, 70_000] {
-            let inst = PickInstanceRaw::new(Matrix4::IDENTITY.to_cols_array(), index);
+            let inst = PickInstanceRaw::new(Matrix4::IDENTITY, index);
             // The id color bytes are the pick target's stored RGBA (× 255, exact).
             let rgba = [
                 (inst.id_color[0] * 255.0).round() as u8,

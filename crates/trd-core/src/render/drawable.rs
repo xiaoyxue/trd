@@ -16,6 +16,7 @@
 //! opaque `usize` payload purely to give its variants a uniform shape.
 
 use super::{GridPlane, RenderMode};
+use crate::math::Matrix4;
 
 /// **What** the renderer draws: the closed list of primitives it knows, with the
 /// per-primitive configuration that selects the geometry and pipeline — but
@@ -195,45 +196,45 @@ impl Primitive {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DrawableObject {
     primitive: Primitive,
-    model: [f32; 16],
+    model: Matrix4,
 }
 
 impl DrawableObject {
     /// `primitive` placed by `model` (column-major 4×4).
-    pub fn new(primitive: Primitive, model: [f32; 16]) -> Self {
+    pub fn new(primitive: Primitive, model: Matrix4) -> Self {
         Self { primitive, model }
     }
 
     /// Mesh `mesh_id` placed by `model` and drawn in `mode`.
-    pub fn mesh(mesh_id: u32, model: [f32; 16], mode: RenderMode) -> Self {
+    pub fn mesh(mesh_id: u32, model: Matrix4, mode: RenderMode) -> Self {
         Self::new(Primitive::Mesh { mesh_id, mode }, model)
     }
 
     /// The AABB outline of mesh `mesh_id`, placed by the same `model` as the mesh
     /// instance it boxes.
-    pub fn aabb_box(mesh_id: u32, model: [f32; 16]) -> Self {
+    pub fn aabb_box(mesh_id: u32, model: Matrix4) -> Self {
         Self::new(Primitive::AabbBox { mesh_id }, model)
     }
 
     /// A coordinate-plane grid on `plane`, placed by `model`.
-    pub fn plane_grid(plane: GridPlane, model: [f32; 16]) -> Self {
+    pub fn plane_grid(plane: GridPlane, model: Matrix4) -> Self {
         Self::new(Primitive::PlaneGrid { plane }, model)
     }
 
     /// The placement-quad outline placed by `model`, in its `selected` or
     /// unselected color.
-    pub fn quad_outline(model: [f32; 16], selected: bool) -> Self {
+    pub fn quad_outline(model: Matrix4, selected: bool) -> Self {
         Self::new(Primitive::QuadOutline { selected }, model)
     }
 
     /// The coordinate-axes gizmo placed by `model` (identity marks the world
     /// origin).
-    pub fn coordinate_axes(model: [f32; 16]) -> Self {
+    pub fn coordinate_axes(model: Matrix4) -> Self {
         Self::new(Primitive::CoordinateAxes, model)
     }
 
     /// A contact/blob grounding shadow placed by `model`.
-    pub fn blob_shadow(model: [f32; 16]) -> Self {
+    pub fn blob_shadow(model: Matrix4) -> Self {
         Self::new(Primitive::BlobShadow, model)
     }
 
@@ -242,8 +243,8 @@ impl DrawableObject {
         self.primitive
     }
 
-    /// The column-major 4×4 model that places it this frame.
-    pub fn model(&self) -> [f32; 16] {
+    /// The typed column-major 4×4 model that places it this frame.
+    pub fn model(&self) -> Matrix4 {
         self.model
     }
 }

@@ -39,6 +39,7 @@ use super::{
     FRAMES_TABLE_KIND, MESH_TABLE_KIND, PARAMS_TABLE_KIND, PROTOCOL_VERSION, PROTOCOL_VERSION_KEY,
     TABLE_KIND_KEY, TEXTURE_TABLE_KIND,
 };
+use crate::math::Matrix4;
 use crate::render::{Draw, DrawSelection, RenderMode};
 use crate::render::{FrameParams, Mesh};
 use crate::texture::{Texture, TEXTURE_COLUMN};
@@ -359,7 +360,7 @@ pub fn encode_params_stream_with_frame_ids(
             .collect();
         let model_rows: Vec<Vec<f32>> = draws
             .iter()
-            .map(|row| row.iter().flat_map(|d| d.model).collect())
+            .map(|row| row.iter().flat_map(|d| d.model.to_cols_array()).collect())
             .collect();
         fields.push(Field::new(
             "draw_mesh",
@@ -639,9 +640,9 @@ mod tests {
         };
         let draws = vec![vec![Draw {
             mesh_id: 0,
-            model: [
+            model: Matrix4::from_cols_array(&[
                 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.2, -0.1, 0.0, 1.0,
-            ],
+            ]),
             selection: DrawSelection::INHERIT,
         }]];
 
@@ -704,16 +705,16 @@ mod tests {
         let draws = vec![
             vec![Draw {
                 mesh_id: 0,
-                model: [
+                model: Matrix4::from_cols_array(&[
                     1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.2, -0.1, 0.0, 1.0,
-                ],
+                ]),
                 selection: DrawSelection::INHERIT,
             }],
             vec![Draw {
                 mesh_id: 0,
-                model: [
+                model: Matrix4::from_cols_array(&[
                     0.5, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 1.0,
-                ],
+                ]),
                 selection: DrawSelection::Mesh(Some(RenderMode::Wireframe)),
             }],
         ];
@@ -739,9 +740,9 @@ mod tests {
         let frames = vec![FrameParams::IDENTITY, FrameParams::IDENTITY];
         let placed = Draw {
             mesh_id: 0,
-            model: [
+            model: Matrix4::from_cols_array(&[
                 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.2, -0.1, 0.0, 1.0,
-            ],
+            ]),
             selection: DrawSelection::INHERIT,
         };
         let draws = vec![vec![placed], Vec::new()];
