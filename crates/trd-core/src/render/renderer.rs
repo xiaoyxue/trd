@@ -1469,7 +1469,11 @@ impl Renderer {
                 pass.set_bind_group(1, mesh.texture.bind_group(), &[]);
                 pass.set_bind_group(2, self.environment.bind_group(), &[]);
                 pass.set_bind_group(3, mesh.material_maps.bind_group(), &[]);
-                draw_indexed(pass, mesh.pbr(), range);
+                // Slot 2 carries this mesh's derived normals/tangents; the
+                // geometry at slot 0 is the same buffer every other mode draws
+                // (#247 S7).
+                pass.set_vertex_buffer(2, mesh.shading().slice());
+                draw_indexed(pass, mesh.filled(), range);
             }
             RenderMode::Wireframe => {
                 pass.set_pipeline(&self.pipelines.wireframe);

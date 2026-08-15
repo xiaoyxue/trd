@@ -31,11 +31,11 @@ use crate::math::Matrix4;
 /// [`MeshStore::meshes`](super::mesh_store::MeshStore).
 pub(super) struct MeshGpu {
     pub(super) vertex_buffer: VertexBuffer<Vertex>,
-    /// Parallel vertex buffer for the Disney PBR path (`pbr.wgsl`): the same
-    /// positions + UVs as `vertex_buffer`, but with a derived smooth shading
-    /// **normal** in place of the vertex color. Reuses the `triangles` index
-    /// buffer. Built once per mesh; only bound by [`RenderMode::Shaded`] draws.
-    pub(super) pbr_vertex_buffer: VertexBuffer<PbrVertex>,
+    /// The derived shading attributes for the Disney PBR path (`pbr.wgsl`):
+    /// smooth normal + tangent, bound at vertex slot 2 *beside* `vertex_buffer`
+    /// rather than duplicating its positions and UVs (#247 S7). Built once per
+    /// mesh; only bound by [`RenderMode::Shaded`] draws.
+    pub(super) shading: VertexBuffer<ShadingVertex>,
     pub(super) triangles: IndexBuffer,
     pub(super) edges: IndexBuffer,
     pub(super) aabb: VertexBuffer<GizmoLineVertex>,
@@ -63,8 +63,10 @@ impl MeshGpu {
         (&self.vertex_buffer, &self.triangles)
     }
 
-    pub(super) fn pbr(&self) -> (&VertexBuffer<PbrVertex>, &IndexBuffer) {
-        (&self.pbr_vertex_buffer, &self.triangles)
+    /// What a shaded draw binds **in addition** to [`filled`](Self::filled) —
+    /// the geometry is the same buffer, so there is no second copy of it.
+    pub(super) fn shading(&self) -> &VertexBuffer<ShadingVertex> {
+        &self.shading
     }
 
     pub(super) fn wireframe(&self) -> (&VertexBuffer<Vertex>, &IndexBuffer) {
@@ -103,20 +105,12 @@ pub(super) fn upload_mesh(
         .filter(|shading| shading.tangents.len() == mesh.vertices.len())
         .map(|shading| shading.tangents.clone())
         .unwrap_or_else(|| compute_tangents(&mesh.vertices, &mesh.indices, &normals));
-    let pbr_vertices: Vec<PbrVertex> = mesh
-        .vertices
+    let shading_vertices: Vec<ShadingVertex> = normals
         .iter()
-        .zip(&normals)
         .zip(&tangents)
-        .map(|((v, &normal), &tangent)| PbrVertex {
-            position: v.position,
-            normal,
-            uv: v.uv,
-            tangent,
-        })
+        .map(|(&normal, &tangent)| ShadingVertex { normal, tangent })
         .collect();
-    let pbr_vertex_buffer =
-        VertexBuffer::new(&gpu.device, "trd mesh pbr vertex buffer", &pbr_vertices);
+    let shading = VertexBuffer::new(&gpu.device, "trd mesh shading buffer", &shading_vertices);
 
     // AABB overlay box: the mesh's own bounding box (mesh-local coords) as 8
     // colored corner vertices + a 12-edge line list. Built once per mesh; drawn
@@ -126,7 +120,7 @@ pub(super) fn upload_mesh(
 
     MeshGpu {
         vertex_buffer,
-        pbr_vertex_buffer,
+        shading,
         triangles,
         edges,
         aabb: VertexBuffer::new(&gpu.device, "trd mesh aabb line buffer", &aabb_vertices),

@@ -68,16 +68,21 @@ struct PbrUniform {
 @group(3) @binding(1) var normal_tex: texture_2d<f32>;
 @group(3) @binding(2) var material_samp: sampler;
 
+// Slot 0 is the shared mesh vertex buffer (position/color/uv) every other
+// pipeline reads; slot 1 the per-instance model; slot 2 the derived shading
+// attributes only this pass needs. Vertex color (location 1) is bound but not
+// consumed here — the Disney path takes base color from the material and the
+// albedo texture.
 struct VsIn {
     @location(0) position: vec3<f32>,
-    @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
     // Per-instance model matrix, one column per attribute (column-major).
     @location(3) model_col0: vec4<f32>,
     @location(4) model_col1: vec4<f32>,
     @location(5) model_col2: vec4<f32>,
     @location(6) model_col3: vec4<f32>,
-    @location(7) tangent: vec4<f32>,
+    @location(8) normal: vec3<f32>,
+    @location(9) tangent: vec4<f32>,
 };
 
 struct VsOut {

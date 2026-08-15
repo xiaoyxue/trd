@@ -2,8 +2,8 @@
 //! uniform construction helpers.
 
 use super::{
-    BoundUniform, GizmoLineVertex, GizmoUniform, InstanceRaw, PbrVertex, PickInstanceRaw, Uniform,
-    Vertex,
+    BoundUniform, GizmoLineVertex, GizmoUniform, InstanceRaw, PickInstanceRaw, ShadingVertex,
+    Uniform, Vertex,
 };
 use crate::Camera;
 
@@ -731,7 +731,7 @@ pub(crate) fn create_env_bind_group_layout(device: &wgpu::Device) -> wgpu::BindG
 }
 
 /// Builds the Disney **PBR** `TriangleList` pipeline: `pbr.wgsl` over the
-/// dedicated [`PbrVertex`] (position + normal + UV) buffer plus the shared
+/// shared [`Vertex`] buffer, the derived [`ShadingVertex`] buffer, plus the shared
 /// [`InstanceRaw`] model buffer, with group 0 = the `PbrUniform`, group 1 = the
 /// bound albedo texture + sampler, group 2 = the HDR environment map. Opaque
 /// ([`solid_depth_stencil`]), multisampled to match the mesh pass.
@@ -749,7 +749,14 @@ pub(crate) fn create_pbr_pipeline(
             module: &shader,
             entry_point: Some("vs_main"),
             compilation_options: Default::default(),
-            buffers: &[Some(PbrVertex::layout()), Some(InstanceRaw::layout())],
+            buffers: &[
+                // Slot 0 is the same `Vertex` buffer the filled/textured/shadow
+                // /picking pipelines read; slot 2 adds the derived shading
+                // attributes this pass alone needs (#247 S7).
+                Some(Vertex::layout()),
+                Some(InstanceRaw::layout()),
+                Some(ShadingVertex::layout()),
+            ],
         },
         fragment: Some(wgpu::FragmentState {
             module: &shader,

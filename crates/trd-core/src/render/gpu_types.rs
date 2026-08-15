@@ -52,10 +52,10 @@ impl GizmoUniform {
 /// vertex record: it is [`Mesh::vertices`](crate::Mesh)' element, decoded from
 /// OBJ, glTF and the `0.0.6` wire, so it is `pub` and compared for equality.
 ///
-/// **Why this and [`PbrVertex`] are two types** (#247): they answer different
-/// questions. This one is what an *asset* carries; `PbrVertex` is what the
-/// Disney path *derives* at upload (smooth normals + tangents the OBJ assets do
-/// not have). Merging them — one record with an "optional" tangent — is not
+/// **Why this and [`ShadingVertex`] are two types** (#247): they answer
+/// different questions. This one is what an *asset* carries; `ShadingVertex` is
+/// what the Disney path *derives* at upload (smooth normals + tangents the OBJ
+/// assets do not have), bound beside it at a second vertex slot. Merging them — one record with an "optional" tangent — is not
 /// expressible: a vertex buffer has a fixed `array_stride`, so "optional" can
 /// only mean "a field that is sometimes zero", paid on every vertex of every
 /// mesh in all six pipelines, and it would push derived data into a public,
@@ -151,59 +151,48 @@ impl GizmoLineVertex {
     }
 }
 
-/// A mesh vertex for the Disney PBR path (`pbr.wgsl`): position + smooth shading
-/// **normal** (loc 1) + UV + tangent (loc 7) — **48 bytes**, where [`Vertex`] is
-/// 32.
+/// The **derived** half of a shaded mesh vertex: the smooth shading normal
+/// (loc 8) and tangent (loc 9), bound at vertex slot **2** by `pbr.wgsl` beside
+/// the ordinary [`Vertex`] buffer every other pipeline reads (#247 S7).
 ///
-/// The **derived** counterpart to [`Vertex`]'s authored record (see the "why two
-/// types" note there): the second attribute is a normal rather than a color
-/// because the OBJ assets carry no `vn`, so
+/// It is a separate record rather than fields on [`Vertex`] because it is
+/// *derived*, not authored: the OBJ assets carry no `vn`, so
 /// [`compute_smooth_normals`](super::pbr::compute_smooth_normals) and
-/// [`compute_tangents`](super::pbr::compute_tangents) fill it at upload time —
-/// unless the asset supplies its own through
-/// [`MeshShading`](crate::MeshShading) — into a dedicated buffer, leaving the
-/// shared [`Vertex`] used by every other pipeline untouched.
+/// [`compute_tangents`](super::pbr::compute_tangents) fill it at upload unless
+/// the asset supplies its own through [`MeshShading`](crate::MeshShading).
+/// Putting it on `Vertex` would push derived data into a public, wire-decoded
+/// type and make every other pipeline fetch 28 bytes it never reads.
 ///
-/// It re-stores `position` and `uv`, which the mesh's [`Vertex`] buffer already
-/// holds: 20 of these 48 bytes are a second copy. Removing that duplication
-/// means splitting the derived half into its own buffer bound at a second vertex
-/// slot, not merging the two records — measured and left as its own slice
-/// (#247 S7).
+/// It is a separate *buffer* rather than a wider PBR vertex — which is what it
+/// used to be, `PbrVertex { position, normal, uv, tangent }` — because that
+/// stored `position` and `uv` a second time: 20 of its 48 bytes duplicated the
+/// mesh's own vertex buffer, 80 B/vertex across the two. Splitting the derived
+/// half off costs one extra `set_vertex_buffer` per shaded draw and stores
+/// 60 B/vertex instead.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
-pub(crate) struct PbrVertex {
-    pub(crate) position: [f32; 3],
+pub(crate) struct ShadingVertex {
     pub(crate) normal: [f32; 3],
-    pub(crate) uv: [f32; 2],
     /// xyz = tangent, w = handedness used to reconstruct the bitangent.
     pub(crate) tangent: [f32; 4],
 }
 
-impl PbrVertex {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 4] = [
+impl ShadingVertex {
+    // 0-2 are `Vertex`, 3-6 the instance model, 7 the gizmo line's extrusion.
+    const ATTRIBUTES: [wgpu::VertexAttribute; 2] = [
         wgpu::VertexAttribute {
             format: wgpu::VertexFormat::Float32x3,
             offset: 0,
-            shader_location: 0,
-        },
-        wgpu::VertexAttribute {
-            format: wgpu::VertexFormat::Float32x3,
-            offset: 12,
-            shader_location: 1,
-        },
-        wgpu::VertexAttribute {
-            format: wgpu::VertexFormat::Float32x2,
-            offset: 24,
-            shader_location: 2,
+            shader_location: 8,
         },
         wgpu::VertexAttribute {
             format: wgpu::VertexFormat::Float32x4,
-            offset: 32,
-            shader_location: 7,
+            offset: 12,
+            shader_location: 9,
         },
     ];
 
-    /// Returns the vertex buffer layout expected by `pbr.wgsl`.
+    /// The slot-2 vertex buffer layout expected by `pbr.wgsl`.
     pub(crate) const fn layout() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
