@@ -2,7 +2,7 @@
 //! and grids, plus the coordinate-axis arrowhead triangles — and
 //! [`GizmoGeometry`], the uploaded result every frame draws from.
 
-use super::buffer::VertexGeometry;
+use super::buffer::VertexBuffer;
 use super::GridPlane;
 use super::{GizmoLineVertex, GpuContext, Vertex};
 
@@ -248,7 +248,7 @@ pub(crate) fn quad_outline_vertices(selected: bool) -> Vec<GizmoLineVertex> {
 
 /// Number of `TriangleList` vertices in the **contact/blob-shadow** quad: two
 /// triangles → `6`.
-pub(crate) const SHADOW_VERTEX_COUNT: u32 = 6;
+const SHADOW_VERTEX_COUNT: usize = 6;
 
 /// The `TriangleList` vertices of the **contact/blob-shadow** quad: a unit square
 /// in the model-space XY plane (`[-1, 1]²` at `z = 0`). `shadow.wgsl` reads each
@@ -256,9 +256,9 @@ pub(crate) const SHADOW_VERTEX_COUNT: u32 = 6;
 /// alpha (darkest under the placed mesh, fading to `0` at the rim), so a
 /// [`Primitive::BlobShadow`](crate::Primitive::BlobShadow) lays a
 /// grounding shadow on the plane beneath a placed mesh via its per-instance
-/// model. Drawn non-indexed (`draw(0..SHADOW_VERTEX_COUNT, ..)`), alpha-blended
+/// model. Drawn non-indexed over the buffer's own vertex count, alpha-blended
 /// over the background frame plane.
-pub(crate) fn blob_shadow_vertices() -> [Vertex; SHADOW_VERTEX_COUNT as usize] {
+pub(crate) fn blob_shadow_vertices() -> [Vertex; SHADOW_VERTEX_COUNT] {
     let v = |x: f32, y: f32| Vertex {
         position: [x, y, 0.0],
         color: [0.0, 0.0, 0.0],
@@ -285,58 +285,59 @@ pub(crate) fn blob_shadow_vertices() -> [Vertex; SHADOW_VERTEX_COUNT as usize] {
 /// `*Gpu` name for the same reason: nothing about it varies with caller input.
 pub(super) struct GizmoGeometry {
     /// The coordinate-axis shafts and cone arrowheads.
-    pub(super) axes_lines: VertexGeometry,
-    pub(super) axes_heads: VertexGeometry,
+    pub(super) axes_lines: VertexBuffer<GizmoLineVertex>,
+    /// The arrowhead cones are ordinary unlit overlay triangles, not expanded
+    /// lines — a different pipeline and a different vertex record from the shafts
+    /// above, which the type now says (#247 S2).
+    pub(super) axes_heads: VertexBuffer<Vertex>,
     /// The coordinate-plane grid geometry, one expanded-line buffer per
     /// [`GridPlane`] (indexed by [`GridPlane::index`]): XY, XZ, YZ. Each
     /// [`PlaneGrid`](crate::Primitive::PlaneGrid) draws the buffer for its
     /// plane under its own model, supplied through the shared instance buffer.
-    pub(super) grid_lines: [VertexGeometry; 3],
+    pub(super) grid_lines: [VertexBuffer<GizmoLineVertex>; 3],
     /// The placement-quad outline, plain and selected.
-    pub(super) quad_lines: [VertexGeometry; 2],
+    pub(super) quad_lines: [VertexBuffer<GizmoLineVertex>; 2],
     /// The contact / blob **grounding-shadow** quad geometry (six `TriangleList`
     /// vertices, a unit XY quad); each
     /// [`BlobShadow`](crate::Primitive::BlobShadow) draws it under its own model
     /// through the shared instance buffer, alpha-blended.
-    pub(super) shadow_vertex_buffer: wgpu::Buffer,
+    pub(super) shadow_vertex_buffer: VertexBuffer<Vertex>,
 }
 
 impl GizmoGeometry {
     /// Uploads every gizmo buffer. Called once per renderer.
     pub(super) fn new(gpu: &GpuContext) -> Self {
-        use wgpu::util::DeviceExt;
-
         let axes_lines =
-            VertexGeometry::new(&gpu.device, "trd axes line buffer", &axes_line_vertices());
+            VertexBuffer::new(&gpu.device, "trd axes line buffer", &axes_line_vertices());
         let axes_heads =
-            VertexGeometry::new(&gpu.device, "trd axes arrow buffer", &axes_arrow_vertices());
+            VertexBuffer::new(&gpu.device, "trd axes arrow buffer", &axes_arrow_vertices());
 
         // Coordinate-plane grids: one expanded-line vertex buffer per plane
         // (XY/XZ/YZ), drawn under each PlaneGrid object's model.
         let grid_lines = [
-            VertexGeometry::new(
+            VertexBuffer::new(
                 &gpu.device,
                 "trd xy grid line buffer",
                 &grid_line_vertices(GridPlane::Xy),
             ),
-            VertexGeometry::new(
+            VertexBuffer::new(
                 &gpu.device,
                 "trd xz grid line buffer",
                 &grid_line_vertices(GridPlane::Xz),
             ),
-            VertexGeometry::new(
+            VertexBuffer::new(
                 &gpu.device,
                 "trd yz grid line buffer",
                 &grid_line_vertices(GridPlane::Yz),
             ),
         ];
         let quad_lines = [
-            VertexGeometry::new(
+            VertexBuffer::new(
                 &gpu.device,
                 "trd placement quad line buffer",
                 &quad_outline_vertices(false),
             ),
-            VertexGeometry::new(
+            VertexBuffer::new(
                 &gpu.device,
                 "trd selected placement quad line buffer",
                 &quad_outline_vertices(true),
@@ -346,13 +347,11 @@ impl GizmoGeometry {
         // Contact / blob grounding-shadow quad: six TriangleList vertices (a unit
         // XY quad). Each BlobShadow drawable draws them under its own model via
         // the shared instance buffer, alpha-blended over the frame plane.
-        let shadow_vertex_buffer =
-            gpu.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("trd shadow vertex buffer"),
-                    contents: bytemuck::cast_slice(&blob_shadow_vertices()),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
+        let shadow_vertex_buffer = VertexBuffer::new(
+            &gpu.device,
+            "trd shadow vertex buffer",
+            &blob_shadow_vertices(),
+        );
 
         Self {
             axes_lines,

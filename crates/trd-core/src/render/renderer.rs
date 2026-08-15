@@ -75,7 +75,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use super::bound_material_maps::BoundMaterialMaps;
-use super::buffer::{draw_indexed, draw_vertices, InstanceBuffer, VertexGeometry};
+use super::buffer::{draw_indexed, draw_vertices, InstanceBuffer, VertexBuffer};
 use super::draw_command::{build_batches, Batches};
 use super::environment::{EnvBackgroundSettings, Environment};
 use super::frame_plane::FramePlane;
@@ -1489,7 +1489,7 @@ impl Renderer {
     fn record_gizmo_lines(
         &self,
         pass: &mut wgpu::RenderPass<'_>,
-        geometry: &VertexGeometry,
+        geometry: &VertexBuffer<GizmoLineVertex>,
         range: Range<u32>,
     ) {
         pass.set_pipeline(&self.pipelines.gizmo_line);
@@ -1536,9 +1536,9 @@ impl Renderer {
     fn record_blob_shadow(&self, pass: &mut wgpu::RenderPass<'_>, range: Range<u32>) {
         pass.set_pipeline(&self.pipelines.shadow);
         pass.set_bind_group(0, self.uniforms.camera.bind_group(), &[]);
-        pass.set_vertex_buffer(0, self.gizmos.shadow_vertex_buffer.slice(..));
         self.bind_instances(pass);
-        pass.draw(0..SHADOW_VERTEX_COUNT, range);
+        // The quad's own count, not a constant kept in step with it by hand.
+        draw_vertices(pass, &self.gizmos.shadow_vertex_buffer, range);
     }
 
     /// Records the world-orientation gizmo (#42) as two draws over the same
