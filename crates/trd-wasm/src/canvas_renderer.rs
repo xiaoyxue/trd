@@ -608,7 +608,8 @@ impl CanvasRenderer {
     fn ensure_renderer(&mut self) -> Result<&mut Renderer, JsValue> {
         if self.renderer.is_none() {
             let meshes = self.input.meshes();
-            let renderer = Renderer::auto_fit(self.gpu.clone(), self.target.view_format(), meshes);
+            let renderer = Renderer::auto_fit(self.gpu.clone(), self.target.view_format(), meshes)
+                .map_err(crate::js_error)?;
             self.renderer = Some(renderer);
 
             // Bind the stream's texture (0.0.4) as the sampled albedo so

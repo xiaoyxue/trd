@@ -108,6 +108,18 @@ pub enum RenderError {
         height: u32,
         reason: &'static str,
     },
+    /// The mesh set a constructor was handed cannot be rendered: it is empty, or
+    /// its base models do not pair with it one-to-one.
+    ///
+    /// A `Result` rather than the panic it used to be (#235 R8): the mesh set
+    /// arrives from the *wire* in every streaming front-end, so "there were no
+    /// meshes in that stream" is an input error the shell should report, not a
+    /// bug it should abort on.
+    #[error("invalid mesh set: {reason}")]
+    InvalidMeshSet {
+        /// What was wrong with it.
+        reason: String,
+    },
     /// GPU device/adapter acquisition or read-back failed.
     #[error("render failed: {0}")]
     Gpu(String),
@@ -220,7 +232,11 @@ impl Renderer {
     /// arbitrary-unit asset renders centered at a reasonable size. A convenience
     /// constructor over [`new`](Self::new); shared by the headless
     /// [`crate::run_stream`] and every on-screen front-end.
-    pub fn auto_fit(gpu: Arc<GpuContext>, format: wgpu::TextureFormat, meshes: &[Mesh]) -> Self {
+    pub fn auto_fit(
+        gpu: Arc<GpuContext>,
+        format: wgpu::TextureFormat,
+        meshes: &[Mesh],
+    ) -> Result<Self, RenderError> {
         let base_models: Vec<Matrix4> = meshes
             .iter()
             .map(|mesh| {
@@ -240,13 +256,14 @@ impl Renderer {
     /// [`with_sample_count`](Self::with_sample_count) to override (e.g. `1` = no
     /// MSAA).
     ///
-    /// Panics if `meshes` is empty or `meshes`/`base_models` differ in length.
+    /// Returns [`RenderError::InvalidMeshSet`] if `meshes` is empty or
+    /// `meshes`/`base_models` differ in length.
     pub fn new(
         gpu: Arc<GpuContext>,
         format: wgpu::TextureFormat,
         meshes: &[Mesh],
         base_models: &[Matrix4],
-    ) -> Self {
+    ) -> Result<Self, RenderError> {
         Self::with_sample_count(gpu, format, meshes, base_models, MSAA_SAMPLE_COUNT)
     }
 
@@ -256,22 +273,34 @@ impl Renderer {
     /// at `1`; mesh silhouettes and hardware wireframes do not. All pipelines and
     /// the depth/color attachments are built for this count.
     ///
-    /// Panics if `meshes` is empty, `meshes`/`base_models` differ in length, or
-    /// `sample_count` is 0.
+    /// Returns [`RenderError::InvalidMeshSet`] if `meshes` is empty,
+    /// `meshes`/`base_models` differ in length, or `sample_count` is 0.
     pub fn with_sample_count(
         gpu: Arc<GpuContext>,
         format: wgpu::TextureFormat,
         meshes: &[Mesh],
         base_models: &[Matrix4],
         sample_count: u32,
-    ) -> Self {
-        assert!(!meshes.is_empty(), "Renderer requires at least one mesh");
-        assert_eq!(
-            meshes.len(),
-            base_models.len(),
-            "meshes and base_models must have equal length"
-        );
-        assert!(sample_count >= 1, "sample_count must be >= 1");
+    ) -> Result<Self, RenderError> {
+        if meshes.is_empty() {
+            return Err(RenderError::InvalidMeshSet {
+                reason: "a renderer needs at least one mesh".into(),
+            });
+        }
+        if meshes.len() != base_models.len() {
+            return Err(RenderError::InvalidMeshSet {
+                reason: format!(
+                    "{} mesh(es) but {} base model(s) — they pair one-to-one",
+                    meshes.len(),
+                    base_models.len()
+                ),
+            });
+        }
+        if sample_count == 0 {
+            return Err(RenderError::InvalidMeshSet {
+                reason: "sample_count must be >= 1 (1 = no MSAA)".into(),
+            });
+        }
 
         // One shared group-1 albedo layout for the textured/PBR pipelines and
         // every per-mesh [`BoundTexture`] (each object skins with its own diffuse).
@@ -300,7 +329,7 @@ impl Renderer {
         let frame_plane = FramePlane::new(&gpu.device, format, sample_count);
         let picking = Picking::new(&gpu.device, meshes.len());
 
-        Self {
+        Ok(Self {
             pipelines,
             uniforms,
             environment,
@@ -313,7 +342,7 @@ impl Renderer {
             msaa: MsaaColor::new(format, sample_count),
             gpu,
             picking,
-        }
+        })
     }
 
     /// Builds the harness for `meshes` (drawn by index), requesting its own GPU
@@ -382,7 +411,7 @@ impl Renderer {
         .map_err(|e| RenderError::Gpu(e.to_string()))?;
         let format = TEXTURE_TARGET_FORMAT;
         let renderer =
-            Self::with_sample_count(gpu.clone(), format, meshes, base_models, sample_count);
+            Self::with_sample_count(gpu.clone(), format, meshes, base_models, sample_count)?;
 
         // The target owns the render texture + readback buffer and re-validates
         // the size against the adapter's max dimension.
@@ -406,7 +435,7 @@ impl Renderer {
         meshes: &[Mesh],
     ) -> Result<(Self, TextureTarget), RenderError> {
         check_dimensions(width, height)?;
-        let renderer = Self::auto_fit(gpu.clone(), TEXTURE_TARGET_FORMAT, meshes);
+        let renderer = Self::auto_fit(gpu.clone(), TEXTURE_TARGET_FORMAT, meshes)?;
         let target = TextureTarget::new(&gpu.device, width, height)?;
         Ok((renderer, target))
     }
@@ -911,15 +940,15 @@ impl Renderer {
         self.encode_pass(encoder, view, camera, scene, true);
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn encode_pass(
-        &mut self,
-        encoder: &mut wgpu::CommandEncoder,
-        view: &wgpu::TextureView,
-        camera: Camera,
-        scene: &Scene,
-        load_color: bool,
-    ) {
+    /// Everything a frame needs **written and sized** before a pass can start:
+    /// the camera and PBR uniforms, the batched instances, the depth/MSAA
+    /// attachments, and the two background settings (#235 R8).
+    ///
+    /// Split out of `encode_pass` so the encode half reads as what it is — a
+    /// dispatch over batched commands — instead of ~150 lines where the
+    /// preparation and the recording are interleaved. It is also the whole of
+    /// the `&mut self` work: everything after it borrows immutably.
+    fn prepare_frame(&mut self, camera: Camera, scene: &Scene) {
         // 1. Camera P·V for this frame.
         self.uniforms.write_camera(&self.gpu.queue, camera);
         // 1b. Disney PBR uniform slots for this frame — one per mesh (each carries
@@ -983,26 +1012,29 @@ impl Renderer {
                 },
             );
         }
+    }
 
-        // 6. Record the pass. With MSAA (`sample_count > 1`) the mesh pass renders
-        //    into the multisampled color attachment and resolves into the caller's
-        //    single-sample `view`, so every front-end (offscreen CLI, native
-        //    window, wasm canvas) gets multisampled mesh/arrowhead edges.
-        //    Without MSAA (`sample_count == 1`) there is no MSAA target — the pass
-        //    renders straight into `view` (no resolve).
-        let depth_view = &self.depth.as_ref().expect("depth set in step 3").view;
-        let color_load = if load_color {
-            wgpu::LoadOp::Load
-        } else {
-            wgpu::LoadOp::Clear(wgpu::Color::BLACK)
-        };
-        let color_attachment = match self.msaa.target() {
+    /// The mesh pass's color attachment for this frame: with MSAA
+    /// (`sample_count > 1`) the pass renders into the multisampled attachment
+    /// and **resolves** into the caller's single-sample `view`, so every
+    /// front-end (offscreen CLI, native window, wasm canvas) gets multisampled
+    /// mesh/arrowhead edges; without MSAA (`sample_count == 1`) there is no MSAA
+    /// target and the pass renders straight into `view` (no resolve).
+    ///
+    /// `load` is what happens to the existing contents — `Load` for a layer
+    /// composited over an earlier one, `Clear` for the first.
+    fn color_attachment<'a>(
+        &'a self,
+        view: &'a wgpu::TextureView,
+        load: wgpu::LoadOp<wgpu::Color>,
+    ) -> wgpu::RenderPassColorAttachment<'a> {
+        match self.msaa.target() {
             Some(msaa) => wgpu::RenderPassColorAttachment {
                 view: &msaa.view,
                 depth_slice: None,
                 resolve_target: Some(view),
                 ops: wgpu::Operations {
-                    load: color_load,
+                    load,
                     store: wgpu::StoreOp::Store,
                 },
             },
@@ -1011,11 +1043,40 @@ impl Renderer {
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: color_load,
+                    load,
                     store: wgpu::StoreOp::Store,
                 },
             },
-        };
+        }
+    }
+
+    /// Draws one frame of `scene` into `view`: prepare, then dispatch the
+    /// batched commands. `load_color` keeps the existing contents (a composited
+    /// layer) instead of clearing to black (the first pass).
+    fn encode_pass(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        camera: Camera,
+        scene: &Scene,
+        load_color: bool,
+    ) {
+        self.prepare_frame(camera, scene);
+
+        let background = *scene.background();
+        let depth_view = &self
+            .depth
+            .as_ref()
+            .expect("prepare_frame sized the depth attachment")
+            .view;
+        let color_attachment = self.color_attachment(
+            view,
+            if load_color {
+                wgpu::LoadOp::Load
+            } else {
+                wgpu::LoadOp::Clear(wgpu::Color::BLACK)
+            },
+        );
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("trd mesh pass"),
             color_attachments: &[Some(color_attachment)],

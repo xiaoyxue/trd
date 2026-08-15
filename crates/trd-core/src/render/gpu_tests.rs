@@ -13,6 +13,52 @@ use glam::{Mat4, Vec3};
 /// identity base model (vertices drawn in their own coordinates). Replaces the
 /// former single-mesh `SceneRenderer::new`/`with_base_model` production helpers,
 /// which only the GPU tests used.
+/// An unusable mesh set is **reported**, not panicked on (#235 R8): every
+/// streaming front-end learns its meshes from the wire, so "that stream carried
+/// no meshes" is an input error a shell should surface — not an abort. The three
+/// former `assert!`s are one typed variant now.
+#[test]
+#[ignore = "requires a GPU adapter"]
+#[cfg(not(target_arch = "wasm32"))]
+fn renderer_rejects_an_unusable_mesh_set_without_panicking() {
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+    let mesh = Mesh::hello_triangle();
+
+    let empty = Renderer::new(test_gpu(), format, &[], &[]);
+    assert!(
+        matches!(empty, Err(crate::RenderError::InvalidMeshSet { .. })),
+        "an empty mesh set is an error, not a panic"
+    );
+
+    let mismatched = Renderer::new(test_gpu(), format, std::slice::from_ref(&mesh), &[]);
+    assert!(
+        matches!(mismatched, Err(crate::RenderError::InvalidMeshSet { .. })),
+        "meshes and base models pair one-to-one"
+    );
+
+    let zero_samples = Renderer::with_sample_count(
+        test_gpu(),
+        format,
+        std::slice::from_ref(&mesh),
+        &[Matrix4::IDENTITY],
+        0,
+    );
+    assert!(
+        matches!(zero_samples, Err(crate::RenderError::InvalidMeshSet { .. })),
+        "sample_count 0 is not a pass configuration"
+    );
+
+    // ...and the valid combination still builds.
+    assert!(Renderer::with_sample_count(
+        test_gpu(),
+        format,
+        std::slice::from_ref(&mesh),
+        &[Matrix4::IDENTITY],
+        1,
+    )
+    .is_ok());
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 /// The [`Camera`] a set of wire params resolves to for a `width`x`height`
 /// target — the tests' stand-in for what a front-end does at the decode
@@ -30,6 +76,7 @@ fn single(format: wgpu::TextureFormat, mesh: &Mesh) -> Renderer {
         std::slice::from_ref(mesh),
         &[Matrix4::IDENTITY],
     )
+    .expect("one mesh with one base model is a valid mesh set")
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -572,7 +619,8 @@ fn mesh_renderer_depth_buffer_occludes_far_behind_near() {
         format,
         &[quad([1.0, 0.0, 0.0]), quad([0.0, 1.0, 0.0])],
         &[Matrix4::IDENTITY, Matrix4::IDENTITY],
-    );
+    )
+    .expect("two meshes with two base models is a valid mesh set");
     let scene: Scene = [
         DrawableObject::mesh(
             0,
@@ -915,7 +963,8 @@ fn gizmo_lines_and_arrowheads_stay_smooth_without_msaa() {
         std::slice::from_ref(&mesh_data),
         &[Matrix4::IDENTITY],
         1,
-    );
+    )
+    .expect("one mesh, one base model, sample_count 1");
     let model = Matrix4::from_scale(Vector3::new(0.5, 0.5, 0.5));
     let scene: Scene = [DrawableObject::coordinate_axes(model)]
         .into_iter()

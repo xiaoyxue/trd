@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use trd_core::{
     DisneyMaterial, EnvMapData, FrameFit, ImageBasedLighting, ImageData, ImageTexture, Lighting,
-    Mesh, RenderOptions, RenderTarget, Renderer, Scene, SurfaceTarget, ToneMapping,
+    Mesh, RenderError, RenderOptions, RenderTarget, Renderer, Scene, SurfaceTarget, ToneMapping,
 };
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
@@ -120,13 +120,18 @@ impl WindowRenderer {
     /// Uploads the stream's meshes and builds the scene renderer (each mesh
     /// centered + scaled to fit via its preview base model). Idempotent per
     /// stream: called once when the mesh table first arrives.
-    pub(crate) fn set_meshes(&mut self, meshes: &[Mesh]) {
+    ///
+    /// Reports an unusable mesh set (e.g. a stream whose mesh table decoded to
+    /// nothing) rather than aborting the window on it (#235 R8) — the mesh set
+    /// comes from the wire, so it is input, not a bug.
+    pub(crate) fn set_meshes(&mut self, meshes: &[Mesh]) -> Result<(), RenderError> {
         self.renderer = Some(Renderer::auto_fit(
             self.gpu.clone(),
             self.target.view_format(),
             meshes,
-        ));
+        )?);
         self.uploaded_frame_image = None;
+        Ok(())
     }
 
     /// Binds `texture` as the albedo sampled by [`RenderMode::Textured`] meshes

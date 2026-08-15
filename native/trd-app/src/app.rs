@@ -260,8 +260,15 @@ impl ApplicationHandler for App {
         if let Some(gpu) = self.gpu.as_mut() {
             if gpu.renderer.is_none() {
                 if let Some(meshes) = self.pending_meshes.as_ref() {
-                    gpu.set_meshes(meshes);
-                    gpu.window.request_redraw();
+                    match gpu.set_meshes(meshes) {
+                        Ok(()) => gpu.window.request_redraw(),
+                        // An unusable mesh table is a bad stream, not a crash:
+                        // report it and stop retrying it every wake (#235 R8).
+                        Err(error) => {
+                            log::error!("cannot render this stream's meshes: {error}");
+                            self.pending_meshes = None;
+                        }
+                    }
                 }
             }
             // Upload the stream's bound texture once the renderer exists (the
