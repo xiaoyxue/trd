@@ -34,7 +34,7 @@ impl IndexBuffer {
 /// (#247 R3).
 ///
 /// `T` is the per-vertex record — [`Vertex`](super::Vertex),
-/// [`PbrVertex`](super::PbrVertex), [`GizmoLineVertex`](super::GizmoLineVertex)
+/// [`ShadingVertex`](super::ShadingVertex), [`GizmoLineVertex`](super::GizmoLineVertex)
 /// — so a buffer names the layout its pipeline expects instead of being an
 /// anonymous `wgpu::Buffer` that any pipeline would accept. The mesh store used
 /// to hand out three of those bare handles from `filled()` / `pbr()` /

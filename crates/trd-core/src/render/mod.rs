@@ -102,7 +102,7 @@ pub(crate) use frame_params::{projection_from_intrinsics, DEFAULT_FAR, DEFAULT_N
 // `GizmoGeometry`, beside the generators that fill them (#222).
 pub(crate) use gizmo::aabb_line_vertices;
 pub(crate) use gpu_types::{
-    GizmoLineVertex, GizmoUniform, InstanceRaw, PbrVertex, PickInstanceRaw, Uniform,
+    GizmoLineVertex, GizmoUniform, InstanceRaw, PickInstanceRaw, ShadingVertex, Uniform,
 };
 // The light rig is universal domain vocabulary and lives at the crate root
 // (#223); re-exported here so `render/`'s `use super::*` globs keep resolving.
