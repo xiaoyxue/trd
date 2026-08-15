@@ -592,6 +592,7 @@ pub fn run_stream<R: Read, W: Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::math::Matrix4;
     use crate::protocol::{
         MESH_TABLE_KIND, PARAMS_TABLE_KIND, PROTOCOL_VERSION_KEY, TABLE_KIND_KEY,
     };
@@ -882,12 +883,12 @@ mod tests {
             vec![
                 Draw {
                     mesh_id: 0,
-                    model: a,
+                    model: Matrix4::from_cols_array(&a),
                     selection: DrawSelection::INHERIT
                 },
                 Draw {
                     mesh_id: 1,
-                    model: b,
+                    model: Matrix4::from_cols_array(&b),
                     selection: DrawSelection::INHERIT
                 },
             ]
@@ -896,7 +897,7 @@ mod tests {
             rows[1],
             vec![Draw {
                 mesh_id: 1,
-                model: b,
+                model: Matrix4::from_cols_array(&b),
                 selection: DrawSelection::INHERIT
             }]
         );

@@ -662,7 +662,7 @@ fn golden_environment_light_syncs_sky_and_reflection() {
     let scene = Scene::from_draws(
         &[Draw {
             mesh_id: 0,
-            model: Matrix4::IDENTITY.to_cols_array(),
+            model: Matrix4::IDENTITY,
             selection: DrawSelection::Mesh(Some(RenderMode::Shaded)),
         }],
         &RenderOptions {

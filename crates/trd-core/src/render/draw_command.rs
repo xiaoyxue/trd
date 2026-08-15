@@ -101,8 +101,7 @@ pub(super) fn build_batches(
                 let Some(base_model) = mesh_base_model(mesh_id as usize) else {
                     continue;
                 };
-                let effective = Matrix4::from_cols_array(&object.model()) * base_model;
-                effective.to_cols_array()
+                object.model() * base_model
             }
             Primitive::PlaneGrid { .. }
             | Primitive::QuadOutline { .. }
@@ -131,10 +130,10 @@ mod tests {
     use super::*;
     use crate::render::{GridPlane, RenderMode};
 
-    fn model(tag: f32) -> [f32; 16] {
-        let mut model = Matrix4::IDENTITY.to_cols_array();
-        model[12] = tag;
-        model
+    /// A model tagged by its x-translation, so an instance can be identified by
+    /// `model.to_cols_array()[12]` in the assertions below.
+    fn model(tag: f32) -> Matrix4 {
+        Matrix4::from_translation(crate::math::Vector3::new(tag, 0.0, 0.0))
     }
 
     fn mesh(mesh_id: u32, tag: f32, mode: RenderMode) -> DrawableObject {
@@ -229,7 +228,7 @@ mod tests {
             batches
                 .instances
                 .iter()
-                .map(|instance| instance.model[12])
+                .map(|instance| instance.model.to_cols_array()[12])
                 .collect::<Vec<_>>(),
             [
                 1.0, 10.0, 11.0, 12.0, 20.0, 21.0, 30.0, 31.0, 50.0, 52.0, 40.0, 41.0, 60.0, 61.0,
@@ -266,12 +265,12 @@ mod tests {
             reused
                 .instances
                 .iter()
-                .map(|instance| instance.model[12])
+                .map(|instance| instance.model.to_cols_array()[12])
                 .collect::<Vec<_>>(),
             fresh
                 .instances
                 .iter()
-                .map(|instance| instance.model[12])
+                .map(|instance| instance.model.to_cols_array()[12])
                 .collect::<Vec<_>>(),
         );
         assert_eq!(reused.commands.len(), 1, "one textured mesh ⇒ one command");

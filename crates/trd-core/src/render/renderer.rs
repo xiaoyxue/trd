@@ -1110,12 +1110,9 @@ impl Renderer {
             let Some(mesh) = self.meshes.get(draw.mesh_id as usize) else {
                 continue;
             };
-            let effective = Matrix4::from_cols_array(&draw.model) * mesh.base_model;
+            let effective = draw.model * mesh.base_model;
             let slot = instances.len() as u32;
-            instances.push(PickInstanceRaw::new(
-                effective.to_cols_array(),
-                index as u32,
-            ));
+            instances.push(PickInstanceRaw::new(effective, index as u32));
             records.push((draw.mesh_id as usize, slot));
         }
 

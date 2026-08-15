@@ -324,9 +324,7 @@ fn build_scene(draws: &[Draw], options: &RenderOptions, frame: Option<FrameFit>)
         }
     }
     if show_axes {
-        scene.push(DrawableObject::coordinate_axes(
-            Matrix4::IDENTITY.to_cols_array(),
-        ));
+        scene.push(DrawableObject::coordinate_axes(Matrix4::IDENTITY));
     }
     scene
 }
@@ -348,10 +346,7 @@ pub(crate) fn plane_grid_overlays(
 ) -> Vec<DrawableObject> {
     let mut grids = Vec::new();
     if let Some(plane) = world_grid {
-        grids.push(DrawableObject::plane_grid(
-            plane,
-            Matrix4::IDENTITY.to_cols_array(),
-        ));
+        grids.push(DrawableObject::plane_grid(plane, Matrix4::IDENTITY));
     }
     if let Some(plane) = object_grid {
         for draw in draws.iter().filter(|d| d.selection.is_mesh()) {
@@ -388,13 +383,12 @@ mod tests {
         let draws = [
             Draw {
                 mesh_id: 0,
-                model: Matrix4::from_translation(crate::math::Vector3::new(1.0, 0.0, 0.0))
-                    .to_cols_array(),
+                model: Matrix4::from_translation(crate::math::Vector3::new(1.0, 0.0, 0.0)),
                 selection: DrawSelection::INHERIT,
             },
             Draw {
                 mesh_id: 1,
-                model: Matrix4::IDENTITY.to_cols_array(),
+                model: Matrix4::IDENTITY,
                 selection: DrawSelection::Shadow,
             },
         ];
@@ -406,7 +400,7 @@ mod tests {
         assert_eq!(world.len(), 1);
         assert_eq!(
             world[0],
-            DrawableObject::plane_grid(GridPlane::Xz, Matrix4::IDENTITY.to_cols_array())
+            DrawableObject::plane_grid(GridPlane::Xz, Matrix4::IDENTITY)
         );
 
         // Object grid ⇒ one grid per *non-shadow* draw, at that draw's model.
@@ -422,7 +416,7 @@ mod tests {
     fn build_scene_puts_the_frame_on_the_background_not_in_the_objects() {
         let draws = [Draw {
             mesh_id: 0,
-            model: Matrix4::IDENTITY.to_cols_array(),
+            model: Matrix4::IDENTITY,
             selection: DrawSelection::INHERIT,
         }];
 
@@ -478,7 +472,7 @@ mod tests {
         };
         let draws = [Draw {
             mesh_id: 0,
-            model: Matrix4::IDENTITY.to_cols_array(),
+            model: Matrix4::IDENTITY,
             selection: DrawSelection::INHERIT,
         }];
         let options = crate::RenderOptions {
@@ -513,7 +507,7 @@ mod tests {
     fn from_draws_carries_the_environment_background_from_the_options() {
         let draws = [Draw {
             mesh_id: 0,
-            model: Matrix4::IDENTITY.to_cols_array(),
+            model: Matrix4::IDENTITY,
             selection: DrawSelection::INHERIT,
         }];
         let sky = EnvironmentBackground {
@@ -544,7 +538,7 @@ mod tests {
         // in THAT mode regardless of the scene default, while `mode: None`
         // inherits the default. This lets one frame mix, e.g., a textured mesh
         // and a wireframe placement quad (the two-stage cornellbox scene).
-        let model = Matrix4::IDENTITY.to_cols_array();
+        let model = Matrix4::IDENTITY;
         let draws = [
             Draw {
                 mesh_id: 0,
@@ -620,10 +614,8 @@ mod tests {
         // its placement quad) the scene carries TWO local gizmos (one per draw
         // model) plus, when --axes is also set, ONE world gizmo at the identity —
         // the "two axes" a placed-mesh-on-quad frame shows.
-        let mut model_a = Matrix4::IDENTITY.to_cols_array();
-        model_a[12] = 1.0; // distinct translation (col-major tx)
-        let mut model_b = Matrix4::IDENTITY.to_cols_array();
-        model_b[12] = 5.0;
+        let model_a = Matrix4::from_translation(crate::math::Vector3::new(1.0, 0.0, 0.0)); // distinct translation (col-major tx)
+        let model_b = Matrix4::from_translation(crate::math::Vector3::new(5.0, 0.0, 0.0));
         let draws = [
             Draw {
                 mesh_id: 0,
@@ -637,7 +629,7 @@ mod tests {
             },
         ];
 
-        let axes_models = |scene: &[DrawableObject]| -> Vec<[f32; 16]> {
+        let axes_models = |scene: &[DrawableObject]| -> Vec<Matrix4> {
             scene
                 .iter()
                 .filter_map(|o| match o.primitive() {
@@ -674,7 +666,7 @@ mod tests {
         // gizmo is last, at the identity (origin).
         assert_eq!(
             axes_models(&scene),
-            vec![model_a, model_b, Matrix4::IDENTITY.to_cols_array()],
+            vec![model_a, model_b, Matrix4::IDENTITY],
             "two local gizmos (per draw model) then one world gizmo at identity"
         );
 
@@ -703,10 +695,8 @@ mod tests {
         // plane — the lattice twin of --axes-local, but scoped to wireframe draws
         // (the placement quad) so a filled/textured content mesh gets no grid. For
         // the FIBA quad-only scene this is one Xy grid over the quad's surface.
-        let mut model_a = Matrix4::IDENTITY.to_cols_array();
-        model_a[12] = 2.0; // distinct translations (col-major tx)
-        let mut model_b = Matrix4::IDENTITY.to_cols_array();
-        model_b[12] = 7.0;
+        let model_a = Matrix4::from_translation(crate::math::Vector3::new(2.0, 0.0, 0.0)); // distinct translations (col-major tx)
+        let model_b = Matrix4::from_translation(crate::math::Vector3::new(7.0, 0.0, 0.0));
         let draws = [
             Draw {
                 mesh_id: 0,
@@ -720,7 +710,7 @@ mod tests {
             },
         ];
 
-        let grids = |scene: &[DrawableObject]| -> Vec<(GridPlane, [f32; 16])> {
+        let grids = |scene: &[DrawableObject]| -> Vec<(GridPlane, Matrix4)> {
             scene
                 .iter()
                 .filter_map(|o| match o.primitive() {
@@ -813,10 +803,8 @@ mod tests {
         // 1), so the plain "all wireframe draws" scoping would lay a stray floor
         // grid under every can. Pinning `grid_mesh = Some(1)` keeps exactly one
         // grid — under the quad — while the cans stay wireframe with no grid.
-        let mut model_can = Matrix4::IDENTITY.to_cols_array();
-        model_can[12] = 3.0;
-        let mut model_quad = Matrix4::IDENTITY.to_cols_array();
-        model_quad[12] = 9.0;
+        let model_can = Matrix4::from_translation(crate::math::Vector3::new(3.0, 0.0, 0.0));
+        let model_quad = Matrix4::from_translation(crate::math::Vector3::new(9.0, 0.0, 0.0));
         // Two cans (mesh 0) + one placement quad (mesh 1), all wireframe.
         let draws = [
             Draw {
@@ -826,7 +814,7 @@ mod tests {
             },
             Draw {
                 mesh_id: 0,
-                model: Matrix4::IDENTITY.to_cols_array(),
+                model: Matrix4::IDENTITY,
                 selection: DrawSelection::Mesh(Some(RenderMode::Wireframe)),
             },
             Draw {
@@ -836,7 +824,7 @@ mod tests {
             },
         ];
 
-        let grids = |scene: &[DrawableObject]| -> Vec<(GridPlane, [f32; 16])> {
+        let grids = |scene: &[DrawableObject]| -> Vec<(GridPlane, Matrix4)> {
             scene
                 .iter()
                 .filter_map(|o| match o.primitive() {
@@ -904,12 +892,9 @@ mod tests {
         // grounding blob (not a Mesh), and it carries no AABB / axes gizmo even
         // when those overlays are on. A mixed FIBA-style scene [shadow, bunny,
         // quad] must yield exactly one BlobShadow at the shadow draw's model.
-        let mut shadow_m = Matrix4::IDENTITY.to_cols_array();
-        shadow_m[12] = 3.0; // distinct col-major tx
-        let mut bunny_m = Matrix4::IDENTITY.to_cols_array();
-        bunny_m[12] = 4.0;
-        let mut quad_m = Matrix4::IDENTITY.to_cols_array();
-        quad_m[12] = 5.0;
+        let shadow_m = Matrix4::from_translation(crate::math::Vector3::new(3.0, 0.0, 0.0)); // distinct col-major tx
+        let bunny_m = Matrix4::from_translation(crate::math::Vector3::new(4.0, 0.0, 0.0));
+        let quad_m = Matrix4::from_translation(crate::math::Vector3::new(5.0, 0.0, 0.0));
         let draws = [
             Draw {
                 mesh_id: 0,
@@ -941,7 +926,7 @@ mod tests {
             None,
         );
 
-        let blobs: Vec<[f32; 16]> = scene
+        let blobs: Vec<Matrix4> = scene
             .iter()
             .filter_map(|o| match o.primitive() {
                 Primitive::BlobShadow => Some(o.model()),
@@ -978,8 +963,8 @@ mod tests {
         // #41: the draw list + mode/overlay flags become an ordered `Scene` of
         // `DrawableObject`s — one Mesh per draw (in `mode`), then one AabbBox per
         // draw when enabled, then a single origin CoordinateAxes when enabled.
-        let a = [1.0f32; 16];
-        let b = [2.0f32; 16];
+        let a = Matrix4::from_cols_array(&[1.0f32; 16]);
+        let b = Matrix4::from_cols_array(&[2.0f32; 16]);
         let draws = [
             Draw {
                 mesh_id: 0,
@@ -1042,7 +1027,7 @@ mod tests {
                 DrawableObject::mesh(1, b, RenderMode::Filled),
                 DrawableObject::aabb_box(0, a),
                 DrawableObject::aabb_box(1, b),
-                DrawableObject::coordinate_axes(Matrix4::IDENTITY.to_cols_array()),
+                DrawableObject::coordinate_axes(Matrix4::IDENTITY),
             ]
         );
 

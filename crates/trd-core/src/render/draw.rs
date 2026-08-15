@@ -12,6 +12,7 @@
 //! protocol, not configuration.
 
 use super::RenderMode;
+use crate::math::Matrix4;
 
 /// A single instance placement decoded from a frame's protocol draw list
 /// (`draw_mesh` / `draw_model`): which mesh to draw (index into the leading mesh
@@ -21,8 +22,13 @@ use super::RenderMode;
 /// [`DrawableObject`](super::DrawableObject)s.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Draw {
+    /// Index into the leading mesh table — which geometry this draw places.
     pub mesh_id: u32,
-    pub model: [f32; 16],
+    /// The per-instance placement, applied beneath that mesh's base (preview)
+    /// model. Typed (#235 R3): the wire's raw `[f32; 16]` is converted once, at
+    /// the protocol boundary, so no consumer has to remember whether an array is
+    /// row- or column-major.
+    pub model: Matrix4,
     /// What this draw places: a mesh (optionally overriding the global render
     /// mode) or a grounding shadow. Decoded from the optional `draw_mode` column.
     pub selection: DrawSelection,
