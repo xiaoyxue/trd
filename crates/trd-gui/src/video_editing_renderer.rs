@@ -485,11 +485,11 @@ mod tests {
         let state = SceneState::default();
 
         let (unselected, _, _) = placement_scenes(Some(quad), Some(quad), false, None, &state);
-        assert_eq!(unselected.len(), 1, "quad outline only");
+        assert_eq!(unselected.objects().len(), 1, "quad outline only");
 
         let (selected, _, _) = placement_scenes(Some(quad), Some(quad), true, None, &state);
-        assert_eq!(selected.len(), 3, "+ floor grid + basis axes");
-        assert!(selected.iter().any(is_axes));
+        assert_eq!(selected.objects().len(), 3, "+ floor grid + basis axes");
+        assert!(selected.objects().iter().any(is_axes));
     }
 
     /// The selection AABB goes in its own layer, so it is drawn over the object it
@@ -511,6 +511,7 @@ mod tests {
             [trd_core::Primitive::AabbBox { mesh_id: 0 }]
         );
         assert!(!foreground
+            .objects()
             .iter()
             .any(|d| matches!(d.primitive(), trd_core::Primitive::AabbBox { .. })));
     }
@@ -522,14 +523,14 @@ mod tests {
         let (background, foreground, overlay) =
             placement_scenes(None, None, false, None, &SceneState::default());
         assert!(
-            background.is_empty(),
+            background.objects().is_empty(),
             "video plane only, and it is a setting"
         );
         assert_eq!(
             background.background().frame,
             Some(trd_core::FrameFit::Stretch)
         );
-        assert!(foreground.is_empty());
-        assert!(overlay.is_empty());
+        assert!(foreground.objects().is_empty());
+        assert!(overlay.objects().is_empty());
     }
 }

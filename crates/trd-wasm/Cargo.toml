@@ -37,3 +37,6 @@ web-sys = { version = "0.3", features = [
     "Window",
 ] }
 wgpu = "30"
+
+[lints]
+workspace = true

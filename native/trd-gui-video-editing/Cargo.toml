@@ -10,6 +10,9 @@ name = "trd-gui-video-editing"
 path = "src/main.rs"
 
 # Native-only delivery surface; dependencies are plain, not target-gated.
+[lints]
+workspace = true
+
 [dependencies]
 trd-core.workspace = true
 trd-gui = { path = "../../crates/trd-gui" }

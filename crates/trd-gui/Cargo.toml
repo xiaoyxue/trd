@@ -24,6 +24,9 @@ crate-type = ["rlib"]
 # runs an eframe window with the synchronous `render_backend`; the wasm library
 # (`start`, `web_app`, `wasm_renderer`) runs eframe on a canvas with an async
 # offscreen trd-core render.
+[lints]
+workspace = true
+
 [dependencies]
 trd-core.workspace = true
 trd-placement.workspace = true
