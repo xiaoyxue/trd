@@ -58,6 +58,18 @@ pub struct ImageData {
 /// The renderer only ever needs [`to_image`](Texture::to_image) (the bytes to
 /// upload); [`sample`](Texture::sample) is the CPU counterpart for tests and
 /// non-image kinds. Object-safe, so a bound texture can be held as `&dyn Texture`.
+///
+/// **The CPU face is deliberate, and it is why this file is at the crate root**
+/// (#247 S5, upholding #232). Today only `to_image` has production callers —
+/// [`sample`](Texture::sample) and [`kind`](Texture::kind) are exercised by
+/// tests — and reducing the trait to "a thing that produces [`ImageData`] for
+/// upload" would make it a *GPU-upload* interface, which belongs in `render/`.
+/// It is kept as an evaluation of a surface texture because that is what a
+/// procedural / bump / noise kind implements, and because it keeps `mesh` and
+/// `texture` symmetric: both are decoded assets at the root, each with a GPU
+/// face in `render/` (`mesh_store.rs`, `bound_texture.rs`). Deleting `sample`
+/// and moving this file are **one** decision, not two — take them together or
+/// not at all.
 pub trait Texture {
     /// The RGBA color at surface coordinate `uv` (each component in `[0, 1]`).
     /// Nearest lookup with clamp-to-edge for image maps; the constant color for
