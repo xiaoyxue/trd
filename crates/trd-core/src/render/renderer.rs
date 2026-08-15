@@ -38,11 +38,11 @@
 //!
 //! Internally it is still a composition of a few cohesive parts, each with a
 //! single job, so no one struct is a grab-bag of wgpu handles:
-//! - [`ScenePipelines`] — the mesh/gizmo pipelines (filled/wireframe/textured/PBR)
+//! - [`RenderPipelines`] — the mesh/gizmo pipelines (filled/wireframe/textured/PBR)
 //!   and [`SceneUniforms`] — the group-0 uniforms they read (the camera `P·V`,
 //!   the gizmo viewport params, the per-mesh PBR slot array). Two types, because
 //!   *what draws* and *what it reads* are different questions (#203); both live
-//!   in `scene_pipelines.rs` because both are `f(format, sample_count)` rather
+//!   in `render_pipelines.rs` because both are `f(format, sample_count)` rather
 //!   than a function of any one scene (#221 §2).
 //! - [`MeshStore`] — the uploaded [`MeshGpu`]s (each owning its albedo, material
 //!   maps, material, IBL, tone-map and debug view), the shared axes gizmo, and
@@ -166,7 +166,7 @@ pub(crate) fn check_dimensions(width: u32, height: u32) -> Result<u32, RenderErr
 /// owns. Uploads, materials, lighting, mesh count and picking are shared by
 /// every caller regardless of target.
 pub struct Renderer {
-    pipelines: ScenePipelines,
+    pipelines: RenderPipelines,
     /// The group-0 uniforms every pass binds: the camera `P·V`, the gizmo
     /// viewport params, and the per-mesh PBR slot array.
     uniforms: SceneUniforms,
@@ -271,7 +271,7 @@ impl Renderer {
         let texture_layout = create_texture_bind_group_layout(&gpu.device);
         let material_maps_layout = BoundMaterialMaps::create_layout(&gpu.device);
         let environment = Environment::new(&gpu, format, sample_count);
-        let (pipelines, uniforms) = create_scene_pipelines(
+        let (pipelines, uniforms) = create_render_pipelines(
             &gpu.device,
             format,
             &texture_layout,
