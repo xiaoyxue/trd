@@ -11,7 +11,7 @@
 
 use super::bound_material_maps::BoundMaterialMaps;
 use super::bound_texture::BoundTexture;
-use super::buffer::{IndexBuffer, VertexGeometry};
+use super::buffer::{IndexBuffer, VertexBuffer};
 use super::*;
 use crate::material::DisneyMaterial;
 use crate::math::Matrix4;
@@ -30,15 +30,15 @@ use crate::math::Matrix4;
 /// because the `Vec` already exists one level up, in
 /// [`MeshStore::meshes`](super::mesh_store::MeshStore).
 pub(super) struct MeshGpu {
-    pub(super) vertex_buffer: wgpu::Buffer,
+    pub(super) vertex_buffer: VertexBuffer<Vertex>,
     /// Parallel vertex buffer for the Disney PBR path (`pbr.wgsl`): the same
     /// positions + UVs as `vertex_buffer`, but with a derived smooth shading
     /// **normal** in place of the vertex color. Reuses the `triangles` index
     /// buffer. Built once per mesh; only bound by [`RenderMode::Shaded`] draws.
-    pub(super) pbr_vertex_buffer: wgpu::Buffer,
+    pub(super) pbr_vertex_buffer: VertexBuffer<PbrVertex>,
     pub(super) triangles: IndexBuffer,
     pub(super) edges: IndexBuffer,
-    pub(super) aabb: VertexGeometry,
+    pub(super) aabb: VertexBuffer<GizmoLineVertex>,
     pub(super) base_model: Matrix4,
     /// This mesh's **own** albedo texture (group 1), so a multi-object scene skins
     /// each object with its own diffuse (#141). Defaults to 1×1 white (identity
@@ -59,19 +59,19 @@ pub(super) struct MeshGpu {
 }
 
 impl MeshGpu {
-    pub(super) fn filled(&self) -> (&wgpu::Buffer, &IndexBuffer) {
+    pub(super) fn filled(&self) -> (&VertexBuffer<Vertex>, &IndexBuffer) {
         (&self.vertex_buffer, &self.triangles)
     }
 
-    pub(super) fn pbr(&self) -> (&wgpu::Buffer, &IndexBuffer) {
+    pub(super) fn pbr(&self) -> (&VertexBuffer<PbrVertex>, &IndexBuffer) {
         (&self.pbr_vertex_buffer, &self.triangles)
     }
 
-    pub(super) fn wireframe(&self) -> (&wgpu::Buffer, &IndexBuffer) {
+    pub(super) fn wireframe(&self) -> (&VertexBuffer<Vertex>, &IndexBuffer) {
         (&self.vertex_buffer, &self.edges)
     }
 
-    pub(super) fn aabb(&self) -> &VertexGeometry {
+    pub(super) fn aabb(&self) -> &VertexBuffer<GizmoLineVertex> {
         &self.aabb
     }
 }
@@ -83,15 +83,7 @@ pub(super) fn upload_mesh(
     texture_layout: &wgpu::BindGroupLayout,
     material_maps_layout: &wgpu::BindGroupLayout,
 ) -> MeshGpu {
-    use wgpu::util::DeviceExt;
-
-    let vertex_buffer = gpu
-        .device
-        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("trd mesh vertex buffer"),
-            contents: bytemuck::cast_slice(&mesh.vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
+    let vertex_buffer = VertexBuffer::new(&gpu.device, "trd mesh vertex buffer", &mesh.vertices);
     let triangles = IndexBuffer::new(&gpu.device, "trd mesh index buffer", &mesh.indices);
     let edges = mesh.edge_indices();
     let edges = IndexBuffer::new(&gpu.device, "trd mesh edge buffer", &edges);
@@ -123,13 +115,8 @@ pub(super) fn upload_mesh(
             tangent,
         })
         .collect();
-    let pbr_vertex_buffer = gpu
-        .device
-        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("trd mesh pbr vertex buffer"),
-            contents: bytemuck::cast_slice(&pbr_vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
+    let pbr_vertex_buffer =
+        VertexBuffer::new(&gpu.device, "trd mesh pbr vertex buffer", &pbr_vertices);
 
     // AABB overlay box: the mesh's own bounding box (mesh-local coords) as 8
     // colored corner vertices + a 12-edge line list. Built once per mesh; drawn
@@ -142,7 +129,7 @@ pub(super) fn upload_mesh(
         pbr_vertex_buffer,
         triangles,
         edges,
-        aabb: VertexGeometry::new(&gpu.device, "trd mesh aabb line buffer", &aabb_vertices),
+        aabb: VertexBuffer::new(&gpu.device, "trd mesh aabb line buffer", &aabb_vertices),
         base_model,
         texture: BoundTexture::with_layout(gpu, texture_layout.clone()),
         material_maps: BoundMaterialMaps::with_layout(gpu, material_maps_layout.clone()),

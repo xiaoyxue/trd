@@ -1,6 +1,6 @@
 //! Small GPU buffer primitives: a buffer plus its element count.
 //!
-//! [`IndexBuffer`] and [`VertexGeometry`] are twins — same shape, same
+//! [`IndexBuffer`] and [`VertexBuffer`] are twins — same shape, same
 //! `create_buffer_init` construction — so they live together rather than being
 //! split along "index versus vertex". The two `draw_*` helpers issue the
 //! instanced draw for each. [`InstanceBuffer`] is the growable third: a buffer
@@ -30,29 +30,51 @@ impl IndexBuffer {
     }
 }
 
-/// A self-contained non-indexed draw.
-pub(super) struct VertexGeometry {
-    vertex_buffer: wgpu::Buffer,
-    vertex_count: u32,
+/// A vertex buffer plus its element count, typed by the vertex record it holds
+/// (#247 R3).
+///
+/// `T` is the per-vertex record — [`Vertex`](super::Vertex),
+/// [`PbrVertex`](super::PbrVertex), [`GizmoLineVertex`](super::GizmoLineVertex)
+/// — so a buffer names the layout its pipeline expects instead of being an
+/// anonymous `wgpu::Buffer` that any pipeline would accept. The mesh store used
+/// to hand out three of those bare handles from `filled()` / `pbr()` /
+/// `wireframe()`, and swapping two of them compiled cleanly; now it cannot. Same
+/// argument as [`InstanceBuffer`]'s: the element size (and here the layout) is
+/// the type's, not a number the caller has to remember.
+///
+/// The `count` is what a **non-indexed** draw ranges over. An **indexed** draw
+/// ignores it and ranges over the index buffer instead — wgpu's rule, not ours —
+/// which is why one type serves both: the alternative was two near-identical
+/// types differing only in whether they carried a `u32` some callers read.
+pub(super) struct VertexBuffer<T> {
+    buffer: wgpu::Buffer,
+    count: u32,
+    /// `T` is only ever written *through* the buffer, never stored inline.
+    vertex: PhantomData<fn(T)>,
 }
 
-impl VertexGeometry {
-    pub(super) fn new<T: bytemuck::Pod>(
-        device: &wgpu::Device,
-        label: &str,
-        vertices: &[T],
-    ) -> Self {
+impl<T: bytemuck::Pod> VertexBuffer<T> {
+    pub(super) fn new(device: &wgpu::Device, label: &str, vertices: &[T]) -> Self {
         use wgpu::util::DeviceExt;
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(label),
             contents: bytemuck::cast_slice(vertices),
             usage: wgpu::BufferUsages::VERTEX,
         });
-        let vertex_count = u32::try_from(vertices.len()).expect("vertex count exceeds u32::MAX");
+        let count = u32::try_from(vertices.len()).expect("vertex count exceeds u32::MAX");
         Self {
-            vertex_buffer,
-            vertex_count,
+            buffer,
+            count,
+            vertex: PhantomData,
         }
+    }
+}
+
+impl<T> VertexBuffer<T> {
+    /// The whole buffer, for binding at a pass's vertex slot 0. No `Pod` bound:
+    /// binding and drawing never touch `T`, only uploading does.
+    pub(super) fn slice(&self) -> wgpu::BufferSlice<'_> {
+        self.buffer.slice(..)
     }
 }
 
@@ -114,24 +136,28 @@ impl<T: bytemuck::Pod> InstanceBuffer<T> {
     }
 }
 
-/// Binds `vertex_buffer` at slot 0 and `index`, then draws it over `instances`.
+/// Binds `vertices` at slot 0 and `index`, then draws them over `instances`.
 /// Pipeline, group bindings and the per-instance model buffer at slot 1 are the
 /// caller's responsibility — each `record` body binds its own (#204).
-pub(super) fn draw_indexed(
+///
+/// The draw ranges over the **index** count; the vertex buffer's own count is
+/// not read here (it is what [`draw_vertices`] uses).
+pub(super) fn draw_indexed<T>(
     pass: &mut wgpu::RenderPass,
-    (vertex_buffer, index): (&wgpu::Buffer, &IndexBuffer),
+    (vertices, index): (&VertexBuffer<T>, &IndexBuffer),
     instances: Range<u32>,
 ) {
-    pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+    pass.set_vertex_buffer(0, vertices.slice());
     pass.set_index_buffer(index.buffer.slice(..), wgpu::IndexFormat::Uint32);
     pass.draw_indexed(0..index.count, 0, instances);
 }
 
-pub(super) fn draw_vertices(
+/// The non-indexed twin: binds `vertices` at slot 0 and draws its whole span.
+pub(super) fn draw_vertices<T>(
     pass: &mut wgpu::RenderPass,
-    geometry: &VertexGeometry,
+    vertices: &VertexBuffer<T>,
     instances: Range<u32>,
 ) {
-    pass.set_vertex_buffer(0, geometry.vertex_buffer.slice(..));
-    pass.draw(0..geometry.vertex_count, instances);
+    pass.set_vertex_buffer(0, vertices.slice());
+    pass.draw(0..vertices.count, instances);
 }
