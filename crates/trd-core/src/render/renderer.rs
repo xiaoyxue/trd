@@ -76,7 +76,7 @@ use std::sync::Arc;
 
 use super::bound_material_maps::BoundMaterialMaps;
 use super::buffer::{draw_indexed, draw_vertices, InstanceBuffer, VertexGeometry};
-use super::draw_command::build_batches;
+use super::draw_command::{build_batches, Batches};
 use super::environment::{EnvBackgroundSettings, Environment};
 use super::frame_plane::FramePlane;
 use super::gizmo::GizmoGeometry;
@@ -184,6 +184,11 @@ pub struct Renderer {
     /// The per-frame model matrices every draw kind is instanced through,
     /// rewritten each `encode` and grown on demand (#222).
     instances: InstanceBuffer<InstanceRaw>,
+    /// The batcher's scratch, reused across frames (#235 R6): `build_batches`
+    /// clears and refills it, so a steady-state frame reuses the capacity of the
+    /// previous one instead of allocating three vectors per frame. It is scratch,
+    /// not state — nothing outside `encode_pass` reads it between frames.
+    batches: Batches,
     frame_plane: FramePlane,
     /// The mesh pass's depth attachment, (re)created lazily in `encode` to match
     /// the viewport. Gives solid (filled/textured) meshes real z-occlusion.
@@ -302,6 +307,7 @@ impl Renderer {
             meshes: store,
             gizmos,
             instances,
+            batches: Batches::default(),
             frame_plane,
             depth: None,
             msaa: MsaaColor::new(format, sample_count),
@@ -933,10 +939,16 @@ impl Renderer {
         //    needed). The backgrounds are not objects: they are settings on the
         //    scene, read directly below (#204).
         let background = *scene.background();
-        let batches = build_batches(scene.objects(), |mesh_id| {
-            self.meshes.get(mesh_id).map(|mesh| mesh.base_model)
+        // Split the borrow by field so the walk can fill the renderer's own
+        // scratch while reading the mesh store (#235 R6) — the same shape S3 used
+        // for the pick target: keep the buffer in `self`, don't move it out.
+        let Self {
+            batches, meshes, ..
+        } = self;
+        build_batches(batches, scene.objects(), |mesh_id| {
+            meshes.get(mesh_id).map(|mesh| mesh.base_model)
         });
-        self.instances.upload(&self.gpu, &batches.instances);
+        self.instances.upload(&self.gpu, &self.batches.instances);
 
         // 3. Match the depth + (when MSAA is on) color attachments to the viewport
         //    (solid meshes z-occlude; the multisampled color, if any, is resolved
@@ -1039,7 +1051,7 @@ impl Renderer {
         //    *what* is drawn and in which order, never *how*, and it holds no
         //    pass state of its own — every body sets what it needs at entry and
         //    restores nothing at exit (#204).
-        for command in &batches.commands {
+        for command in &self.batches.commands {
             let range = command.start..command.start + command.count;
             match command.primitive {
                 Primitive::Mesh { mesh_id, mode } => {

@@ -44,9 +44,19 @@ pub(super) struct DrawCommand {
 /// (#204). They used to be drawables the batcher had to recognise and `continue`
 /// past, and were carried out again here as two singleton fields, which is
 /// exactly the round-trip that moving them onto the scene removes.
+///
+/// It is also the batcher's **scratch**, held by the renderer across frames and
+/// refilled in place by [`build_batches`] (#235 R6): every frame rebuilds the
+/// whole scene, so allocating these vectors again per frame is pure churn —
+/// keeping the capacity makes a steady-state frame allocation-free here. The
+/// staging list is a third buffer for the same reason, and is private because
+/// nothing outside the walk ever reads it.
+#[derive(Default)]
 pub(super) struct Batches {
     pub(super) instances: Vec<InstanceRaw>,
     pub(super) commands: Vec<DrawCommand>,
+    /// The `(primitive, instance)` pairs the walk sorts before grouping.
+    staged: Vec<(Primitive, InstanceRaw)>,
 }
 
 /// Walks `objects` once into a flat draw list, stable-sorts by
@@ -61,11 +71,25 @@ pub(super) struct Batches {
 /// Takes the objects alone: every one of them is a placed primitive that becomes
 /// an instance, so there is no longer a non-instanced member to filter out
 /// (#204).
+///
+/// `into` is an out-parameter, cleared and refilled here: the function stays a
+/// pure function of `objects` (nothing is carried over between calls — only the
+/// vectors' capacity is), while the renderer can hold one scratch across frames
+/// instead of allocating three vectors per frame (#235 R6).
 pub(super) fn build_batches(
+    into: &mut Batches,
     objects: &[DrawableObject],
     mut mesh_base_model: impl FnMut(usize) -> Option<Matrix4>,
-) -> Batches {
-    let mut draws: Vec<(Primitive, InstanceRaw)> = Vec::with_capacity(objects.len());
+) {
+    let Batches {
+        instances,
+        commands,
+        staged,
+    } = into;
+    instances.clear();
+    commands.clear();
+    staged.clear();
+    staged.reserve(objects.len());
 
     for object in objects {
         let primitive = object.primitive();
@@ -85,14 +109,13 @@ pub(super) fn build_batches(
             | Primitive::CoordinateAxes
             | Primitive::BlobShadow => object.model(),
         };
-        draws.push((primitive, InstanceRaw { model }));
+        staged.push((primitive, InstanceRaw { model }));
     }
 
-    draws.sort_by_key(|(primitive, _)| primitive.sort_key());
+    staged.sort_by_key(|(primitive, _)| primitive.sort_key());
 
-    let mut instances = Vec::with_capacity(draws.len());
-    let mut commands = Vec::new();
-    for run in draws.chunk_by(|a, b| a.0 == b.0) {
+    instances.reserve(staged.len());
+    for run in staged.chunk_by(|a, b| a.0 == b.0) {
         let start = instances.len() as u32;
         instances.extend(run.iter().map(|(_, instance)| *instance));
         commands.push(DrawCommand {
@@ -100,11 +123,6 @@ pub(super) fn build_batches(
             start,
             count: run.len() as u32,
         });
-    }
-
-    Batches {
-        instances,
-        commands,
     }
 }
 
@@ -163,7 +181,10 @@ mod tests {
         ];
         let base_models = [Matrix4::IDENTITY, Matrix4::IDENTITY];
 
-        let batches = build_batches(&scene, |mesh_id| base_models.get(mesh_id).copied());
+        let mut batches = Batches::default();
+        build_batches(&mut batches, &scene, |mesh_id| {
+            base_models.get(mesh_id).copied()
+        });
         let commands = batches
             .commands
             .iter()
@@ -215,5 +236,45 @@ mod tests {
                 70.0, 71.0, 80.0,
             ]
         );
+    }
+
+    /// The scratch is **reused**, not rebuilt, so the walk must leave nothing of
+    /// the previous frame behind (#235 R6): batching a second, smaller scene into
+    /// a scratch that already holds a bigger one must equal batching it into a
+    /// fresh scratch — commands, instances and all.
+    #[test]
+    fn a_reused_scratch_batches_exactly_like_a_fresh_one() {
+        let base_models = [Matrix4::IDENTITY, Matrix4::IDENTITY];
+        let base = |mesh_id: usize| base_models.get(mesh_id).copied();
+        let crowded = [
+            mesh(0, 10.0, RenderMode::Filled),
+            mesh(1, 11.0, RenderMode::Filled),
+            DrawableObject::aabb_box(0, model(70.0)),
+            DrawableObject::coordinate_axes(model(80.0)),
+        ];
+        let sparse = [mesh(1, 21.0, RenderMode::Textured)];
+
+        let mut reused = Batches::default();
+        build_batches(&mut reused, &crowded, base);
+        build_batches(&mut reused, &sparse, base);
+
+        let mut fresh = Batches::default();
+        build_batches(&mut fresh, &sparse, base);
+
+        assert_eq!(reused.commands, fresh.commands);
+        assert_eq!(
+            reused
+                .instances
+                .iter()
+                .map(|instance| instance.model[12])
+                .collect::<Vec<_>>(),
+            fresh
+                .instances
+                .iter()
+                .map(|instance| instance.model[12])
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(reused.commands.len(), 1, "one textured mesh ⇒ one command");
+        assert_eq!(reused.instances.len(), 1);
     }
 }
