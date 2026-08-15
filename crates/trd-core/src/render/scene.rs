@@ -168,7 +168,10 @@ impl Scene {
     /// builders need not be public at all (#203).
     ///
     /// `frame` sets the [`Background::frame`] fit (#63) when the caller has a
-    /// frame texture bound.
+    /// frame texture bound; the sky *behind* it comes from
+    /// [`RenderOptions::env_background`], so every front-end that binds an HDR
+    /// probe can draw it as a background from the same shared assembly instead of
+    /// reaching around this function to set `background_mut()` (#235 R2).
     pub fn from_draws(draws: &[Draw], options: &RenderOptions, frame: Option<FrameFit>) -> Self {
         let mut scene = build_scene(draws, options, frame);
         // World / object plane grids (#140) are ungated by render mode, so a
@@ -268,6 +271,7 @@ fn build_scene(draws: &[Draw], options: &RenderOptions, frame: Option<FrameFit>)
         show_local_axes,
         show_local_grid: local_grid,
         show_local_grid_mesh: grid_mesh,
+        env_background,
         ..
     } = *options;
     let mut scene = Scene::with_capacity(
@@ -278,7 +282,9 @@ fn build_scene(draws: &[Draw], options: &RenderOptions, frame: Option<FrameFit>)
             + usize::from(show_axes),
     )
     .with_background(Background {
-        environment: None,
+        // Both slots are filled here, and independently: the environment sky is
+        // drawn first, the frame plane over it (#204).
+        environment: env_background,
         frame,
     });
     // The one place a `DrawSelection` is resolved: past here the scene holds
@@ -477,11 +483,13 @@ mod tests {
         }];
         let options = crate::RenderOptions {
             mode: RenderMode::Filled,
+            env_background: Some(environment),
             ..Default::default()
         };
 
-        let mut scene = Scene::from_draws(&draws, &options, Some(FrameFit::Stretch));
-        scene.background_mut().environment = Some(environment);
+        // Both slots come from the *shared* assembly now (#235 R2): the sky from
+        // the options, the frame fit from the argument.
+        let scene = Scene::from_draws(&draws, &options, Some(FrameFit::Stretch));
 
         assert_eq!(scene.background().environment, Some(environment));
         assert_eq!(scene.background().frame, Some(FrameFit::Stretch));
@@ -495,6 +503,39 @@ mod tests {
         });
         assert_eq!(built.background().environment, Some(environment));
         assert_eq!(built.background().frame, Some(FrameFit::Cover));
+    }
+
+    /// The environment sky is assembled from the options like every other
+    /// appearance setting (#235 R2), so the CLI and both browser renderers — none
+    /// of which ever touched `background_mut()` — can draw it. Absent the option
+    /// the slot stays empty, which is what keeps existing streams byte-identical.
+    #[test]
+    fn from_draws_carries_the_environment_background_from_the_options() {
+        let draws = [Draw {
+            mesh_id: 0,
+            model: Matrix4::IDENTITY.to_cols_array(),
+            selection: DrawSelection::INHERIT,
+        }];
+        let sky = EnvironmentBackground {
+            exposure: 0.75,
+            blur: 0.5,
+            tonemap: Tonemap::Aces,
+        };
+
+        let scene = Scene::from_draws(
+            &draws,
+            &crate::RenderOptions {
+                env_background: Some(sky),
+                ..Default::default()
+            },
+            None,
+        );
+        assert_eq!(scene.background().environment, Some(sky));
+        assert_eq!(scene.background().frame, None);
+
+        // Default ⇒ no sky: every stream that never asks for one is unchanged.
+        let scene = Scene::from_draws(&draws, &crate::RenderOptions::default(), None);
+        assert_eq!(scene.background().environment, None);
     }
 
     #[test]

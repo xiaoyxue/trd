@@ -60,6 +60,13 @@ impl PbrState {
         self.lighting
     }
 
+    /// The staged output transform (exposure + operator). Read by
+    /// [`env_background`] so the HDR sky is tone-mapped exactly like the objects
+    /// drawn in front of it.
+    pub(crate) fn tone_mapping(&self) -> ToneMapping {
+        self.tone_mapping
+    }
+
     /// Pushes the staged per-object material onto the render harness. Shared by
     /// the offscreen and canvas renderers — they use the same non-generic
     /// [`trd_core::Renderer`], differing only in which target they pass to their
@@ -69,6 +76,26 @@ impl PbrState {
         renderer.set_image_based_lighting(self.ibl);
         renderer.set_tone_mapping(self.tone_mapping);
     }
+}
+
+/// The staged HDR **background sky** for both browser renderers: `blur` is what
+/// JS asked for (`setEnvBackground`), while the exposure and operator follow the
+/// staged PBR tone mapping, so the sky and the objects drawn in front of it
+/// cannot be tone-mapped differently. `None` ⇒ no sky.
+///
+/// A plain [`RenderOptions`](trd_core::RenderOptions) field now (#235 R2), so
+/// the browser gets its sky from the same `Scene::from_draws` assembly as every
+/// other front-end instead of poking the scene's background itself.
+pub(crate) fn env_background(
+    blur: Option<f32>,
+    pbr: Option<&PbrState>,
+) -> Option<trd_core::EnvironmentBackground> {
+    let tone = pbr.map(PbrState::tone_mapping).unwrap_or_default();
+    blur.map(|blur| trd_core::EnvironmentBackground {
+        exposure: tone.exposure,
+        blur,
+        tonemap: tone.operator,
+    })
 }
 
 /// Wraps any `Display` message as a JS `Error` (for a rejected `Promise` or a

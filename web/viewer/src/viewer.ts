@@ -39,6 +39,11 @@ interface RenderConfig {
   /// root), reflected by metallic PBR surfaces. Decoded in-wasm; only used when
   /// `mode === "pbr"`.
   env?: string;
+  /// Draw the `env` probe as the frame's background sky (the browser twin of
+  /// trd-cli's `--env-background`), blurred by `blur` (0 = sharp, 1 = fully
+  /// blurred). Exposure + tone-map operator follow the PBR material, so the sky
+  /// and the objects in front of it are tone-mapped alike.
+  envBackground?: { blur: number };
   showAabb: boolean;
   showAxes: boolean;
   showLocalAxes: boolean;
@@ -299,6 +304,11 @@ async function applyMode(
       setStatus("loading environment map…");
       renderer.setEnvMapHdr(await fetchBytes(config.env));
     }
+  }
+  // The HDR sky is a scene background, not a material, so it is applied after
+  // the material (whose tone mapping it follows) and independently of it.
+  if (config.envBackground) {
+    renderer.setEnvBackground(true, config.envBackground.blur);
   }
   renderer.setShowAabb(config.showAabb);
   renderer.setShowAxes(config.showAxes);

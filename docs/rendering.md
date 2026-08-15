@@ -100,7 +100,9 @@ The same stream renders four ways — pick one per render:
   shading normals: `--metallic` (0 dielectric → 1 metal), `--roughness` (0 mirror →
   1 rough), `--specular`, `--clearcoat`, plus an optional HDR **environment probe**
   `--env <file.hdr>` (equirectangular Radiance map) reflected by metallic surfaces
-  (`--env-intensity`). HDR output is tone-mapped by `--tonemap reinhard|aces`
+  (`--env-intensity`), which `--env-background` (blurred by
+  `--env-background-blur`) also draws as the **background sky** behind the scene.
+  HDR output is tone-mapped by `--tonemap reinhard|aces`
   (default `reinhard`; `aces` is the filmic curve), with `--exposure` / `--ambient`
   controls. Requires a texture stream for the albedo. **Full parameter reference +
   material model: [`docs/pbr.md`](pbr.md).**

@@ -134,6 +134,8 @@ param(
     # to trd's --metallic/--roughness/… f32 flags; defaults mirror render.sh.
     [switch]$Pbr,
     [string]$Env,
+    [switch]$EnvBackground,
+    [string]$EnvBackgroundBlur = '0.0',
     [string]$Metallic = '0.0',
     [string]$Roughness = '0.35',
     [string]$EnvIntensity = '1.0',
@@ -217,6 +219,10 @@ PBR SHADING (-CLI and -Native; the Disney principled BRDF, #112):
                     the albedo. Use -Metallic 1 -Roughness 0.3 for a shiny metal look.
   -Env HDR          Equirectangular HDR environment map (.hdr) reflected by metallic
                     surfaces (decoded here; downscaled to 2048px). Only used with -Pbr.
+  -EnvBackground    Also draw the -Env probe as the frame's background sky, behind every
+                    primitive (tone-mapped with -Exposure/-Tonemap). Needs -Env.
+  -EnvBackgroundBlur N
+                    Blur of the -EnvBackground sky, 0 = sharp … 1 = fully blurred (default 0.0)
   -Metallic N       0 = dielectric, 1 = metal          (default 0.0)
   -Roughness N      0 = mirror, 1 = fully rough         (default 0.35)
   -EnvIntensity N   Env-map reflection gain (0 = off)   (default 1.0)
@@ -605,6 +611,14 @@ f 1 3 4
         )
         if ($Env) { $sceneArgs += @('--env', $Env) }
     }
+    # The HDR sky is a scene background, not a material, so it is forwarded on
+    # its own — with or without -Pbr (#235 R2). It needs -Env to show anything.
+    if ($EnvBackground) {
+        $sceneArgs += @('--env-background', '--env-background-blur', $EnvBackgroundBlur)
+        if (-not $Pbr -and $Env) {
+            $sceneArgs += @('--env', $Env, '--exposure', $Exposure, '--tonemap', $Tonemap)
+        }
+    }
     if ($Aabb) { $sceneArgs += '--aabb' }
     if ($Axes) { $sceneArgs += '--axes' }
     if ($AxesLocal) { $sceneArgs += '--axes-local' }
@@ -685,6 +699,17 @@ f 1 3 4
             if ($Env) {
                 Copy-Item -LiteralPath $Env -Destination (Join-Path $distDir 'env.hdr') -Force
                 $config['env'] = 'env.hdr'
+            }
+        }
+        # The sky follows the material's tone mapping but is a scene background
+        # (#235 R2); the browser loads the probe as part of the PBR setup, so it
+        # needs -Pbr -Env here.
+        if ($EnvBackground) {
+            if ($Pbr -and $Env) {
+                $config['envBackground'] = [ordered]@{ blur = [double]$EnvBackgroundBlur }
+            }
+            else {
+                Write-Warning '-EnvBackground needs -Pbr -Env in -Web mode; skipping the sky'
             }
         }
         $config | ConvertTo-Json -Depth 5 | Set-Content -Path (Join-Path $distDir 'config.json') -Encoding utf8

@@ -95,6 +95,15 @@ pub(crate) struct Cli {
     /// downscaled to the renderer's 2048px limit. Only used with `--pbr`.
     #[arg(long, value_name = "FILE")]
     pub(crate) env: Option<PathBuf>,
+    /// Also draw the `--env` probe as the frame's **background sky**, behind
+    /// every primitive, tone-mapped with `--exposure` / `--tonemap`. Needs
+    /// `--env` (with no probe bound the sky is black); independent of `--pbr`.
+    #[arg(long)]
+    pub(crate) env_background: bool,
+    /// Blur applied to the `--env-background` sky, `0.0` (sharp) … `1.0` (fully
+    /// blurred toward the probe's smallest mip).
+    #[arg(long, default_value_t = 0.0, value_name = "AMOUNT")]
+    pub(crate) env_background_blur: f32,
     /// PBR metallic parameter (0 = dielectric, 1 = metal).
     #[arg(long, default_value_t = 0.0)]
     pub(crate) metallic: f32,

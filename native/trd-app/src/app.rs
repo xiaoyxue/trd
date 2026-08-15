@@ -332,7 +332,9 @@ pub fn run() -> Result<(), AppError> {
     // Assemble the Disney PBR config (material + optional HDR env probe) when
     // `--pbr` is set. The `.hdr` file is decoded here so trd-core does no
     // file/codec I/O; it is downscaled to the renderer's portable 2048px limit.
-    let pbr_config = if cli.pbr {
+    // `--env-background` needs it too: the sky is the same bound probe the
+    // shaded surfaces reflect (#235 R2).
+    let pbr_config = if cli.pbr || cli.env_background {
         let material = DisneyMaterial {
             metallic: cli.metallic,
             roughness: cli.roughness,
@@ -387,6 +389,11 @@ pub fn run() -> Result<(), AppError> {
             show_local_axes: cli.axes_local,
             show_local_grid: cli.grid_local.map(Into::into),
             show_local_grid_mesh: cli.grid_mesh,
+            env_background: cli.env_background.then(|| trd_core::EnvironmentBackground {
+                exposure: cli.exposure,
+                blur: cli.env_background_blur,
+                tonemap: cli.tonemap.into(),
+            }),
             ..RenderOptions::default()
         },
         pbr_config,
