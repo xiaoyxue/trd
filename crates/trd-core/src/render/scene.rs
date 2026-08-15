@@ -13,7 +13,7 @@
 use super::{Draw, DrawableObject, FrameFit, GridPlane, RenderMode};
 use crate::math::Matrix4;
 use crate::render::Tonemap;
-use crate::Lighting;
+use crate::{Lighting, RenderOptions};
 
 /// The camera-centered spherical HDR **environment background**: the bound
 /// environment map drawn behind everything else, as seen through this frame's
@@ -169,21 +169,8 @@ impl Scene {
     ///
     /// `frame` sets the [`Background::frame`] fit (#63) when the caller has a
     /// frame texture bound.
-    pub fn from_draws(
-        draws: &[Draw],
-        options: &crate::RenderOptions,
-        frame: Option<FrameFit>,
-    ) -> Self {
-        let mut scene = build_scene(
-            draws,
-            options.mode,
-            options.show_aabb,
-            options.show_axes,
-            options.show_local_axes,
-            options.show_local_grid,
-            options.show_local_grid_mesh,
-            frame,
-        );
+    pub fn from_draws(draws: &[Draw], options: &RenderOptions, frame: Option<FrameFit>) -> Self {
+        let mut scene = build_scene(draws, options, frame);
         // World / object plane grids (#140) are ungated by render mode, so a
         // filled or shaded object still gets a floor. `encode` buckets by
         // primitive type, so appending here still draws them in the grid pass.
@@ -232,26 +219,33 @@ impl From<Vec<DrawableObject>> for Scene {
     }
 }
 
-/// Builds a per-frame [`Scene`] from a wire `draws` list plus the render `mode`
-/// and overlay flags. When `frame` is `Some`, the scene's
+/// Builds a per-frame [`Scene`] from a wire `draws` list plus the appearance
+/// `options` every front-end already holds ([`RenderOptions::mode`] and the
+/// overlay flags; the grid/selection/PBR fields are applied by
+/// [`Scene::from_draws`] around this core). When `frame` is `Some`, the scene's
 /// [`Background::frame`] fit is set so the mesh scene composites on top of the
 /// bound frame texture (#63); the background is a scene-level setting rather
 /// than a leading drawable, since it carries no model and cannot be instanced
 /// (#204). Each [`Draw`] becomes one [`Primitive::Mesh`](super::Primitive::Mesh)
-/// in the draw's own [`Draw::mode`] when set, else the passed `mode`; with
-/// `show_aabb`, each also emits a tracking
-/// [`Primitive::AabbBox`](super::Primitive::AabbBox); with `local_grid = Some(plane)`, each
+/// in the draw's own [`Draw::mode`] when set, else [`RenderOptions::mode`]; with
+/// [`show_aabb`](RenderOptions::show_aabb), each also emits a tracking
+/// [`Primitive::AabbBox`](super::Primitive::AabbBox); with
+/// [`show_local_grid`](RenderOptions::show_local_grid) `= Some(plane)`, each
 /// **wireframe-mode** draw emits a [`Primitive::PlaneGrid`](super::Primitive::PlaneGrid) on `plane` at
 /// **its own `model`** (a coordinate-plane lattice in that object's local frame —
 /// e.g. the `Xy` grid on a #77 placement quad's surface; scoped to wireframe
 /// draws so a filled/textured content mesh whose local `Xy` is vertical gets no
-/// stray grid wall). `grid_mesh = Some(id)` narrows the grid further to draws of
+/// stray grid wall).
+/// [`show_local_grid_mesh`](RenderOptions::show_local_grid_mesh) `= Some(id)`
+/// narrows the grid further to draws of
 /// **that** mesh only (#110 follow-up): when the *content* mesh is also drawn
 /// wireframe (e.g. a wireframe-reveal intro over a placement quad), the grid
 /// would otherwise land on every wireframe object; pin it to the placement
-/// quad's `mesh_id` so exactly one floor grid is laid. `grid_mesh = None` keeps
-/// the "all wireframe draws" behaviour. With `show_axes`, one **world-origin**
-/// [`Primitive::CoordinateAxes`](super::Primitive::CoordinateAxes) is appended; with `show_local_axes`, each
+/// quad's `mesh_id` so exactly one floor grid is laid. `None` keeps
+/// the "all wireframe draws" behaviour. With
+/// [`show_axes`](RenderOptions::show_axes), one **world-origin**
+/// [`Primitive::CoordinateAxes`](super::Primitive::CoordinateAxes) is appended; with
+/// [`show_local_axes`](RenderOptions::show_local_axes), each
 /// draw also emits a [`Primitive::CoordinateAxes`](super::Primitive::CoordinateAxes) at **its own `model`** —
 /// i.e. that object's *local* coordinate frame (its model-space X/Y/Z axes as
 /// placed, e.g. #77's `(e1,e2,e3)` quad frame). The order (all meshes, then all
@@ -259,19 +253,23 @@ impl From<Vec<DrawableObject>> for Scene {
 /// axes — all of it over the background) matches the renderer's draw buckets so
 /// output is pixel-identical to the pre-scene, flag-driven path.
 ///
+/// Takes the whole `&RenderOptions` rather than one positional flag per field
+/// (#235 R0): every argument but `frame` was already a field of the options its
+/// only caller holds, exploded one by one and immediately re-assembled — which
+/// is how an 8-parameter private function acquires a ninth.
+///
 /// Private: [`Scene::from_draws`] is the entry point, so a front-end cannot
 /// assemble half a scene.
-#[allow(clippy::too_many_arguments)]
-fn build_scene(
-    draws: &[Draw],
-    mode: RenderMode,
-    show_aabb: bool,
-    show_axes: bool,
-    show_local_axes: bool,
-    local_grid: Option<GridPlane>,
-    grid_mesh: Option<u32>,
-    frame: Option<FrameFit>,
-) -> Scene {
+fn build_scene(draws: &[Draw], options: &RenderOptions, frame: Option<FrameFit>) -> Scene {
+    let RenderOptions {
+        mode,
+        show_aabb,
+        show_axes,
+        show_local_axes,
+        show_local_grid: local_grid,
+        show_local_grid_mesh: grid_mesh,
+        ..
+    } = *options;
     let mut scene = Scene::with_capacity(
         draws.len()
             * (1 + usize::from(show_aabb)
@@ -328,7 +326,7 @@ fn build_scene(
 }
 
 /// Builds **plane-grid overlay** drawables independent of [`build_scene`]'s
-/// wireframe-scoped `local_grid` (#114): a `world_grid` lays one
+/// wireframe-scoped [`show_local_grid`](RenderOptions::show_local_grid) (#114): a `world_grid` lays one
 /// [`Primitive::PlaneGrid`](super::Primitive::PlaneGrid) at the **world origin** (identity model — the
 /// world floor, analogous to `show_axes`), and an `object_grid` lays a
 /// `PlaneGrid` at **each drawn object's own model** frame (analogous to
@@ -425,12 +423,12 @@ mod tests {
         // No frame ⇒ no background frame (byte-identical to the pre-0.0.5 scene).
         let scene = build_scene(
             &draws,
-            RenderMode::Filled,
-            true,
-            true,
-            false,
-            None,
-            None,
+            &RenderOptions {
+                mode: RenderMode::Filled,
+                show_aabb: true,
+                show_axes: true,
+                ..Default::default()
+            },
             None,
         );
         assert_eq!(scene.background().frame, None, "no frame ⇒ no frame plane");
@@ -440,12 +438,12 @@ mod tests {
         // (#204).
         let scene = build_scene(
             &draws,
-            RenderMode::Filled,
-            true,
-            true,
-            false,
-            None,
-            None,
+            &RenderOptions {
+                mode: RenderMode::Filled,
+                show_aabb: true,
+                show_axes: true,
+                ..Default::default()
+            },
             Some(FrameFit::Cover),
         );
         assert_eq!(scene.background().frame, Some(FrameFit::Cover));
@@ -537,12 +535,10 @@ mod tests {
         // Filled default: only the `None` draw is Filled; the overrides stand.
         let scene = build_scene(
             &draws,
-            RenderMode::Filled,
-            false,
-            false,
-            false,
-            None,
-            None,
+            &RenderOptions {
+                mode: RenderMode::Filled,
+                ..Default::default()
+            },
             None,
         );
         assert_eq!(
@@ -559,12 +555,10 @@ mod tests {
         // explicit overrides are unaffected — the override is per draw, not global.
         let scene = build_scene(
             &draws,
-            RenderMode::Wireframe,
-            false,
-            false,
-            false,
-            None,
-            None,
+            &RenderOptions {
+                mode: RenderMode::Wireframe,
+                ..Default::default()
+            },
             None,
         );
         assert_eq!(
@@ -615,12 +609,13 @@ mod tests {
         // Everything on: frame + aabb + world axes + local axes.
         let scene = build_scene(
             &draws,
-            RenderMode::Filled,
-            true,                  // show_aabb
-            true,                  // show_axes (world)
-            true,                  // show_local_axes
-            None,                  // local_grid
-            None,                  // grid_mesh
+            &RenderOptions {
+                mode: RenderMode::Filled,
+                show_aabb: true,
+                show_axes: true,
+                show_local_axes: true,
+                ..Default::default()
+            },
             Some(FrameFit::Cover), // background frame plane
         );
 
@@ -646,12 +641,11 @@ mod tests {
         // one (both draw models are non-identity, so this is unambiguous).
         let scene = build_scene(
             &draws,
-            RenderMode::Filled,
-            false,
-            false,
-            true,
-            None,
-            None,
+            &RenderOptions {
+                mode: RenderMode::Filled,
+                show_local_axes: true,
+                ..Default::default()
+            },
             None,
         );
         assert_eq!(
@@ -698,12 +692,10 @@ mod tests {
         // None ⇒ no grid at all (byte-identical to the pre-grid scene).
         let scene = build_scene(
             &draws,
-            RenderMode::Wireframe,
-            false,
-            false,
-            false,
-            None,
-            None,
+            &RenderOptions {
+                mode: RenderMode::Wireframe,
+                ..Default::default()
+            },
             None,
         );
         assert!(grids(&scene).is_empty(), "no grid when local_grid is None");
@@ -712,12 +704,11 @@ mod tests {
         // draw, on that plane, at the draw's model.
         let scene = build_scene(
             &draws,
-            RenderMode::Wireframe,
-            false,
-            false,
-            false,
-            Some(GridPlane::Xy),
-            None,
+            &RenderOptions {
+                mode: RenderMode::Wireframe,
+                show_local_grid: Some(GridPlane::Xy),
+                ..Default::default()
+            },
             None,
         );
         assert_eq!(
@@ -729,12 +720,11 @@ mod tests {
         // The plane is honored (Yz here) and grids sit after the meshes.
         let scene = build_scene(
             &draws,
-            RenderMode::Wireframe,
-            false,
-            false,
-            false,
-            Some(GridPlane::Yz),
-            None,
+            &RenderOptions {
+                mode: RenderMode::Wireframe,
+                show_local_grid: Some(GridPlane::Yz),
+                ..Default::default()
+            },
             None,
         );
         assert!(matches!(scene[0].primitive(), Primitive::Mesh { .. }));
@@ -760,12 +750,11 @@ mod tests {
         ];
         let scene = build_scene(
             &mixed,
-            RenderMode::Filled,
-            false,
-            false,
-            false,
-            Some(GridPlane::Xy),
-            None,
+            &RenderOptions {
+                mode: RenderMode::Filled,
+                show_local_grid: Some(GridPlane::Xy),
+                ..Default::default()
+            },
             None,
         );
         assert_eq!(
@@ -820,12 +809,11 @@ mod tests {
         // very over-emission #110 fixes.
         let scene = build_scene(
             &draws,
-            RenderMode::Filled,
-            false,
-            false,
-            false,
-            Some(GridPlane::Xy),
-            None,
+            &RenderOptions {
+                mode: RenderMode::Filled,
+                show_local_grid: Some(GridPlane::Xy),
+                ..Default::default()
+            },
             None,
         );
         assert_eq!(
@@ -838,12 +826,12 @@ mod tests {
         // quad's model — no grid under either can.
         let scene = build_scene(
             &draws,
-            RenderMode::Filled,
-            false,
-            false,
-            false,
-            Some(GridPlane::Xy),
-            Some(1),
+            &RenderOptions {
+                mode: RenderMode::Filled,
+                show_local_grid: Some(GridPlane::Xy),
+                show_local_grid_mesh: Some(1),
+                ..Default::default()
+            },
             None,
         );
         assert_eq!(
@@ -855,12 +843,12 @@ mod tests {
         // A mesh filter with no matching draw ⇒ no grid at all.
         let scene = build_scene(
             &draws,
-            RenderMode::Filled,
-            false,
-            false,
-            false,
-            Some(GridPlane::Xy),
-            Some(7),
+            &RenderOptions {
+                mode: RenderMode::Filled,
+                show_local_grid: Some(GridPlane::Xy),
+                show_local_grid_mesh: Some(7),
+                ..Default::default()
+            },
             None,
         );
         assert!(
@@ -903,12 +891,12 @@ mod tests {
         // Mesh / AabbBox / CoordinateAxes.
         let scene = build_scene(
             &draws,
-            RenderMode::Filled,
-            true,
-            false,
-            true,
-            None,
-            None,
+            &RenderOptions {
+                mode: RenderMode::Filled,
+                show_aabb: true,
+                show_local_axes: true,
+                ..Default::default()
+            },
             None,
         );
 
@@ -968,12 +956,10 @@ mod tests {
         assert_eq!(
             *build_scene(
                 &draws,
-                RenderMode::Filled,
-                false,
-                false,
-                false,
-                None,
-                None,
+                &RenderOptions {
+                    mode: RenderMode::Filled,
+                    ..Default::default()
+                },
                 None
             ),
             [
@@ -986,12 +972,10 @@ mod tests {
         assert_eq!(
             *build_scene(
                 &draws,
-                RenderMode::Wireframe,
-                false,
-                false,
-                false,
-                None,
-                None,
+                &RenderOptions {
+                    mode: RenderMode::Wireframe,
+                    ..Default::default()
+                },
                 None
             ),
             [
@@ -1004,12 +988,12 @@ mod tests {
         assert_eq!(
             *build_scene(
                 &draws,
-                RenderMode::Filled,
-                true,
-                true,
-                false,
-                None,
-                None,
+                &RenderOptions {
+                    mode: RenderMode::Filled,
+                    show_aabb: true,
+                    show_axes: true,
+                    ..Default::default()
+                },
                 None
             ),
             [
@@ -1026,12 +1010,11 @@ mod tests {
         assert_eq!(
             *build_scene(
                 &draws,
-                RenderMode::Filled,
-                false,
-                false,
-                true,
-                None,
-                None,
+                &RenderOptions {
+                    mode: RenderMode::Filled,
+                    show_local_axes: true,
+                    ..Default::default()
+                },
                 None
             ),
             [
@@ -1059,12 +1042,10 @@ mod tests {
         assert_eq!(
             *build_scene(
                 &mixed,
-                RenderMode::Textured,
-                false,
-                false,
-                false,
-                None,
-                None,
+                &RenderOptions {
+                    mode: RenderMode::Textured,
+                    ..Default::default()
+                },
                 None
             ),
             [
