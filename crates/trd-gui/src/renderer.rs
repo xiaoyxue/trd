@@ -49,19 +49,18 @@ pub fn render_options(state: &SceneState) -> trd_core::RenderOptions {
         // No `rotation` here either: the probe yaw is a scene-level
         // `EnvironmentLight`, so the sky and the reflections in front of it
         // cannot disagree (#182).
-        env_background: state.show_environment_background.then(|| {
+        //
+        // Its exposure and operator are the *background's own* (#235 S6): the sky
+        // used to read `tone_mappings.first()`, i.e. mesh 0's, so editing the
+        // first object's exposure silently re-graded the sky and editing any
+        // other object's did nothing to it.
+        env_background: state.show_environment_background.then_some(
             trd_core::EnvironmentBackground {
-                exposure: state
-                    .tone_mappings
-                    .first()
-                    .map_or(1.0, |tone_mapping| tone_mapping.exposure),
+                exposure: state.environment_background_tone_mapping.exposure,
                 blur: state.environment_background_blur,
-                tonemap: state
-                    .tone_mappings
-                    .first()
-                    .map_or(trd_core::Tonemap::Reinhard, |t| t.operator),
-            }
-        }),
+                tonemap: state.environment_background_tone_mapping.operator,
+            },
+        ),
         msaa: trd_core::Msaa::X4,
     }
 }
@@ -270,6 +269,38 @@ mod tests {
             scene_for(&on).background().environment.is_some(),
             "the environment background toggle must reach the scene on every platform"
         );
+    }
+
+    /// The sky is graded by **its own** tone mapping, not by mesh 0's (#235 S6).
+    ///
+    /// It used to read `tone_mappings.first()`, so editing the *first* object's
+    /// exposure silently re-graded the background while editing any other
+    /// object's did nothing to it — "which object's exposure does the sky
+    /// follow?" answered by "index 0", the defect #182/P9 removed for the probe
+    /// yaw. Per-object tone mapping stays a feature; the two are simply
+    /// independent now.
+    #[test]
+    fn the_sky_is_graded_by_its_own_tone_mapping_not_mesh_zero() {
+        let state = SceneState {
+            show_environment_background: true,
+            environment_background_tone_mapping: trd_core::ToneMapping {
+                exposure: 0.25,
+                operator: trd_core::Tonemap::Aces,
+            },
+            // Mesh 0 is deliberately graded differently; the sky must ignore it.
+            tone_mappings: vec![trd_core::ToneMapping {
+                exposure: 3.5,
+                operator: trd_core::Tonemap::Reinhard,
+            }],
+            ..SceneState::default()
+        };
+
+        let sky = scene_for(&state)
+            .background()
+            .environment
+            .expect("the background is enabled");
+        assert_eq!(sky.exposure, 0.25, "the sky keeps its own exposure");
+        assert_eq!(sky.tonemap, trd_core::Tonemap::Aces, "and its own operator");
     }
 
     /// `render_options` must forward **every** overlay toggle, so the one

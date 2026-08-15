@@ -136,8 +136,11 @@ preserving roughness-dependent reflections.
 The probe can also be **drawn as the background sky**, camera-centered behind
 every primitive: `--env-background` (blurred by `--env-background-blur`,
 tone-mapped with `--exposure` / `--tonemap`) in `trd-cli` and `trd-app`, the
-**Environment background** toggle in `trd-gui`, and `setEnvBackground(enabled,
-blur)` in the browser renderers. It is a `RenderOptions` field
+**Environment background** toggle in `trd-gui` — with its **own** blur, exposure
+and tone-map operator, independent of the per-object ones in the PBR panel
+(#235 S6: the sky used to borrow mesh 0's, so editing the first object's exposure
+silently re-graded the background) — and `setEnvBackground(enabled, blur)` in the
+browser renderers. It is a `RenderOptions` field
 (`env_background`) applied by the shared `Scene::from_draws` assembly, so every
 front-end gets it from the same inputs (#235 R2) — before that only `trd-gui`
 could draw a sky, by reaching around the assembly. The sky needs a bound probe:

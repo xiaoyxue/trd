@@ -232,6 +232,17 @@ pub struct SceneState {
     pub show_environment_background: bool,
     /// Mip-based HDR background blur (`0` sharp, `1` fully blurred).
     pub environment_background_blur: f32,
+    /// The output transform applied to the HDR **sky** — its own value, not the
+    /// selected object's and not mesh 0's (#235 S6).
+    ///
+    /// The sky used to borrow `tone_mappings.first()`, which answered *"which
+    /// object's exposure does the background follow?"* with *"index 0"* — the
+    /// same class of defect #182/P9 removed for the probe yaw. Tone mapping stays
+    /// **per object** for the objects (it is a feature, edited in the PBR panel);
+    /// the background simply owns the one that is the background's. Seeded from
+    /// the front-end's initial tone mapping, so a freshly loaded scene looks
+    /// exactly as it did.
+    pub environment_background_tone_mapping: ToneMapping,
     /// The current front end supplied an HDR probe that can be displayed.
     pub environment_available: bool,
     /// The currently **selected** object as a 0-based index into
@@ -260,6 +271,7 @@ impl Default for SceneState {
             show_local_grid: false,
             show_environment_background: false,
             environment_background_blur: 0.65,
+            environment_background_tone_mapping: ToneMapping::default(),
             environment_available: false,
             selected: None,
         }
@@ -308,6 +320,8 @@ impl SceneState {
             lighting: seed.lighting,
             environment_available: seed.environment_available,
             show_environment_background: seed.environment_available,
+            // Same starting point as the objects, then edited independently.
+            environment_background_tone_mapping: seed.tone_mapping,
             ..Self::default()
         }
     }
