@@ -212,6 +212,9 @@ impl SceneUniforms {
     /// read straight off the [`MeshGpu`]s that own them (#203): they used to be
     /// four `Vec`s on the renderer, all sized to the mesh count with nothing
     /// enforcing it, joined here by a four-deep `zip`.
+    /// `write_slots` skips the per-mesh half when nothing has changed since the
+    /// last frame (#235 R5) — the scene half is always written, because the
+    /// camera moves every frame.
     pub(super) fn write_pbr(
         &self,
         queue: &wgpu::Queue,
@@ -219,6 +222,7 @@ impl SceneUniforms {
         meshes: &[MeshGpu],
         lighting: Lighting,
         use_env: bool,
+        write_slots: bool,
     ) {
         let scene = PbrSceneUniform::new(
             camera.view_projection().matrix().to_cols_array(),
@@ -227,6 +231,9 @@ impl SceneUniforms {
             use_env,
         );
         self.pbr.write_scene(queue, &scene);
+        if !write_slots {
+            return;
+        }
         for (slot, mesh) in meshes.iter().enumerate() {
             let uniform = PbrUniform::new(PbrUniformInputs {
                 material: &mesh.material,

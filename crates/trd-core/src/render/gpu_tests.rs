@@ -475,6 +475,61 @@ fn with_gpu_renders_identically_to_with_meshes() {
 /// are built in the constructors instead. Had that been missed, the very first
 /// frame would panic in `bind_group()` — but only for a caller that sets
 /// nothing, which every other test happens to avoid.
+/// The per-mesh PBR slots are only re-uploaded when a setter has changed one
+/// (#235 R5) — so the test that matters is that a change still **lands**: a
+/// material edited between two frames must show, or the skip would be a stale
+/// cache rather than an optimization.
+#[test]
+#[ignore = "requires a GPU adapter"]
+#[cfg(not(target_arch = "wasm32"))]
+fn a_material_change_between_frames_still_reaches_the_slots() {
+    let gpu = test_gpu();
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+    let (width, height) = (48, 48);
+    let mut renderer = single(format, &Mesh::hello_triangle());
+    let scene: Scene = vec![DrawableObject::mesh(
+        0,
+        Matrix4::IDENTITY,
+        RenderMode::Shaded,
+    )]
+    .into();
+
+    let frame = |renderer: &mut Renderer| {
+        render_with_readback(&gpu, format, width, height, |encoder, view| {
+            renderer.encode(
+                encoder,
+                view,
+                camera_of(FrameParams::IDENTITY, width, height),
+                &scene,
+            );
+        })
+    };
+
+    renderer.set_disney_material(crate::DisneyMaterial {
+        base_color: [0.9, 0.05, 0.05],
+        metallic: 0.0,
+        roughness: 0.5,
+        ..Default::default()
+    });
+    let red = frame(&mut renderer);
+    // A second frame with nothing changed: the slots are skipped, and the image
+    // must be identical — the skip is invisible.
+    let red_again = frame(&mut renderer);
+    assert_eq!(red, red_again, "an unchanged scene renders identically");
+
+    renderer.set_disney_material(crate::DisneyMaterial {
+        base_color: [0.05, 0.05, 0.9],
+        metallic: 0.0,
+        roughness: 0.5,
+        ..Default::default()
+    });
+    let blue = frame(&mut renderer);
+    assert_ne!(
+        red, blue,
+        "a material set between frames must reach the GPU slots"
+    );
+}
+
 #[test]
 #[ignore = "requires a GPU adapter"]
 #[cfg(not(target_arch = "wasm32"))]
