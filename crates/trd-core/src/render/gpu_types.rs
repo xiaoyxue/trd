@@ -48,7 +48,24 @@ impl GizmoUniform {
     }
 }
 
-/// A mesh vertex consumed by `mesh.wgsl` / `textured.wgsl`.
+/// A mesh vertex consumed by `mesh.wgsl` / `textured.wgsl` — and the **authored**
+/// vertex record: it is [`Mesh::vertices`](crate::Mesh)' element, decoded from
+/// OBJ, glTF and the `0.0.6` wire, so it is `pub` and compared for equality.
+///
+/// **Why this and [`PbrVertex`] are two types** (#247): they answer different
+/// questions. This one is what an *asset* carries; `PbrVertex` is what the
+/// Disney path *derives* at upload (smooth normals + tangents the OBJ assets do
+/// not have). Merging them — one record with an "optional" tangent — is not
+/// expressible: a vertex buffer has a fixed `array_stride`, so "optional" can
+/// only mean "a field that is sometimes zero", paid on every vertex of every
+/// mesh in all six pipelines, and it would push derived data into a public,
+/// wire-decoded type every producer would then have to fill. The optionality
+/// that *is* real lives one level up, on
+/// [`MeshShading`](crate::MeshShading), whose tangents may legitimately be
+/// absent. An enum over the two is the same idea in a worse place: a
+/// discriminant per vertex, not `Pod`, and unusable as a GPU record — which
+/// layout a buffer holds is a property of the **buffer**, and `VertexBuffer<T>`
+/// already says it statically (#247 S2).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
@@ -134,12 +151,24 @@ impl GizmoLineVertex {
     }
 }
 
-/// A mesh vertex for the Disney PBR path (`pbr.wgsl`): position + smooth
-/// shading **normal** (loc 1) + UV. Mirrors [`Vertex`]'s 32-byte stride, but the
-/// second attribute is a normal rather than a color — the assets carry no `vn`,
-/// so [`compute_smooth_normals`](super::pbr::compute_smooth_normals) derives it
-/// at upload time into a dedicated buffer (leaving the shared [`Vertex`] used by
-/// every other pipeline untouched).
+/// A mesh vertex for the Disney PBR path (`pbr.wgsl`): position + smooth shading
+/// **normal** (loc 1) + UV + tangent (loc 7) — **48 bytes**, where [`Vertex`] is
+/// 32.
+///
+/// The **derived** counterpart to [`Vertex`]'s authored record (see the "why two
+/// types" note there): the second attribute is a normal rather than a color
+/// because the OBJ assets carry no `vn`, so
+/// [`compute_smooth_normals`](super::pbr::compute_smooth_normals) and
+/// [`compute_tangents`](super::pbr::compute_tangents) fill it at upload time —
+/// unless the asset supplies its own through
+/// [`MeshShading`](crate::MeshShading) — into a dedicated buffer, leaving the
+/// shared [`Vertex`] used by every other pipeline untouched.
+///
+/// It re-stores `position` and `uv`, which the mesh's [`Vertex`] buffer already
+/// holds: 20 of these 48 bytes are a second copy. Removing that duplication
+/// means splitting the derived half into its own buffer bound at a second vertex
+/// slot, not merging the two records — measured and left as its own slice
+/// (#247 S7).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct PbrVertex {
