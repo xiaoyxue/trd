@@ -1600,18 +1600,17 @@ fn triangle_renderer_draws_gradient_triangle() {
 /// pixel hit. Two quads are placed side by side (a gap between them) under the
 /// identity camera; clicking the left one returns object index 0, the right one
 /// index 1, and the gap / a corner returns `None` (background). Exercises
-/// `Renderer::encode_picking` + `PickTarget` end-to-end on a real GPU.
+/// `Renderer::pick` — staging, the id pass and the one-texel read-back — end-to-end
+/// on a real GPU, including the lazily allocated `PickTarget` it owns (#235 R4).
 #[test]
 #[ignore = "requires a GPU adapter"]
 #[cfg(not(target_arch = "wasm32"))]
 fn picking_resolves_object_ids_and_background() {
-    let gpu = test_gpu();
     let quad = Mesh::from_obj(QUAD_OBJ).expect("quad OBJ parses");
     // The main-pass format is irrelevant to picking (its pipeline is PICK_FORMAT).
     let mut renderer = single(wgpu::TextureFormat::Rgba8UnormSrgb, &quad);
 
     let (width, height) = (64u32, 64u32);
-    let target = PickTarget::new(&gpu.device, width, height);
 
     // Two objects: a 0.35-scaled quad at NDC x = -0.5 (object 0) and +0.5
     // (object 1), leaving the center a background gap.
@@ -1633,13 +1632,12 @@ fn picking_resolves_object_ids_and_background() {
     ];
 
     let mut pick = |x: u32, y: u32| {
-        pollster::block_on(target.pick(
-            &gpu,
-            &mut renderer,
+        pollster::block_on(renderer.pick(
             camera_of(FrameParams::IDENTITY, width, height),
             &draws,
             x,
             y,
+            Viewport { width, height },
         ))
     };
 
