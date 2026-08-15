@@ -8,7 +8,7 @@
 
 use super::upload_texture;
 use super::GpuContext;
-use crate::texture::{ImageData, Texture};
+use crate::texture::{ConstantTexture, Texture};
 
 /// The albedo texture bound as group 1 by the textured mesh pipeline (#20).
 ///
@@ -27,11 +27,10 @@ impl BoundTexture {
     /// handle clone) so many per-mesh albedo textures stay compatible with the
     /// one textured/PBR pipeline layout.
     pub(super) fn with_layout(gpu: &GpuContext, layout: wgpu::BindGroupLayout) -> Self {
-        let image = ImageData {
-            width: 1,
-            height: 1,
-            rgba: vec![255, 255, 255, 255],
-        };
+        // `ConstantTexture::white()` *is* "the identity albedo" — the kind whose
+        // documented purpose is this default (#247 T5) — so the 1×1 image is
+        // built by the texture abstraction rather than open-coded here.
+        let image = ConstantTexture::white().to_image();
         let bind_group = upload_texture(gpu, &layout, &image);
         Self { layout, bind_group }
     }

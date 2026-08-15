@@ -1,5 +1,5 @@
 use super::GpuContext;
-use crate::texture::{ImageData, Texture};
+use crate::texture::{ConstantTexture, ImageData, Texture};
 
 /// Linear-data textures used by the glTF metallic-roughness and normal inputs.
 pub(super) struct BoundMaterialMaps {
@@ -31,8 +31,14 @@ impl BoundMaterialMaps {
     pub(super) fn with_layout(gpu: &GpuContext, layout: wgpu::BindGroupLayout) -> Self {
         // Neutral factors: G roughness=1, B metallic=1; neutral tangent-space
         // normal. Uploaded immediately so `bind_group` is valid from the start.
-        let metallic_roughness = pixel([0, 255, 255, 255]);
-        let normal = pixel([128, 128, 255, 255]);
+        //
+        // Through `ConstantTexture` — the texture kind whose documented job is
+        // exactly this, "a constant map … the default when a mesh is drawn
+        // textured but no texture stream is bound" — rather than a private 1×1
+        // `ImageData` builder next to it (#247 T5). The sRGB-vs-linear choice
+        // still lives at upload, where `upload_linear_view` makes it.
+        let metallic_roughness = ConstantTexture::new([0, 255, 255, 255]).to_image();
+        let normal = ConstantTexture::new([128, 128, 255, 255]).to_image();
         let bind_group = build_bind_group(gpu, &layout, &metallic_roughness, &normal);
         Self {
             layout,
@@ -112,14 +118,6 @@ fn texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
             multisampled: false,
         },
         count: None,
-    }
-}
-
-fn pixel(rgba: [u8; 4]) -> ImageData {
-    ImageData {
-        width: 1,
-        height: 1,
-        rgba: rgba.to_vec(),
     }
 }
 
