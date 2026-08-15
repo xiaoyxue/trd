@@ -335,6 +335,23 @@ pub fn overlays_section(ui: &mut egui::Ui, controller: &mut InteractionControlle
                     0.0..=1.0,
                 ))
                 .changed();
+            // The sky's **own** output transform (#235 S6). Per-object tone
+            // mapping stays in the PBR panel below; this one grades the
+            // background, so neither has to stand in for the other.
+            let sky = &mut state.environment_background_tone_mapping;
+            ui.label("Background exposure");
+            c |= ui
+                .add(egui::Slider::new(&mut sky.exposure, 0.0..=4.0))
+                .changed();
+            ui.label("Background tonemap");
+            ui.horizontal_wrapped(|ui| {
+                c |= ui
+                    .selectable_value(&mut sky.operator, Tonemap::Reinhard, "Reinhard")
+                    .changed();
+                c |= ui
+                    .selectable_value(&mut sky.operator, Tonemap::Aces, "ACES")
+                    .changed();
+            });
         }
         if state.environment_available {
             // One slider for one value: the probe yaw drives the sky and the
