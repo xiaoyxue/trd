@@ -592,8 +592,15 @@ pub(crate) fn create_view_proj_binding(
 /// instanced mesh path supplies each model matrix per instance). Lets
 /// [`Renderer`](super::Renderer) reuse one uniform buffer across frames instead
 /// of rebuilding it.
-pub(crate) fn write_view_proj(queue: &wgpu::Queue, buffer: &wgpu::Buffer, camera: Camera) {
-    queue.write_buffer(buffer, 0, bytemuck::bytes_of(&Uniform::view_proj(camera)));
+/// Takes the [`BoundUniform`] rather than a bare buffer (#247 B8): the camera
+/// `P·V` is written to *that* uniform, and a bare `&wgpu::Buffer` parameter
+/// accepts any buffer in the renderer.
+pub(crate) fn write_view_proj(queue: &wgpu::Queue, uniform: &BoundUniform, camera: Camera) {
+    queue.write_buffer(
+        uniform.buffer(),
+        0,
+        bytemuck::bytes_of(&Uniform::view_proj(camera)),
+    );
 }
 
 /// Creates the viewport-aware gizmo uniform and bind group.
@@ -620,8 +627,12 @@ pub(crate) fn create_gizmo_binding(
 }
 
 /// Updates the gizmo camera + viewport uniform for the current frame.
-pub(crate) fn write_gizmo_params(queue: &wgpu::Queue, buffer: &wgpu::Buffer, camera: Camera) {
-    queue.write_buffer(buffer, 0, bytemuck::bytes_of(&GizmoUniform::new(camera)));
+pub(crate) fn write_gizmo_params(queue: &wgpu::Queue, uniform: &BoundUniform, camera: Camera) {
+    queue.write_buffer(
+        uniform.buffer(),
+        0,
+        bytemuck::bytes_of(&GizmoUniform::new(camera)),
+    );
 }
 
 /// The group-0 bind-group layout for the Disney PBR pipeline (#, `pbr.wgsl`):

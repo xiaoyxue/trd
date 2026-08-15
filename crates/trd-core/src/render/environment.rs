@@ -21,7 +21,10 @@ use super::env_map::{
     build_irradiance_map, f32_to_f16_bits, fit_environment, integrate_brdf,
     prefilter_environment_level,
 };
-use super::{create_env_bind_group_layout, overlay_depth_stencil, EnvMapData, GpuContext, Tonemap};
+use super::{
+    create_env_bind_group_layout, overlay_depth_stencil, BoundUniform, EnvMapData, GpuContext,
+    Tonemap,
+};
 use crate::Camera;
 
 /// The environment background's group-0 uniform: the inverse `P·V` that turns a
@@ -64,8 +67,10 @@ pub(super) struct Environment {
     bind_group: wgpu::BindGroup,
     has_env: bool,
     background_pipeline: wgpu::RenderPipeline,
-    background_uniform: wgpu::Buffer,
-    background_bind_group: wgpu::BindGroup,
+    /// The sky draw's group-0 uniform and the bind group that exposes it — one
+    /// value, because they are created, rewritten and invalidated together
+    /// (#203). This was the last pair still spelled out as two fields (#247 B7).
+    background: BoundUniform,
 }
 
 impl Environment {
@@ -143,14 +148,14 @@ impl Environment {
                 resource: background_uniform.as_entire_binding(),
             }],
         });
+        let background = BoundUniform::new(background_uniform, background_bind_group);
 
         Self {
             layout,
             bind_group,
             has_env: false,
             background_pipeline,
-            background_uniform,
-            background_bind_group,
+            background,
         }
     }
 
@@ -196,7 +201,7 @@ impl Environment {
                 settings.tonemap.to_uniform(),
             ],
         };
-        queue.write_buffer(&self.background_uniform, 0, bytemuck::bytes_of(&uniform));
+        queue.write_buffer(self.background.buffer(), 0, bytemuck::bytes_of(&uniform));
     }
 
     /// Draws the probe as a fullscreen background triangle. The probe bind
@@ -204,7 +209,7 @@ impl Environment {
     /// thread by hand is now internal.
     pub(super) fn draw_background<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>) {
         pass.set_pipeline(&self.background_pipeline);
-        pass.set_bind_group(0, &self.background_bind_group, &[]);
+        pass.set_bind_group(0, self.background.bind_group(), &[]);
         pass.set_bind_group(1, &self.bind_group, &[]);
         pass.draw(0..3, 0..1);
     }

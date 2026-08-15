@@ -197,8 +197,8 @@ pub(crate) fn create_render_pipelines(
 impl SceneUniforms {
     /// Rewrites the camera `P·V` uniform for this frame's `camera`.
     pub(super) fn write_camera(&self, queue: &wgpu::Queue, camera: Camera) {
-        write_view_proj(queue, self.camera.buffer(), camera);
-        write_gizmo_params(queue, self.gizmo.buffer(), camera);
+        write_view_proj(queue, &self.camera, camera);
+        write_gizmo_params(queue, &self.gizmo, camera);
     }
 
     /// Rewrites the Disney PBR uniforms for this frame, **split by frequency of
