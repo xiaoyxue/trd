@@ -138,3 +138,28 @@ renders the mesh. The material and edited object-local transform persist, while
 each frame recomputes
 `final = current_quad_basis(e1,e2,e3) * object_model * normalized_vertices`
 using that Arrow row's calibration.
+
+## WebCodecs decode probe
+
+`probe.html` + `probe.ts` are a standalone check that mp4box.js and
+`VideoDecoder` decode this project's MP4s — demux, extract `avcC`, decode, draw
+one frame — before the editor's playback path is rebuilt on them (#282). It
+imports none of the editor's code, so a failure there costs nothing:
+
+```sh
+cd web/gui-video-editing
+bun probe.html
+```
+
+Pick a local MP4, or decode one from a URL. `serve-documents.ts` serves a
+directory with the CORS and `Range` headers a naive static server omits:
+
+```sh
+bun web/gui-video-editing/serve-documents.ts /path/to/videos --port 8090
+```
+
+The probe prints the track, the `description` (`avcC`) byte count, and the first
+decoded frames. Two results worth keeping: an AVC decoder configured **without**
+`description` accepts the configuration and then emits neither frames nor an
+error, and our MP4s carry `moov` at the *end*, so streaming one needs range
+reads that locate `moov` first rather than a plain in-order feed.

@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>WebCodecs decode probe</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 1rem;
+        background: #111;
+        color: #ddd;
+        font: 13px/1.5 ui-monospace, monospace;
+      }
+      #log {
+        white-space: pre-wrap;
+      }
+      canvas {
+        display: block;
+        margin-top: 1rem;
+        max-width: 100%;
+        background: #000;
+      }
+      input {
+        color: inherit;
+      }
+    </style>
+  </head>
+  <body>
+    <p>
+      Minimal check that mp4box.js + WebCodecs can decode this project's videos —
+      a local file or a URL — before the editor's playback path is rebuilt on
+      them (#282).
+    </p>
+    <p>
+      <input type="file" id="file" accept="video/mp4" />
+      <input type="text" id="url" size="52" placeholder="https://example.com/video.mp4" />
+      <button id="load" type="button">Decode from URL</button>
+    </p>
+    <div id="log"></div>
+    <canvas id="preview" width="480" height="270"></canvas>
+    <script type="module" src="./probe.ts"></script>
+  </body>
+</html>
