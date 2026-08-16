@@ -27,17 +27,23 @@
   </head>
   <body>
     <p>
-      Minimal check that mp4box.js + WebCodecs can decode this project's videos —
-      a local file or a URL — before the editor's playback path is rebuilt on
-      them (#282).
+      Minimal check that mp4box.js + WebCodecs can open this project's videos
+      over <em>range reads</em> — a local file or a URL — and land on an exact
+      frame, before the editor's playback path is rebuilt on them (#282). Watch
+      the reported bytes: opening a multi-gigabyte video, and each seek, must
+      cost megabytes.
     </p>
     <p>
       <input type="file" id="file" accept="video/mp4" />
       <input type="text" id="url" size="52" placeholder="https://example.com/video.mp4" />
       <button id="load" type="button">Decode from URL</button>
     </p>
+    <p>
+      <label for="seek">seek to (seconds)</label>
+      <input type="number" id="seek" value="0" min="0" step="1" size="8" />
+    </p>
     <div id="log"></div>
     <canvas id="preview" width="480" height="270"></canvas>
-    <script type="module" src="./probe.ts"></script>
+    <script type="module" src="./src/probe.ts"></script>
   </body>
 </html>

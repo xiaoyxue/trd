@@ -141,25 +141,57 @@ using that Arrow row's calibration.
 
 ## WebCodecs decode probe
 
-`probe.html` + `probe.ts` are a standalone check that mp4box.js and
-`VideoDecoder` decode this project's MP4s — demux, extract `avcC`, decode, draw
-one frame — before the editor's playback path is rebuilt on them (#282). It
-imports none of the editor's code, so a failure there costs nothing:
+`probe.html` + `src/probe.ts` are a standalone check that the ranged MP4 reader
+in `src/media/` opens this project's videos and lands on an exact frame —
+locate `moov`, extract `avcC`, seek, decode, draw — before the editor's playback
+path is rebuilt on it (#282). It imports none of the editor's code, so a failure
+there costs nothing:
 
 ```sh
 cd web/gui-video-editing
 bun probe.html
 ```
 
-Pick a local MP4, or decode one from a URL. `serve-documents.ts` serves a
-directory with the CORS and `Range` headers a naive static server omits:
+Pick a local MP4, or decode one from a URL. `?url=…&seek=…` runs it without a
+click, so a result is a command rather than a click-through.
+`serve-documents.ts` serves a directory with the CORS and `Range` headers a
+naive static server omits:
 
 ```sh
 bun web/gui-video-editing/serve-documents.ts /path/to/videos --port 8090
 ```
 
-The probe prints the track, the `description` (`avcC`) byte count, and the first
-decoded frames. Two results worth keeping: an AVC decoder configured **without**
-`description` accepts the configuration and then emits neither frames nor an
-error, and our MP4s carry `moov` at the *end*, so streaming one needs range
-reads that locate `moov` first rather than a plain in-order feed.
+The probe prints the track, the `description` (`avcC`) bytes, the frames it
+delivered, and — the number to watch — how much of the file was actually
+transferred.
+
+### What `src/media/` does, and why
+
+`byte-source.ts` gives random access over either a local `File` or a URL, so
+nothing above it knows which it has. `mp4-video.ts` walks the top-level boxes to
+find `moov`, reads exactly that one box, hands it to mp4box for the sample
+tables, and then feeds `VideoDecoder` from the key frame at or before a target
+time. Measured on a range-serving origin:
+
+| Video | `moov` | To open | Seek |
+|---|---|---|---|
+| FIBA shot 1, 6.36 MiB | 4 KiB, at the **end** | 0.04 MiB (0.56%) | lands on the exact frame |
+| 4K60 test clip, 11.79 GiB | 10 MiB, at the **front** | 9.75 MiB (0.08%) | `3600.000s` → pts `3600.0000s`, 12 MiB |
+
+Both open in two requests: the head, then the `moov` its header sized. Results
+worth keeping:
+
+- An AVC decoder configured **without** `description` accepts the configuration
+  and then emits neither frames nor an error.
+- `moov` sits at either end depending on the muxer — the FIBA clip has it last,
+  the 4K clip first — so neither "download it all" nor "stream it in order"
+  works for both. Range reads driven by the box list do.
+- Step through the box list by each box's recorded size. Scanning for the bytes
+  `moov` also matches them inside sample data, and `totalSize - moovSize`
+  assumes nothing follows `moov`, which is untrue of any file ending in `free`,
+  `skip` or `mfra`.
+- A seek must be driven by frames *delivered*, not samples *queued*: the decoder
+  only reports what it skipped after decoding it, so a key frame seconds ahead
+  of the target ends the loop before a single frame comes out.
+- `--virtual-time-budget` starves the WebCodecs output callbacks, so headless
+  Chrome cannot check a decode that way — drive a real-time browser instead.
