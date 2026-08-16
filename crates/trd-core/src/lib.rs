@@ -10,6 +10,7 @@ mod light;
 mod material;
 mod math;
 mod mesh;
+mod mp4_probe;
 mod output;
 mod protocol;
 mod render;
@@ -58,6 +59,7 @@ pub use render::{
 };
 // The render harness; available on both platforms since readback became async
 // (#180) — the browser could not use it while it blocked on readback.
+pub use mp4_probe::{probe_moov, Mp4VideoInfo};
 pub use render::{RenderError, Renderer};
 pub use texture::{
     ConstantTexture, ImageData, ImageTexture, Texture, TextureError, TEXTURE_COLUMN,
