@@ -35,6 +35,12 @@ trd-placement.workspace = true
 thiserror = "2"
 # egui/log are shared by the native window and the wasm (eframe-web) app.
 egui = "0.36.1"
+# Direct wgpu/egui-wgpu: the editor binds trd's rendered texture into egui
+# (`register_native_texture`) when the shell shares eframe's device, which needs
+# both types by name. Safe only because one `wgpu 30` resolves for the whole
+# tree (#257) — under two versions these would be a *third* incompatible copy.
+wgpu = "30"
+egui-wgpu = "0.36.1"
 log = "0.4"
 # `std::time::Instant` panics on `wasm32-unknown-unknown`, so the shared
 # video-editing render-latency diagnostic uses `web-time`'s drop-in `Instant`:

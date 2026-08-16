@@ -148,6 +148,19 @@ pub struct VideoEditingShared {
     latest_video_frame: RefCell<Option<IncomingVideoFrame>>,
     rendered_frame: RefCell<Option<RenderedVideoFrame>>,
     context: RefCell<Option<egui::Context>>,
+    /// Set when the host binds the render texture directly into egui: the render
+    /// task then draws without reading the pixels back.
+    skip_readback: Cell<bool>,
+    /// The **UI toolkit's own** GPU context, when the shell built the renderer on
+    /// it (`eframe`'s `wgpu_render_state`).
+    ///
+    /// Held rather than merely flagged for two reasons. It is *declared* by the
+    /// shell because `wgpu 30`'s `Device` has no identity comparison — nothing
+    /// can be detected — and keeping the context itself means every **rebuilt**
+    /// renderer (a catalog asset swap rebuilds one) lands on the same device
+    /// instead of quietly opening another, which would make the bound texture
+    /// come from a device egui knows nothing about.
+    shared_gpu: RefCell<Option<std::sync::Arc<trd_core::GpuContext>>>,
     command: Cell<u8>,
     asset_request: Cell<u8>,
     video_url_request: RefCell<Option<String>>,
@@ -185,6 +198,8 @@ impl Default for VideoEditingShared {
             latest_video_frame: RefCell::new(None),
             rendered_frame: RefCell::new(None),
             context: RefCell::new(None),
+            skip_readback: Cell::new(false),
+            shared_gpu: RefCell::new(None),
             command: Cell::new(COMMAND_NONE),
             asset_request: Cell::new(0),
             video_url_request: RefCell::new(None),
@@ -218,6 +233,43 @@ impl Default for VideoEditingShared {
 }
 
 impl VideoEditingShared {
+    /// Switches the render task off the readback path, for a host that binds the
+    /// rendered texture directly into egui.
+    pub fn set_skip_readback(&self, skip: bool) {
+        self.skip_readback.set(skip);
+    }
+
+    /// Declares that the renderer was built on the **UI toolkit's own device**,
+    /// and keeps that context so rebuilt renderers stay on it.
+    ///
+    /// Declared by the shell rather than detected: `wgpu 30`'s `Device` derives
+    /// only `Debug, Clone` — no `PartialEq`, no `global_id()` — so there is
+    /// nothing to compare, and the shell is the component that *chose* the
+    /// device anyway. Binding a texture from a different device is undefined.
+    pub fn set_shared_gpu(&self, gpu: std::sync::Arc<trd_core::GpuContext>) {
+        self.shared_gpu.replace(Some(gpu));
+    }
+
+    /// The toolkit's GPU context, if this editor shares one. A renderer rebuilt
+    /// for a catalog asset **must** use it, or its texture belongs to a device
+    /// egui cannot sample.
+    pub fn shared_gpu(&self) -> Option<std::sync::Arc<trd_core::GpuContext>> {
+        self.shared_gpu.borrow().clone()
+    }
+
+    /// The current renderer's target view + size + identity, for a host binding
+    /// it into its UI toolkit. `None` while a render is in flight (the renderer
+    /// is moved out for the duration) or before one exists.
+    pub fn target_binding(&self) -> Option<(wgpu::TextureView, (u32, u32), usize)> {
+        let renderer = self.renderer.borrow();
+        let renderer = renderer.as_ref()?;
+        Some((
+            renderer.target_view(),
+            renderer.size(),
+            renderer.renderer_generation_key(),
+        ))
+    }
+
     pub fn update_video_frame_rgba(
         &self,
         rgba: Vec<u8>,
@@ -439,6 +491,13 @@ pub struct VideoEditingApp {
     video_url: String,
     pending_seek_target: Option<u32>,
     last_pick_result: Option<Option<u32>>,
+    /// The rendered texture bound directly into egui, when the shell shares
+    /// trd's `wgpu::Device`. `None` means the portable readback path.
+    native_texture: Option<egui::TextureId>,
+    /// The `(renderer identity, size)` the current `native_texture` was
+    /// registered for, so a resize or asset swap re-registers instead of
+    /// sampling a freed view.
+    native_texture_key: Option<(usize, (u32, u32))>,
 }
 
 impl VideoEditingApp {
@@ -472,7 +531,46 @@ impl VideoEditingApp {
             video_url: String::new(),
             pending_seek_target: None,
             last_pick_result: None,
+            native_texture: None,
+            native_texture_key: None,
         }
+    }
+
+    /// Binds trd's render texture straight into egui when both share a device.
+    ///
+    /// This is what removes the readback: instead of copying the rendered pixels
+    /// GPU→CPU and re-uploading them through egui, the texture trd just drew
+    /// into is registered once and sampled in place. It lives on the app rather
+    /// than in a shell so **native and web share one implementation**.
+    ///
+    /// Registration is keyed on `(renderer identity, size)`, so a resize or an
+    /// asset swap — both of which recreate the target — re-registers instead of
+    /// sampling a freed view.
+    ///
+    /// A no-op unless the shell built the renderer on the toolkit's own device;
+    /// two devices cannot share a texture, so those shells keep the readback.
+    fn sync_native_texture(&mut self, frame: &mut eframe::Frame) {
+        if self.shared.shared_gpu().is_none() {
+            return;
+        }
+        let Some(state) = frame.wgpu_render_state() else {
+            return;
+        };
+        let Some((view, size, key)) = self.shared.target_binding() else {
+            return;
+        };
+        if self.native_texture_key == Some((key, size)) {
+            return;
+        }
+        let mut renderer = state.renderer.write();
+        if let Some(old) = self.native_texture.take() {
+            renderer.free_texture(&old);
+        }
+        let id = renderer.register_native_texture(&state.device, &view, wgpu::FilterMode::Linear);
+        drop(renderer);
+        self.native_texture = Some(id);
+        self.native_texture_key = Some((key, size));
+        self.shared.set_skip_readback(true);
     }
 
     fn ensure_texture(&mut self, context: &egui::Context) {
@@ -536,6 +634,13 @@ impl VideoEditingApp {
         self.displayed_diagnostics = Some(rendered.diagnostics);
         if self.pending_seek_target == Some(frame.frame_index) {
             self.pending_seek_target = None;
+        }
+        // On the shared-device path the pixels were never read back — the
+        // rendered texture is bound directly — so there is nothing to upload.
+        // Missing this is a panic, not a silent bug: `ColorImage` asserts the
+        // buffer matches the size (`epaint/src/image.rs`).
+        if frame.rgba.is_empty() {
+            return;
         }
         self.display_image = egui::ColorImage::from_rgba_unmultiplied(
             [self.display_size.0 as usize, self.display_size.1 as usize],
@@ -688,21 +793,43 @@ impl VideoEditingApp {
         let background_media_time = video.media_time_seconds;
         let render_started = Instant::now();
         let render = async move {
-            let result = renderer
-                .render(
-                    &video.rgba,
-                    video.width,
-                    video.height,
-                    (width, height),
-                    &background_frame,
-                    quad_model,
-                    quad_axes,
-                    show_quad_gizmo,
-                    placement_frame.as_ref(),
-                    model,
-                    &state,
-                )
-                .await;
+            let result = if shared.skip_readback.get() {
+                // Shared-device path: the rendered texture is bound straight into
+                // egui, so there is nothing to read back. The empty `Vec` is the
+                // frame's payload, and `set_display_frame` skips the upload for
+                // exactly that reason.
+                renderer
+                    .draw(
+                        &video.rgba,
+                        video.width,
+                        video.height,
+                        (width, height),
+                        &background_frame,
+                        quad_model,
+                        quad_axes,
+                        show_quad_gizmo,
+                        placement_frame.as_ref(),
+                        model,
+                        &state,
+                    )
+                    .map(|()| Vec::new())
+            } else {
+                renderer
+                    .render(
+                        &video.rgba,
+                        video.width,
+                        video.height,
+                        (width, height),
+                        &background_frame,
+                        quad_model,
+                        quad_axes,
+                        show_quad_gizmo,
+                        placement_frame.as_ref(),
+                        model,
+                        &state,
+                    )
+                    .await
+            };
             let renderer_diagnostics = renderer.diagnostics();
             if shared.renderer_generation.get() != renderer_generation {
                 shared.render_in_flight.set(false);

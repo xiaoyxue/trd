@@ -13,6 +13,7 @@ use super::{point_in_quad, CatalogAsset, VideoEditingApp, COMMAND_PAUSE, COMMAND
 impl eframe::App for VideoEditingApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.shared.context.replace(Some(ui.ctx().clone()));
+        self.sync_native_texture(_frame);
         self.consume_video_frame();
         self.consume_rendered_frame();
         self.consume_asset_defaults();
@@ -80,16 +81,26 @@ impl eframe::App for VideoEditingApp {
             .show(ui, |ui| self.player_controls(ui));
 
         egui::CentralPanel::default().show(ui, |ui| {
+            // Field-level borrows: the panel takes `&mut self.controller`, so the
+            // texture must be selected from disjoint fields rather than through a
+            // `&self` method.
+            let texture = if !self.shared.video_loaded.get() {
+                None
+            } else if let Some(id) = self.native_texture {
+                Some(crate::ui::DisplayTexture::Native {
+                    id,
+                    size: self.display_size,
+                })
+            } else {
+                self.display_texture
+                    .as_ref()
+                    .map(crate::ui::DisplayTexture::Uploaded)
+            };
             let outcome = crate::ui::image_panel(
                 ui,
                 crate::ui::Image {
                     controller: &mut self.controller,
-                    texture: self
-                        .shared
-                        .video_loaded
-                        .get()
-                        .then_some(self.display_texture.as_ref())
-                        .flatten(),
+                    texture,
                     render_size: self.display_size,
                     sizing: self.image_sizing,
                     camera_locked: true,

@@ -40,15 +40,32 @@ fn run() -> Result<(), error::NativeVideoEditingError> {
         }
         return Ok(());
     }
-    let app = app::NativeVideoEditingApp::new(document, video_source, cli.preview_width)?;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 800.0]),
         ..Default::default()
     };
+    let preview_width = cli.preview_width;
     eframe::run_native(
         "trd GUI video editing",
         options,
-        Box::new(|_context| Ok(Box::new(app))),
+        // Built inside the creator so the app can adopt eframe's own wgpu device
+        // — `CreationContext::wgpu_render_state` exists nowhere else. One device
+        // per process is what lets the rendered texture be bound straight into
+        // egui instead of round-tripping through CPU memory (#229).
+        Box::new(move |context| {
+            let gpu = context.wgpu_render_state.as_ref().map(|state| {
+                trd_core::GpuContext::adopt(
+                    state.adapter.clone(),
+                    state.device.clone(),
+                    state.queue.clone(),
+                )
+            });
+            if gpu.is_none() {
+                log::warn!("eframe has no wgpu render state; falling back to a private device");
+            }
+            let app = app::NativeVideoEditingApp::new(document, video_source, preview_width, gpu)?;
+            Ok(Box::new(app))
+        }),
     )?;
     Ok(())
 }
