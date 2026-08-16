@@ -523,6 +523,18 @@ mod tests {
         std::env::var_os(variable).map_or_else(default, PathBuf::from)
     }
 
+    /// The repository root. A test binary runs with the *crate* directory as
+    /// its working directory, so a tree-relative default has to be anchored
+    /// explicitly — otherwise a fixture sitting exactly where the docs put it
+    /// is never found and the test skips instead of asserting.
+    fn repository_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("crates/trd-core is two levels below the repository root")
+            .to_path_buf()
+    }
+
     /// Where the generated Parquet fixtures are looked for. `std::env::temp_dir`
     /// rather than `TMP`, which only Windows sets.
     fn parquet_fixture_dir() -> PathBuf {
@@ -884,7 +896,7 @@ mod tests {
     #[ignore = "needs generated fixtures: web/gui-video-editing/data/fiba-shot1.{arrow,parquet}"]
     fn the_real_document_decodes_identically_from_both_containers() {
         let arrow = fixture_path("TRD_DOC_ARROW", || {
-            "web/gui-video-editing/data/fiba-shot1.arrow".into()
+            repository_root().join("web/gui-video-editing/data/fiba-shot1.arrow")
         });
         let parquet = fixture_path("TRD_DOC_PARQUET", || {
             parquet_fixture_dir().join("fiba-shot1.parquet")

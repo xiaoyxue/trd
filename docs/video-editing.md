@@ -118,8 +118,10 @@ TRD_DOC_DIR=/tmp/trd-doc cargo test -p trd-core --lib video_editing -- --ignored
 ```
 
 `TRD_DOC_DIR` is where the Parquet fixtures are looked for (default: the
-platform temp dir); `TRD_DOC_ARROW` / `TRD_DOC_PARQUET` override the two paths
-individually. Writing the same table once per codec as
+platform temp dir); the Arrow fixture defaults to its generated location in the
+tree, resolved against the repository root rather than the crate directory a
+test binary runs from. `TRD_DOC_ARROW` / `TRD_DOC_PARQUET` override the two
+paths individually. Writing the same table once per codec as
 `fiba-<codec>.parquet` also drives `unsupported_compression_says_so_clearly`,
 which pins that `snappy`/uncompressed read and that `zstd`/`gzip` are refused
 with parquet's own "Disabled feature at compile time" — those codecs are C shims
