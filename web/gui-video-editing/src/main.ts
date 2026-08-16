@@ -40,6 +40,23 @@ async function main(): Promise<void> {
   input.hidden = true;
   document.body.append(input);
 
+  // The optional annotation document. A second picker rather than one filtered
+  // for both, because the two sources are independent: either may be chosen
+  // first, and the document may be cleared without touching the video (#264).
+  const documentInput = document.createElement("input");
+  documentInput.type = "file";
+  documentInput.accept = ".arrow,.parquet";
+  documentInput.hidden = true;
+  document.body.append(documentInput);
+  documentInput.addEventListener("change", () => {
+    const file = documentInput.files?.[0];
+    if (file) {
+      // Mock: the choice is echoed into the dialog; decoding is its own slice,
+      // so this one stays reviewable as pure UI.
+      editor.setPendingDocumentSelection(file.name);
+    }
+  });
+
   const video = document.createElement("video");
   video.muted = true;
   video.playsInline = true;
@@ -53,6 +70,7 @@ async function main(): Promise<void> {
   editor.setVideoElement(video);
 
   let objectUrl: string | undefined;
+  let pendingVideoFile: File | undefined;
   let callbackActive = false;
   let callbackId: number | undefined;
   let loadingAsset = false;
@@ -187,11 +205,10 @@ async function main(): Promise<void> {
       input.value = "";
       return;
     }
-    if (objectUrl) {
-      URL.revokeObjectURL(objectUrl);
-    }
-    objectUrl = URL.createObjectURL(file);
-    loadVideoSource(objectUrl, { filename: file.name, byteLength: file.size });
+    // Selected, not loaded: the dialog stays open so the optional document can
+    // be chosen too, and its Load button commits both (#264).
+    pendingVideoFile = file;
+    editor.setPendingVideoSelection(file.name);
   });
 
   function serviceRustCommands(): void {
@@ -203,23 +220,39 @@ async function main(): Promise<void> {
       void video.play().catch((error: unknown) => editor.setVideoError(String(error)));
     } else if (command === 3) {
       video.pause();
-    }
-    const requestedVideoUrl = editor.takeVideoUrlRequest();
-    if (requestedVideoUrl) {
-      try {
-        const url = new URL(requestedVideoUrl);
-        if (url.protocol !== "http:" && url.protocol !== "https:") {
-          throw new Error("video URL must use http:// or https://");
+    } else if (command === 4) {
+      documentInput.value = "";
+      documentInput.click();
+    } else if (command === 5) {
+      // The dialog's single commit point: load the picked file, or the URL it
+      // accepted, whichever is pending.
+      const pendingUrl = editor.pendingVideoUrl();
+      if (pendingUrl) {
+        try {
+          const url = new URL(pendingUrl);
+          if (url.protocol !== "http:" && url.protocol !== "https:") {
+            throw new Error("video URL must use http:// or https://");
+          }
+          if (objectUrl) {
+            URL.revokeObjectURL(objectUrl);
+            objectUrl = undefined;
+          }
+          loadVideoSource(url.href);
+        } catch (error) {
+          editor.setVideoError(String(error));
         }
+      } else if (pendingVideoFile) {
         if (objectUrl) {
           URL.revokeObjectURL(objectUrl);
-          objectUrl = undefined;
         }
-        loadVideoSource(url.href);
-      } catch (error) {
-        editor.setVideoError(String(error));
+        objectUrl = URL.createObjectURL(pendingVideoFile);
+        loadVideoSource(objectUrl, {
+          filename: pendingVideoFile.name,
+          byteLength: pendingVideoFile.size,
+        });
       }
     }
+
     const seekFrame = editor.takeSeekFrame();
     if (seekFrame >= 0 && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
       video.currentTime = editor.mediaTimeAtFrame(seekFrame);

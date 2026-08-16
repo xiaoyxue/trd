@@ -42,6 +42,10 @@ pub struct NativeVideoEditingApp {
     pending_frame: Option<DecodedFrame>,
     assets_root: PathBuf,
     env_bytes: Option<Vec<u8>>,
+    /// What the dialog picked but has not loaded: the paths behind the shared
+    /// [`PendingSource`](trd_gui::video_editing::PendingSource) names.
+    picked_video: Option<PathBuf>,
+    picked_document: Option<PathBuf>,
 }
 
 impl NativeVideoEditingApp {
@@ -107,6 +111,8 @@ impl NativeVideoEditingApp {
                 }
             })?,
             env_bytes: None,
+            picked_video: None,
+            picked_document: None,
         };
         if app.video_source.is_some() {
             app.shared.set_video_status(false, false);
@@ -203,14 +209,14 @@ impl NativeVideoEditingApp {
     fn service_editor_requests(&mut self) {
         if let Some(command) = self.shared.take_command() {
             match command {
-                VideoEditingCommand::OpenLocalVideo => self.open_local_video(),
+                VideoEditingCommand::OpenLocalVideo => self.pick_local_video(),
+                VideoEditingCommand::OpenLocalDocument => self.pick_local_document(),
+                VideoEditingCommand::LoadSelection => self.load_selection(),
                 VideoEditingCommand::Play => self.play(),
                 VideoEditingCommand::Pause => self.pause(),
             }
         }
-        if let Some(url) = self.shared.take_video_url_request() {
-            self.open_video_source(NativeVideoSource::Url(url));
-        }
+
         if let Some(index) = self.shared.take_seek_frame() {
             self.seek(index);
         }
@@ -221,8 +227,31 @@ impl NativeVideoEditingApp {
         }
     }
 
-    fn open_local_video(&mut self) {
-        self.stop_playback();
+    /// Picks a local annotation document. **Mock**: the choice is recorded and
+    /// shown, but nothing is decoded yet — the loading path is its own slice, so
+    /// this one stays reviewable as pure UI (#264).
+    fn pick_local_document(&mut self) {
+        let dialog = rfd::FileDialog::new().add_filter(
+            "Annotation document",
+            &trd_gui::video_editing::DocumentFormat::EXTENSIONS,
+        );
+        if let Some(path) = dialog.pick_file() {
+            log::info!(
+                "annotation document selected: {} (not loaded yet)",
+                path.display()
+            );
+            self.shared
+                .set_pending_document(Some(trd_gui::video_editing::PendingSource {
+                    kind: VideoSourceKind::LocalFile,
+                    name: path.display().to_string(),
+                }));
+            self.picked_document = Some(path);
+        }
+    }
+
+    /// Picks a local video **without opening it**: the dialog stays up so an
+    /// optional document can be chosen too, and Load commits both (#264).
+    fn pick_local_video(&mut self) {
         let mut dialog = rfd::FileDialog::new().add_filter("MP4 video", &["mp4"]);
         if let Some(NativeVideoSource::Local(path)) = &self.video_source {
             if let Some(parent) = path.parent() {
@@ -230,7 +259,34 @@ impl NativeVideoEditingApp {
             }
         }
         if let Some(path) = dialog.pick_file() {
-            self.open_video_source(NativeVideoSource::Local(path));
+            self.shared
+                .set_pending_video(Some(trd_gui::video_editing::PendingSource {
+                    kind: VideoSourceKind::LocalFile,
+                    name: path.display().to_string(),
+                }));
+            self.picked_video = Some(path);
+        }
+    }
+
+    /// Loads whatever the dialog selected: the picked local video or the typed
+    /// URL, plus — once the loading path exists — the optional document.
+    fn load_selection(&mut self) {
+        let Some(pending) = self.shared.pending_video() else {
+            return;
+        };
+        let source = match pending.kind {
+            VideoSourceKind::LocalFile => match self.picked_video.clone() {
+                Some(path) => NativeVideoSource::Local(path),
+                None => return,
+            },
+            VideoSourceKind::HttpUrl => NativeVideoSource::Url(pending.name),
+        };
+        self.open_video_source(source);
+        if let Some(path) = &self.picked_document {
+            log::info!(
+                "annotation document {} selected but not loaded yet (#264)",
+                path.display()
+            );
         }
     }
 

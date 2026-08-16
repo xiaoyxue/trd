@@ -8,7 +8,9 @@
 //! playback widgets.
 
 use super::details_ui::details_ui;
-use super::{point_in_quad, CatalogAsset, VideoEditingApp, COMMAND_PAUSE, COMMAND_PLAY};
+use super::{
+    point_in_quad, CatalogAsset, VideoEditingApp, VideoSourceKind, COMMAND_PAUSE, COMMAND_PLAY,
+};
 
 impl eframe::App for VideoEditingApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -154,7 +156,7 @@ impl VideoEditingApp {
     /// Source heading, the Open button, and the loaded-source readout.
     fn source_controls(&mut self, ui: &mut egui::Ui) {
         ui.heading("Video");
-        if ui.button("Open video...").clicked() {
+        if ui.button("Open source...").clicked() {
             self.show_video_source_dialog = true;
             ui.ctx().request_repaint();
         }
@@ -162,6 +164,13 @@ impl VideoEditingApp {
         ui.collapsing("Source", |ui| {
             let video = &self.document.video;
             ui.label(format!("Source: {}", video.source_name));
+            ui.label(match self.shared.pending_document() {
+                Some(source) => match source.kind {
+                    VideoSourceKind::LocalFile => format!("Document: {} (local)", source.name),
+                    VideoSourceKind::HttpUrl => format!("Document: {}", source.name),
+                },
+                None => "Document: none — the video plays as-is".to_owned(),
+            });
             ui.label(format!(
                 "{}x{} · {}/{} fps · {} frames",
                 video.width, video.height, video.fps_num, video.fps_den, video.frame_count
