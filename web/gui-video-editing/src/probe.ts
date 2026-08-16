@@ -42,7 +42,7 @@ async function probe(source: ByteSource): Promise<void> {
   log(
     `track ${facts.id}: ${facts.codec} ${facts.width}x${facts.height}, ` +
       `${facts.sampleCount} samples, timescale ${facts.timescale}, ` +
-      `${facts.durationSeconds.toFixed(3)}s`,
+      `${facts.durationSeconds.toFixed(3)}s (last frame ${facts.lastFrameSeconds.toFixed(3)}s)`,
   );
   log(
     facts.description
@@ -70,7 +70,9 @@ async function probe(source: ByteSource): Promise<void> {
     frame.close();
   });
   log(
-    `seek to ${target.toFixed(3)}s: landed at ${report.firstTime.toFixed(4)}s in ` +
+    `seek to ${target.toFixed(3)}s${
+      report.target === target ? "" : ` (past the end — clamped to ${report.target.toFixed(3)}s)`
+    }: landed at ${report.firstTime.toFixed(4)}s in ` +
       `${(performance.now() - seekAt).toFixed(0)}ms, delivered ${report.delivered}, ` +
       `decoded-and-dropped ${report.skipped} to reach the key frame, ` +
       `read ${mib(report.bytesRead)}`,

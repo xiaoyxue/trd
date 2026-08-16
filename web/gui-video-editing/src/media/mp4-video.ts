@@ -25,6 +25,11 @@ const MAX_QUEUED_CHUNKS = 32;
 /// seek rather than hanging it.
 const MAX_IDLE_TICKS = 10_000;
 
+/// Most one seek will transfer before giving up. A key-frame interval is a few
+/// seconds at worst, so needing more than this means something is wrong —
+/// report an empty seek rather than walk a multi-gigabyte file.
+const SEEK_BUDGET_BYTES = 256 * 1024 * 1024;
+
 /// What a decoded video's timeline is made of. Every field comes from the
 /// container, so a frame's identity is read rather than inferred — the reason
 /// for moving off `<video>`, which reports no frame rate at all (#282).
@@ -36,6 +41,12 @@ export interface VideoTrackFacts {
   readonly timescale: number;
   readonly sampleCount: number;
   readonly durationSeconds: number;
+  /// The largest time a seek may ask for. Neither `durationSeconds` nor simply
+  /// the last frame's presentation time: mp4box refuses to seek past its own
+  /// duration, taken from the last sample in *decode* order, and answers such a
+  /// request with an offset that decodes nothing — which then reads to the end
+  /// of the file looking for a frame that cannot exist.
+  readonly lastFrameSeconds: number;
   /// The `avcC`/`hvcC` payload. An AVC decoder configured without it accepts
   /// the configuration and then silently emits nothing, so its absence is worth
   /// reporting rather than tolerating.
@@ -44,6 +55,8 @@ export interface VideoTrackFacts {
 
 /// What one seek actually cost, so "the seek stayed cheap" is a measurement.
 export interface SeekReport {
+  /// The time actually sought to, after clamping into the video's range.
+  readonly target: number;
   /// Frames decoded to get from the preceding key frame to the target, then
   /// discarded — the price of the container's key-frame spacing.
   readonly skipped: number;
@@ -174,6 +187,28 @@ export class Mp4Video {
         failure ??= "the file has no video track";
         return;
       }
+      // Sample lists are built before `onReady` fires, so the true last frame
+      // is available here. Taking the maximum rather than the last entry
+      // because with B-frames decode order is not presentation order.
+      // Sample lists are built before `onReady` fires, so the true extent is
+      // available here. Two different "ends" matter: the largest presentation
+      // time (decode order is not presentation order with B-frames), and
+      // mp4box's own idea of the duration, which it takes from the last sample
+      // in *decode* order and refuses to seek past. Clamping to the smaller is
+      // what makes a seek to the end land on a frame instead of falling back to
+      // a meaningless offset.
+      const samples = file.getTrackById(track.id)?.samples ?? [];
+      let lastCts = 0;
+      for (const sample of samples) {
+        if (sample.cts > lastCts) {
+          lastCts = sample.cts;
+        }
+      }
+      const decodeLast = samples[samples.length - 1];
+      const sampleTimescale = decodeLast?.timescale ?? track.timescale;
+      const mp4boxEnd = decodeLast
+        ? (decodeLast.cts + decodeLast.duration) / decodeLast.timescale
+        : 0;
       facts = {
         id: track.id,
         codec: track.codec,
@@ -182,6 +217,7 @@ export class Mp4Video {
         timescale: track.timescale,
         sampleCount: track.nb_samples,
         durationSeconds: track.duration / track.timescale,
+        lastFrameSeconds: Math.min(lastCts / sampleTimescale, mp4boxEnd),
         description: descriptionFor(file, track.id),
       };
       // Registering the track does not start delivery; `start()` does, and that
@@ -250,7 +286,12 @@ export class Mp4Video {
     onFrame: (frame: VideoFrame) => void,
   ): Promise<SeekReport> {
     const before = this.#source.bytesRead;
-    const target = Math.max(0, seconds) * 1_000_000;
+    // Clamp into the video's real range. A scrubber can ask for a time past the
+    // end, and mp4box answers that with an offset that decodes nothing — which
+    // would then read to the end of the file looking for a frame that does not
+    // exist.
+    const wantedSeconds = Math.min(Math.max(0, seconds), this.facts.lastFrameSeconds);
+    const target = wantedSeconds * 1_000_000;
     let skipped = 0;
     let delivered = 0;
     let firstTime = Number.NaN;
@@ -306,7 +347,7 @@ export class Mp4Video {
       this.#file.releaseUsedSamples(this.facts.id, samples[samples.length - 1]?.number ?? 0);
     };
 
-    const seek = this.#file.seek(seconds, true);
+    const seek = this.#file.seek(wantedSeconds, true);
     if (!this.#started) {
       this.#file.start();
       this.#started = true;
@@ -317,7 +358,11 @@ export class Mp4Video {
     // end the loop before a single frame was delivered.
     let offset = seek.offset;
     let idleTicks = 0;
-    while (delivered < wanted && offset < this.#source.size) {
+    while (
+      delivered < wanted &&
+      offset < this.#source.size &&
+      this.#source.bytesRead - before < SEEK_BUDGET_BYTES
+    ) {
       // Back-pressure. Catching up from a distant key frame can mean hundreds
       // of frames, and queueing all of them at once would hold the whole span
       // in memory for no gain.
@@ -342,6 +387,7 @@ export class Mp4Video {
     await decoder.flush();
     this.#onOutput = undefined;
     return {
+      target: wantedSeconds,
       skipped,
       delivered,
       bytesRead: this.#source.bytesRead - before,

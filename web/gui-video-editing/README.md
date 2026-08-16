@@ -193,5 +193,11 @@ worth keeping:
 - A seek must be driven by frames *delivered*, not samples *queued*: the decoder
   only reports what it skipped after decoding it, so a key frame seconds ahead
   of the target ends the loop before a single frame comes out.
+- Clamp the target, and clamp it to **mp4box's** idea of the end. It refuses to
+  seek past a duration taken from the last sample in *decode* order, which with
+  B-frames is earlier than the last presented frame, and answers an out-of-range
+  request with a meaningless offset rather than an error. Asking a 4727.966s
+  video for 5011s then read 256 MiB and returned nothing; clamped, it returns
+  the last frame after 0.22 MiB.
 - `--virtual-time-budget` starves the WebCodecs output callbacks, so headless
   Chrome cannot check a decode that way — drive a real-time browser instead.
