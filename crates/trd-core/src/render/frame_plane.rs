@@ -16,11 +16,7 @@ use super::{frame_fit_uv_scale, FrameFit};
 /// VRAM the frame ring may spend on decoded frames. Capacity is derived from
 /// this and the frame size rather than fixed, because a slot count that is
 /// comfortable at 960×540 (2 MB each) is a gigabyte at 4K (33 MB each).
-///
-/// Sized so 1080p — the common case — affords the full pipeline depth. Larger
-/// frames run a shallower ring, which is survivable because decode is well
-/// ahead of realtime there anyway (4K60 measured at 3.25×).
-const RING_BUDGET_BYTES: usize = 192 * 1024 * 1024;
+const RING_BUDGET_BYTES: usize = 64 * 1024 * 1024;
 
 /// Never fewer than this many slots.
 ///
@@ -31,28 +27,12 @@ const RING_BUDGET_BYTES: usize = 192 * 1024 * 1024;
 /// queue, four slots is already slack.
 const RING_MIN_SLOTS: u32 = 4;
 
-/// Frames the decoder may keep ahead of the renderer, at the resolution the
-/// budget affords in full.
+/// Never more than this, however small the frames.
 ///
-/// This is the ring's *reason for existing*: the decoder fills slots the
-/// renderer has not reached, so presenting a frame never waits on an upload and
-/// the two run independently. It also frees the decoder's own pool, since a
-/// `VideoFrame` held for later upload holds a slot in a small fixed pool and
-/// uploading it eagerly lets it close.
-///
-/// It is **not** a depth the shell may assume. The ring is a FIFO, so running
-/// ahead by more than the capacity allows wraps onto frames not yet shown; at
-/// 4K the budget affords far fewer slots than here. The shell reads
-/// [`FrameRingStats::max_lookahead`] instead — this constant only sizes the cap
-/// for the case where VRAM is not the binding constraint.
-const RING_LOOKAHEAD_SLOTS: u32 = 12;
-
-/// Frames kept *behind* the playhead, for renders of a frame already shown.
-///
-/// Measured across four editing workloads — the payoff is the repeated render of
-/// the frame already on screen (a gizmo drag, an overlay toggle, a selection),
-/// which one slot serves; only frame-stepping wants more, and it saturates by
-/// eight:
+/// Eight because that is where the measured benefit stops, not because a ring
+/// "should" be deep. What the ring actually earns is the repeated render of the
+/// frame **already on screen** — a gizmo drag, an overlay toggle, a selection —
+/// and one slot serves that. Simulated across four editing workloads:
 ///
 /// | workload | 1 slot | 8 slots | 64 slots |
 /// |---|---:|---:|---:|
@@ -61,17 +41,20 @@ const RING_LOOKAHEAD_SLOTS: u32 = 12;
 /// | stepping frame by frame | 95.2% | 99.2% | 99.6% |
 /// | dragging a gizmo | 100% | 100% | 100% |
 ///
-/// Deeper buys nothing, because the resident window is a span of *frames* while
-/// a scrub is a span of *seconds*: even 64 slots hold 2.1 s at 30 fps and 0.07 s
-/// of 4K60, so a seek lands outside it essentially always.
-const RING_REPLAY_SLOTS: u32 = 8;
-
-/// Never more than this, however small the frames.
+/// Depth does not help because the ring is a span of *frames* while everything
+/// that would want it is a span of *seconds*: eight slots hold 0.33 s at 24 fps,
+/// and a GOP in this project's own footage is 250 frames (`shot_0001.mp4` has
+/// keyframes only at 0.000 s and 10.417 s). So a backward step beyond the window
+/// re-decodes from the keyframe whatever the capacity, and covering a whole GOP
+/// would cost 1.9 GiB at 1080p — which is why the ring is not the answer to
+/// backward navigation and is not sized as if it were.
 ///
-/// Derived rather than chosen: the ring has to hold what the decoder has run
-/// ahead to, what the GPU still has in flight, and what a repaint or a
-/// frame-step may ask for again.
-const RING_MAX_SLOTS: u32 = RING_LOOKAHEAD_SLOTS + RING_MIN_SLOTS + RING_REPLAY_SLOTS;
+/// **What would change this:** uploading frames *ahead* of the renderer, which
+/// nothing does yet — the browser shell's lookahead holds decoded `VideoFrame`s
+/// in JS, not ring slots. That would need capacity ≥ the lookahead depth,
+/// because the ring is a FIFO and running further ahead wraps onto frames not
+/// yet shown. Size it there, against that measurement.
+const RING_MAX_SLOTS: u32 = 8;
 
 /// The ring's **bookkeeping**, free of GPU resources: which frame each layer
 /// holds and which layer is filled next.
@@ -203,20 +186,6 @@ pub struct FrameRingStats {
     pub hits: u32,
     /// Frames that had to be uploaded.
     pub misses: u32,
-}
-
-impl FrameRingStats {
-    /// How far the decoder may run ahead of the renderer without overwriting a
-    /// frame that has not been shown yet.
-    ///
-    /// The ring is a FIFO, so a decoder that runs ahead by more than this wraps
-    /// onto slots the renderer has not reached — the one hazard the ring cannot
-    /// absorb. The shell must clamp its own lookahead to this rather than
-    /// assume a depth: VRAM decides the capacity, and at 4K that is far less
-    /// than at 1080p.
-    pub fn max_lookahead(&self) -> u32 {
-        self.capacity.saturating_sub(RING_MIN_SLOTS)
-    }
 }
 
 /// The background frame-plane subsystem: the fullscreen pipeline, its bind-group
@@ -570,10 +539,7 @@ impl FramePlane {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        FrameRingStats, RingSlots, RING_BUDGET_BYTES, RING_LOOKAHEAD_SLOTS, RING_MAX_SLOTS,
-        RING_MIN_SLOTS, RING_REPLAY_SLOTS,
-    };
+    use super::{RingSlots, RING_BUDGET_BYTES, RING_MAX_SLOTS, RING_MIN_SLOTS};
 
     /// The same `capacity_for` arithmetic as [`super::FrameRing`], minus the
     /// device limit — that clamp needs a GPU, the budget policy does not.
@@ -637,11 +603,11 @@ mod tests {
 
     #[test]
     fn capacity_scales_with_frame_size_within_bounds() {
-        // 4K frames are 31.6 MiB each, so the budget affords only 6 — a
-        // shallower pipeline than 1080p gets, which is survivable because decode
-        // there runs well ahead of realtime.
-        assert_eq!(capacity_for(3840, 2160), 6);
-        // 1080p is 7.91 MiB, so the budget affords the full derived depth.
+        // 4K frames are 31.6 MiB each, so the budget affords only the floor —
+        // and the floor wins, because it is a correctness requirement rather
+        // than a target.
+        assert_eq!(capacity_for(3840, 2160), RING_MIN_SLOTS);
+        // 1080p is 7.91 MiB, so the budget affords exactly the cap.
         assert_eq!(capacity_for(1920, 1080), RING_MAX_SLOTS);
         // 960x540 is 2 MiB, so the budget affords far more than the cap allows.
         assert_eq!(capacity_for(960, 540), RING_MAX_SLOTS);
@@ -659,45 +625,14 @@ mod tests {
         assert!(RING_MIN_SLOTS as usize * 7680 * 4320 * 4 > RING_BUDGET_BYTES);
     }
 
-    /// The ring has to hold what the decoder ran ahead to, what the GPU still
-    /// has in flight, and what a repaint may ask for again. Pinning the
-    /// relationship so the cap cannot drift away from the lookahead it exists to
-    /// absorb.
+    /// The ring is sized to what it was measured to earn, so the VRAM it costs
+    /// has to stay proportionate. Pinned so growing it needs a new measurement
+    /// rather than an intuition — the case that would justify depth (uploading
+    /// ahead of the renderer) does not exist yet.
     #[test]
-    fn capacity_covers_lookahead_plus_flight_plus_replay() {
-        const { assert!(RING_MAX_SLOTS > RING_LOOKAHEAD_SLOTS) };
-        assert_eq!(
-            RING_MAX_SLOTS,
-            RING_LOOKAHEAD_SLOTS + RING_MIN_SLOTS + RING_REPLAY_SLOTS
-        );
-        // 1080p, the common case, must afford the whole pipeline.
-        assert_eq!(capacity_for(1920, 1080), RING_MAX_SLOTS);
-    }
-
-    /// The lookahead a shell may use is what the *capacity* affords, never the
-    /// constant: the ring is a FIFO, so running further ahead overwrites frames
-    /// the renderer has not shown. At 4K the budget affords a quarter of the
-    /// slots 1080p gets, and the decoder has to be told so.
-    #[test]
-    fn lookahead_is_reported_from_capacity_not_assumed() {
-        let stats = |w, h| FrameRingStats {
-            capacity: capacity_for(w, h),
-            resident: 0,
-            hits: 0,
-            misses: 0,
-        };
-        assert_eq!(
-            stats(1920, 1080).max_lookahead(),
-            RING_LOOKAHEAD_SLOTS + RING_REPLAY_SLOTS
-        );
-        // 4K affords far less, and reporting it honestly is the point.
-        let uhd = stats(3840, 2160);
-        assert!(uhd.max_lookahead() < RING_LOOKAHEAD_SLOTS);
-        assert!(
-            uhd.max_lookahead() >= 1,
-            "a pipeline of zero is not a pipeline"
-        );
-        // Every slot beyond the in-flight floor is usable, at any size.
-        assert_eq!(uhd.max_lookahead(), uhd.capacity - RING_MIN_SLOTS);
+    fn the_ring_costs_no_more_vram_than_it_earns() {
+        let vram = |w: usize, h: usize| capacity_for(w as u32, h as u32) as usize * w * h * 4;
+        assert!(vram(1920, 1080) <= RING_BUDGET_BYTES);
+        assert!(vram(1280, 720) <= RING_BUDGET_BYTES);
     }
 }
