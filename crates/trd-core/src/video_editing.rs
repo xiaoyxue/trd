@@ -490,6 +490,7 @@ fn value_bool(
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
     use arrow::array::{ArrayRef, BinaryArray, BooleanArray, FixedSizeListArray};
@@ -497,6 +498,36 @@ mod tests {
     use arrow::ipc::writer::StreamWriter;
 
     use super::*;
+
+    /// Reads a fixture that is **generated, not committed** — the FIBA document
+    /// is derived from an external MP4, so most checkouts do not have one.
+    ///
+    /// `cargo test -p trd-core -- --ignored` runs *every* ignored test, so an
+    /// absent fixture has to skip rather than fail the suite. A fixture that is
+    /// present but unreadable is still an error: that is a broken fixture, not
+    /// a missing one.
+    fn generated_fixture(path: &Path) -> Option<Vec<u8>> {
+        match std::fs::read(path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("skipping: {} has not been generated", path.display());
+                None
+            }
+            Err(error) => panic!("{}: {error}", path.display()),
+        }
+    }
+
+    /// An overridable fixture path, so a document generated elsewhere can be
+    /// pointed at without moving it into the tree.
+    fn fixture_path(variable: &str, default: impl FnOnce() -> PathBuf) -> PathBuf {
+        std::env::var_os(variable).map_or_else(default, PathBuf::from)
+    }
+
+    /// Where the generated Parquet fixtures are looked for. `std::env::temp_dir`
+    /// rather than `TMP`, which only Windows sets.
+    fn parquet_fixture_dir() -> PathBuf {
+        fixture_path("TRD_DOC_DIR", std::env::temp_dir)
+    }
 
     fn document_batch(version: &str, partial_geometry: bool) -> (Schema, RecordBatch) {
         let metadata = [
@@ -847,17 +878,21 @@ mod tests {
     /// only show on real data.
     ///
     /// Ignored by default: it needs the generated document, which is not
-    /// committed. Run it after `scripts/fiba_video_editing_bundle.py`.
+    /// committed. Run it after `scripts/fiba_video_editing_bundle.py`;
+    /// `TRD_DOC_ARROW` / `TRD_DOC_PARQUET` override where they are looked for.
     #[test]
     #[ignore = "needs generated fixtures: web/gui-video-editing/data/fiba-shot1.{arrow,parquet}"]
     fn the_real_document_decodes_identically_from_both_containers() {
-        let arrow = std::fs::read(
-            std::env::var("TRD_DOC_ARROW")
-                .unwrap_or_else(|_| "web/gui-video-editing/data/fiba-shot1.arrow".into()),
-        )
-        .expect("arrow document");
-        let parquet = std::fs::read(std::env::var("TRD_DOC_PARQUET").expect("TRD_DOC_PARQUET"))
-            .expect("parquet document");
+        let arrow = fixture_path("TRD_DOC_ARROW", || {
+            "web/gui-video-editing/data/fiba-shot1.arrow".into()
+        });
+        let parquet = fixture_path("TRD_DOC_PARQUET", || {
+            parquet_fixture_dir().join("fiba-shot1.parquet")
+        });
+        let (Some(arrow), Some(parquet)) = (generated_fixture(&arrow), generated_fixture(&parquet))
+        else {
+            return;
+        };
         let from_arrow = decode_video_editing_document(&arrow).unwrap();
         let from_parquet = decode_video_editing_document(&parquet).unwrap();
         assert_eq!(from_arrow.frames.len(), 222, "the FIBA document is sparse");
@@ -870,6 +905,9 @@ mod tests {
     /// because their C shims do not cross-compile to wasm32. This documents the
     /// trade and pins that an unsupported codec produces parquet's own clear
     /// "Disabled feature at compile time" message rather than something opaque.
+    ///
+    /// Reads `fiba-<codec>.parquet` from `TRD_DOC_DIR` (default: the platform
+    /// temp dir); each codec absent from there is skipped.
     #[test]
     #[ignore = "needs generated fixtures written with several codecs"]
     fn unsupported_compression_says_so_clearly() {
@@ -879,8 +917,8 @@ mod tests {
             ("zstd", false),
             ("gzip", false),
         ] {
-            let path = format!("{}/fiba-{codec}.parquet", std::env::var("TMP").unwrap());
-            let Ok(bytes) = std::fs::read(&path) else {
+            let path = parquet_fixture_dir().join(format!("fiba-{codec}.parquet"));
+            let Some(bytes) = generated_fixture(&path) else {
                 continue;
             };
             assert_eq!(DocumentFormat::sniff(&bytes), Some(DocumentFormat::Parquet));

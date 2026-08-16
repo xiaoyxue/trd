@@ -103,6 +103,28 @@ uv run --with pyarrow scripts\fiba_video_editing_bundle.py `
 
 The generated Arrow file is ignored; regenerate it from the local MP4.
 
+### The Parquet twin, and the parity test
+
+Both containers decode through one code path, and
+`the_real_document_decodes_identically_from_both_containers` pins that on the
+real 222-row document rather than on hand-built rows. Both fixtures are
+generated, so the test is `#[ignore]`d and **skips** when they are absent:
+
+```sh
+uv run --with pyarrow python -c "import pyarrow as pa, pyarrow.parquet as pq; \
+  t = pa.ipc.open_stream(pa.memory_map('web/gui-video-editing/data/fiba-shot1.arrow')).read_all(); \
+  pq.write_table(t, '/tmp/trd-doc/fiba-shot1.parquet')"
+TRD_DOC_DIR=/tmp/trd-doc cargo test -p trd-core --lib video_editing -- --ignored
+```
+
+`TRD_DOC_DIR` is where the Parquet fixtures are looked for (default: the
+platform temp dir); `TRD_DOC_ARROW` / `TRD_DOC_PARQUET` override the two paths
+individually. Writing the same table once per codec as
+`fiba-<codec>.parquet` also drives `unsupported_compression_says_so_clearly`,
+which pins that `snappy`/uncompressed read and that `zstd`/`gzip` are refused
+with parquet's own "Disabled feature at compile time" — those codecs are C shims
+and are left out so the crate keeps cross-compiling to wasm32.
+
 ## Browser/media boundary
 
 `HTMLVideoElement` owns demux, play/pause, seeking, and the media clock.
