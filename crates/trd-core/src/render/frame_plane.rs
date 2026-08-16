@@ -98,59 +98,7 @@ impl FramePlane {
             width as usize * height as usize * 4,
             "frame texture rgba length must be width*height*4"
         );
-
-        let needs_new = self
-            .texture
-            .as_ref()
-            .is_none_or(|ft| ft.width != width || ft.height != height);
-        if needs_new {
-            let texture = device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("trd frame texture"),
-                size: wgpu::Extent3d {
-                    width,
-                    height,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                view_formats: &[],
-            });
-            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            let fit_uniform = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("trd frame fit uniform"),
-                size: 16,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("trd frame plane bind group"),
-                layout: &self.layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: fit_uniform.as_entire_binding(),
-                    },
-                ],
-            });
-            self.texture = Some(FrameTextureGpu {
-                texture,
-                bind_group,
-                fit_uniform,
-                width,
-                height,
-            });
-        }
+        self.ensure_texture(device, width, height);
 
         let ft = self.texture.as_ref().expect("frame texture set above");
         queue.write_texture(
@@ -172,6 +120,128 @@ impl FramePlane {
                 depth_or_array_layers: 1,
             },
         );
+    }
+
+    /// Copies a browser `<video>` element's current frame **GPU→GPU**, without
+    /// it ever entering CPU memory (#229).
+    ///
+    /// The browser has already decoded the frame in hardware, into GPU memory.
+    /// The `upload_rgba` route drags it back down three times — `VideoFrame.copyTo`
+    /// (which also performs the YUV→RGBA conversion), the wasm-bindgen boundary,
+    /// and `write_texture` — at *source* resolution: ~99 MB per frame for 4K.
+    ///
+    /// Three decisions worth recording:
+    ///
+    /// * **`HtmlVideoElement`, not `VideoFrame`.** `web_sys::VideoFrame` is gated
+    ///   behind `--cfg=web_sys_unstable_apis`, a **build-wide** rustflag that
+    ///   would apply to the whole wasm build to gain one type. `HtmlVideoElement`
+    ///   is stable and wgpu's `ExternalImageSource` accepts both. WebGPU snapshots
+    ///   the source during this call, so the caller may present or seek right
+    ///   after.
+    /// * **Web-only by construction.** `copy_external_image_to_texture` is
+    ///   `#[cfg(web)]` in wgpu, and native does not want it: its frames arrive
+    ///   from an ffmpeg pipe as CPU bytes already.
+    /// * **Zero-copy is the browser's decision, not ours.** The spec does not
+    ///   guarantee it; a software-decoded frame starts in CPU memory and a
+    ///   YUV→RGB pass may still run. What this guarantees is that *we* no longer
+    ///   force the download.
+    #[cfg(target_arch = "wasm32")]
+    pub(super) fn copy_video_element(
+        &mut self,
+        gpu: &GpuContext,
+        video: &web_sys::HtmlVideoElement,
+        width: u32,
+        height: u32,
+    ) {
+        assert!(
+            width > 0 && height > 0,
+            "frame texture dimensions must be non-zero"
+        );
+        self.ensure_texture(&gpu.device, width, height);
+        let ft = self.texture.as_ref().expect("frame texture set above");
+        gpu.queue.copy_external_image_to_texture(
+            &wgpu::CopyExternalImageSourceInfo {
+                source: wgpu::ExternalImageSource::HTMLVideoElement(video.clone()),
+                origin: wgpu::Origin2d::ZERO,
+                flip_y: false,
+            },
+            wgpu::CopyExternalImageDestInfo {
+                texture: &ft.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+                color_space: wgpu::PredefinedColorSpace::Srgb,
+                premultiplied_alpha: false,
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
+    /// (Re)allocates the frame texture when the resolution changes, and leaves it
+    /// alone otherwise — so streaming a fixed-resolution video allocates once.
+    fn ensure_texture(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        let needs_new = self
+            .texture
+            .as_ref()
+            .is_none_or(|ft| ft.width != width || ft.height != height);
+        if !needs_new {
+            return;
+        }
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("trd frame texture"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            // `RENDER_ATTACHMENT` is required by
+            // `copy_external_image_to_texture`, which writes through the render
+            // pipeline — omitting it is a validation error, not a slow path.
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let fit_uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("trd frame fit uniform"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("trd frame plane bind group"),
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: fit_uniform.as_entire_binding(),
+                },
+            ],
+        });
+        self.texture = Some(FrameTextureGpu {
+            texture,
+            bind_group,
+            fit_uniform,
+            width,
+            height,
+        });
     }
 
     /// Computes and uploads the centered UV-fit scale that realizes `fit` on

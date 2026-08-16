@@ -389,6 +389,38 @@ impl VideoEditingHandle {
             .map_err(|error| wasm_bindgen::JsValue::from_str(&error))
     }
 
+    /// Hands over the `<video>` element **once**, so later frames present by
+    /// index instead of by pixels (#229).
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = setVideoElement)]
+    pub fn set_video_element(&self, video: web_sys::HtmlVideoElement) {
+        self.shared.set_video_element(video);
+    }
+
+    /// Presents the element's **current** frame without copying it anywhere: the
+    /// browser decoded it into GPU memory and it stays there.
+    ///
+    /// A separate entry point from
+    /// [`update_video_frame_rgba`](Self::update_video_frame_rgba) rather than a
+    /// flag, because the preconditions differ — this one requires an element to
+    /// have been handed over and carries no buffer at all.
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = presentVideoFrame)]
+    pub fn present_video_frame(
+        &self,
+        width: u32,
+        height: u32,
+        frame_index: u32,
+        media_time_seconds: f64,
+    ) -> Result<(), wasm_bindgen::JsValue> {
+        if frame_index >= self.frame_count {
+            return Err(wasm_bindgen::JsValue::from_str(
+                "video frame index out of range",
+            ));
+        }
+        self.shared
+            .present_video_frame(width, height, frame_index, media_time_seconds)
+            .map_err(|error| wasm_bindgen::JsValue::from_str(&error))
+    }
+
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = setVideoStatus)]
     pub fn set_video_status(&self, loaded: bool, playing: bool) {
         self.shared.set_video_status(loaded, playing);

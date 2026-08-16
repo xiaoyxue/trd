@@ -3995,6 +3995,7 @@ dependencies = [
  "proptest",
  "thiserror 2.0.18",
  "tobj",
+ "web-sys",
  "wgpu",
 ]
 
