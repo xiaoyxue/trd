@@ -328,7 +328,7 @@ impl VideoPlacementRenderer {
         frame_width: u32,
         frame_height: u32,
         calibration_size: (u32, u32),
-        background_frame: &trd_core::VideoEditingFrame,
+        background_frame: Option<&trd_core::VideoEditingFrame>,
         quad_model: Option<trd_core::Matrix4>,
         quad_axes: Option<trd_core::Matrix4>,
         selected_quad: bool,
@@ -376,7 +376,7 @@ impl VideoPlacementRenderer {
         frame_width: u32,
         frame_height: u32,
         calibration_size: (u32, u32),
-        background_frame: &trd_core::VideoEditingFrame,
+        background_frame: Option<&trd_core::VideoEditingFrame>,
         quad_model: Option<trd_core::Matrix4>,
         quad_axes: Option<trd_core::Matrix4>,
         selected_quad: bool,
@@ -407,8 +407,11 @@ impl VideoPlacementRenderer {
         let identity_camera = trd_core::FrameParams::IDENTITY
             .to_camera(self.viewport())
             .map_err(|error| error.to_string())?;
-        let background_camera = self
-            .frame_camera(background_frame, calibration_size)
+        // No row — no document, or a frame the document does not annotate — is
+        // the ordinary case for a plain video frame: draw it with the identity
+        // camera rather than refusing to draw at all (#264).
+        let background_camera = background_frame
+            .and_then(|frame| self.frame_camera(frame, calibration_size).ok())
             .unwrap_or(identity_camera);
         let foreground_camera = placement_frame
             .map(|frame| self.frame_camera(frame, calibration_size))

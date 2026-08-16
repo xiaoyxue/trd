@@ -31,7 +31,10 @@ impl PlaybackClock {
 }
 
 pub struct NativeVideoEditingApp {
-    document: trd_core::VideoEditingDocument,
+    /// The timeline in force: the document's when there is one, otherwise what
+    /// ffprobe read from the container (#264).
+    video_info: trd_core::VideoInfo,
+    document: Option<trd_core::VideoEditingDocument>,
     shared: Rc<VideoEditingShared>,
     editor: VideoEditingApp,
     video_source: Option<NativeVideoSource>,
@@ -48,17 +51,54 @@ pub struct NativeVideoEditingApp {
     picked_document: Option<PathBuf>,
 }
 
+/// The render-target size a preview uses before any frame has been decoded.
+fn preview_size(info: &trd_core::VideoInfo, preview_width: u32) -> (u32, u32) {
+    let width = preview_width.min(info.width.max(1)).max(1);
+    let height = ((u64::from(width) * u64::from(info.height.max(1)))
+        .div_ceil(u64::from(info.width.max(1)))) as u32;
+    (width, height.max(1))
+}
+
+/// The timeline before anything is open: one frame of nothing, replaced as soon
+/// as a video is loaded through the dialog.
+fn empty_video_info() -> trd_core::VideoInfo {
+    trd_core::VideoInfo {
+        source_name: String::new(),
+        mime: String::new(),
+        codec: String::new(),
+        sha256: String::new(),
+        byte_length: 0,
+        width: 16,
+        height: 9,
+        fps_num: 25,
+        fps_den: 1,
+        frame_count: 1,
+        duration_us: 0,
+    }
+}
+
 impl NativeVideoEditingApp {
     pub fn new(
-        document: trd_core::VideoEditingDocument,
+        document: Option<trd_core::VideoEditingDocument>,
         video_source: Option<NativeVideoSource>,
         preview_width: u32,
         gpu: Option<std::sync::Arc<trd_core::GpuContext>>,
     ) -> Result<Self, NativeVideoEditingError> {
-        let mut video = video_source
-            .clone()
-            .map(|source| NativeVideo::open(source, &document.video, preview_width))
-            .transpose()?;
+        // With a document the video is validated against it; without one the
+        // container *is* the timeline, so the probe supplies it (#264).
+        let (mut video, video_info) = match (video_source.clone(), document.as_ref()) {
+            (Some(source), Some(document)) => (
+                Some(NativeVideo::open(source, &document.video, preview_width)?),
+                document.video.clone(),
+            ),
+            (Some(source), None) => {
+                let (video, info) = NativeVideo::probe(source, preview_width)?;
+                (Some(video), info)
+            }
+            (None, Some(document)) => (None, document.video.clone()),
+            // Neither yet: an empty timeline the Open dialog will replace.
+            (None, None) => (None, empty_video_info()),
+        };
         let initial_frame = video
             .as_ref()
             .map(|video| video.decode_one(0))
@@ -66,12 +106,7 @@ impl NativeVideoEditingApp {
         let render_size = video
             .as_ref()
             .map(|video| (video.width, video.height))
-            .unwrap_or_else(|| {
-                let width = preview_width.min(document.video.width).max(1);
-                let height = ((u64::from(width) * u64::from(document.video.height))
-                    .div_ceil(u64::from(document.video.width))) as u32;
-                (width, height)
-            });
+            .unwrap_or_else(|| preview_size(&video_info, preview_width));
         if let Some(video) = &mut video {
             video.stop();
         }
@@ -93,8 +128,12 @@ impl NativeVideoEditingApp {
         if let Some(gpu) = gpu {
             shared.set_shared_gpu(gpu);
         }
-        let editor = VideoEditingApp::new(document.clone(), shared.clone());
+        let editor = match document.clone() {
+            Some(document) => VideoEditingApp::new(document, shared.clone()),
+            None => VideoEditingApp::player(video_info.clone(), shared.clone()),
+        };
         let mut app = Self {
+            video_info,
             document,
             shared,
             editor,
@@ -118,9 +157,9 @@ impl NativeVideoEditingApp {
             app.shared.set_video_status(false, false);
             app.sync_source_observation();
             app.shared.set_video_metadata_observation(
-                app.document.video.width,
-                app.document.video.height,
-                app.document.video.duration_us as f64 / 1_000_000.0,
+                app.video_info.width,
+                app.video_info.height,
+                app.video_info.duration_us as f64 / 1_000_000.0,
             );
         }
         if let Some(frame) = initial_frame {
@@ -159,11 +198,11 @@ impl NativeVideoEditingApp {
         let Some(clock) = self.playback else {
             return;
         };
-        let last_frame = self.document.video.frame_count.saturating_sub(1);
+        let last_frame = self.video_info.frame_count.saturating_sub(1);
         let target = clock.target_frame(
             Instant::now(),
-            self.document.video.fps_num,
-            self.document.video.fps_den,
+            self.video_info.fps_num,
+            self.video_info.fps_den,
             last_frame,
         );
 
@@ -292,14 +331,22 @@ impl NativeVideoEditingApp {
 
     fn open_video_source(&mut self, source: NativeVideoSource) {
         self.stop_playback();
-        let video =
-            match NativeVideo::open(source.clone(), &self.document.video, self.preview_width) {
-                Ok(video) => video,
-                Err(error) => {
-                    self.shared.set_error(error.to_string());
-                    return;
-                }
-            };
+        // With a document the source must match it; without one the container is
+        // the timeline, so probe and adopt what it says (#264).
+        let opened = match self.document.as_ref() {
+            Some(document) => {
+                NativeVideo::open(source.clone(), &document.video, self.preview_width)
+                    .map(|video| (video, document.video.clone()))
+            }
+            None => NativeVideo::probe(source.clone(), self.preview_width),
+        };
+        let (video, info) = match opened {
+            Ok(opened) => opened,
+            Err(error) => {
+                self.shared.set_error(error.to_string());
+                return;
+            }
+        };
         let frame = match video.decode_one(0) {
             Ok(frame) => frame,
             Err(error) => {
@@ -308,13 +355,15 @@ impl NativeVideoEditingApp {
             }
         };
         self.shared.set_video_status(false, false);
+        self.video_info = info;
+        self.editor.set_video_info(self.video_info.clone());
         self.video_source = Some(source);
         self.video = Some(video);
         self.sync_source_observation();
         self.shared.set_video_metadata_observation(
-            self.document.video.width,
-            self.document.video.height,
-            self.document.video.duration_us as f64 / 1_000_000.0,
+            self.video_info.width,
+            self.video_info.height,
+            self.video_info.duration_us as f64 / 1_000_000.0,
         );
         self.frame_index = 0;
         self.pending_frame = None;
@@ -328,7 +377,7 @@ impl NativeVideoEditingApp {
                 .set_error("native playback requires a source passed with --video");
             return;
         }
-        let last_frame = self.document.video.frame_count.saturating_sub(1);
+        let last_frame = self.video_info.frame_count.saturating_sub(1);
         let start_frame = replay_start(self.frame_index, last_frame);
         if start_frame != self.frame_index {
             self.seek(start_frame);
@@ -364,7 +413,7 @@ impl NativeVideoEditingApp {
 
     fn seek(&mut self, index: u32) {
         let Some(video) = &mut self.video else {
-            self.frame_index = index.min(self.document.video.frame_count.saturating_sub(1));
+            self.frame_index = index.min(self.video_info.frame_count.saturating_sub(1));
             self.shared
                 .set_error("native seeking requires a source passed with --video");
             return;
@@ -396,7 +445,7 @@ impl NativeVideoEditingApp {
             .video
             .as_ref()
             .map(|video| (video.width, video.height))
-            .unwrap_or((self.document.video.width, self.document.video.height));
+            .unwrap_or((self.video_info.width, self.video_info.height));
         // A catalog swap rebuilds the renderer, so it has to land on the *same*
         // device egui samples — otherwise the re-registered texture belongs to a
         // device the toolkit knows nothing about.
@@ -426,7 +475,7 @@ impl NativeVideoEditingApp {
     fn sync_video_status(&self) {
         self.shared
             .set_video_status(self.video.is_some(), self.playback.is_some());
-        let last_frame = self.document.video.frame_count.saturating_sub(1);
+        let last_frame = self.video_info.frame_count.saturating_sub(1);
         self.shared.set_video_media_observation(
             if self.video.is_some() { 4 } else { 0 },
             self.video.is_some() && self.playback.is_none() && self.frame_index >= last_frame,
@@ -438,9 +487,9 @@ impl NativeVideoEditingApp {
     fn media_time_at(&self, frame_index: u32) -> f64 {
         trd_gui::video_editing::media_time_at_frame(
             frame_index,
-            self.document.video.fps_num,
-            self.document.video.fps_den,
-            self.document.video.frame_count,
+            self.video_info.fps_num,
+            self.video_info.fps_den,
+            self.video_info.frame_count,
         )
     }
 
@@ -457,7 +506,7 @@ impl NativeVideoEditingApp {
                 self.shared.set_video_source_observation(
                     VideoSourceKind::LocalFile,
                     name,
-                    Some(self.document.video.byte_length),
+                    Some(self.video_info.byte_length),
                 );
             }
             NativeVideoSource::Url(url) => {
@@ -469,7 +518,7 @@ impl NativeVideoEditingApp {
 
     fn frame_duration(&self) -> Duration {
         Duration::from_secs_f64(
-            f64::from(self.document.video.fps_den) / f64::from(self.document.video.fps_num),
+            f64::from(self.video_info.fps_den) / f64::from(self.video_info.fps_num),
         )
     }
 }

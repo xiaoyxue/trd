@@ -278,6 +278,12 @@ pub struct VideoEditingShared {
     /// CPU bytes and have nothing to keep on the GPU (#229).
     #[cfg(target_arch = "wasm32")]
     video_element: RefCell<Option<web_sys::HtmlVideoElement>>,
+    /// A timeline the shell probed from the container, waiting to be adopted.
+    ///
+    /// The browser learns the real frame rate only after `moov` has been read,
+    /// which happens *after* the editor starts — so this arrives late by
+    /// construction and the app consumes it on its next frame (#264).
+    pending_video_info: RefCell<Option<trd_core::VideoInfo>>,
     command: Cell<u8>,
     asset_request: Cell<u8>,
 
@@ -324,6 +330,7 @@ impl Default for VideoEditingShared {
             shared_gpu: RefCell::new(None),
             #[cfg(target_arch = "wasm32")]
             video_element: RefCell::new(None),
+            pending_video_info: RefCell::new(None),
             command: Cell::new(COMMAND_NONE),
             asset_request: Cell::new(0),
 
@@ -572,6 +579,17 @@ impl VideoEditingShared {
         CatalogAsset::from_code(self.asset_request.replace(0))
     }
 
+    /// Hands the editor a timeline probed from the container. Applied on the
+    /// next frame, since the shell learns it after the editor has started.
+    pub fn set_pending_video_info(&self, video: trd_core::VideoInfo) {
+        self.pending_video_info.replace(Some(video));
+        self.request_repaint();
+    }
+
+    fn take_pending_video_info(&self) -> Option<trd_core::VideoInfo> {
+        self.pending_video_info.borrow_mut().take()
+    }
+
     /// Records what a shell's file picker returned, **without loading it**. The
     /// dialog shows it and enables Load; nothing happens until Load is pressed.
     pub fn set_pending_video(&self, source: Option<PendingSource>) {
@@ -661,7 +679,19 @@ impl VideoEditingShared {
 }
 
 pub struct VideoEditingApp {
-    document: trd_core::VideoEditingDocument,
+    /// What the editor knows about the video **being played** — its size, rate,
+    /// frame count and identity.
+    ///
+    /// Held separately from the document because the document is optional: with
+    /// one it comes from the document, without one the shell synthesizes it from
+    /// the container (ffprobe natively, `mp4_probe` in the browser). The editor
+    /// only ever reads the timeline from here, so "no document" is not a special
+    /// case anywhere else (#264).
+    video: trd_core::VideoInfo,
+    /// The annotation rows, when a document was supplied. `None` means the
+    /// editor is a plain player: the placement UI is inert and every frame is
+    /// just video.
+    document: Option<trd_core::VideoEditingDocument>,
     display_image: egui::ColorImage,
     display_texture: Option<egui::TextureHandle>,
     current_frame_index: u32,
@@ -698,8 +728,29 @@ pub struct VideoEditingApp {
 }
 
 impl VideoEditingApp {
+    /// The editor over an annotation document — the document's own video
+    /// metadata is the timeline.
     pub fn new(document: trd_core::VideoEditingDocument, shared: Rc<VideoEditingShared>) -> Self {
-        let source_size = (document.video.width, document.video.height);
+        Self::with_timeline(document.video.clone(), Some(document), shared)
+    }
+
+    /// The editor as a **plain player**: a timeline the shell probed from the
+    /// container, and no annotation document.
+    ///
+    /// This is the video-first entry point (#264). Everything downstream reads
+    /// the timeline from `video` and the rows through
+    /// [`frame_row`](Self::frame_row), so "no document" needs no special case
+    /// beyond an inert placement UI.
+    pub fn player(video: trd_core::VideoInfo, shared: Rc<VideoEditingShared>) -> Self {
+        Self::with_timeline(video, None, shared)
+    }
+
+    fn with_timeline(
+        video: trd_core::VideoInfo,
+        document: Option<trd_core::VideoEditingDocument>,
+        shared: Rc<VideoEditingShared>,
+    ) -> Self {
+        let source_size = (video.width.max(1), video.height.max(1));
         let scene = crate::scene::SceneState::default();
         let mut controller = crate::interaction::InteractionController::new(scene);
         controller.target = crate::interaction::InteractionTarget::Object;
@@ -707,6 +758,7 @@ impl VideoEditingApp {
         controller.move_reference_axes = [[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]];
         controller.state.camera.distance = 1.0;
         Self {
+            video,
             document,
             display_image: egui::ColorImage::from_rgba_unmultiplied([1, 1], &[0, 0, 0, 0]),
             display_texture: None,
@@ -734,6 +786,36 @@ impl VideoEditingApp {
             native_texture: None,
             native_texture_key: None,
         }
+    }
+
+    /// The annotation row for `frame_index`, if the document has one.
+    ///
+    /// An `Option`, not an index: with no document — and, once rows may be
+    /// sparse, on any unannotated frame — the absence of a row is the **normal**
+    /// state, not an error. Every caller therefore has to say what it draws for
+    /// a plain video frame (#264).
+    pub fn frame_row(&self, frame_index: u32) -> Option<&trd_core::VideoEditingFrame> {
+        self.document.as_ref()?.frames.get(frame_index as usize)
+    }
+
+    /// Whether an annotation document is loaded at all. Drives the "inert but
+    /// honest" state of the placement UI.
+    pub fn has_document(&self) -> bool {
+        self.document.is_some()
+    }
+
+    /// Replaces the timeline once the shell has probed the real container.
+    ///
+    /// The browser learns the frame rate only after `moov` has been read, which
+    /// happens *after* the editor starts, so the timeline arrives late by
+    /// construction. Clamps the playhead, since a shorter video may not contain
+    /// the frame currently displayed.
+    pub fn set_video_info(&mut self, video: trd_core::VideoInfo) {
+        let last = video.frame_count.saturating_sub(1);
+        self.video = video;
+        self.current_frame_index = self.current_frame_index.min(last);
+        self.displayed_frame_index = self.displayed_frame_index.min(last);
+        self.pending_seek_target = None;
     }
 
     /// Binds trd's render texture straight into egui when both share a device.
@@ -1018,25 +1100,20 @@ impl VideoEditingApp {
         let Some(video) = self.shared.latest_video_frame.borrow().clone() else {
             return;
         };
-        let Some(background_frame) = self
-            .document
-            .frames
-            .get(video.frame_index as usize)
-            .cloned()
-        else {
-            return;
-        };
+        let background_frame = self.frame_row(video.frame_index).cloned();
         let quad_frame = self.quad_frame_at(video.frame_index);
-        let show_quad = !self.shared.video_playing.get() && background_frame.tracked;
+        let show_quad = !self.shared.video_playing.get()
+            && background_frame.as_ref().is_some_and(|frame| frame.tracked);
         let quad_model = quad_frame
             .filter(|_| show_quad)
             .map(trd_placement::quad_outline_model);
         let quad_axes = quad_frame
             .filter(|_| show_quad)
             .map(trd_placement::quad_axes_model);
-        let show_object =
-            self.selected_asset.is_some() && self.selected_quad && background_frame.tracked;
-        let placement_frame = show_object.then_some(background_frame.clone());
+        let show_object = self.selected_asset.is_some()
+            && self.selected_quad
+            && background_frame.as_ref().is_some_and(|frame| frame.tracked);
+        let placement_frame = show_object.then(|| background_frame.clone()).flatten();
         let model = if show_object {
             self.placement_model_at(video.frame_index)
         } else {
@@ -1045,7 +1122,7 @@ impl VideoEditingApp {
         let Some(mut renderer) = self.shared.renderer.borrow_mut().take() else {
             return;
         };
-        let source_size = (self.document.video.width, self.document.video.height);
+        let source_size = (self.video.width, self.video.height);
         let requested_size = match self.image_sizing {
             crate::ui::ImageSizing::FitCanvas => (
                 self.fitted_render_size.0.min(source_size.0).max(1),
@@ -1081,8 +1158,8 @@ impl VideoEditingApp {
         let render_revision = shared.render_revision.get();
         let source_generation = video.source_generation;
         let renderer_generation = shared.renderer_generation.get();
-        let width = self.document.video.width;
-        let height = self.document.video.height;
+        let width = self.video.width;
+        let height = self.video.height;
         let show_quad_gizmo = self.show_quad_gizmo;
         let selected_asset = self.selected_asset;
         let selected_quad = self.selected_quad;
@@ -1115,7 +1192,7 @@ impl VideoEditingApp {
                         video.width,
                         video.height,
                         (width, height),
-                        &background_frame,
+                        background_frame.as_ref(),
                         quad_model,
                         quad_axes,
                         show_quad_gizmo,
@@ -1131,7 +1208,7 @@ impl VideoEditingApp {
                         video.width,
                         video.height,
                         (width, height),
-                        &background_frame,
+                        background_frame.as_ref(),
                         quad_model,
                         quad_axes,
                         show_quad_gizmo,
@@ -1211,12 +1288,7 @@ impl VideoEditingApp {
         let Some(request) = self.shared.pending_pick.take() else {
             return;
         };
-        let Some(frame) = self
-            .document
-            .frames
-            .get(self.displayed_frame_index as usize)
-            .cloned()
-        else {
+        let Some(frame) = self.frame_row(self.displayed_frame_index).cloned() else {
             return;
         };
         let Some(model) = self.placement_model_at(self.displayed_frame_index) else {
@@ -1226,7 +1298,7 @@ impl VideoEditingApp {
             self.shared.pending_pick.set(Some(request));
             return;
         };
-        let source_size = (self.document.video.width, self.document.video.height);
+        let source_size = (self.video.width, self.video.height);
         let render_size = renderer.size();
         let target_point = (
             request.point.0 * render_size.0 / self.display_size.0.max(1),
@@ -1291,9 +1363,7 @@ impl VideoEditingApp {
         frame_index: u32,
     ) -> Result<trd_placement::QuadFrame, TrackingPlacementError> {
         let frame = self
-            .document
-            .frames
-            .get(frame_index as usize)
+            .frame_row(frame_index)
             .ok_or(TrackingPlacementError::FrameOutOfRange)?;
         let k = frame.k.ok_or(TrackingPlacementError::MissingIntrinsics)?;
         let placement_quad = frame
@@ -1332,8 +1402,7 @@ impl VideoEditingApp {
         let displayed_frame_index = self
             .displayed_frame_ready
             .then_some(self.displayed_frame_index);
-        let timeline_frame =
-            displayed_frame_index.and_then(|index| self.document.frames.get(index as usize));
+        let timeline_frame = displayed_frame_index.and_then(|index| self.frame_row(index));
         // Media time rides with its own frame, so the timeline block describes
         // the frame actually on screen rather than a newer presented one.
         let media_time_seconds = self
@@ -1366,9 +1435,7 @@ impl VideoEditingApp {
         };
         let previous_quad = displayed_frame_index.and_then(|index| {
             (0..index).rev().find_map(|previous_index| {
-                self.document
-                    .frames
-                    .get(previous_index as usize)
+                self.frame_row(previous_index)
                     .filter(|frame| frame.tracked)
                     .and_then(|_| {
                         self.quad_frame_at(previous_index)
