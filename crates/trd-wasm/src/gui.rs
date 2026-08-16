@@ -579,6 +579,25 @@ impl VideoEditingHandle {
         self.shared.take_asset_request_code()
     }
 
+    /// Loads an annotation document from bytes the shell fetched — a local file
+    /// or an HTTP(S) URL, decided by the shell (#264).
+    ///
+    /// Decoding happens in Rust so native and web share one contract and one
+    /// error message; a failure leaves the current document in place.
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = loadDocument)]
+    pub fn load_document(&self, bytes: Vec<u8>) -> Result<(), wasm_bindgen::JsValue> {
+        self.shared
+            .load_document_bytes(&bytes)
+            .map_err(|error| wasm_bindgen::JsValue::from_str(&error))
+    }
+
+    /// Drops the current annotation document: the video keeps playing, as plain
+    /// video.
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = clearDocument)]
+    pub fn clear_document(&self) {
+        self.shared.clear_document();
+    }
+
     /// Records what the shell's file picker returned, **without loading it**:
     /// the dialog stays open so an optional document can be chosen too, and its
     /// Load button commits both (#264).
@@ -600,6 +619,26 @@ impl VideoEditingHandle {
                 kind: trd_gui::video_editing::VideoSourceKind::LocalFile,
                 name,
             }));
+    }
+
+    /// The pending document's URL, or `None` when the selection is a local file
+    /// the shell already holds (or nothing is selected).
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = pendingDocumentUrl)]
+    pub fn pending_document_url(&self) -> Option<String> {
+        self.shared.pending_document().and_then(|source| {
+            matches!(
+                source.kind,
+                trd_gui::video_editing::VideoSourceKind::HttpUrl
+            )
+            .then_some(source.name)
+        })
+    }
+
+    /// Whether the dialog has any document selected at all — the shell needs to
+    /// know, because Load with none means "play unannotated".
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = hasPendingDocument)]
+    pub fn has_pending_document(&self) -> bool {
+        self.shared.pending_document().is_some()
     }
 
     /// The pending video's URL, or `None` when the selection is a local file the

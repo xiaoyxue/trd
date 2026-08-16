@@ -278,12 +278,19 @@ pub struct VideoEditingShared {
     /// CPU bytes and have nothing to keep on the GPU (#229).
     #[cfg(target_arch = "wasm32")]
     video_element: RefCell<Option<web_sys::HtmlVideoElement>>,
-    /// A timeline the shell probed from the container, waiting to be adopted.
-    ///
+    /// A timeline the shell probed from the container, waiting to be adopted.    ///
     /// The browser learns the real frame rate only after `moov` has been read,
     /// which happens *after* the editor starts — so this arrives late by
     /// construction and the app consumes it on its next frame (#264).
     pending_video_info: RefCell<Option<trd_core::VideoInfo>>,
+    /// An annotation document the shell fetched, waiting to be adopted — or
+    /// `Some(None)` to drop the current one.
+    ///
+    /// A slot rather than a direct call because only the shell can read a file
+    /// or a URL, while only the app owns the document; the app takes it on its
+    /// next frame (#264). Distinct from `pending_document`, which is the
+    /// dialog's *selection* — this is the decoded result of loading it.
+    incoming_document: RefCell<Option<Option<trd_core::VideoEditingDocument>>>,
     command: Cell<u8>,
     asset_request: Cell<u8>,
 
@@ -331,6 +338,7 @@ impl Default for VideoEditingShared {
             #[cfg(target_arch = "wasm32")]
             video_element: RefCell::new(None),
             pending_video_info: RefCell::new(None),
+            incoming_document: RefCell::new(None),
             command: Cell::new(COMMAND_NONE),
             asset_request: Cell::new(0),
 
@@ -590,6 +598,31 @@ impl VideoEditingShared {
         self.pending_video_info.borrow_mut().take()
     }
 
+    /// Decodes `bytes` as an annotation document and hands it to the editor.
+    ///
+    /// Decoding here rather than in each shell keeps one implementation of the
+    /// contract — and one error message — for native and web alike. A failure
+    /// leaves the current document untouched: a bad file must not empty the
+    /// editor (#264).
+    pub fn load_document_bytes(&self, bytes: &[u8]) -> Result<(), String> {
+        let document =
+            trd_core::decode_video_editing_document(bytes).map_err(|error| error.to_string())?;
+        self.incoming_document.replace(Some(Some(document)));
+        self.request_repaint();
+        Ok(())
+    }
+
+    /// Drops the current annotation document: the video keeps playing, as plain
+    /// video.
+    pub fn clear_document(&self) {
+        self.incoming_document.replace(Some(None));
+        self.request_repaint();
+    }
+
+    fn take_incoming_document(&self) -> Option<Option<trd_core::VideoEditingDocument>> {
+        self.incoming_document.borrow_mut().take()
+    }
+
     /// Records what a shell's file picker returned, **without loading it**. The
     /// dialog shows it and enables Load; nothing happens until Load is pressed.
     pub fn set_pending_video(&self, source: Option<PendingSource>) {
@@ -818,8 +851,25 @@ impl VideoEditingApp {
         self.document.is_some()
     }
 
-    /// Replaces the timeline once the shell has probed the real container.
+    /// Adopts (or drops) an annotation document **while the video keeps
+    /// playing**.
     ///
+    /// The video position is deliberately kept: attaching a document is an
+    /// annotation change, not a source change. Everything derived from the old
+    /// document is not — the selection, the placed object and any pick in flight
+    /// all refer to a quad that may no longer exist, so they are cleared (#264).
+    pub fn set_document(&mut self, document: Option<trd_core::VideoEditingDocument>) {
+        self.document = document;
+        self.selected_quad = false;
+        self.show_quad_gizmo = false;
+        self.selected_asset = None;
+        self.last_pick_result = None;
+        self.controller.state.selected = None;
+        self.controller.state.objects[0] = crate::scene::ObjectTransform::default();
+        self.shared.request_overlay();
+    }
+
+    /// Replaces the timeline once the shell has probed the real container.    ///
     /// The browser learns the frame rate only after `moov` has been read, which
     /// happens *after* the editor starts, so the timeline arrives late by
     /// construction. Clamps the playhead, since a shorter video may not contain
@@ -972,6 +1022,7 @@ impl VideoEditingApp {
                 self.shared.set_pending_document(None);
             }
         });
+        ui.weak("Load applies the whole selection: with no document the video plays unannotated.");
 
         ui.label("Document URL");
         let response = ui.add(

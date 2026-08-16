@@ -98,8 +98,8 @@ async function main(): Promise<void> {
   documentInput.addEventListener("change", () => {
     const file = documentInput.files?.[0];
     if (file) {
-      // Mock: the choice is echoed into the dialog; decoding is its own slice,
-      // so this one stays reviewable as pure UI.
+      // Selected, not loaded: Load commits the video and the document together.
+      pendingDocumentFile = file;
       editor.setPendingDocumentSelection(file.name);
     }
   });
@@ -118,6 +118,37 @@ async function main(): Promise<void> {
 
   let objectUrl: string | undefined;
   let pendingVideoFile: File | undefined;
+  let pendingDocumentFile: File | undefined;
+
+  /// Applies the dialog's document selection: a picked file, a fetched URL, or
+  /// nothing — which means "play unannotated", since Load commits the whole
+  /// selection (#264).
+  async function loadSelectedDocument(): Promise<void> {
+    const url = editor.pendingDocumentUrl();
+    if (url) {
+      let response: Response;
+      try {
+        response = await fetch(url);
+      } catch (error) {
+        // A `fetch` rejection is almost always the browser refusing the request
+        // rather than the server answering: no CORS header, or nothing
+        // listening. Say so, because the status-code path below cannot.
+        throw new Error(
+          `${String(error)} — the server must send Access-Control-Allow-Origin for a cross-origin document`,
+        );
+      }
+      if (!response.ok) {
+        throw new Error(`failed to fetch document: ${response.status} ${response.statusText}`);
+      }
+      editor.loadDocument(new Uint8Array(await response.arrayBuffer()));
+      return;
+    }
+    if (editor.hasPendingDocument() && pendingDocumentFile) {
+      editor.loadDocument(new Uint8Array(await pendingDocumentFile.arrayBuffer()));
+      return;
+    }
+    editor.clearDocument();
+  }
   let callbackActive = false;
   let callbackId: number | undefined;
   let loadingAsset = false;
@@ -309,6 +340,11 @@ async function main(): Promise<void> {
           byteLength: file.size,
         });
       }
+      // The document is part of the same commit, and it applies whether or not a
+      // video was loaded above.
+      void loadSelectedDocument().catch((error: unknown) =>
+        editor.setVideoError(`annotation document: ${String(error)}`),
+      );
     }
 
     const seekFrame = editor.takeSeekFrame();

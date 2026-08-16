@@ -20,6 +20,10 @@ impl eframe::App for VideoEditingApp {
             // A timeline probed from the container after start-up (#264).
             self.set_video_info(video);
         }
+        if let Some(document) = self.shared.take_incoming_document() {
+            // A document attached, replaced or cleared from the Open dialog.
+            self.set_document(document);
+        }
         self.consume_video_frame();
         self.consume_rendered_frame();
         self.consume_asset_defaults();
