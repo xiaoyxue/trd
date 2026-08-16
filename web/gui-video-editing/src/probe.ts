@@ -54,29 +54,49 @@ async function probe(source: ByteSource): Promise<void> {
 
   const seconds = Number(seekInput.value);
   const target = Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
-  log(`seeking to ${target.toFixed(3)}s…`);
+  const requested = Number(new URLSearchParams(location.search).get("frames") ?? 4);
+  const frames = Number.isFinite(requested) && requested > 0 ? Math.floor(requested) : 4;
+  log(`seeking to ${target.toFixed(3)}s, pulling ${frames} frames…`);
   const seekAt = performance.now();
-  const report = await video.seekAndDecode(target, 4, (frame) => {
-    if (context) {
+  let firstDrawn = false;
+  let previous = Number.NaN;
+  let maxGap = 0;
+  const report = await video.seekAndDecode(target, frames, (frame) => {
+    if (context && !firstDrawn) {
       // Only to prove a real image came out; the editor uploads frames to the
       // GPU instead of drawing them here.
       canvas.width = frame.displayWidth;
       canvas.height = frame.displayHeight;
       context.drawImage(frame, 0, 0);
+      firstDrawn = true;
     }
-    log(
-      `  frame pts=${(frame.timestamp / 1_000_000).toFixed(4)}s ${frame.codedWidth}x${frame.codedHeight}`,
-    );
+    // Presentation order and no gaps is what playback depends on; a dropped or
+    // reordered frame shows up here as an irregular step.
+    const seconds = frame.timestamp / 1_000_000;
+    if (Number.isFinite(previous)) {
+      maxGap = Math.max(maxGap, seconds - previous);
+    }
+    previous = seconds;
+    if (frames <= 8) {
+      log(`  frame pts=${seconds.toFixed(4)}s ${frame.codedWidth}x${frame.codedHeight}`);
+    }
     frame.close();
   });
+  const elapsed = performance.now() - seekAt;
   log(
     `seek to ${target.toFixed(3)}s${
       report.target === target ? "" : ` (past the end — clamped to ${report.target.toFixed(3)}s)`
     }: landed at ${report.firstTime.toFixed(4)}s in ` +
-      `${(performance.now() - seekAt).toFixed(0)}ms, delivered ${report.delivered}, ` +
+      `${elapsed.toFixed(0)}ms, delivered ${report.delivered}, ` +
       `decoded-and-dropped ${report.skipped} to reach the key frame, ` +
       `read ${mib(report.bytesRead)}`,
   );
+  if (report.delivered > 1) {
+    log(
+      `pull: ${report.delivered} frames, largest pts step ${maxGap.toFixed(4)}s, ` +
+        `${((report.delivered * 1000) / elapsed).toFixed(1)} frames/s end to end`,
+    );
+  }
   log(`total read: ${mib(source.bytesRead)} of ${mib(source.size)}`);
   video.close();
 }

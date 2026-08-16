@@ -160,9 +160,18 @@ export class Mp4Video {
   readonly facts: VideoTrackFacts;
   readonly #source: ByteSource;
   readonly #file: ISOFile;
+  /// Decoded frames at or after the seek target, in presentation order. The
+  /// decoder emits in presentation order, so this needs no reordering.
+  readonly #ready: VideoFrame[] = [];
   #decoder: VideoDecoder | undefined;
-  #onOutput: ((frame: VideoFrame) => void) | undefined;
   #started = false;
+  /// Frames ending at or before this (microseconds) are the catch-up from the
+  /// key frame and get dropped.
+  #skipTarget = 0;
+  #skipped = 0;
+  #feedOffset = 0;
+  #budgetFrom = 0;
+  #exhausted = true;
 
   private constructor(source: ByteSource, file: ISOFile, facts: VideoTrackFacts) {
     this.#source = source;
@@ -260,12 +269,14 @@ export class Mp4Video {
   #ensureDecoder(): VideoDecoder {
     this.#decoder ??= new VideoDecoder({
       output: (frame) => {
-        const handler = this.#onOutput;
-        if (handler) {
-          handler(frame);
-        } else {
+        // `?? 1` so a frame starting exactly at the target is not mistaken for
+        // one that ends there.
+        if (frame.timestamp + (frame.duration ?? 1) <= this.#skipTarget) {
+          this.#skipped += 1;
           frame.close();
+          return;
         }
+        this.#ready.push(frame);
       },
       error: (error) => {
         console.error("video decode failed:", error);
@@ -274,27 +285,26 @@ export class Mp4Video {
     return this.#decoder;
   }
 
-  /// Decodes the frame covering `seconds` and the `wanted - 1` frames after it.
+  /// Positions the reader at the key frame at or before `seconds`, discarding
+  /// what precedes the target. Returns the time actually sought to.
   ///
-  /// This is what a `<video>` element does internally for `currentTime = t`:
-  /// start at the key frame at or before the target, decode forward, and drop
-  /// what precedes it. The difference is that every delivered frame carries its
-  /// container timestamp, so it is identified rather than approximated.
-  async seekAndDecode(
-    seconds: number,
-    wanted: number,
-    onFrame: (frame: VideoFrame) => void,
-  ): Promise<SeekReport> {
-    const before = this.#source.bytesRead;
+  /// This is what a `<video>` element does internally for `currentTime = t`.
+  /// The difference is that every frame that comes out carries its container
+  /// timestamp, so it is identified rather than approximated.
+  async seekTo(seconds: number): Promise<number> {
     // Clamp into the video's real range. A scrubber can ask for a time past the
     // end, and mp4box answers that with an offset that decodes nothing — which
     // would then read to the end of the file looking for a frame that does not
     // exist.
     const wantedSeconds = Math.min(Math.max(0, seconds), this.facts.lastFrameSeconds);
-    const target = wantedSeconds * 1_000_000;
-    let skipped = 0;
-    let delivered = 0;
-    let firstTime = Number.NaN;
+    this.#skipTarget = wantedSeconds * 1_000_000;
+    this.#skipped = 0;
+    this.#exhausted = false;
+    this.#budgetFrom = this.#source.bytesRead;
+    for (const frame of this.#ready) {
+      frame.close();
+    }
+    this.#ready.length = 0;
 
     const decoder = this.#ensureDecoder();
     if (decoder.state === "configured") {
@@ -306,26 +316,6 @@ export class Mp4Video {
       codedHeight: this.facts.height,
       ...(this.facts.description ? { description: this.facts.description } : {}),
     });
-    this.#onOutput = (frame) => {
-      // `?? 1` so a frame starting exactly at the target is not mistaken for one
-      // that ends there.
-      const end = frame.timestamp + (frame.duration ?? 1);
-      if (end <= target) {
-        skipped += 1;
-        frame.close();
-        return;
-      }
-      if (delivered >= wanted) {
-        frame.close();
-        return;
-      }
-      if (delivered === 0) {
-        firstTime = frame.timestamp / 1_000_000;
-      }
-      delivered += 1;
-      onFrame(frame);
-    };
-
     this.#file.onSamples = (_id: number, _user: unknown, samples: Sample[]) => {
       for (const sample of samples) {
         if (!sample.data) {
@@ -346,27 +336,37 @@ export class Mp4Video {
       // The samples are in the decoder's queue now; mp4box can drop its copies.
       this.#file.releaseUsedSamples(this.facts.id, samples[samples.length - 1]?.number ?? 0);
     };
-
-    const seek = this.#file.seek(wantedSeconds, true);
+    this.#feedOffset = this.#file.seek(wantedSeconds, true).offset;
     if (!this.#started) {
       this.#file.start();
       this.#started = true;
     }
-    // Feed until the wanted frames have actually come out. Counting queued
-    // samples instead would race: the decoder reports what it skipped only
-    // after it has decoded it, so a key frame seconds ahead of the target would
-    // end the loop before a single frame was delivered.
-    let offset = seek.offset;
+    return wantedSeconds;
+  }
+
+  /// The next frame in presentation order, or `undefined` past the end.
+  ///
+  /// **The caller owns the frame and must `close()` it.** A `VideoFrame` holds a
+  /// slot in a small decoder-side pool, so leaking one stalls decoding.
+  async nextFrame(): Promise<VideoFrame | undefined> {
+    const decoder = this.#ensureDecoder();
     let idleTicks = 0;
-    while (
-      delivered < wanted &&
-      offset < this.#source.size &&
-      this.#source.bytesRead - before < SEEK_BUDGET_BYTES
-    ) {
+    // Feed until a frame is ready. Waiting on frames *out* rather than samples
+    // *in* is what makes this correct across a distant key frame: the decoder
+    // reports what it skipped only after decoding it.
+    while (this.#ready.length === 0 && !this.#exhausted) {
+      if (
+        this.#feedOffset >= this.#source.size ||
+        this.#source.bytesRead - this.#budgetFrom > SEEK_BUDGET_BYTES
+      ) {
+        await decoder.flush();
+        this.#exhausted = true;
+        break;
+      }
       // Back-pressure. Catching up from a distant key frame can mean hundreds
       // of frames, and queueing all of them at once would hold the whole span
       // in memory for no gain.
-      while (decoder.decodeQueueSize > MAX_QUEUED_CHUNKS && delivered < wanted) {
+      while (decoder.decodeQueueSize > MAX_QUEUED_CHUNKS && this.#ready.length === 0) {
         await new Promise((resolve) => {
           setTimeout(resolve, 0);
         });
@@ -374,21 +374,46 @@ export class Mp4Video {
           break;
         }
       }
-      if (delivered >= wanted) {
+      if (this.#ready.length > 0) {
         break;
       }
-      const buffer = await this.#source.read(offset, CHUNK_BYTES);
+      const buffer = await this.#source.read(this.#feedOffset, CHUNK_BYTES);
       if (buffer.byteLength === 0) {
+        await decoder.flush();
+        this.#exhausted = true;
         break;
       }
-      const next = this.#file.appendBuffer(MP4BoxBuffer.fromArrayBuffer(buffer, offset));
-      offset = next > offset ? next : offset + buffer.byteLength;
+      const next = this.#file.appendBuffer(MP4BoxBuffer.fromArrayBuffer(buffer, this.#feedOffset));
+      this.#feedOffset = next > this.#feedOffset ? next : this.#feedOffset + buffer.byteLength;
     }
-    await decoder.flush();
-    this.#onOutput = undefined;
+    return this.#ready.shift();
+  }
+
+  /// Seeks and takes the next `wanted` frames — the measurement shape the probe
+  /// reports, on top of the same pull the player uses.
+  async seekAndDecode(
+    seconds: number,
+    wanted: number,
+    onFrame: (frame: VideoFrame) => void,
+  ): Promise<SeekReport> {
+    const before = this.#source.bytesRead;
+    const target = await this.seekTo(seconds);
+    let delivered = 0;
+    let firstTime = Number.NaN;
+    while (delivered < wanted) {
+      const frame = await this.nextFrame();
+      if (!frame) {
+        break;
+      }
+      if (delivered === 0) {
+        firstTime = frame.timestamp / 1_000_000;
+      }
+      delivered += 1;
+      onFrame(frame);
+    }
     return {
-      target: wantedSeconds,
-      skipped,
+      target,
+      skipped: this.#skipped,
       delivered,
       bytesRead: this.#source.bytesRead - before,
       firstTime,
@@ -396,6 +421,10 @@ export class Mp4Video {
   }
 
   close(): void {
+    for (const frame of this.#ready) {
+      frame.close();
+    }
+    this.#ready.length = 0;
     this.#decoder?.close();
     this.#decoder = undefined;
   }
