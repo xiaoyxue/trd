@@ -85,6 +85,33 @@ pub struct VideoRendererDiagnostics {
     pub transfers: TransferCounts,
 }
 
+/// Where a frame's pixels come from.
+///
+/// Native decodes into CPU bytes (an ffmpeg pipe), so it has nothing to avoid.
+/// The browser has already decoded **into GPU memory**, so naming the element
+/// lets the copy stay on the GPU — the difference is a whole frame of traffic at
+/// source resolution, ~99 MB for 4K (#229). One `draw` serves both, so the scene
+/// assembly cannot drift between them.
+pub enum FrameSource<'a> {
+    /// Tightly-packed row-major RGBA8, `width * height * 4` bytes.
+    Rgba(&'a [u8]),
+    /// A browser `<video>` element, copied GPU→GPU.
+    #[cfg(target_arch = "wasm32")]
+    VideoElement(&'a web_sys::HtmlVideoElement),
+}
+
+impl FrameSource<'_> {
+    /// Bytes this source moves CPU→GPU — zero when the frame never leaves the
+    /// GPU, which is exactly what the transfer meter must report.
+    fn upload_bytes(&self) -> usize {
+        match self {
+            Self::Rgba(rgba) => rgba.len(),
+            #[cfg(target_arch = "wasm32")]
+            Self::VideoElement(_) => 0,
+        }
+    }
+}
+
 pub struct VideoPlacementRenderer {
     /// The shared render harness. This type is a **placement** front-end, not a
     /// renderer: it turns the editor's timeline state into layered scenes and hands
@@ -310,7 +337,7 @@ impl VideoPlacementRenderer {
         state: &crate::scene::SceneState,
     ) -> Result<Vec<u8>, String> {
         self.draw(
-            rgba,
+            FrameSource::Rgba(rgba),
             frame_width,
             frame_height,
             calibration_size,
@@ -345,7 +372,7 @@ impl VideoPlacementRenderer {
     #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &mut self,
-        rgba: &[u8],
+        source: FrameSource<'_>,
         frame_width: u32,
         frame_height: u32,
         calibration_size: (u32, u32),
@@ -358,15 +385,25 @@ impl VideoPlacementRenderer {
         state: &crate::scene::SceneState,
     ) -> Result<(), String> {
         // Counted at the transfer site, not inferred from the call: the frame
-        // genuinely crosses CPU→GPU here. `render` adds the readback pair
-        // afterwards, so a `draw`-only frame is left with exactly what it moved.
+        // genuinely crosses CPU→GPU here — or, for a `<video>` element, does not.
+        // `render` adds the readback pair afterwards, so a `draw`-only frame is
+        // left with exactly what it moved.
         self.transfers = TransferCounts {
-            frame_upload: rgba.len(),
+            frame_upload: source.upload_bytes(),
             readback: 0,
             ui_upload: 0,
         };
-        self.renderer
-            .update_frame_texture_rgba(rgba, frame_width, frame_height);
+        match source {
+            FrameSource::Rgba(rgba) => {
+                self.renderer
+                    .update_frame_texture_rgba(rgba, frame_width, frame_height)
+            }
+            #[cfg(target_arch = "wasm32")]
+            FrameSource::VideoElement(video) => {
+                self.renderer
+                    .update_frame_texture_from_video(video, frame_width, frame_height)
+            }
+        }
         let identity_camera = trd_core::FrameParams::IDENTITY
             .to_camera(self.viewport())
             .map_err(|error| error.to_string())?;

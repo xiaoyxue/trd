@@ -161,6 +161,13 @@ pub struct VideoEditingShared {
     /// instead of quietly opening another, which would make the bound texture
     /// come from a device egui knows nothing about.
     shared_gpu: RefCell<Option<std::sync::Arc<trd_core::GpuContext>>>,
+    /// The browser `<video>` element whose decoded frames are copied GPU→GPU.
+    ///
+    /// Handed over once by the JS bootstrap; its presence is what selects the
+    /// zero-upload path. Web-only: native frames arrive from an ffmpeg pipe as
+    /// CPU bytes and have nothing to keep on the GPU (#229).
+    #[cfg(target_arch = "wasm32")]
+    video_element: RefCell<Option<web_sys::HtmlVideoElement>>,
     command: Cell<u8>,
     asset_request: Cell<u8>,
     video_url_request: RefCell<Option<String>>,
@@ -200,6 +207,8 @@ impl Default for VideoEditingShared {
             context: RefCell::new(None),
             skip_readback: Cell::new(false),
             shared_gpu: RefCell::new(None),
+            #[cfg(target_arch = "wasm32")]
+            video_element: RefCell::new(None),
             command: Cell::new(COMMAND_NONE),
             asset_request: Cell::new(0),
             video_url_request: RefCell::new(None),
@@ -268,6 +277,54 @@ impl VideoEditingShared {
             renderer.size(),
             renderer.renderer_generation_key(),
         ))
+    }
+
+    /// Hands over the `<video>` element whose frames are copied GPU→GPU, so the
+    /// render task can present a frame without any pixels crossing the wasm
+    /// boundary. Until this is set the editor uses the RGBA path unchanged.
+    #[cfg(target_arch = "wasm32")]
+    pub fn set_video_element(&self, video: web_sys::HtmlVideoElement) {
+        self.video_element.replace(Some(video));
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn video_element(&self) -> Option<web_sys::HtmlVideoElement> {
+        self.video_element.borrow().clone()
+    }
+
+    /// Publishes a frame that lives **only on the GPU**: the `<video>` element
+    /// holds the pixels, so the editor is told which timeline row is on screen
+    /// and nothing else.
+    ///
+    /// A separate entry point from
+    /// [`update_video_frame_rgba`](Self::update_video_frame_rgba) rather than a
+    /// flag on it, because the two have genuinely different preconditions — this
+    /// one *requires* an empty buffer, and that buffer reaching `epaint` would
+    /// panic if the display path had not been taught to skip it.
+    #[cfg(target_arch = "wasm32")]
+    pub fn present_video_frame(
+        &self,
+        width: u32,
+        height: u32,
+        frame_index: u32,
+        media_time_seconds: f64,
+    ) -> Result<(), String> {
+        if self.video_element.borrow().is_none() {
+            return Err("no <video> element handed over; call setVideoElement first".to_owned());
+        }
+        if width == 0 || height == 0 {
+            return Err(format!("video frame size {width}x{height} is degenerate"));
+        }
+        self.frame.replace(Some(IncomingVideoFrame {
+            rgba: Vec::new(),
+            width,
+            height,
+            frame_index,
+            media_time_seconds,
+            source_generation: self.source_generation.get(),
+        }));
+        self.request_repaint();
+        Ok(())
     }
 
     pub fn update_video_frame_rgba(
@@ -792,7 +849,19 @@ impl VideoEditingApp {
         let background_frame_index = video.frame_index;
         let background_media_time = video.media_time_seconds;
         let render_started = Instant::now();
+        // A frame published by `present_video_frame` carries no pixels: the
+        // `<video>` element still holds them on the GPU, so the source is the
+        // element itself and nothing crosses the wasm boundary.
+        #[cfg(target_arch = "wasm32")]
+        let video_element = shared.video_element().filter(|_| video.rgba.is_empty());
         let render = async move {
+            #[cfg(target_arch = "wasm32")]
+            let source = match video_element.as_ref() {
+                Some(element) => crate::video_editing_renderer::FrameSource::VideoElement(element),
+                None => crate::video_editing_renderer::FrameSource::Rgba(&video.rgba),
+            };
+            #[cfg(not(target_arch = "wasm32"))]
+            let source = crate::video_editing_renderer::FrameSource::Rgba(&video.rgba);
             let result = if shared.skip_readback.get() {
                 // Shared-device path: the rendered texture is bound straight into
                 // egui, so there is nothing to read back. The empty `Vec` is the
@@ -800,7 +869,7 @@ impl VideoEditingApp {
                 // exactly that reason.
                 renderer
                     .draw(
-                        &video.rgba,
+                        source,
                         video.width,
                         video.height,
                         (width, height),

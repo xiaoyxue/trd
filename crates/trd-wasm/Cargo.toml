@@ -33,6 +33,8 @@ wasm-bindgen = "=0.2.126"
 wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = [
     "HtmlCanvasElement",
+    # `setVideoElement` takes the element the editor copies frames from (#229).
+    "HtmlVideoElement",
     "Element",
     "Performance",
     "Window",

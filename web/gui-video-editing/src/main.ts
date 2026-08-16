@@ -47,6 +47,10 @@ async function main(): Promise<void> {
   video.crossOrigin = "anonymous";
   video.hidden = true;
   document.body.append(video);
+  // Handed over once. Every later frame is presented by index: the browser
+  // already decoded it into GPU memory, and Rust copies it GPU→GPU, so no pixels
+  // cross the wasm boundary at all.
+  editor.setVideoElement(video);
 
   let objectUrl: string | undefined;
   let callbackActive = false;
@@ -67,23 +71,15 @@ async function main(): Promise<void> {
     if (generation !== sourceGeneration) {
       return;
     }
-    const frame = new VideoFrame(video, { timestamp: Math.round(mediaTime * 1_000_000) });
-    try {
-      const rgba = new Uint8Array(frame.allocationSize({ format: "RGBA" }));
-      await frame.copyTo(rgba, { format: "RGBA" });
-      if (generation !== sourceGeneration) {
-        return;
-      }
-      editor.updateVideoFrameRgba(
-        rgba,
-        frame.displayWidth,
-        frame.displayHeight,
-        editor.frameIndexAtMediaTime(mediaTime),
-        mediaTime,
-      );
-    } finally {
-      frame.close();
-    }
+    // No `VideoFrame`, no `copyTo`, no `Uint8Array`: the element itself is the
+    // source and Rust copies it on the GPU. Async only so the call sites (which
+    // await it) stay unchanged.
+    editor.presentVideoFrame(
+      video.videoWidth,
+      video.videoHeight,
+      editor.frameIndexAtMediaTime(mediaTime),
+      mediaTime,
+    );
   }
 
   function scheduleVideoFrame(): void {

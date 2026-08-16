@@ -587,6 +587,29 @@ impl Renderer {
         self.frame_plane.upload_rgba(&self.gpu, rgba, width, height);
     }
 
+    /// Copies a browser `<video>` element's current frame into the **background
+    /// frame texture** without it entering CPU memory (#229).
+    ///
+    /// The browser-only counterpart of
+    /// [`update_frame_texture_rgba`](Self::update_frame_texture_rgba): the frame
+    /// is already decoded in GPU memory, so `copy_external_image_to_texture`
+    /// keeps it there instead of paying `copyTo` + the wasm boundary +
+    /// `write_texture` at source resolution. See
+    /// [`FramePlane::copy_video_element`] for why this takes the element rather
+    /// than a `VideoFrame`.
+    ///
+    /// Panics if either dimension is zero.
+    #[cfg(target_arch = "wasm32")]
+    pub fn update_frame_texture_from_video(
+        &mut self,
+        video: &web_sys::HtmlVideoElement,
+        width: u32,
+        height: u32,
+    ) {
+        self.frame_plane
+            .copy_video_element(&self.gpu, video, width, height);
+    }
+
     /// Uploads `image` as the **background frame texture** (#63) sampled by a
     /// scene whose [`Background::frame`](crate::Background::frame) is set. The
     /// GPU texture is reused across frames (grown only on a resolution change).
