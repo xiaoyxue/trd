@@ -159,6 +159,38 @@ impl GpuContext {
         }))
     }
 
+    /// Adopts an **already-created** adapter/device/queue instead of requesting
+    /// its own.
+    ///
+    /// This is what lets a front-end share one GPU device with its UI toolkit
+    /// (`eframe`'s `wgpu_render_state` exposes exactly this trio). Two devices on
+    /// the same adapter cannot share textures, so a shell that renders trd
+    /// content *into* its UI must build the context from the UI's device or pay
+    /// a GPU→CPU→GPU round trip per frame.
+    ///
+    /// The `adopting …` line mirrors [`request`](Self::request)'s `using …`, so
+    /// the log says which path a run took — and a shell that accidentally opens
+    /// a second device is visible as two lines instead of one.
+    ///
+    /// The caller is responsible for the device having the limits trd needs;
+    /// [`request`](Self::request) is still the path for a standalone context.
+    pub fn adopt(adapter: wgpu::Adapter, device: wgpu::Device, queue: wgpu::Queue) -> Arc<Self> {
+        let info = adapter.get_info();
+        log::info!(
+            "adopting {:?} adapter \"{}\" ({:?}), driver: {}",
+            info.backend,
+            info.name,
+            info.device_type,
+            info.driver_info
+        );
+        #[allow(clippy::arc_with_non_send_sync)]
+        Arc::new(Self {
+            adapter,
+            device,
+            queue,
+        })
+    }
+
     /// wgpu-free adapter facts for diagnostics panels.
     ///
     /// Returns a plain trd-core value rather than a front-end type, so the GUI's
