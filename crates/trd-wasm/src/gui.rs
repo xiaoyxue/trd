@@ -464,9 +464,40 @@ impl VideoEditingHandle {
         self.shared.take_asset_request_code()
     }
 
-    #[wasm_bindgen::prelude::wasm_bindgen(js_name = takeVideoUrlRequest)]
-    pub fn take_video_url_request(&self) -> Option<String> {
-        self.shared.take_video_url_request()
+    /// Records what the shell's file picker returned, **without loading it**:
+    /// the dialog stays open so an optional document can be chosen too, and its
+    /// Load button commits both (#264).
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = setPendingVideoSelection)]
+    pub fn set_pending_video_selection(&self, name: String) {
+        self.shared
+            .set_pending_video(Some(trd_gui::video_editing::PendingSource {
+                kind: trd_gui::video_editing::VideoSourceKind::LocalFile,
+                name,
+            }));
+    }
+
+    /// Records the local annotation document the shell's file picker returned.
+    /// **Mock**: nothing is decoded yet (#264).
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = setPendingDocumentSelection)]
+    pub fn set_pending_document_selection(&self, name: String) {
+        self.shared
+            .set_pending_document(Some(trd_gui::video_editing::PendingSource {
+                kind: trd_gui::video_editing::VideoSourceKind::LocalFile,
+                name,
+            }));
+    }
+
+    /// The pending video's URL, or `None` when the selection is a local file the
+    /// shell already holds.
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = pendingVideoUrl)]
+    pub fn pending_video_url(&self) -> Option<String> {
+        self.shared.pending_video().and_then(|source| {
+            matches!(
+                source.kind,
+                trd_gui::video_editing::VideoSourceKind::HttpUrl
+            )
+            .then_some(source.name)
+        })
     }
 
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = takeSeekFrame)]

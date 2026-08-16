@@ -60,10 +60,120 @@ const COMMAND_NONE: u8 = 0;
 const COMMAND_PICK_VIDEO: u8 = 1;
 const COMMAND_PLAY: u8 = 2;
 const COMMAND_PAUSE: u8 = 3;
+const COMMAND_PICK_DOCUMENT: u8 = 4;
+const COMMAND_LOAD_SELECTION: u8 = 5;
+
+/// A source the dialog has **selected but not loaded**.
+///
+/// Picking a file and loading it are separate steps because the annotation
+/// document is optional *and* independent: the user chooses a video, maybe a
+/// document, sees both, and then commits with one Load. A picker that loaded
+/// immediately would make "video + document" impossible to express (#264).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingSource {
+    pub kind: VideoSourceKind,
+    /// A file name (local) or the URL itself. Display text *and* — for a URL —
+    /// what the shell fetches.
+    pub name: String,
+}
+
+/// The annotation-document formats the Open dialog accepts.
+///
+/// Extension matching is a **hint for the file picker only**: the real loader
+/// must sniff magic bytes, because a URL need not carry a useful suffix and a
+/// mislabelled file should still be read correctly (#264).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocumentFormat {
+    ArrowIpc,
+    Parquet,
+}
+
+impl DocumentFormat {
+    pub const EXTENSIONS: [&'static str; 2] = ["arrow", "parquet"];
+
+    /// The format an extension suggests, or `None` for anything else.
+    pub fn from_name(name: &str) -> Option<Self> {
+        let extension = name.rsplit_once('.')?.1.to_ascii_lowercase();
+        match extension.as_str() {
+            "arrow" => Some(Self::ArrowIpc),
+            "parquet" => Some(Self::Parquet),
+            _ => None,
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::ArrowIpc => "Arrow IPC",
+            Self::Parquet => "Parquet",
+        }
+    }
+}
+
+/// One row's status line: the last validation verdict if there is one, else a
+/// plain description of what is currently selected.
+fn selection_label(
+    ui: &mut egui::Ui,
+    status: Option<&Result<String, String>>,
+    fallback: impl FnOnce() -> String,
+) {
+    match status {
+        Some(Ok(message)) => {
+            ui.colored_label(egui::Color32::LIGHT_GREEN, format!("Selected: {message}"));
+        }
+        Some(Err(error)) => {
+            ui.colored_label(egui::Color32::LIGHT_RED, error);
+        }
+        None => {
+            ui.weak(fallback());
+        }
+    }
+}
+
+/// Whether a string is an `http`/`https` URL, the only schemes either source/// accepts — a browser cannot fetch anything else cross-origin, and a `file:`
+/// URL would silently mean the wrong thing on each platform.
+pub fn is_http_url(url: &str) -> bool {
+    url.starts_with("http://") || url.starts_with("https://")
+}
+
+/// Validates a typed annotation-document URL, naming the format its suffix
+/// suggests.
+///
+/// Pure so the dialog's rules are testable without a UI, and so both shells
+/// agree about what is acceptable before anything is fetched.
+pub fn document_url_selection(url: &str) -> Result<DocumentFormat, String> {
+    let url = url.trim();
+    if url.is_empty() {
+        return Err("enter a document URL, or leave it empty to play without one".to_owned());
+    }
+    if !is_http_url(url) {
+        return Err("document URL must start with http:// or https://".to_owned());
+    }
+    // The path, without a query string or fragment — `?v=2` is not an extension.
+    let path = url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(url)
+        .rsplit('/')
+        .next()
+        .unwrap_or(url);
+    DocumentFormat::from_name(path).ok_or_else(|| {
+        format!(
+            "document URL should name a .{} or .{} file",
+            DocumentFormat::EXTENSIONS[0],
+            DocumentFormat::EXTENSIONS[1]
+        )
+    })
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoEditingCommand {
     OpenLocalVideo,
+    /// Pick a local annotation document (`.arrow` / `.parquet`). Optional by
+    /// design: without one the video simply plays (#264).
+    OpenLocalDocument,
+    /// Load what the dialog has selected — the picked local video, plus the
+    /// document if one was chosen. Picking never loads on its own.
+    LoadSelection,
     Play,
     Pause,
 }
@@ -170,7 +280,12 @@ pub struct VideoEditingShared {
     video_element: RefCell<Option<web_sys::HtmlVideoElement>>,
     command: Cell<u8>,
     asset_request: Cell<u8>,
-    video_url_request: RefCell<Option<String>>,
+
+    /// What the dialog has **selected but not yet loaded**. The shells fill the
+    /// local-file entries in (only they run a file picker); the dialog fills in
+    /// URLs itself.
+    pending_video: RefCell<Option<PendingSource>>,
+    pending_document: RefCell<Option<PendingSource>>,
     seek_frame: Cell<i32>,
     video_loaded: Cell<bool>,
     video_playing: Cell<bool>,
@@ -211,7 +326,9 @@ impl Default for VideoEditingShared {
             video_element: RefCell::new(None),
             command: Cell::new(COMMAND_NONE),
             asset_request: Cell::new(0),
-            video_url_request: RefCell::new(None),
+
+            pending_video: RefCell::new(None),
+            pending_document: RefCell::new(None),
             seek_frame: Cell::new(-1),
             video_loaded: Cell::new(false),
             video_playing: Cell::new(false),
@@ -443,6 +560,8 @@ impl VideoEditingShared {
     pub fn take_command(&self) -> Option<VideoEditingCommand> {
         match self.command.replace(COMMAND_NONE) {
             COMMAND_PICK_VIDEO => Some(VideoEditingCommand::OpenLocalVideo),
+            COMMAND_PICK_DOCUMENT => Some(VideoEditingCommand::OpenLocalDocument),
+            COMMAND_LOAD_SELECTION => Some(VideoEditingCommand::LoadSelection),
             COMMAND_PLAY => Some(VideoEditingCommand::Play),
             COMMAND_PAUSE => Some(VideoEditingCommand::Pause),
             _ => None,
@@ -453,8 +572,23 @@ impl VideoEditingShared {
         CatalogAsset::from_code(self.asset_request.replace(0))
     }
 
-    pub fn take_video_url_request(&self) -> Option<String> {
-        self.video_url_request.borrow_mut().take()
+    /// Records what a shell's file picker returned, **without loading it**. The
+    /// dialog shows it and enables Load; nothing happens until Load is pressed.
+    pub fn set_pending_video(&self, source: Option<PendingSource>) {
+        self.pending_video.replace(source);
+    }
+
+    pub fn pending_video(&self) -> Option<PendingSource> {
+        self.pending_video.borrow().clone()
+    }
+
+    /// The optional annotation document selected alongside the video.
+    pub fn set_pending_document(&self, source: Option<PendingSource>) {
+        self.pending_document.replace(source);
+    }
+
+    pub fn pending_document(&self) -> Option<PendingSource> {
+        self.pending_document.borrow().clone()
     }
 
     pub fn take_seek_frame(&self) -> Option<u32> {
@@ -546,6 +680,12 @@ pub struct VideoEditingApp {
     fitted_render_size: (u32, u32),
     show_video_source_dialog: bool,
     video_url: String,
+    /// The URLs being typed, and the last thing the dialog said about each —
+    /// `Ok` describes what is selected, `Err` why it was rejected. Cleared to
+    /// `None` once the row falls back to reporting the pending selection.
+    video_status: Option<Result<String, String>>,
+    document_url: String,
+    document_status: Option<Result<String, String>>,
     pending_seek_target: Option<u32>,
     last_pick_result: Option<Option<u32>>,
     /// The rendered texture bound directly into egui, when the shell shares
@@ -586,6 +726,9 @@ impl VideoEditingApp {
             fitted_render_size: source_size,
             show_video_source_dialog: false,
             video_url: String::new(),
+            video_status: None,
+            document_url: String::new(),
+            document_status: None,
             pending_seek_target: None,
             last_pick_result: None,
             native_texture: None,
@@ -646,40 +789,139 @@ impl VideoEditingApp {
         }
         let mut open = true;
         let mut close = false;
-        egui::Window::new("Open video")
+        egui::Window::new("Open source")
             .collapsible(false)
             .resizable(false)
             .open(&mut open)
             .show(context, |ui| {
-                ui.set_min_width(420.0);
-                ui.label("Select the video matched by this editing document.");
-                if ui.button("Select local file...").clicked() {
-                    self.shared.command.set(COMMAND_PICK_VIDEO);
-                    close = true;
-                }
+                ui.set_min_width(460.0);
+                // The rows scroll; the Load button does not. A dialog whose
+                // commit point can be pushed off-screen by its own explanatory
+                // text is a dialog with no commit point.
+                egui::ScrollArea::vertical()
+                    .max_height(360.0)
+                    .show(ui, |ui| {
+                        self.video_source_row(ui);
+                        ui.separator();
+                        self.document_source_row(ui);
+                    });
                 ui.separator();
-                ui.label("Video URL");
-                let response = ui.add(
-                    egui::TextEdit::singleline(&mut self.video_url)
-                        .hint_text("https://example.com/video.mp4")
-                        .desired_width(f32::INFINITY),
-                );
-                let submit =
-                    response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-                if ui.button("Load URL").clicked() || submit {
-                    let url = self.video_url.trim();
-                    if url.starts_with("https://") || url.starts_with("http://") {
-                        self.shared.video_url_request.replace(Some(url.to_owned()));
-                        close = true;
-                    } else {
-                        self.shared.error.replace(Some(
-                            "video URL must start with http:// or https://".to_owned(),
-                        ));
-                    }
-                }
-                ui.weak("The URL must allow cross-origin video frame access.");
+                close = self.load_row(ui);
             });
         self.show_video_source_dialog = open && !close;
+    }
+
+    /// The video row. Choosing a file or accepting a URL only **selects** it —
+    /// loading waits for the Load button, so a document can be chosen in the
+    /// same visit (#264).
+    fn video_source_row(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Video");
+        ui.label("The video to play. Required.");
+        ui.horizontal(|ui| {
+            if ui.button("Select local file...").clicked() {
+                self.shared.command.set(COMMAND_PICK_VIDEO);
+            }
+            if ui.button("Clear").clicked() {
+                self.video_url.clear();
+                self.video_status = None;
+                self.shared.set_pending_video(None);
+            }
+        });
+
+        ui.label("Video URL");
+        let response = ui.add(
+            egui::TextEdit::singleline(&mut self.video_url)
+                .hint_text("https://example.com/video.mp4")
+                .desired_width(f32::INFINITY),
+        );
+        let submit = response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+        if ui.button("Use this URL").clicked() || submit {
+            let url = self.video_url.trim().to_owned();
+            self.video_status = Some(if is_http_url(&url) {
+                self.shared.set_pending_video(Some(PendingSource {
+                    kind: VideoSourceKind::HttpUrl,
+                    name: url.clone(),
+                }));
+                Ok(url)
+            } else {
+                Err("video URL must start with http:// or https://".to_owned())
+            });
+        }
+        selection_label(ui, self.video_status.as_ref(), || {
+            match self.shared.pending_video() {
+                Some(source) => format!("Selected: {}", source.name),
+                None => "No video selected".to_owned(),
+            }
+        });
+        ui.weak("A URL must allow cross-origin video frame access.");
+    }
+
+    /// The **optional** annotation-document row: a single `.arrow` or `.parquet`,
+    /// local or over HTTP, plus Clear.
+    ///
+    /// Mock for now — it validates and reports what *would* be loaded. Landing
+    /// the shape first keeps the loading slices free of layout churn (#264).
+    fn document_source_row(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Annotation document (optional)");
+        ui.label("Arrow IPC or Parquet rows naming the frames that carry placement data.");
+        ui.weak("Without one the video simply plays; with one, those frames become editable.");
+
+        ui.horizontal(|ui| {
+            if ui.button("Select local file...").clicked() {
+                self.shared.command.set(COMMAND_PICK_DOCUMENT);
+            }
+            if ui.button("Clear").clicked() {
+                self.document_url.clear();
+                self.document_status = None;
+                self.shared.set_pending_document(None);
+            }
+        });
+
+        ui.label("Document URL");
+        let response = ui.add(
+            egui::TextEdit::singleline(&mut self.document_url)
+                .hint_text("https://example.com/shot.parquet")
+                .desired_width(f32::INFINITY),
+        );
+        let submit = response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+        if ui.button("Use this URL").clicked() || submit {
+            let url = self.document_url.trim().to_owned();
+            self.document_status = Some(match document_url_selection(&url) {
+                Ok(format) => {
+                    self.shared.set_pending_document(Some(PendingSource {
+                        kind: VideoSourceKind::HttpUrl,
+                        name: url.clone(),
+                    }));
+                    Ok(format!("{url} · {}", format.label()))
+                }
+                Err(error) => Err(error),
+            });
+        }
+        selection_label(ui, self.document_status.as_ref(), || {
+            match self.shared.pending_document() {
+                Some(source) => format!("Selected: {}", source.name),
+                None => "No document — the video plays as-is".to_owned(),
+            }
+        });
+        ui.weak("Format is decided by the file's contents, not its name.");
+    }
+
+    /// The single commit point. Disabled until a video is selected, because a
+    /// document alone has nothing to annotate. Returns whether it was pressed,
+    /// so the dialog closes only on an actual load.
+    fn load_row(&mut self, ui: &mut egui::Ui) -> bool {
+        let ready = self.shared.pending_video().is_some();
+        let clicked = ui
+            .add_enabled(ready, egui::Button::new("Load"))
+            .on_disabled_hover_text("Select a video first — the document is optional")
+            .clicked();
+        if clicked {
+            self.shared.command.set(COMMAND_LOAD_SELECTION);
+        }
+        if !ready {
+            ui.weak("Load becomes available once a video is selected.");
+        }
+        clicked
     }
 
     fn set_display_frame(&mut self, rendered: RenderedVideoFrame) {
@@ -1402,6 +1644,85 @@ pub(super) mod tests {
         shared.seek_frame.set(42);
         assert_eq!(shared.take_seek_frame(), Some(42));
         assert_eq!(shared.take_seek_frame(), None);
+    }
+
+    /// The document row's rules, pinned without a UI: what the dialog accepts is
+    /// what both shells will have to accept when the loading path is real.
+    #[test]
+    fn document_url_selection_names_the_format_or_says_why_not() {
+        assert_eq!(
+            document_url_selection("https://example.com/shot.parquet"),
+            Ok(DocumentFormat::Parquet)
+        );
+        assert_eq!(
+            document_url_selection("  http://example.com/a/b/shot.ARROW  "),
+            Ok(DocumentFormat::ArrowIpc),
+            "extensions are case-insensitive and the input is trimmed"
+        );
+        assert_eq!(
+            document_url_selection("https://example.com/shot.arrow?v=2#row"),
+            Ok(DocumentFormat::ArrowIpc),
+            "a query string is not part of the extension"
+        );
+
+        // An empty box is not an error state: no document is the default.
+        assert!(document_url_selection("").is_err());
+        assert!(document_url_selection("file:///tmp/shot.arrow").is_err());
+        assert!(document_url_selection("https://example.com/shot.mp4").is_err());
+    }
+
+    #[test]
+    fn document_format_follows_the_extension_only_as_a_hint() {
+        assert_eq!(
+            DocumentFormat::from_name("fiba-shot1.arrow"),
+            Some(DocumentFormat::ArrowIpc)
+        );
+        assert_eq!(
+            DocumentFormat::from_name("tracks.Parquet"),
+            Some(DocumentFormat::Parquet)
+        );
+        assert_eq!(DocumentFormat::from_name("tracks"), None);
+        assert_eq!(DocumentFormat::from_name("tracks.csv"), None);
+    }
+
+    #[test]
+    fn picking_a_document_is_its_own_command() {
+        let shared = VideoEditingShared::default();
+        shared.command.set(COMMAND_PICK_DOCUMENT);
+        assert_eq!(
+            shared.take_command(),
+            Some(VideoEditingCommand::OpenLocalDocument)
+        );
+        shared.command.set(COMMAND_LOAD_SELECTION);
+        assert_eq!(
+            shared.take_command(),
+            Some(VideoEditingCommand::LoadSelection)
+        );
+    }
+
+    /// Selecting is not loading, and the two sources are independent: clearing
+    /// the document must leave the video's selection alone (#264).
+    #[test]
+    fn pending_sources_are_selected_independently() {
+        let shared = VideoEditingShared::default();
+        assert_eq!(shared.pending_video(), None);
+
+        shared.set_pending_video(Some(PendingSource {
+            kind: VideoSourceKind::LocalFile,
+            name: "shot.mp4".to_owned(),
+        }));
+        shared.set_pending_document(Some(PendingSource {
+            kind: VideoSourceKind::HttpUrl,
+            name: "https://example.com/shot.parquet".to_owned(),
+        }));
+
+        shared.set_pending_document(None);
+        assert_eq!(
+            shared.pending_video().map(|source| source.name).as_deref(),
+            Some("shot.mp4"),
+            "clearing the document dropped the video selection"
+        );
+        assert_eq!(shared.pending_document(), None);
     }
 
     #[test]
