@@ -286,6 +286,116 @@ fn draw_then_read_pixels_matches_render_layers() {
     );
 }
 
+/// A shell that shares trd's device must be able to **sample** the rendered
+/// target, and get exactly the bytes `read_pixels` would have handed back.
+///
+/// This is the sRGB trap, pinned. `TEXTURE_TARGET_FORMAT` is `Rgba8UnormSrgb`,
+/// which the GPU *linearizes on sample*, while the stored texels are already
+/// gamma-encoded — so a view in the texture's own format would gamma-correct a
+/// second time and wash the image out (this was hit for real). `create_view`
+/// therefore returns an `Rgba8Unorm` view, and the blit below goes
+/// `Rgba8Unorm` → `Rgba8Unorm` so a mismatch can only come from the sampled
+/// interpretation, not from the copy.
+///
+/// It also pins the two capabilities the view depends on: `TEXTURE_BINDING`
+/// usage (or building the blit bind group is a validation error) and the
+/// `Rgba8Unorm` entry in `view_formats` (or `create_view` is).
+#[test]
+#[ignore = "requires a GPU adapter"]
+#[cfg(not(target_arch = "wasm32"))]
+fn the_target_view_samples_the_bytes_read_pixels_returns() {
+    let (width, height) = (32, 24);
+    let mut renderer = single(TEXTURE_TARGET_FORMAT, &Mesh::hello_triangle());
+    let source = renderer
+        .create_texture_target(width, height)
+        .expect("source target");
+    let sampled = renderer
+        .create_texture_target(width, height)
+        .expect("destination target");
+
+    let scene: Scene = [DrawableObject::mesh(
+        0,
+        Matrix4::IDENTITY,
+        RenderMode::Filled,
+    )]
+    .into_iter()
+    .collect();
+    let expected =
+        pollster::block_on(renderer.render_params(FrameParams::IDENTITY, &scene, &source))
+            .expect("renders");
+
+    let gpu = renderer.gpu().clone();
+    let blitter = wgpu::util::TextureBlitter::new(&gpu.device, wgpu::TextureFormat::Rgba8Unorm);
+    let mut encoder = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("trd target view sampling test"),
+        });
+    blitter.copy(
+        &gpu.device,
+        &mut encoder,
+        &source.create_view(),
+        &sampled.create_view(),
+    );
+    gpu.queue.submit([encoder.finish()]);
+
+    let actual = pollster::block_on(renderer.read_pixels(&sampled)).expect("sampled readback");
+
+    assert!(
+        expected.chunks_exact(4).any(|px| px[..3] != [0, 0, 0]),
+        "the test scene drew nothing, so the comparison is vacuous"
+    );
+    assert_eq!(
+        actual, expected,
+        "sampling the target's view changed its texels — the gamma space is wrong"
+    );
+}
+
+/// `GpuContext::adopt` must produce a context that renders exactly like one
+/// `request` built — that is the whole claim a shell relies on when it hands
+/// trd its UI toolkit's device instead of letting trd open a second one.
+#[test]
+#[ignore = "requires a GPU adapter"]
+#[cfg(not(target_arch = "wasm32"))]
+fn an_adopted_context_renders_like_a_requested_one() {
+    let (width, height) = (48, 32);
+    let meshes = [Mesh::hello_triangle()];
+    let scene: Scene = [DrawableObject::mesh(
+        0,
+        Matrix4::IDENTITY,
+        RenderMode::Filled,
+    )]
+    .into_iter()
+    .collect();
+
+    let requested = test_gpu();
+    let (mut owned, owned_target) = Renderer::with_gpu(requested.clone(), width, height, &meshes)
+        .expect("the harness accepts an existing device");
+    let expected =
+        pollster::block_on(owned.render_params(FrameParams::IDENTITY, &scene, &owned_target))
+            .expect("renders");
+
+    // The trio a front-end hands over — `eframe`'s `wgpu_render_state` exposes
+    // exactly these three, already cloned out of its own render state.
+    let adopted = GpuContext::adopt(
+        requested.adapter.clone(),
+        requested.device.clone(),
+        requested.queue.clone(),
+    );
+    assert_eq!(adopted.adapter_facts(), requested.adapter_facts());
+
+    let (mut shared, shared_target) = Renderer::with_gpu(adopted, width, height, &meshes)
+        .expect("an adopted context builds a renderer");
+    let actual =
+        pollster::block_on(shared.render_params(FrameParams::IDENTITY, &scene, &shared_target))
+            .expect("renders");
+
+    assert_eq!(
+        actual, expected,
+        "an adopted device rendered a different frame than a requested one"
+    );
+}
+
 /// `render_layers` must reproduce the fixed-arity passes exactly, and composite.
 ///
 /// The video editor builds a frame from three passes through two different camera

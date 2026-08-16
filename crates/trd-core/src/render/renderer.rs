@@ -459,6 +459,15 @@ impl Renderer {
         self.meshes.len()
     }
 
+    /// The GPU context this harness renders on.
+    ///
+    /// Exposed so a shell can build further resources — or bind the rendered
+    /// texture into its UI toolkit — on the **same** device the frame was drawn
+    /// with, rather than opening a second one.
+    pub fn gpu(&self) -> &Arc<GpuContext> {
+        &self.gpu
+    }
+
     /// Binds `texture` as the albedo of **mesh 0** — the single-mesh /
     /// wire-protocol default sampled by [`RenderMode::Textured`]/[`RenderMode::Shaded`]
     /// draws (#20). For a multi-object scene, skin each object with

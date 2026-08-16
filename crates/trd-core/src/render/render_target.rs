@@ -142,8 +142,16 @@ impl TextureTarget {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: TEXTURE_TARGET_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::TEXTURE_BINDING,
+            // A non-sRGB view of the same texels, so a shell can bind the target
+            // directly. `TEXTURE_TARGET_FORMAT` is sRGB, which the GPU would
+            // *linearize* on sample — but the bytes are already gamma-encoded
+            // (that is exactly what `read_pixels` hands back), and egui-wgpu
+            // documents that it wants `Rgba8Unorm`, i.e. gamma space. Sampling
+            // through the sRGB view would gamma-correct a second time.
+            view_formats: &[wgpu::TextureFormat::Rgba8Unorm],
         });
 
         let unpadded = width
@@ -193,6 +201,26 @@ impl TextureTarget {
             width: self.width(),
             height: self.height(),
         }
+    }
+
+    /// A sampleable view of the rendered texture, in **gamma space**.
+    ///
+    /// Lets a shell that shares trd's `wgpu::Device` bind the rendered frame
+    /// **directly** — `egui_wgpu::Renderer::register_native_texture` turns this
+    /// into an `egui::TextureId` — instead of reading the pixels back and
+    /// re-uploading them through the UI toolkit. Only meaningful when the
+    /// toolkit and trd are on the same device; a reader on a private device must
+    /// still use [`read_pixels`](super::Renderer::read_pixels).
+    ///
+    /// The view is `Rgba8Unorm`, **not** the target's sRGB format: the stored
+    /// texels are already gamma-encoded, so sampling them through the sRGB view
+    /// would linearize them a second time and wash the image out. These are the
+    /// same bytes `read_pixels` returns.
+    pub fn create_view(&self) -> wgpu::TextureView {
+        self.texture.create_view(&wgpu::TextureViewDescriptor {
+            format: Some(wgpu::TextureFormat::Rgba8Unorm),
+            ..Default::default()
+        })
     }
 
     /// The texture a frame is drawn into.
