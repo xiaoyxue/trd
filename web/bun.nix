@@ -121,6 +121,10 @@
     url = "https://registry.npmjs.org/lodash.camelcase/-/lodash.camelcase-4.3.0.tgz";
     hash = "sha512-TwuEnCnxbc3rAvhf/LbG7tJUDzhqXyFnv3dtzLOPgCG/hODL7WFnsbwktkD7yUV0RrreP/l1PALq/YSg6VvjlA==";
   };
+  "mp4box@2.4.1" = fetchurl {
+    url = "https://registry.npmjs.org/mp4box/-/mp4box-2.4.1.tgz";
+    hash = "sha1-mj6VJ95/v4AgjIw6dmvBJcoBw0s=";
+  };
   "supports-color@7.2.0" = fetchurl {
     url = "https://registry.npmjs.org/supports-color/-/supports-color-7.2.0.tgz";
     hash = "sha512-qpCAvRl9stuOHveKsn7HncJRvv501qIacKzQlO/+Lwxc9+0q2wLyv4Dfvt80/DPn2pqOBsJdDiogXGR9+OvwRw==";

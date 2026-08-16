@@ -19,8 +19,13 @@ const portFlag = args.indexOf("--port");
 const port = Number(portFlag >= 0 ? args[portFlag + 1] : (process.env.PORT ?? 8090));
 const rootArg = args.find((value, index) => !value.startsWith("--") && index !== portFlag + 1);
 // `new URL(dir, import.meta.url)` mis-reads an absolute Windows path — `D:` is
-// parsed as a URL scheme — so resolve through the filesystem instead.
-const root = rootArg ? pathToFileURL(`${resolve(rootArg)}\\`) : new URL("./data/", import.meta.url);
+// parsed as a URL scheme — so resolve through the filesystem instead. The
+// trailing `/` is what makes it a *base directory*: without it `new URL(name,
+// root)` would replace the last segment and serve the parent instead. It has to
+// be a `/` rather than the platform separator, because by then this is a URL.
+const root = rootArg
+  ? new URL(`${pathToFileURL(resolve(rootArg)).href}/`)
+  : new URL("./data/", import.meta.url);
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
