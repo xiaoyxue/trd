@@ -31,7 +31,17 @@ trd.video_edit.table.kind = timeline
 ```
 
 Schema metadata records source name, MIME/codec, SHA-256, byte length,
-dimensions, frame rate, frame count, and duration. The single timeline table is
+dimensions, frame rate, frame count, and duration.
+
+It is read from **Arrow IPC streams or Parquet**, whichever the bytes turn out to
+be. The container is sniffed (`PAR1` at both ends versus the Arrow IPC
+continuation marker), never taken from the file name — a URL need not carry a
+useful suffix, and a mislabelled file is read for what it is. Parquet carries
+schema key-value metadata, so the version and table-kind contract above is
+identical either way, and both readers feed one decoder: the same rows in either
+container produce the same document.
+
+The single timeline table is
 **sparse** — it holds a row only for the frames that carry an ad-placement quad,
 because those are the only frames the editor can act on. Everything else is
 ordinary video and is played as such:

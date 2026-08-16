@@ -16,6 +16,12 @@ an ad-placement quad — for FIBA shot 1 that is frames 0-221 of 288, so the
 - an optional encoded poster, on the first row only;
 - video identity/size/fps/count/digest in schema metadata.
 
+It may be **Arrow IPC or Parquet**: the container is sniffed from the bytes
+(`PAR1` at both ends versus the Arrow IPC continuation marker), never from the
+file name, so a URL without a useful suffix and a mislabelled file both work.
+Parquet keeps schema key-value metadata, so the version and table-kind contract
+is the same either way.
+
 Without a document the editor is a plain player: the timeline comes from the
 video container and the placement UI stays inert. With one, the left pane lists
 the derived **shots** (runs of consecutive annotated frames), jumps to a shot's

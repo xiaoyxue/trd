@@ -25,6 +25,20 @@ gltf-rs = { package = "gltf", version = "1.4.1", default-features = false, featu
 ] }
 arrow = { version = "59", default-features = false, features = ["ipc", "canonical_extension_types"] }
 arrow-schema = { version = "59", default-features = false, features = ["canonical_extension_types"] }
+# Annotation documents also arrive as Parquet, which is what tracking and
+# calibration pipelines emit (#264 N4). `default-features = false` is what keeps
+# this crate wasm-compatible: the defaults add `zstd`, `lz4` and `brotli`, whose
+# C shims do not cross-compile.
+#
+# `snap` is not optional in practice — it is pyarrow's default compression, so a
+# file written by any normal producer needs it — and it is pure Rust, so it
+# builds for wasm32. A file using one of the other codecs is rejected with
+# parquet's own "Disabled feature at compile time" message rather than failing
+# the build for everyone.
+parquet = { version = "59", default-features = false, features = ["arrow", "snap"] }
+# The parquet reader takes a `ChunkReader`, implemented for `Bytes` and `File`;
+# only the former works on wasm. Cargo unifies this with parquet's own copy.
+bytes = "1"
 # OBJ is trd's default mesh format; `tobj` is the popular pure-Rust loader
 # (wasm-compatible). `default-features = false` drops the `ahash` feature for a
 # leaner wasm build (falls back to std hashing).
