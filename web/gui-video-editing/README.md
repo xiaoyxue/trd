@@ -57,6 +57,11 @@ uv run --with pyarrow scripts\fiba_video_editing_bundle.py `
 
 ## Run
 
+Requires a **WebGPU-capable browser** (Chrome/Edge 113+, or Firefox with WebGPU
+enabled): egui itself now runs on WebGPU through `egui-wgpu`, so there is no
+WebGL fallback — a browser without WebGPU fails outright rather than degrading
+(#257).
+
 ```sh
 cd web
 bun run --cwd viewer build:wasm  # stage the workspace's trd-wasm file dependency
