@@ -532,6 +532,11 @@ impl VideoEditingShared {
             self.needs_overlay.set(false);
             self.render_in_flight_frame.set(None);
             self.video_media.set(VideoMediaObservation::default());
+            // Resident frames are keyed by index into the *old* timeline, so a
+            // new source makes every one of them wrong.
+            if let Some(renderer) = self.renderer.borrow_mut().as_mut() {
+                renderer.invalidate_frame_ring();
+            }
         }
         self.video_loaded.set(loaded);
         self.video_playing.set(playing);
@@ -1251,13 +1256,28 @@ impl VideoEditingApp {
         #[cfg(target_arch = "wasm32")]
         let video_frame = shared.video_frame().filter(|_| video.rgba.is_empty());
         let render = async move {
+            // Ask the ring first. A frame it still holds is presented by a
+            // 16-byte uniform write, so an overlay-only repaint — a gizmo drag,
+            // a selection, a panel toggle, none of which change the video frame
+            // — and a scrub back over frames just played both move no frame
+            // bytes at all. This is deliberately platform-agnostic: native
+            // saves a `write_texture` of CPU bytes, the browser saves a
+            // GPU→GPU copy, and neither has to decode.
+            let resident = renderer.present_resident_frame(background_frame_index);
             #[cfg(target_arch = "wasm32")]
-            let source = match video_frame.as_ref() {
-                Some(frame) => crate::video_editing_renderer::FrameSource::VideoFrame(frame),
-                None => crate::video_editing_renderer::FrameSource::Rgba(&video.rgba),
+            let source = match (resident, video_frame.as_ref()) {
+                (true, _) => crate::video_editing_renderer::FrameSource::Resident,
+                (false, Some(frame)) => {
+                    crate::video_editing_renderer::FrameSource::VideoFrame(frame)
+                }
+                (false, None) => crate::video_editing_renderer::FrameSource::Rgba(&video.rgba),
             };
             #[cfg(not(target_arch = "wasm32"))]
-            let source = crate::video_editing_renderer::FrameSource::Rgba(&video.rgba);
+            let source = if resident {
+                crate::video_editing_renderer::FrameSource::Resident
+            } else {
+                crate::video_editing_renderer::FrameSource::Rgba(&video.rgba)
+            };
             let result = if shared.skip_readback.get() {
                 // Shared-device path: the rendered texture is bound straight into
                 // egui, so there is nothing to read back. The empty `Vec` is the
@@ -1268,6 +1288,7 @@ impl VideoEditingApp {
                         source,
                         video.width,
                         video.height,
+                        background_frame_index,
                         (width, height),
                         background_frame.as_ref(),
                         quad_model,
@@ -1284,6 +1305,7 @@ impl VideoEditingApp {
                         &video.rgba,
                         video.width,
                         video.height,
+                        background_frame_index,
                         (width, height),
                         background_frame.as_ref(),
                         quad_model,
@@ -2112,6 +2134,7 @@ pub(super) mod tests {
                 msaa_samples: 4,
                 asset: None,
                 transfers: crate::video_editing_renderer::TransferCounts::default(),
+                frame_ring: trd_core::FrameRingStats::default(),
             },
         }
     }

@@ -70,6 +70,7 @@ pub use draw_config::{FrameFit, GridPlane, RenderMode};
 pub use drawable::{DrawableObject, Primitive};
 pub use env_map::{EnvMapData, ImageBasedLighting};
 pub use frame_params::{CameraFormError, FrameParams, Viewport};
+pub use frame_plane::FrameRingStats;
 pub(crate) use gpu_context::LimitsPreset;
 pub use gpu_context::{create_instance, AdapterFacts, GpuContext, GpuInitError, GpuRequest};
 pub use gpu_types::Vertex;

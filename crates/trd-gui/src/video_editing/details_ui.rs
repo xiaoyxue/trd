@@ -545,6 +545,18 @@ fn renderer_rows(video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut dy
         r.row("  ui upload", &bytes_label(transfers.ui_upload));
         r.row("  total / frame", &bytes_label(transfers.total_bytes()));
     }
+    // GPU frame ring (#229): `hits` counts frames presented straight from VRAM,
+    // with no decode and no upload.
+    if let Some(ring) = renderer.map(|renderer| renderer.frame_ring) {
+        r.row(
+            "frame ring",
+            &format!("{}/{} resident", ring.resident, ring.capacity),
+        );
+        r.row(
+            "  hits / misses",
+            &format!("{} / {}", ring.hits, ring.misses),
+        );
+    }
     r.row(
         "MSAA",
         &renderer.map_or_else(
