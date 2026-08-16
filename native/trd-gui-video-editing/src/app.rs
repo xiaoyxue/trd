@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -49,6 +50,27 @@ pub struct NativeVideoEditingApp {
     /// [`PendingSource`](trd_gui::video_editing::PendingSource) names.
     picked_video: Option<PathBuf>,
     picked_document: Option<PathBuf>,
+}
+
+/// Downloads an annotation document over HTTP(S).
+///
+/// A blocking one-shot rather than a client the app holds: a document is fetched
+/// at most once per Open, and the UI thread is already blocked by the file
+/// dialog next to it. The size cap keeps a mistyped URL from streaming a video
+/// into memory — an annotation document is kilobytes to a few megabytes.
+fn fetch_document(url: &str) -> Result<Vec<u8>, String> {
+    const MAX_BYTES: u64 = 256 * 1024 * 1024;
+    let mut response = ureq::get(url)
+        .call()
+        .map_err(|error| format!("{url}: {error}"))?;
+    let mut bytes = Vec::new();
+    response
+        .body_mut()
+        .as_reader()
+        .take(MAX_BYTES)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("{url}: {error}"))?;
+    Ok(bytes)
 }
 
 /// The render-target size a preview uses before any frame has been decoded.
@@ -308,7 +330,10 @@ impl NativeVideoEditingApp {
     }
 
     /// Loads whatever the dialog selected: the picked local video or the typed
-    /// URL, plus — once the loading path exists — the optional document.
+    /// URL, plus the optional annotation document.
+    ///
+    /// Both are applied in one act, so "open this video *with* this document" is
+    /// expressible — which is why picking never loads on its own (#264).
     fn load_selection(&mut self) {
         let Some(pending) = self.shared.pending_video() else {
             return;
@@ -321,11 +346,39 @@ impl NativeVideoEditingApp {
             VideoSourceKind::HttpUrl => NativeVideoSource::Url(pending.name),
         };
         self.open_video_source(source);
-        if let Some(path) = &self.picked_document {
-            log::info!(
-                "annotation document {} selected but not loaded yet (#264)",
-                path.display()
-            );
+        self.load_selected_document();
+    }
+
+    /// Reads the selected annotation document — a local file or an HTTP(S) URL —
+    /// and hands its bytes to the editor.
+    ///
+    /// A failure is reported and **leaves the current document in place**: a
+    /// mistyped URL should not empty the editor.
+    fn load_selected_document(&mut self) {
+        let Some(pending) = self.shared.pending_document() else {
+            // Load applies the *whole* selection: no document selected means the
+            // video plays unannotated, even if one was loaded before. Keeping a
+            // document authored against a different source would be worse than
+            // dropping it (#264).
+            self.shared.clear_document();
+            self.picked_document = None;
+            return;
+        };
+        let bytes = match pending.kind {
+            VideoSourceKind::LocalFile => {
+                let Some(path) = self.picked_document.clone() else {
+                    return;
+                };
+                std::fs::read(&path).map_err(|error| format!("{}: {error}", path.display()))
+            }
+            VideoSourceKind::HttpUrl => fetch_document(&pending.name),
+        };
+        let result = bytes.and_then(|bytes| self.shared.load_document_bytes(&bytes));
+        match result {
+            Ok(()) => log::info!("annotation document loaded from {}", pending.name),
+            Err(error) => self
+                .shared
+                .set_error(format!("annotation document: {error}")),
         }
     }
 

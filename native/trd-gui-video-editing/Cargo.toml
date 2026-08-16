@@ -24,3 +24,4 @@ log = "0.4"
 pollster = "0.4"
 rfd = "0.17.2"
 thiserror = "2"
+ureq = { version = "3.4.0", default-features = false, features = ["rustls"] }
