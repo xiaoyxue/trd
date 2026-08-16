@@ -34,7 +34,7 @@ trd-placement.workspace = true
 # derive-macro dep is a general dependency, not native-only.
 thiserror = "2"
 # egui/log are shared by the native window and the wasm (eframe-web) app.
-egui = "0.35"
+egui = "0.36.1"
 log = "0.4"
 # `std::time::Instant` panics on `wasm32-unknown-unknown`, so the shared
 # video-editing render-latency diagnostic uses `web-time`'s drop-in `Instant`:
@@ -55,14 +55,21 @@ serde_json = "1"
 # The browser target (Slice 4, #97): eframe-on-canvas UI + trd-core rendering the
 # scene offscreen (wgpu 30) to RGBA shown as an egui texture (Strategy A). Mirrors
 # trd-wasm's wasm-only dep set; trd-core's `MeshRenderer` is available on wasm.
+#
+# egui runs on **WebGPU** here (`eframe`'s `wgpu` feature), not WebGL2 (`glow`):
+# eframe 0.36's `egui-wgpu` is on `wgpu 30`, the same major trd-core uses, so one
+# graphics API — and eventually one device — serves both (#257). Without
+# `egui-wgpu/webgl` there is no WebGL fallback: a browser without WebGPU fails
+# outright. Deliberate — trd's rendering needs WebGPU regardless, so a fallback
+# could only draw UI chrome around a dead canvas.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-eframe = { version = "0.35", default-features = false, features = [
-    "glow",
+eframe = { version = "0.36.1", default-features = false, features = [
+    "wgpu",
     "default_fonts",
 ] }
 wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = ["HtmlCanvasElement", "Element", "Window"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-eframe = "0.35"
+eframe = "0.36.1"
 pollster = "0.4"

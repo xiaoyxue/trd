@@ -24,7 +24,8 @@ the native viewer reads — no copies). If `pkg/` is already built, `bun run ser
 skips the wasm rebuild. `pkg/`, `dist/`, `node_modules/` are generated (gitignored).
 
 Requires a **WebGPU-capable browser** (Chrome/Edge 113+, or Firefox with WebGPU
-enabled) for `trd-core`'s offscreen wgpu renderer.
+enabled) for `trd-core`'s offscreen wgpu renderer — and for egui itself, which
+runs on WebGPU through `egui-wgpu` since #257. There is no WebGL fallback.
 
 ## Scene URL params (browser equivalents of the native flags)
 

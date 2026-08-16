@@ -41,7 +41,7 @@ Slices 0–3**; the Arrow round-trip and wasm land as their own follow-up PRs.
   `apply_materials` state→scene assembly), `app.rs` (egui panels), `cli.rs` (`--mesh` /
   `--texture` / `--width` / `--height`, built-in default cube). Render modes
   Filled / Wireframe / **Textured** (`--texture` binds an albedo, downscaled to
-  the renderer's 2048² limit). Deps: `eframe`/`egui` 0.35 (glow), `trd-core`,
+  the renderer's 2048² limit). Deps: `eframe`/`egui` 0.36 (wgpu), `trd-core`,
   `clap`, `thiserror`, `image`. Native-only (empty `main` on wasm, like
   trd-app); the pure `scene`/`interaction` modules still compile on wasm.
 - **Verification:** unit tests (scene/interaction/cli/renderer, no GPU)
@@ -140,28 +140,34 @@ egui/eframe owns **its own** UI renderer, and trd-core renders the scene
 egui texture** shown in the central panel. Only **CPU pixels** cross between the
 two, so the version gap is irrelevant.
 
-**Realized with eframe's default `glow` (OpenGL) backend** for the UI — since
-only CPU RGBA is handed over, egui's renderer is fully independent of trd-core's
-`wgpu 30`, and we avoid pulling a *second* wgpu (29) into the build entirely.
-(eframe's optional `wgpu` backend is still resolved in `Cargo.lock` but stays
-inactive.) On wasm the same holds with eframe's WebGL renderer while trd-core
-uses WebGPU.
+**Realized on eframe's `wgpu` backend** (egui 0.36 / `egui-wgpu` 0.36.1, which
+depends on the same **wgpu 30** trd-core uses). Until then egui ran on `glow`
+(OpenGL) natively and on WebGL in the browser, because eframe 0.35 pulled
+**wgpu 29** — a second, incompatible copy of the whole `wgpu-core`/`wgpu-hal`
+stack. Aligning on 0.36.1 (#257) leaves exactly one `wgpu 30` in `Cargo.lock`
+and one graphics API per platform: Vulkan natively, **WebGPU** in the browser.
+The handoff is still CPU RGBA at this point — sharing the *device* is the next
+slice of #229 — but the version gap that made sharing impossible is gone.
+
+> No WebGL2 fallback: the wasm build takes `eframe`'s `wgpu` feature without
+> `egui-wgpu/webgl`, so a browser without WebGPU fails outright rather than
+> degrading. Deliberate — trd's rendering needs WebGPU regardless, so a fallback
+> could only draw UI chrome around a dead canvas.
 
 This is *exactly the loop the request describes* — "generate new arrow with
 computed model matrix → render again → send the output to trd-gui" — and it
 works today.
 
-Cost: on native, egui runs on OpenGL while trd-core runs on Vulkan/wgpu (two
-independent graphics contexts in one process); one GPU→CPU→GPU readback per
-updated frame. Both are acceptable (we only re-render on change).
+Cost: one GPU→CPU→GPU readback per updated frame, and — until #229's device
+sharing lands — two devices on the same adapter, since egui and trd-core each
+request their own. Both are acceptable (we only re-render on change).
 
-### Strategy B — shared-surface egui overlay  ⏳ future
+### Strategy B — shared-surface egui overlay  ⏳ in progress (#229)
 
-When egui releases a wgpu-30-compatible version, trd-gui can share one device:
-trd-core's `SceneRenderer::encode` paints the scene into the swapchain view, then
-`egui-wgpu` paints the UI on top in the same command encoder — zero-copy, live.
-Track upstream egui and migrate then. The §5 design keeps the render backend
-behind a trait so this is a drop-in later.
+egui 0.36's `egui-wgpu` is on **wgpu 30**, so a shared device is finally
+expressible: trd-gui adopts eframe's adapter/device/queue and binds the rendered
+texture straight into egui, dropping the readback and the UI re-upload. The §5
+design keeps the render backend behind a trait, so this is a drop-in.
 
 ## 5. The interaction loop (core of the request)
 
@@ -354,9 +360,9 @@ scene authoring, and the image-display texture. All pixels come from trd-core.
   `hover_pos` relative to the image rect → `InteractionEvent` → controller →
   re-render. Re-render only when state changed (idle otherwise, like trd-app's
   `WaitUntil` pacing).
-* **wasm**: egui on the canvas; trd-core (wasm) `arrow_renderer` renders
-  offscreen → RGBA → egui texture. Enable wgpu `webgpu` + `webgl` features for
-  browser fallback. Same decoupled model as native (Strategy A).
+* **wasm**: egui on the canvas (on **WebGPU** via `egui-wgpu`, no WebGL
+  fallback); trd-core (wasm) `arrow_renderer` renders offscreen → RGBA → egui
+  texture. Same decoupled model as native (Strategy A).
 
 ## 9. Toolchain / build integration
 
