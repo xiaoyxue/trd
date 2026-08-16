@@ -14,6 +14,46 @@ import editingDocumentUrl from "../data/fiba-shot1.arrow" with { type: "file" };
 import init, { startVideoEditing } from "../pkg/trd_wasm.js";
 import wasmUrl from "../pkg/trd_wasm_bg.wasm" with { type: "file" };
 
+/// Locates the `moov` box with small range reads and hands it to Rust.
+///
+/// `moov` may sit at either end of a file, and this one may be gigabytes, so the
+/// box list is walked from the front reading only 16-byte headers — never the
+/// `mdat` payload in between (#264).
+async function readMoov(file: File): Promise<Uint8Array | undefined> {
+  let offset = 0;
+  while (offset + 8 <= file.size) {
+    const header = new DataView(await file.slice(offset, offset + 16).arrayBuffer());
+    if (header.byteLength < 8) {
+      return undefined;
+    }
+    const size32 = header.getUint32(0);
+    const kind = String.fromCharCode(
+      header.getUint8(4),
+      header.getUint8(5),
+      header.getUint8(6),
+      header.getUint8(7),
+    );
+    // `size === 1` puts a 64-bit length after the type; `size === 0` runs to EOF.
+    let size = size32;
+    if (size32 === 1) {
+      if (header.byteLength < 16) {
+        return undefined;
+      }
+      size = Number(header.getBigUint64(8));
+    } else if (size32 === 0) {
+      size = file.size - offset;
+    }
+    if (size < 8) {
+      return undefined;
+    }
+    if (kind === "moov") {
+      return new Uint8Array(await file.slice(offset, offset + size).arrayBuffer());
+    }
+    offset += size;
+  }
+  return undefined;
+}
+
 async function main(): Promise<void> {
   await init({ module_or_path: wasmUrl });
   const canvas = document.getElementById("video-editing-canvas");
@@ -21,14 +61,21 @@ async function main(): Promise<void> {
     throw new Error("missing #video-editing-canvas");
   }
   const query = new URLSearchParams(location.search);
-  const documentUrl = query.get("document") ?? editingDocumentUrl;
-  const response = await fetch(documentUrl);
-  if (!response.ok) {
-    throw new Error(
-      `failed to fetch editing document "${documentUrl}": ${response.status} ${response.statusText}`,
-    );
+  // The annotation document is optional (#264). `?document=none` opens the
+  // editor as a plain player; anything else names a document to load, and the
+  // FIBA one is the default so the demo keeps working unchanged.
+  const requestedDocument = query.get("document") ?? editingDocumentUrl;
+  let documentBytes: Uint8Array | undefined;
+  if (requestedDocument !== "none") {
+    const response = await fetch(requestedDocument);
+    if (!response.ok) {
+      throw new Error(
+        `failed to fetch editing document "${requestedDocument}": ${response.status} ${response.statusText}`,
+      );
+    }
+    documentBytes = new Uint8Array(await response.arrayBuffer());
   }
-  const editor = await startVideoEditing(canvas, new Uint8Array(await response.arrayBuffer()));
+  const editor = await startVideoEditing(canvas, documentBytes);
   const catalog = new Map<number, { modelUrl: string; textureUrl?: string }>([
     [1, { modelUrl: cokeObjUrl, textureUrl: cokeTextureUrl }],
     [2, { modelUrl: beerObjUrl, textureUrl: beerTextureUrl }],
@@ -245,10 +292,21 @@ async function main(): Promise<void> {
         if (objectUrl) {
           URL.revokeObjectURL(objectUrl);
         }
-        objectUrl = URL.createObjectURL(pendingVideoFile);
+        const file = pendingVideoFile;
+        objectUrl = URL.createObjectURL(file);
+        // Adopt the container's own timeline before the first frame arrives:
+        // `<video>` never reports a frame rate, so without this the scrubber is
+        // numbered on an invented grid (#264).
+        void readMoov(file)
+          .then((moov) => {
+            if (moov) {
+              editor.setVideoTimelineFromMoov(moov, file.name);
+            }
+          })
+          .catch((error: unknown) => console.warn("moov probe failed:", error));
         loadVideoSource(objectUrl, {
-          filename: pendingVideoFile.name,
-          byteLength: pendingVideoFile.size,
+          filename: file.name,
+          byteLength: file.size,
         });
       }
     }

@@ -44,20 +44,34 @@ pub async fn start(
     }
 
     /// Starts the dedicated `web/gui-video-editing/` poster/document example.
+    /// Starts the dedicated `web/gui-video-editing/` editor.
+    ///
+    /// `document_bytes` is **optional**: without one the editor is a plain
+    /// player — the timeline comes from the container (see
+    /// `setVideoTimelineFromMoov`) and the placement UI stays inert (#264).
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = startVideoEditing)]
     pub async fn start_video_editing(
         canvas: web_sys::HtmlCanvasElement,
-        document_bytes: Vec<u8>,
+        document_bytes: Option<Vec<u8>>,
     ) -> Result<VideoEditingHandle, wasm_bindgen::JsValue> {
         use std::rc::Rc;
 
         console_error_panic_hook::set_once();
         let _ = eframe::WebLogger::init(log::LevelFilter::Warn);
-        let document = trd_core::decode_video_editing_document(&document_bytes)
+        let document = document_bytes
+            .map(|bytes| trd_core::decode_video_editing_document(&bytes))
+            .transpose()
             .map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()))?;
         let shared = Rc::new(trd_gui::video_editing::VideoEditingShared::default());
-        let handle = VideoEditingHandle::new(&document, shared.clone());
-        let (width, height) = (document.video.width, document.video.height);
+        let handle = match document.as_ref() {
+            Some(document) => VideoEditingHandle::new(document, shared.clone()),
+            None => VideoEditingHandle::player(shared.clone()),
+        };
+        // A placeholder until a video is opened: the real size arrives with the
+        // container probe, and the target is resized to the fitted panel anyway.
+        let (width, height) = document.as_ref().map_or((1280, 720), |document| {
+            (document.video.width, document.video.height)
+        });
         let creator_shared = shared.clone();
         eframe::WebRunner::new()
             .start(
@@ -85,10 +99,16 @@ pub async fn start(
                         )?;
                     creator_shared.set_renderer(renderer);
                     creator_shared.set_shared_gpu(gpu);
-                    Ok(Box::new(trd_gui::video_editing::VideoEditingApp::new(
-                        document,
-                        creator_shared,
-                    )))
+                    Ok(match document {
+                        Some(document) => Box::new(trd_gui::video_editing::VideoEditingApp::new(
+                            document,
+                            creator_shared,
+                        )),
+                        None => Box::new(trd_gui::video_editing::VideoEditingApp::player(
+                            player_timeline(width, height),
+                            creator_shared,
+                        )),
+                    })
                 }),
             )
             .await?;
@@ -267,18 +287,47 @@ fn browser_render_size(canvas: &web_sys::HtmlCanvasElement) -> (u32, u32) {
     (px(w), px(h))
 }
 
-/// Browser bridge for the dedicated editor. It transfers browser-decoded pixels
-/// and services commands emitted by Rust UI; it never computes scene matrices.
-#[wasm_bindgen::prelude::wasm_bindgen]
-pub struct VideoEditingHandle {
-    shared: Rc<trd_gui::video_editing::VideoEditingShared>,
-    source_name: String,
-    byte_length: u64,
+/// The placeholder timeline a document-less editor starts on, until the shell
+/// has probed the container (#264).
+fn player_timeline(width: u32, height: u32) -> trd_core::VideoInfo {
+    trd_core::VideoInfo {
+        source_name: String::new(),
+        mime: String::new(),
+        codec: String::new(),
+        sha256: String::new(),
+        byte_length: 0,
+        width,
+        height,
+        fps_num: 25,
+        fps_den: 1,
+        frame_count: 1,
+        duration_us: 0,
+    }
+}
+
+/// The timeline facts the browser bridge needs for frame↔time mapping.///
+/// `Copy` in a `Cell` because they are **replaced** when the container is
+/// probed: the document's numbers are a starting point, not the truth, and with
+/// no document there is nothing but the container (#264).
+#[derive(Debug, Clone, Copy)]
+struct TimelineFacts {
     fps_num: u32,
     fps_den: u32,
     frame_count: u32,
     width: u32,
     height: u32,
+}
+
+/// Browser bridge for the dedicated editor. It transfers browser-decoded pixels
+/// and services commands emitted by Rust UI; it never computes scene matrices.
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub struct VideoEditingHandle {
+    shared: Rc<trd_gui::video_editing::VideoEditingShared>,
+    /// The identity a **document** declared, which an opened file must match.
+    /// `None` when there is no document — then nothing is expected, so nothing
+    /// can mismatch.
+    expected: Option<(String, u64)>,
+    timeline: std::cell::Cell<TimelineFacts>,
 }
 
 impl VideoEditingHandle {
@@ -288,13 +337,33 @@ impl VideoEditingHandle {
     ) -> Self {
         Self {
             shared,
-            source_name: document.video.source_name.clone(),
-            byte_length: document.video.byte_length,
-            fps_num: document.video.fps_num,
-            fps_den: document.video.fps_den,
-            frame_count: document.video.frame_count,
-            width: document.video.width,
-            height: document.video.height,
+            expected: Some((
+                document.video.source_name.clone(),
+                document.video.byte_length,
+            )),
+            timeline: std::cell::Cell::new(TimelineFacts {
+                fps_num: document.video.fps_num,
+                fps_den: document.video.fps_den,
+                frame_count: document.video.frame_count,
+                width: document.video.width,
+                height: document.video.height,
+            }),
+        }
+    }
+
+    /// The handle for a **plain player**: no document, so no expectations and a
+    /// placeholder timeline until the container is probed.
+    pub(crate) fn player(shared: Rc<trd_gui::video_editing::VideoEditingShared>) -> Self {
+        Self {
+            shared,
+            expected: None,
+            timeline: std::cell::Cell::new(TimelineFacts {
+                fps_num: 25,
+                fps_den: 1,
+                frame_count: 1,
+                width: 16,
+                height: 9,
+            }),
         }
     }
 }
@@ -307,16 +376,18 @@ impl VideoEditingHandle {
         filename: &str,
         byte_length: f64,
     ) -> Result<(), wasm_bindgen::JsValue> {
-        if filename != self.source_name {
+        // No document, no expectation: any file is a legitimate video to play.
+        let Some((expected_name, expected_bytes)) = self.expected.as_ref() else {
+            return Ok(());
+        };
+        if filename != expected_name {
             return Err(wasm_bindgen::JsValue::from_str(&format!(
-                "expected {}, got {filename}",
-                self.source_name
+                "expected {expected_name}, got {filename}"
             )));
         }
-        if byte_length != self.byte_length as f64 {
+        if byte_length != *expected_bytes as f64 {
             return Err(wasm_bindgen::JsValue::from_str(&format!(
-                "expected {} bytes, got {byte_length:.0}",
-                self.byte_length
+                "expected {expected_bytes} bytes, got {byte_length:.0}"
             )));
         }
         Ok(())
@@ -331,15 +402,21 @@ impl VideoEditingHandle {
     ) -> Result<(), wasm_bindgen::JsValue> {
         self.shared
             .set_video_metadata_observation(width, height, duration_seconds);
-        if (width, height) != (self.width, self.height) {
+        if self.expected.is_none() {
+            // Video-first: the container defines the timeline, so its own
+            // dimensions and duration cannot disagree with anything (#264).
+            return Ok(());
+        }
+        let timeline = self.timeline.get();
+        if (width, height) != (timeline.width, timeline.height) {
             return Err(wasm_bindgen::JsValue::from_str(&format!(
                 "expected {}x{} video, got {width}x{height}",
-                self.width, self.height
+                timeline.width, timeline.height
             )));
         }
-        let expected_duration =
-            f64::from(self.frame_count) * f64::from(self.fps_den) / f64::from(self.fps_num);
-        let frame_duration = f64::from(self.fps_den) / f64::from(self.fps_num);
+        let expected_duration = f64::from(timeline.frame_count) * f64::from(timeline.fps_den)
+            / f64::from(timeline.fps_num);
+        let frame_duration = f64::from(timeline.fps_den) / f64::from(timeline.fps_num);
         if !duration_seconds.is_finite()
             || (duration_seconds - expected_duration).abs() > frame_duration
         {
@@ -350,23 +427,61 @@ impl VideoEditingHandle {
         Ok(())
     }
 
+    /// Adopts the timeline from a `moov` box the shell located with range reads.
+    ///
+    /// `<video>` never exposes a frame rate, so without this the browser numbers
+    /// frames on an invented grid — a 25 fps clip reported 300 frames instead of
+    /// 250. The editor picks the new timeline up on its next frame (#264).
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = setVideoTimelineFromMoov)]
+    pub fn set_video_timeline_from_moov(
+        &self,
+        moov: Vec<u8>,
+        source_name: String,
+    ) -> Result<(), wasm_bindgen::JsValue> {
+        let probed = trd_core::probe_moov(&moov)
+            .ok_or_else(|| wasm_bindgen::JsValue::from_str("moov has no readable video track"))?;
+        self.timeline.set(TimelineFacts {
+            fps_num: probed.fps_num,
+            fps_den: probed.fps_den,
+            frame_count: probed.frame_count,
+            width: probed.width,
+            height: probed.height,
+        });
+        self.shared.set_pending_video_info(trd_core::VideoInfo {
+            source_name,
+            mime: String::new(),
+            codec: String::new(),
+            sha256: String::new(),
+            byte_length: 0,
+            width: probed.width,
+            height: probed.height,
+            fps_num: probed.fps_num,
+            fps_den: probed.fps_den,
+            frame_count: probed.frame_count,
+            duration_us: probed.duration_us,
+        });
+        Ok(())
+    }
+
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = frameIndexAtMediaTime)]
     pub fn frame_index_at_media_time(&self, media_time_seconds: f64) -> u32 {
+        let timeline = self.timeline.get();
         trd_gui::video_editing::frame_index_at_media_time(
             media_time_seconds,
-            self.fps_num,
-            self.fps_den,
-            self.frame_count,
+            timeline.fps_num,
+            timeline.fps_den,
+            timeline.frame_count,
         )
     }
 
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = mediaTimeAtFrame)]
     pub fn media_time_at_frame(&self, frame_index: u32) -> f64 {
+        let timeline = self.timeline.get();
         trd_gui::video_editing::media_time_at_frame(
             frame_index,
-            self.fps_num,
-            self.fps_den,
-            self.frame_count,
+            timeline.fps_num,
+            timeline.fps_den,
+            timeline.frame_count,
         )
     }
 
@@ -379,7 +494,7 @@ impl VideoEditingHandle {
         frame_index: u32,
         media_time_seconds: f64,
     ) -> Result<(), wasm_bindgen::JsValue> {
-        if frame_index >= self.frame_count {
+        if frame_index >= self.timeline.get().frame_count {
             return Err(wasm_bindgen::JsValue::from_str(
                 "video frame index out of range",
             ));
@@ -411,7 +526,7 @@ impl VideoEditingHandle {
         frame_index: u32,
         media_time_seconds: f64,
     ) -> Result<(), wasm_bindgen::JsValue> {
-        if frame_index >= self.frame_count {
+        if frame_index >= self.timeline.get().frame_count {
             return Err(wasm_bindgen::JsValue::from_str(
                 "video frame index out of range",
             ));
@@ -525,8 +640,8 @@ impl VideoEditingHandle {
                 &model_bytes,
                 &texture_bytes,
                 &env_bytes,
-                self.width,
-                self.height,
+                self.timeline.get().width,
+                self.timeline.get().height,
             ),
             None => {
                 trd_gui::video_editing_renderer::VideoPlacementRenderer::new(
@@ -534,8 +649,8 @@ impl VideoEditingHandle {
                     &model_bytes,
                     &texture_bytes,
                     &env_bytes,
-                    self.width,
-                    self.height,
+                    self.timeline.get().width,
+                    self.timeline.get().height,
                 )
                 .await
             }

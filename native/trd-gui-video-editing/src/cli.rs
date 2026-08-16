@@ -6,8 +6,11 @@ use clap::Parser;
 #[command(name = "trd-gui-video-editing", version, about)]
 pub struct Cli {
     /// Versioned `trd.video_edit.version = 0.1.0` Arrow timeline.
+    ///
+    /// **Optional**: without one the editor is a plain player — the timeline
+    /// comes from the video container and the placement UI stays inert (#264).
     #[arg(long, value_name = "ARROW")]
-    pub document: PathBuf,
+    pub document: Option<PathBuf>,
 
     /// Local MP4 matching the timeline metadata. Without a source, the editor
     /// starts with an empty canvas until Open video is used.

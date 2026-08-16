@@ -20,23 +20,44 @@ fn run() -> Result<(), error::NativeVideoEditingError> {
     .init();
 
     let cli = cli::Cli::parse();
-    let bytes =
-        std::fs::read(&cli.document).map_err(|source| error::NativeVideoEditingError::Read {
-            path: cli.document.display().to_string(),
-            source,
-        })?;
-    let document = trd_core::decode_video_editing_document(&bytes)?;
+    // The document is optional: without one the editor is a plain player and the
+    // container supplies the timeline (#264).
+    let document = cli
+        .document
+        .as_ref()
+        .map(|path| {
+            let bytes =
+                std::fs::read(path).map_err(|source| error::NativeVideoEditingError::Read {
+                    path: path.display().to_string(),
+                    source,
+                })?;
+            trd_core::decode_video_editing_document(&bytes)
+                .map_err(error::NativeVideoEditingError::from)
+        })
+        .transpose()?;
     let video_source = cli
         .video
         .map(media::NativeVideoSource::Local)
         .or_else(|| cli.video_url.map(media::NativeVideoSource::Url));
     if cli.probe_only {
-        if let Some(source) = video_source {
-            let video = media::NativeVideo::open(source, &document.video, cli.preview_width)?;
-            video.decode_one(0)?;
-            println!("native video-editing source validated; decoded frame 0");
-        } else {
-            println!("native video-editing document validated; no video source supplied");
+        match (video_source, document.as_ref()) {
+            (Some(source), Some(document)) => {
+                let video = media::NativeVideo::open(source, &document.video, cli.preview_width)?;
+                video.decode_one(0)?;
+                println!("native video-editing source validated; decoded frame 0");
+            }
+            (Some(source), None) => {
+                let (video, info) = media::NativeVideo::probe(source, cli.preview_width)?;
+                video.decode_one(0)?;
+                println!(
+                    "native video probed: {}x{} · {}/{} fps · {} frames; decoded frame 0",
+                    info.width, info.height, info.fps_num, info.fps_den, info.frame_count
+                );
+            }
+            (None, Some(_)) => {
+                println!("native video-editing document validated; no video source supplied")
+            }
+            (None, None) => println!("nothing to probe: pass --video and/or --document"),
         }
         return Ok(());
     }

@@ -16,6 +16,10 @@ impl eframe::App for VideoEditingApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.shared.context.replace(Some(ui.ctx().clone()));
         self.sync_native_texture(_frame);
+        if let Some(video) = self.shared.take_pending_video_info() {
+            // A timeline probed from the container after start-up (#264).
+            self.set_video_info(video);
+        }
         self.consume_video_frame();
         self.consume_rendered_frame();
         self.consume_asset_defaults();
@@ -42,7 +46,9 @@ impl eframe::App for VideoEditingApp {
         self.video_source_dialog(ui.ctx());
 
         let overlay_frame_index = self.displayed_frame_index;
-        let quad = self.document.frames[overlay_frame_index as usize].placement_quad;
+        let quad = self
+            .frame_row(overlay_frame_index)
+            .and_then(|frame| frame.placement_quad);
         let quad_frame = self.quad_frame_at(overlay_frame_index);
         let mut needs_render = false;
         let mut pick = None;
@@ -162,7 +168,7 @@ impl VideoEditingApp {
         }
         ui.weak("Display: fit right pane (16:9)");
         ui.collapsing("Source", |ui| {
-            let video = &self.document.video;
+            let video = &self.video;
             ui.label(format!("Source: {}", video.source_name));
             ui.label(match self.shared.pending_document() {
                 Some(source) => match source.kind {
@@ -199,7 +205,17 @@ impl VideoEditingApp {
         quad_frame: Option<trd_placement::QuadFrame>,
     ) {
         ui.collapsing("Placement quad (standalone)", |ui| {
-            let frame = &self.document.frames[frame_index as usize];
+            let Some(frame) = self.frame_row(frame_index) else {
+                // No document, or a frame it does not annotate: the video plays
+                // and there is simply nothing to place here (#264).
+                ui.label(format!("Frame {frame_index}"));
+                ui.label(if self.has_document() {
+                    "Not annotated: this frame is plain video"
+                } else {
+                    "No annotation document: the video plays as-is"
+                });
+                return;
+            };
             ui.label(format!("Frame {}", frame.video_frame_index));
             ui.label(if frame.tracked {
                 if self.shared.video_playing.get() {
@@ -247,7 +263,7 @@ impl VideoEditingApp {
     fn details_controls(&mut self, ui: &mut egui::Ui) {
         ui.collapsing("Details", |ui| {
             let facts = self.displayed_facts();
-            details_ui(ui, &self.document.video, &facts);
+            details_ui(ui, &self.video, &facts);
         });
     }
 
@@ -284,12 +300,12 @@ impl VideoEditingApp {
                 ui.monospace(player_status_label(
                     video_loaded,
                     self.current_frame_index,
-                    &self.document.video,
+                    &self.video,
                 ));
             },
         );
         ui.add_space(6.0);
-        let last = self.document.video.frame_count.saturating_sub(1);
+        let last = self.video.frame_count.saturating_sub(1);
         let mut frame = self.current_frame_index;
         if video_progress_bar(ui, &mut frame, last, video_loaded) {
             self.seek_to(frame);
@@ -317,7 +333,7 @@ impl VideoEditingApp {
 
     /// Adopts the letterboxed image size the panel just drew at.
     fn resize_render_target(&mut self, ctx: &egui::Context, fitted: (u32, u32)) {
-        let video = &self.document.video;
+        let video = &self.video;
         let fitted = (
             fitted.0.min(video.width).max(1),
             fitted.1.min(video.height).max(1),
@@ -337,7 +353,7 @@ impl VideoEditingApp {
     /// Resolves a click on the image into a quad selection, a gizmo reveal, or a
     /// GPU pick request.
     pub(super) fn handle_pick(&mut self, (x, y): (u32, u32), quad: Option<[[f32; 2]; 4]>) {
-        let video = &self.document.video;
+        let video = &self.video;
         let clicked_quad = quad.is_some_and(|points| {
             let source = [
                 x as f32 * video.width as f32 / self.display_size.0 as f32,
