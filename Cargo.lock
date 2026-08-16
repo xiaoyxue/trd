@@ -4004,6 +4004,7 @@ version = "0.1.0"
 dependencies = [
  "eframe",
  "egui",
+ "egui-wgpu",
  "image",
  "log",
  "pollster 0.4.0",
@@ -4015,6 +4016,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "web-time",
+ "wgpu",
 ]
 
 [[package]]

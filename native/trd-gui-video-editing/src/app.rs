@@ -49,6 +49,7 @@ impl NativeVideoEditingApp {
         document: trd_core::VideoEditingDocument,
         video_source: Option<NativeVideoSource>,
         preview_width: u32,
+        gpu: Option<std::sync::Arc<trd_core::GpuContext>>,
     ) -> Result<Self, NativeVideoEditingError> {
         let mut video = video_source
             .clone()
@@ -72,12 +73,22 @@ impl NativeVideoEditingApp {
         }
 
         let shared = Rc::new(VideoEditingShared::default());
-        let renderer = pollster::block_on(VideoPlacementRenderer::new_empty(
-            render_size.0,
-            render_size.1,
-        ))
+        // With eframe's device the rendered texture is bound straight into egui;
+        // without one (no wgpu render state) the portable readback path stands.
+        let renderer = match gpu.clone() {
+            Some(gpu) => {
+                VideoPlacementRenderer::new_empty_with_gpu(gpu, render_size.0, render_size.1)
+            }
+            None => pollster::block_on(VideoPlacementRenderer::new_empty(
+                render_size.0,
+                render_size.1,
+            )),
+        }
         .map_err(NativeVideoEditingError::Renderer)?;
         shared.set_renderer(renderer);
+        if let Some(gpu) = gpu {
+            shared.set_shared_gpu(gpu);
+        }
         let editor = VideoEditingApp::new(document.clone(), shared.clone());
         let mut app = Self {
             document,
@@ -330,14 +341,28 @@ impl NativeVideoEditingApp {
             .as_ref()
             .map(|video| (video.width, video.height))
             .unwrap_or((self.document.video.width, self.document.video.height));
-        let renderer = pollster::block_on(VideoPlacementRenderer::new(
-            asset,
-            &model_bytes,
-            &texture_bytes,
-            self.env_bytes.as_deref().expect("loaded above"),
-            width,
-            height,
-        ))?;
+        // A catalog swap rebuilds the renderer, so it has to land on the *same*
+        // device egui samples — otherwise the re-registered texture belongs to a
+        // device the toolkit knows nothing about.
+        let renderer = match self.shared.shared_gpu() {
+            Some(gpu) => VideoPlacementRenderer::new_with_gpu(
+                gpu,
+                asset,
+                &model_bytes,
+                &texture_bytes,
+                self.env_bytes.as_deref().expect("loaded above"),
+                width,
+                height,
+            ),
+            None => pollster::block_on(VideoPlacementRenderer::new(
+                asset,
+                &model_bytes,
+                &texture_bytes,
+                self.env_bytes.as_deref().expect("loaded above"),
+                width,
+                height,
+            )),
+        }?;
         self.shared.set_catalog_renderer(asset, renderer);
         Ok(())
     }

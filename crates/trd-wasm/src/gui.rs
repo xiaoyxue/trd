@@ -56,20 +56,40 @@ pub async fn start(
         let document = trd_core::decode_video_editing_document(&document_bytes)
             .map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()))?;
         let shared = Rc::new(trd_gui::video_editing::VideoEditingShared::default());
-        let renderer = trd_gui::video_editing_renderer::VideoPlacementRenderer::new_empty(
-            document.video.width,
-            document.video.height,
-        )
-        .await
-        .map_err(|error| wasm_bindgen::JsValue::from_str(&error))?;
-        shared.set_renderer(renderer);
         let handle = VideoEditingHandle::new(&document, shared.clone());
-        let app = trd_gui::video_editing::VideoEditingApp::new(document, shared);
+        let (width, height) = (document.video.width, document.video.height);
+        let creator_shared = shared.clone();
         eframe::WebRunner::new()
             .start(
                 canvas,
                 eframe::WebOptions::default(),
-                Box::new(|_cc| Ok(Box::new(app))),
+                // Built **inside** the creator so the renderer can adopt eframe's
+                // own WebGPU device: one device means trd's rendered texture is
+                // bound straight into egui, with no GPU→CPU→GPU round trip per
+                // frame. `wgpu_render_state` exists nowhere else — which is why
+                // the renderer used to be built before `start`, and therefore had
+                // to request a device of its own.
+                Box::new(move |context| {
+                    let state = context
+                        .wgpu_render_state
+                        .as_ref()
+                        .ok_or("eframe has no wgpu render state")?;
+                    let gpu = trd_core::GpuContext::adopt(
+                        state.adapter.clone(),
+                        state.device.clone(),
+                        state.queue.clone(),
+                    );
+                    let renderer =
+                        trd_gui::video_editing_renderer::VideoPlacementRenderer::new_empty_with_gpu(
+                            gpu.clone(), width, height,
+                        )?;
+                    creator_shared.set_renderer(renderer);
+                    creator_shared.set_shared_gpu(gpu);
+                    Ok(Box::new(trd_gui::video_editing::VideoEditingApp::new(
+                        document,
+                        creator_shared,
+                    )))
+                }),
             )
             .await?;
         Ok(handle)
@@ -432,15 +452,31 @@ impl VideoEditingHandle {
     ) -> Result<(), wasm_bindgen::JsValue> {
         let asset = trd_gui::video_editing::CatalogAsset::from_code(asset_code)
             .ok_or_else(|| wasm_bindgen::JsValue::from_str("unknown catalog asset"))?;
-        let renderer = trd_gui::video_editing_renderer::VideoPlacementRenderer::new(
-            asset,
-            &model_bytes,
-            &texture_bytes,
-            &env_bytes,
-            self.width,
-            self.height,
-        )
-        .await
+        // A catalog swap rebuilds the renderer. It must land on the **same**
+        // device as the one egui samples, or the newly registered texture comes
+        // from a device the toolkit knows nothing about.
+        let renderer = match self.shared.shared_gpu() {
+            Some(gpu) => trd_gui::video_editing_renderer::VideoPlacementRenderer::new_with_gpu(
+                gpu,
+                asset,
+                &model_bytes,
+                &texture_bytes,
+                &env_bytes,
+                self.width,
+                self.height,
+            ),
+            None => {
+                trd_gui::video_editing_renderer::VideoPlacementRenderer::new(
+                    asset,
+                    &model_bytes,
+                    &texture_bytes,
+                    &env_bytes,
+                    self.width,
+                    self.height,
+                )
+                .await
+            }
+        }
         .map_err(|error| wasm_bindgen::JsValue::from_str(&error))?;
         self.shared.set_catalog_renderer(asset, renderer);
         Ok(())
