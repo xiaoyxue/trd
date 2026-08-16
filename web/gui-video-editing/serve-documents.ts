@@ -9,13 +9,18 @@
 // a document fetch fails with a bare TypeError rather than a status code), and
 // `<video>` seeking needs `Range` — without a `206` the element can only play
 // straight through.
+
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { file } from "bun";
 
 const args = process.argv.slice(2);
 const portFlag = args.indexOf("--port");
 const port = Number(portFlag >= 0 ? args[portFlag + 1] : (process.env.PORT ?? 8090));
 const rootArg = args.find((value, index) => !value.startsWith("--") && index !== portFlag + 1);
-const root = new URL(rootArg ? `${rootArg.replace(/\\/g, "/")}/` : "./data/", import.meta.url);
+// `new URL(dir, import.meta.url)` mis-reads an absolute Windows path — `D:` is
+// parsed as a URL scheme — so resolve through the filesystem instead.
+const root = rootArg ? pathToFileURL(`${resolve(rootArg)}\\`) : new URL("./data/", import.meta.url);
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
