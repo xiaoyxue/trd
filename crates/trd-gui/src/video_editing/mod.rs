@@ -704,6 +704,10 @@ pub struct VideoEditingApp {
     controller: crate::interaction::InteractionController,
     selected_quad: bool,
     show_quad_gizmo: bool,
+    /// Whether the placement overlay is drawn at all — including **during
+    /// playback**, which is the point: an annotated frame shows its quad as it
+    /// plays past, and this is how you turn that off (#264).
+    show_overlay: bool,
     was_playing: bool,
     selected_asset: Option<CatalogAsset>,
     image_sizing: crate::ui::ImageSizing,
@@ -772,6 +776,7 @@ impl VideoEditingApp {
             controller,
             selected_quad: false,
             show_quad_gizmo: false,
+            show_overlay: true,
             was_playing: false,
             selected_asset: None,
             image_sizing: crate::ui::ImageSizing::FitCanvas,
@@ -790,12 +795,21 @@ impl VideoEditingApp {
 
     /// The annotation row for `frame_index`, if the document has one.
     ///
-    /// An `Option`, not an index: with no document — and, once rows may be
-    /// sparse, on any unannotated frame — the absence of a row is the **normal**
-    /// state, not an error. Every caller therefore has to say what it draws for
-    /// a plain video frame (#264).
+    /// An `Option`, not an index: with no document — and, with sparse rows, on
+    /// any unannotated frame — the absence of a row is the **normal** state, not
+    /// an error. Every caller therefore has to say what it draws for a plain
+    /// video frame (#264).
     pub fn frame_row(&self, frame_index: u32) -> Option<&trd_core::VideoEditingFrame> {
-        self.document.as_ref()?.frames.get(frame_index as usize)
+        self.document.as_ref()?.frame(frame_index)
+    }
+
+    /// The document's annotated runs — what the Shots list navigates. Empty
+    /// without a document.
+    pub fn shots(&self) -> Vec<trd_core::Shot> {
+        self.document
+            .as_ref()
+            .map(|document| document.shots())
+            .unwrap_or_default()
     }
 
     /// Whether an annotation document is loaded at all. Drives the "inert but
@@ -1102,8 +1116,11 @@ impl VideoEditingApp {
         };
         let background_frame = self.frame_row(video.frame_index).cloned();
         let quad_frame = self.quad_frame_at(video.frame_index);
-        let show_quad = !self.shared.video_playing.get()
-            && background_frame.as_ref().is_some_and(|frame| frame.tracked);
+        // The overlay follows the **toggle**, not the play state: an annotated
+        // frame shows its quad as it plays past, which is how a sparse document
+        // announces itself during ordinary playback (#264).
+        let show_quad =
+            self.show_overlay && background_frame.as_ref().is_some_and(|frame| frame.tracked);
         let quad_model = quad_frame
             .filter(|_| show_quad)
             .map(trd_placement::quad_outline_model);
@@ -1160,7 +1177,7 @@ impl VideoEditingApp {
         let renderer_generation = shared.renderer_generation.get();
         let width = self.video.width;
         let height = self.video.height;
-        let show_quad_gizmo = self.show_quad_gizmo;
+        let show_quad_gizmo = self.show_quad_gizmo && self.show_overlay;
         let selected_asset = self.selected_asset;
         let selected_quad = self.selected_quad;
         let move_direction = self.controller.move_direction;

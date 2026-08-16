@@ -71,8 +71,12 @@ Guidance for agents working in this repository.
   the next redraw; the browser repairs in-call and retries once).
 - Major input data is columnar (Apache Arrow tables) with simple glue logic.
 - **Video editing uses a separate authoring document.**
-  `web/gui-video-editing` reads `trd.video_edit.version = 0.1.0` timeline rows
-  (video metadata/poster + per-frame K/quad/tracked state). It is deliberately
+  `web/gui-video-editing` reads `trd.video_edit.version = 0.2.0` timeline rows
+  (video metadata/optional poster + per-frame K/quad/tracked state). The table is
+  **sparse**: a row exists only for a frame carrying an ad-placement quad, and a
+  frame with no row is plain video — so the document is also **optional**, and
+  without one the editor is a player whose timeline comes from the container
+  (#264). It is deliberately
   independent of render `PROTOCOL_VERSION`; do not add editor-only columns to
   `0.0.6` or bump the render protocol for editor state. Rust maps each presented
   browser `VideoFrame` or native ffmpeg frame to a timeline row, reconstructs

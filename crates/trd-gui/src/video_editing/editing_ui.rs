@@ -72,6 +72,7 @@ impl eframe::App for VideoEditingApp {
                         },
                     );
                     ui.separator();
+                    self.shot_controls(ui);
                     self.quad_controls(ui, overlay_frame_index, quad_frame);
                     self.catalog_controls(ui);
                     self.details_controls(ui);
@@ -310,6 +311,51 @@ impl VideoEditingApp {
         if video_progress_bar(ui, &mut frame, last, video_loaded) {
             self.seek_to(frame);
         }
+    }
+
+    /// The **Shots** section: where the annotated ranges are, and how to get to
+    /// them.
+    ///
+    /// A sparse document may annotate a few hundred frames of a clip that runs
+    /// to hundreds of thousands, so without this nothing tells a user *where*
+    /// the editable parts are. Selecting a shot seeks to its **first** frame
+    /// (#264).
+    fn shot_controls(&mut self, ui: &mut egui::Ui) {
+        let shots = self.shots();
+        ui.collapsing(format!("Shots ({})", shots.len()), |ui| {
+            // The overlay is an authoring aid, not something to watch a cut
+            // through — so it is a toggle, and it governs playback too.
+            ui.checkbox(&mut self.show_overlay, "Show placement overlay")
+                .on_hover_text(
+                    "Draw the quad and gizmo on annotated frames, including while playing",
+                );
+            if shots.is_empty() {
+                ui.weak(if self.has_document() {
+                    "The document annotates no frames"
+                } else {
+                    "No annotation document: the whole video is plain playback"
+                });
+                return;
+            }
+            let current = self.current_frame_index;
+            for (index, shot) in shots.iter().enumerate() {
+                let label = format!(
+                    "Shot {} · frames {}-{} ({})",
+                    index + 1,
+                    shot.start_frame,
+                    shot.end_frame,
+                    shot.frame_count()
+                );
+                if ui
+                    .selectable_label(shot.contains(current), label)
+                    .on_hover_text("Jump to the first frame of this shot")
+                    .clicked()
+                {
+                    self.seek_to(shot.start_frame);
+                    ui.ctx().request_repaint();
+                }
+            }
+        });
     }
 
     fn seek_to(&mut self, frame_index: u32) {
