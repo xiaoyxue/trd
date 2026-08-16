@@ -72,7 +72,10 @@ Guidance for agents working in this repository.
 - Major input data is columnar (Apache Arrow tables) with simple glue logic.
 - **Video editing uses a separate authoring document.**
   `web/gui-video-editing` reads `trd.video_edit.version = 0.2.0` timeline rows
-  (video metadata/optional poster + per-frame K/quad/tracked state). The table is
+  (video metadata/optional poster + per-frame K/quad/tracked state), from
+  **Arrow IPC or Parquet** — the container is sniffed from the bytes, not the
+  file name, and both feed one decoder so either produces the same document.
+  The table is
   **sparse**: a row exists only for a frame carrying an ad-placement quad, and a
   frame with no row is plain video — so the document is also **optional**, and
   without one the editor is a player whose timeline comes from the container

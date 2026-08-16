@@ -31,7 +31,17 @@ trd.video_edit.table.kind = timeline
 ```
 
 Schema metadata records source name, MIME/codec, SHA-256, byte length,
-dimensions, frame rate, frame count, and duration. The single timeline table is
+dimensions, frame rate, frame count, and duration.
+
+It is read from **Arrow IPC streams or Parquet**, whichever the bytes turn out to
+be. The container is sniffed (`PAR1` at both ends versus the Arrow IPC
+continuation marker), never taken from the file name — a URL need not carry a
+useful suffix, and a mislabelled file is read for what it is. Parquet carries
+schema key-value metadata, so the version and table-kind contract above is
+identical either way, and both readers feed one decoder: the same rows in either
+container produce the same document.
+
+The single timeline table is
 **sparse** — it holds a row only for the frames that carry an ad-placement quad,
 because those are the only frames the editor can act on. Everything else is
 ordinary video and is played as such:
@@ -92,6 +102,28 @@ uv run --with pyarrow scripts\fiba_video_editing_bundle.py `
 ```
 
 The generated Arrow file is ignored; regenerate it from the local MP4.
+
+### The Parquet twin, and the parity test
+
+Both containers decode through one code path, and
+`the_real_document_decodes_identically_from_both_containers` pins that on the
+real 222-row document rather than on hand-built rows. Both fixtures are
+generated, so the test is `#[ignore]`d and **skips** when they are absent:
+
+```sh
+uv run --with pyarrow python -c "import pyarrow as pa, pyarrow.parquet as pq; \
+  t = pa.ipc.open_stream(pa.memory_map('web/gui-video-editing/data/fiba-shot1.arrow')).read_all(); \
+  pq.write_table(t, '/tmp/trd-doc/fiba-shot1.parquet')"
+TRD_DOC_DIR=/tmp/trd-doc cargo test -p trd-core --lib video_editing -- --ignored
+```
+
+`TRD_DOC_DIR` is where the Parquet fixtures are looked for (default: the
+platform temp dir); `TRD_DOC_ARROW` / `TRD_DOC_PARQUET` override the two paths
+individually. Writing the same table once per codec as
+`fiba-<codec>.parquet` also drives `unsupported_compression_says_so_clearly`,
+which pins that `snappy`/uncompressed read and that `zstd`/`gzip` are refused
+with parquet's own "Disabled feature at compile time" — those codecs are C shims
+and are left out so the crate keeps cross-compiling to wasm32.
 
 ## Browser/media boundary
 
