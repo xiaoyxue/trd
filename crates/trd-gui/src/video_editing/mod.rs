@@ -1450,6 +1450,7 @@ pub(super) mod tests {
                 pick_target_size: None,
                 msaa_samples: 4,
                 asset: None,
+                transfers: crate::video_editing_renderer::TransferCounts::default(),
             },
         }
     }
