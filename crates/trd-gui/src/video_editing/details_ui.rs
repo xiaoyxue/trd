@@ -497,6 +497,19 @@ fn material_rows(_video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut d
     }
 }
 
+/// Human-readable byte count for the transfer rows.
+///
+/// A frame is megabytes and a `0` must stay visibly a zero, so the unit follows
+/// the magnitude rather than being fixed.
+fn bytes_label(bytes: usize) -> String {
+    match bytes {
+        0 => "0 B".to_owned(),
+        b if b < 1024 => format!("{b} B"),
+        b if b < 1024 * 1024 => format!("{:.1} KiB", b as f64 / 1024.0),
+        b => format!("{:.2} MiB", b as f64 / (1024.0 * 1024.0)),
+    }
+}
+
 fn renderer_rows(video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut dyn Rows) {
     let renderer = facts.renderer.as_ref();
     let identity = renderer.map(|renderer| &renderer.identity);
@@ -519,6 +532,19 @@ fn renderer_rows(video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut dy
         ),
     );
     r.row("mode", render_mode_label(facts.scene.modes[0]));
+    // Observed frame-path CPU↔GPU traffic for the last frame, so a later claim
+    // that a copy is gone is read off a meter rather than asserted (#229).
+    //
+    // Labelled "frame path" because that is the scope: full-resolution image
+    // data. Per-frame uniforms and egui's own geometry upload still cross the
+    // boundary and are not counted here.
+    if let Some(transfers) = renderer.map(|renderer| renderer.transfers) {
+        r.row("frame-path crossings", &transfers.crossings().to_string());
+        r.row("  frame upload", &bytes_label(transfers.frame_upload));
+        r.row("  readback", &bytes_label(transfers.readback));
+        r.row("  ui upload", &bytes_label(transfers.ui_upload));
+        r.row("  total / frame", &bytes_label(transfers.total_bytes()));
+    }
     r.row(
         "MSAA",
         &renderer.map_or_else(
@@ -637,5 +663,58 @@ mod tests {
              error: none\n\
              last render error: device lost [ERROR]\n"
         );
+    }
+
+    /// The transfer meter is only useful if its rows are readable **and** its
+    /// crossing count follows the bytes, so both are pinned here rather than
+    /// checked by eye in the panel.
+    #[test]
+    fn transfer_rows_report_bytes_and_derive_the_crossing_count() {
+        let readback_path = crate::video_editing_renderer::TransferCounts {
+            frame_upload: 2_764_800,
+            readback: 2_764_800,
+            ui_upload: 2_764_800,
+        };
+        assert_eq!(readback_path.crossings(), 3);
+        assert_eq!(readback_path.total_bytes(), 8_294_400);
+
+        // What a shared-device path must look like: the copies are absent, not
+        // merely small.
+        let bound_directly = crate::video_editing_renderer::TransferCounts {
+            frame_upload: 2_764_800,
+            ..Default::default()
+        };
+        assert_eq!(bound_directly.crossings(), 1);
+        assert_eq!(
+            crate::video_editing_renderer::TransferCounts::default().crossings(),
+            0
+        );
+
+        let mut rows = TextRows::default();
+        rows.row(
+            "frame-path crossings",
+            &readback_path.crossings().to_string(),
+        );
+        rows.row("  frame upload", &bytes_label(readback_path.frame_upload));
+        rows.row("  readback", &bytes_label(readback_path.readback));
+        rows.row("  ui upload", &bytes_label(bound_directly.ui_upload));
+        rows.row("  total / frame", &bytes_label(readback_path.total_bytes()));
+
+        assert_eq!(
+            rows.0,
+            "frame-path crossings: 3\n  \
+             frame upload: 2.64 MiB\n  \
+             readback: 2.64 MiB\n  \
+             ui upload: 0 B\n  \
+             total / frame: 7.91 MiB\n"
+        );
+    }
+
+    #[test]
+    fn bytes_label_switches_unit_with_magnitude() {
+        assert_eq!(bytes_label(0), "0 B");
+        assert_eq!(bytes_label(512), "512 B");
+        assert_eq!(bytes_label(1024), "1.0 KiB");
+        assert_eq!(bytes_label(1024 * 1024), "1.00 MiB");
     }
 }

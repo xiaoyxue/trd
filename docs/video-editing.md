@@ -186,6 +186,18 @@ The six sections cover:
 - adapter/backend, render/pick targets, MSAA, layer drawable counts, upload
   size, latest pick, and explicit render/pick errors.
 
+The renderer section also reports the frame's **frame-path CPU↔GPU traffic** —
+`frame-path crossings` plus the bytes for `frame upload`, `readback`,
+`ui upload`, and their total. The copy count is therefore *observed*, not
+asserted: each figure is written at the transfer site itself, and the crossing
+count is derived from the bytes, so a path that stops copying reports `0 B` and
+one crossing fewer because that code did not run. The scope is deliberately
+narrow — full-resolution image data only. Per-frame uniforms and egui's own
+tessellated geometry and font atlas still cross the boundary every frame and are
+not counted, so a `0` reads as *no frame-sized buffer crossed*, not as *nothing
+crossed*. Today's shared path is 3 crossings; binding the rendered texture
+directly into egui is what drives `readback`/`ui upload` to `0 B` (#229).
+
 Completed renders retain the exact scene/material/asset/renderer facts used to
 produce their pixels. While a newer frame or scene revision is in flight,
 Details continues to describe the image on screen and separately reports the

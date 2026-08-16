@@ -22,6 +22,59 @@ pub struct ImportedAssetDiagnostics {
     pub imported_material: trd_core::DisneyMaterial,
 }
 
+/// Per-frame CPU↔GPU traffic **on the video frame path**, so the copy count is
+/// **observed** rather than asserted.
+///
+/// Each field is the bytes that crossed the boundary for the most recent frame.
+/// A zero means that crossing did not happen at all — which is what makes this a
+/// meter rather than a comment: a later change that claims to remove a copy has
+/// to show a `0` here, and a silent fall back to the copying path shows up as
+/// the old number instead.
+///
+/// **Scope, so `0` is not over-read.** This counts *full-resolution image data*
+/// only. A frame reading `0` still involves small CPU→GPU writes that are not
+/// tracked here and never go away:
+///
+/// * the per-frame uniforms (camera, lighting, the frame-plane fit, instance
+///   models) — tens to hundreds of bytes each;
+/// * egui's own tessellated UI geometry and font atlas, re-uploaded each frame
+///   by `egui-wgpu`, which is far larger than the uniforms though still far
+///   smaller than a frame.
+///
+/// So `0` means *no frame-sized buffer crossed the boundary*, not that the
+/// renderer touched the GPU without any CPU writes at all.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TransferCounts {
+    /// Video frame CPU→GPU (`queue.write_texture`).
+    pub frame_upload: usize,
+    /// Rendered pixels GPU→CPU (`read_pixels`).
+    pub readback: usize,
+    /// Rendered pixels CPU→GPU again, through the UI toolkit.
+    pub ui_upload: usize,
+}
+
+impl TransferCounts {
+    /// How many **frame-sized** buffers crossed the CPU↔GPU boundary.
+    ///
+    /// Derived from the byte counts rather than stored, so it cannot drift from
+    /// them: a path that stops reading pixels back reports one crossing fewer
+    /// *because* its `readback` is `0`, not because someone remembered to update
+    /// a constant.
+    pub fn crossings(self) -> u8 {
+        [self.frame_upload, self.readback, self.ui_upload]
+            .into_iter()
+            .filter(|bytes| *bytes > 0)
+            .count() as u8
+    }
+
+    /// Total frame-path bytes moved for the last frame.
+    pub fn total_bytes(self) -> usize {
+        self.frame_upload
+            .saturating_add(self.readback)
+            .saturating_add(self.ui_upload)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct VideoRendererDiagnostics {
     pub identity: Rc<RendererIdentity>,
@@ -29,6 +82,7 @@ pub struct VideoRendererDiagnostics {
     pub pick_target_size: Option<(u32, u32)>,
     pub msaa_samples: u32,
     pub asset: Option<ImportedAssetDiagnostics>,
+    pub transfers: TransferCounts,
 }
 
 pub struct VideoPlacementRenderer {
@@ -49,6 +103,12 @@ pub struct VideoPlacementRenderer {
     default_material: trd_core::DisneyMaterial,
     identity: Rc<RendererIdentity>,
     asset_diagnostics: Option<ImportedAssetDiagnostics>,
+    /// What the **last** frame actually moved across the CPU↔GPU boundary.
+    ///
+    /// Written at the transfer sites themselves rather than derived from which
+    /// method was called, so a count can only be non-zero if that copy really
+    /// ran (#229).
+    pub transfers: TransferCounts,
 }
 
 impl VideoPlacementRenderer {
@@ -83,6 +143,7 @@ impl VideoPlacementRenderer {
                 device_type: facts.device_type,
             }),
             asset_diagnostics: None,
+            transfers: TransferCounts::default(),
         })
     }
 
@@ -138,6 +199,7 @@ impl VideoPlacementRenderer {
                 device_type: facts.device_type,
             }),
             asset_diagnostics: Some(asset_diagnostics),
+            transfers: TransferCounts::default(),
         })
     }
 
@@ -156,6 +218,7 @@ impl VideoPlacementRenderer {
             pick_target_size: self.renderer.pick_target_size(),
             msaa_samples: 4,
             asset: self.asset_diagnostics.clone(),
+            transfers: self.transfers,
         }
     }
 
@@ -211,6 +274,13 @@ impl VideoPlacementRenderer {
         model: Option<trd_core::Matrix4>,
         state: &crate::scene::SceneState,
     ) -> Result<Vec<u8>, String> {
+        // Counted at the transfer site, not inferred from the call: the frame
+        // genuinely crosses CPU→GPU here.
+        self.transfers = TransferCounts {
+            frame_upload: rgba.len(),
+            readback: 0,
+            ui_upload: 0,
+        };
         self.renderer
             .update_frame_texture_rgba(rgba, frame_width, frame_height);
         let identity_camera = trd_core::FrameParams::IDENTITY
@@ -243,7 +313,8 @@ impl VideoPlacementRenderer {
             state,
         );
 
-        self.renderer
+        let pixels = self
+            .renderer
             .render_layers(
                 &[
                     trd_core::SceneLayer::new(background_camera, &background),
@@ -253,7 +324,12 @@ impl VideoPlacementRenderer {
                 &self.target,
             )
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        // `render_layers` reads the pixels back, and the caller uploads them
+        // again through egui — the two crossings a shared device would remove.
+        self.transfers.readback = pixels.len();
+        self.transfers.ui_upload = pixels.len();
+        Ok(pixels)
     }
 
     fn viewport(&self) -> trd_core::Viewport {
