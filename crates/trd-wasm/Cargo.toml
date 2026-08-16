@@ -33,8 +33,9 @@ wasm-bindgen = "=0.2.126"
 wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = [
     "HtmlCanvasElement",
-    # `setVideoElement` takes the element the editor copies frames from (#229).
-    "HtmlVideoElement",
+    # `presentVideoFrame` takes the decoded frame the editor copies GPU→GPU
+    # (#229, #282).
+    "VideoFrame",
     "Element",
     "Performance",
     "Window",

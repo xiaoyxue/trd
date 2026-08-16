@@ -504,35 +504,32 @@ impl VideoEditingHandle {
             .map_err(|error| wasm_bindgen::JsValue::from_str(&error))
     }
 
-    /// Hands over the `<video>` element **once**, so later frames present by
-    /// index instead of by pixels (#229).
-    #[wasm_bindgen::prelude::wasm_bindgen(js_name = setVideoElement)]
-    pub fn set_video_element(&self, video: web_sys::HtmlVideoElement) {
-        self.shared.set_video_element(video);
-    }
-
-    /// Presents the element's **current** frame without copying it anywhere: the
-    /// browser decoded it into GPU memory and it stays there.
+    /// Presents a decoded frame without copying it anywhere: the browser
+    /// decoded it into GPU memory and it stays there (#229, #282).
+    ///
+    /// **Takes ownership of the frame** — do not `close()` it in JS. It holds a
+    /// slot in a small decoder-side pool, and Rust releases that slot once the
+    /// GPU copy is done.
     ///
     /// A separate entry point from
     /// [`update_video_frame_rgba`](Self::update_video_frame_rgba) rather than a
-    /// flag, because the preconditions differ — this one requires an element to
-    /// have been handed over and carries no buffer at all.
+    /// flag, because the preconditions differ — this one carries no buffer at
+    /// all.
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = presentVideoFrame)]
     pub fn present_video_frame(
         &self,
-        width: u32,
-        height: u32,
+        frame: web_sys::VideoFrame,
         frame_index: u32,
         media_time_seconds: f64,
     ) -> Result<(), wasm_bindgen::JsValue> {
         if frame_index >= self.timeline.get().frame_count {
+            frame.close();
             return Err(wasm_bindgen::JsValue::from_str(
                 "video frame index out of range",
             ));
         }
         self.shared
-            .present_video_frame(width, height, frame_index, media_time_seconds)
+            .present_video_frame(frame, frame_index, media_time_seconds)
             .map_err(|error| wasm_bindgen::JsValue::from_str(&error))
     }
 

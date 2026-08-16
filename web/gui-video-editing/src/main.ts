@@ -13,46 +13,8 @@ import beerTextureUrl from "../../../assets/meshes/qd_beer/textures/3d66-export-
 import editingDocumentUrl from "../data/fiba-shot1.arrow" with { type: "file" };
 import init, { startVideoEditing } from "../pkg/trd_wasm.js";
 import wasmUrl from "../pkg/trd_wasm_bg.wasm" with { type: "file" };
-
-/// Locates the `moov` box with small range reads and hands it to Rust.
-///
-/// `moov` may sit at either end of a file, and this one may be gigabytes, so the
-/// box list is walked from the front reading only 16-byte headers — never the
-/// `mdat` payload in between (#264).
-async function readMoov(file: File): Promise<Uint8Array | undefined> {
-  let offset = 0;
-  while (offset + 8 <= file.size) {
-    const header = new DataView(await file.slice(offset, offset + 16).arrayBuffer());
-    if (header.byteLength < 8) {
-      return undefined;
-    }
-    const size32 = header.getUint32(0);
-    const kind = String.fromCharCode(
-      header.getUint8(4),
-      header.getUint8(5),
-      header.getUint8(6),
-      header.getUint8(7),
-    );
-    // `size === 1` puts a 64-bit length after the type; `size === 0` runs to EOF.
-    let size = size32;
-    if (size32 === 1) {
-      if (header.byteLength < 16) {
-        return undefined;
-      }
-      size = Number(header.getBigUint64(8));
-    } else if (size32 === 0) {
-      size = file.size - offset;
-    }
-    if (size < 8) {
-      return undefined;
-    }
-    if (kind === "moov") {
-      return new Uint8Array(await file.slice(offset, offset + size).arrayBuffer());
-    }
-    offset += size;
-  }
-  return undefined;
-}
+import { type ByteSource, fileByteSource, urlByteSource } from "./media/byte-source.ts";
+import { VideoPlayer } from "./media/player.ts";
 
 async function main(): Promise<void> {
   await init({ module_or_path: wasmUrl });
@@ -104,21 +66,9 @@ async function main(): Promise<void> {
     }
   });
 
-  const video = document.createElement("video");
-  video.muted = true;
-  video.playsInline = true;
-  video.preload = "auto";
-  video.crossOrigin = "anonymous";
-  video.hidden = true;
-  document.body.append(video);
-  // Handed over once. Every later frame is presented by index: the browser
-  // already decoded it into GPU memory, and Rust copies it GPU→GPU, so no pixels
-  // cross the wasm boundary at all.
-  editor.setVideoElement(video);
-
-  let objectUrl: string | undefined;
   let pendingVideoFile: File | undefined;
   let pendingDocumentFile: File | undefined;
+  let player: VideoPlayer | undefined;
 
   /// Applies the dialog's document selection: a picked file, a fetched URL, or
   /// nothing — which means "play unannotated", since Load commits the whole
@@ -149,126 +99,92 @@ async function main(): Promise<void> {
     }
     editor.clearDocument();
   }
-  let callbackActive = false;
-  let callbackId: number | undefined;
   let loadingAsset = false;
   let envBytesPromise: Promise<Uint8Array> | undefined;
   let sourceReady = false;
   let sourceGeneration = 0;
 
-  // Only media-element state transitions. `mediaTime` is not published here: it
-  // travels with its own frame through `updateVideoFrameRgba`, so the Details
-  // timeline always describes the frame that reached the screen.
-  function syncMediaState(): void {
-    editor.setVideoMediaState(video.readyState, video.ended);
+  /// Receives decoded frames. Ownership arrives with the frame and passes
+  /// straight to Rust, which closes it after the GPU copy — no pixels cross the
+  /// wasm boundary in either direction.
+  function frameSink(generation: number) {
+    return {
+      present(frame: VideoFrame, mediaSeconds: number): void {
+        if (generation !== sourceGeneration) {
+          frame.close();
+          return;
+        }
+        try {
+          editor.presentVideoFrame(frame, editor.frameIndexAtMediaTime(mediaSeconds), mediaSeconds);
+        } catch (error) {
+          editor.setVideoError(String(error));
+        }
+      },
+      ended(): void {
+        if (generation === sourceGeneration) {
+          editor.setVideoStatus(sourceReady, false);
+        }
+      },
+      failed(message: string): void {
+        if (generation === sourceGeneration) {
+          editor.setVideoError(message);
+        }
+      },
+    };
   }
 
-  async function copyCurrentFrame(mediaTime: number, generation = sourceGeneration): Promise<void> {
-    if (generation !== sourceGeneration) {
-      return;
-    }
-    // No `VideoFrame`, no `copyTo`, no `Uint8Array`: the element itself is the
-    // source and Rust copies it on the GPU. Async only so the call sites (which
-    // await it) stay unchanged.
-    editor.presentVideoFrame(
-      video.videoWidth,
-      video.videoHeight,
-      editor.frameIndexAtMediaTime(mediaTime),
-      mediaTime,
-    );
-  }
-
-  function scheduleVideoFrame(): void {
-    if (callbackActive) {
-      return;
-    }
-    callbackActive = true;
-    callbackId = video.requestVideoFrameCallback((_now, metadata) => {
-      const generation = sourceGeneration;
-      callbackId = undefined;
-      callbackActive = false;
-      void copyCurrentFrame(metadata.mediaTime, generation)
-        .catch((error: unknown) => editor.setVideoError(String(error)))
-        .finally(() => {
-          if (!video.paused && !video.ended) {
-            scheduleVideoFrame();
-          }
-        });
-    });
-  }
-
-  video.addEventListener("play", () => {
-    editor.setVideoStatus(sourceReady, sourceReady);
-    syncMediaState();
-    scheduleVideoFrame();
-  });
-  video.addEventListener("pause", () => {
-    editor.setVideoStatus(sourceReady, false);
-    syncMediaState();
-  });
-  video.addEventListener("ended", () => {
-    editor.setVideoStatus(sourceReady, false);
-    syncMediaState();
-  });
-  video.addEventListener("error", () => {
-    sourceReady = false;
-    editor.setVideoStatus(false, false);
-    syncMediaState();
-    editor.setVideoError(video.error?.message ?? "failed to load video");
-  });
-  video.addEventListener("seeked", () => {
-    if (video.paused) {
-      void copyCurrentFrame(video.currentTime).catch((error: unknown) =>
-        editor.setVideoError(String(error)),
-      );
-    }
-  });
-
-  function loadVideoSource(
-    source: string,
+  /// Opens a video for decoding. The source is a local file or a URL behind the
+  /// same interface, so this path no longer forks on which one it has (#282).
+  async function loadVideoSource(
+    open: () => Promise<ByteSource>,
     localFile?: { filename: string; byteLength: number },
-  ): void {
+  ): Promise<void> {
     if (localFile) {
       editor.validateVideoFile(localFile.filename, localFile.byteLength);
     }
     const generation = ++sourceGeneration;
-    if (callbackId !== undefined) {
-      video.cancelVideoFrameCallback(callbackId);
-      callbackId = undefined;
-      callbackActive = false;
-    }
-    video.pause();
+    player?.close();
+    player = undefined;
     sourceReady = false;
     editor.setVideoStatus(false, false);
-    editor.setVideoSourceInfo(
-      localFile ? 1 : 2,
-      localFile?.filename ?? source,
-      localFile?.byteLength ?? -1,
-    );
-    video.src = source;
-    video.addEventListener(
-      "loadeddata",
-      () => {
-        if (generation !== sourceGeneration) {
-          return;
-        }
-        try {
-          editor.validateVideoMetadata(video.videoWidth, video.videoHeight, video.duration);
-          video.pause();
-          video.currentTime = 0;
-          sourceReady = true;
-          editor.setVideoStatus(true, false);
-          syncMediaState();
-          void copyCurrentFrame(0).catch((error: unknown) => editor.setVideoError(String(error)));
-        } catch (error) {
-          sourceReady = false;
-          editor.setVideoStatus(false, false);
-          editor.setVideoError(String(error));
-        }
-      },
-      { once: true },
-    );
-    video.load();
+    try {
+      const source = await open();
+      if (generation !== sourceGeneration) {
+        return;
+      }
+      editor.setVideoSourceInfo(
+        localFile ? 1 : 2,
+        localFile?.filename ?? source.label,
+        localFile?.byteLength ?? source.size,
+      );
+      const opened = await VideoPlayer.open(source, frameSink(generation));
+      if (generation !== sourceGeneration) {
+        opened.close();
+        return;
+      }
+      // Adopt the container's own timeline before anything is drawn. The frame
+      // rate is a rational the sample table states; deriving it from a sample
+      // count over a duration would reintroduce the invented grid #264 removed.
+      editor.setVideoTimelineFromMoov(opened.moovBytes, localFile?.filename ?? source.label);
+      editor.validateVideoMetadata(
+        opened.facts.width,
+        opened.facts.height,
+        opened.facts.durationSeconds,
+      );
+      player = opened;
+      sourceReady = true;
+      editor.setVideoStatus(true, false);
+      // `readyState`/`ended` are `<video>` vocabulary; with a decoder the only
+      // meaningful report is "there is data and it has not run out".
+      editor.setVideoMediaState(4, false);
+      await opened.seekToSeconds(0);
+    } catch (error) {
+      if (generation === sourceGeneration) {
+        sourceReady = false;
+        editor.setVideoStatus(false, false);
+        editor.setVideoError(String(error));
+      }
+    }
   }
 
   input.addEventListener("change", () => {
@@ -295,15 +211,18 @@ async function main(): Promise<void> {
       input.value = "";
       input.click();
     } else if (command === 2) {
-      void video.play().catch((error: unknown) => editor.setVideoError(String(error)));
+      player?.play();
+      editor.setVideoStatus(sourceReady, sourceReady && player !== undefined);
     } else if (command === 3) {
-      video.pause();
+      player?.pause();
+      editor.setVideoStatus(sourceReady, false);
     } else if (command === 4) {
       documentInput.value = "";
       documentInput.click();
     } else if (command === 5) {
       // The dialog's single commit point: load the picked file, or the URL it
-      // accepted, whichever is pending.
+      // accepted, whichever is pending. Both become a `ByteSource`, so the
+      // decoder path below is identical for the two.
       const pendingUrl = editor.pendingVideoUrl();
       if (pendingUrl) {
         try {
@@ -311,31 +230,13 @@ async function main(): Promise<void> {
           if (url.protocol !== "http:" && url.protocol !== "https:") {
             throw new Error("video URL must use http:// or https://");
           }
-          if (objectUrl) {
-            URL.revokeObjectURL(objectUrl);
-            objectUrl = undefined;
-          }
-          loadVideoSource(url.href);
+          void loadVideoSource(() => urlByteSource(url.href));
         } catch (error) {
           editor.setVideoError(String(error));
         }
       } else if (pendingVideoFile) {
-        if (objectUrl) {
-          URL.revokeObjectURL(objectUrl);
-        }
         const file = pendingVideoFile;
-        objectUrl = URL.createObjectURL(file);
-        // Adopt the container's own timeline before the first frame arrives:
-        // `<video>` never reports a frame rate, so without this the scrubber is
-        // numbered on an invented grid (#264).
-        void readMoov(file)
-          .then((moov) => {
-            if (moov) {
-              editor.setVideoTimelineFromMoov(moov, file.name);
-            }
-          })
-          .catch((error: unknown) => console.warn("moov probe failed:", error));
-        loadVideoSource(objectUrl, {
+        void loadVideoSource(() => Promise.resolve(fileByteSource(file)), {
           filename: file.name,
           byteLength: file.size,
         });
@@ -348,8 +249,10 @@ async function main(): Promise<void> {
     }
 
     const seekFrame = editor.takeSeekFrame();
-    if (seekFrame >= 0 && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
-      video.currentTime = editor.mediaTimeAtFrame(seekFrame);
+    if (seekFrame >= 0 && player) {
+      void player
+        .seekToSeconds(editor.mediaTimeAtFrame(seekFrame))
+        .catch((error: unknown) => editor.setVideoError(String(error)));
     }
     const assetCode = loadingAsset ? 0 : editor.takeAssetRequest();
     const entry = catalog.get(assetCode);
@@ -389,6 +292,21 @@ async function main(): Promise<void> {
     requestAnimationFrame(serviceRustCommands);
   }
   requestAnimationFrame(serviceRustCommands);
+
+  // `?video=<url>` opens a video without going through the dialog, the same way
+  // `?document=` already works. The dialog is an egui canvas, so this is also
+  // the only way a scripted browser run can reach the playback path.
+  const requestedVideo = query.get("video");
+  if (requestedVideo) {
+    void loadVideoSource(() => urlByteSource(requestedVideo)).then(() => {
+      // `&play=1` starts playback too, so a scripted run can exercise the
+      // decode/pace loop without driving the egui transport bar.
+      if (query.get("play") === "1") {
+        player?.play();
+        editor.setVideoStatus(true, true);
+      }
+    });
+  }
 }
 
 main().catch((error: unknown) => {

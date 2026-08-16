@@ -602,12 +602,12 @@ impl Renderer {
     #[cfg(target_arch = "wasm32")]
     pub fn update_frame_texture_from_video(
         &mut self,
-        video: &web_sys::HtmlVideoElement,
+        frame: &web_sys::VideoFrame,
         width: u32,
         height: u32,
     ) {
         self.frame_plane
-            .copy_video_element(&self.gpu, video, width, height);
+            .copy_video_frame(&self.gpu, frame, width, height);
     }
 
     /// Uploads `image` as the **background frame texture** (#63) sampled by a

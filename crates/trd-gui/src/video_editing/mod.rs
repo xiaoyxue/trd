@@ -277,7 +277,9 @@ pub struct VideoEditingShared {
     /// zero-upload path. Web-only: native frames arrive from an ffmpeg pipe as
     /// CPU bytes and have nothing to keep on the GPU (#229).
     #[cfg(target_arch = "wasm32")]
-    video_element: RefCell<Option<web_sys::HtmlVideoElement>>,
+    /// The decoded frame waiting to be drawn. Owned here: it is closed after
+    /// the upload, or when a newer frame replaces it.
+    video_frame: RefCell<Option<web_sys::VideoFrame>>,
     /// A timeline the shell probed from the container, waiting to be adopted.    ///
     /// The browser learns the real frame rate only after `moov` has been read,
     /// which happens *after* the editor starts — so this arrives late by
@@ -336,7 +338,7 @@ impl Default for VideoEditingShared {
             skip_readback: Cell::new(false),
             shared_gpu: RefCell::new(None),
             #[cfg(target_arch = "wasm32")]
-            video_element: RefCell::new(None),
+            video_frame: RefCell::new(None),
             pending_video_info: RefCell::new(None),
             incoming_document: RefCell::new(None),
             command: Cell::new(COMMAND_NONE),
@@ -411,22 +413,27 @@ impl VideoEditingShared {
         ))
     }
 
-    /// Hands over the `<video>` element whose frames are copied GPU→GPU, so the
-    /// render task can present a frame without any pixels crossing the wasm
-    /// boundary. Until this is set the editor uses the RGBA path unchanged.
+    /// Hands over the decoded frame whose pixels are copied GPU→GPU, so the
+    /// render task can present it without any crossing the wasm boundary.
+    ///
+    /// Borrows rather than takes: a render can run more than once for the same
+    /// frame — any UI change repaints — and a taken frame would leave the second
+    /// pass with an empty RGBA buffer. The clone is another handle to the same
+    /// frame, not WebCodecs' `clone()`, so it costs no extra pool slot; the
+    /// frame is released when a newer one replaces it.
     #[cfg(target_arch = "wasm32")]
-    pub fn set_video_element(&self, video: web_sys::HtmlVideoElement) {
-        self.video_element.replace(Some(video));
+    fn video_frame(&self) -> Option<web_sys::VideoFrame> {
+        self.video_frame.borrow().clone()
     }
 
-    #[cfg(target_arch = "wasm32")]
-    fn video_element(&self) -> Option<web_sys::HtmlVideoElement> {
-        self.video_element.borrow().clone()
-    }
-
-    /// Publishes a frame that lives **only on the GPU**: the `<video>` element
-    /// holds the pixels, so the editor is told which timeline row is on screen
-    /// and nothing else.
+    /// Publishes a decoded frame that lives **only on the GPU**: the
+    /// `VideoFrame` holds the pixels, so the editor is told which timeline row
+    /// is on screen and nothing else.
+    ///
+    /// **Takes ownership of the frame.** A `VideoFrame` holds a slot in a small
+    /// decoder-side pool, so it is closed once uploaded — and any frame still
+    /// pending here is closed when this one replaces it, since the newer one is
+    /// what will be drawn.
     ///
     /// A separate entry point from
     /// [`update_video_frame_rgba`](Self::update_video_frame_rgba) rather than a
@@ -436,16 +443,18 @@ impl VideoEditingShared {
     #[cfg(target_arch = "wasm32")]
     pub fn present_video_frame(
         &self,
-        width: u32,
-        height: u32,
+        frame: web_sys::VideoFrame,
         frame_index: u32,
         media_time_seconds: f64,
     ) -> Result<(), String> {
-        if self.video_element.borrow().is_none() {
-            return Err("no <video> element handed over; call setVideoElement first".to_owned());
-        }
+        let width = frame.display_width();
+        let height = frame.display_height();
         if width == 0 || height == 0 {
+            frame.close();
             return Err(format!("video frame size {width}x{height} is degenerate"));
+        }
+        if let Some(dropped) = self.video_frame.replace(Some(frame)) {
+            dropped.close();
         }
         self.frame.replace(Some(IncomingVideoFrame {
             rgba: Vec::new(),
@@ -1237,14 +1246,14 @@ impl VideoEditingApp {
         let background_media_time = video.media_time_seconds;
         let render_started = Instant::now();
         // A frame published by `present_video_frame` carries no pixels: the
-        // `<video>` element still holds them on the GPU, so the source is the
-        // element itself and nothing crosses the wasm boundary.
+        // decoded `VideoFrame` still holds them on the GPU, so the source is the
+        // frame itself and nothing crosses the wasm boundary.
         #[cfg(target_arch = "wasm32")]
-        let video_element = shared.video_element().filter(|_| video.rgba.is_empty());
+        let video_frame = shared.video_frame().filter(|_| video.rgba.is_empty());
         let render = async move {
             #[cfg(target_arch = "wasm32")]
-            let source = match video_element.as_ref() {
-                Some(element) => crate::video_editing_renderer::FrameSource::VideoElement(element),
+            let source = match video_frame.as_ref() {
+                Some(frame) => crate::video_editing_renderer::FrameSource::VideoFrame(frame),
                 None => crate::video_editing_renderer::FrameSource::Rgba(&video.rgba),
             };
             #[cfg(not(target_arch = "wasm32"))]
