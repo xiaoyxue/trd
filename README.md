@@ -25,7 +25,7 @@ from JS.
 ## [How it fits together](docs/architecture.md)
 
 Everything shares **one render function** and one mesh-first render format. The
-video editor additionally reads a separate `0.1.0` authoring timeline and
+video editor additionally reads a separate `0.2.0` authoring timeline and
 derives normal render scenes from it in Rust:
 
 ```
@@ -43,7 +43,7 @@ input-stream ─┬─ trd-cli  → trd-core → offscreen readback → image-st
 | **`trd-app`** | Arrow stream (stdin) | live window swapchain | frames on screen |
 | **`trd-wasm`** | Arrow stream (via `loadIpc`) | live canvas (or offscreen texture) | frames in the browser |
 | **`trd-gui`** | a mesh + live gestures | offscreen → egui image | an interactive orbit/zoom viewer |
-| **video editor** | `0.1.0` timeline + external video | offscreen → egui image | quad-local 3D editing over video |
+| **video editor** | `0.2.0` timeline + external video | offscreen → egui image | quad-local 3D editing over video |
 
 Each front-end is a *thin shell* that only supplies a render target and calls the
 core — no per-front-end rendering logic. Primitive dispatch and draw-kind
@@ -234,7 +234,7 @@ params: **[`docs/rendering.md`](docs/rendering.md#interactive-viewer--trd-gui)**
 `web/gui-video-editing` is a Rust-owned WebGPU editor for placing catalog objects on
 the tracked FIBA court quad while an external MP4 plays. The browser owns media
 decode and copies each presented `VideoFrame` to RGBA; Rust owns the separate
-`trd.video_edit.version = 0.1.0` Arrow timeline, quad reconstruction,
+`trd.video_edit.version = 0.2.0` Arrow timeline, quad reconstruction,
 quad/object-local transforms, GPU picking, PBR/IBL, final composition, and a
 collapsed **Details** inspector. Its typed snapshot follows the displayed render
 and exposes source/synchronization, raw tracking pose deltas, placement,

@@ -65,9 +65,9 @@ pub use texture::{
     ConstantTexture, ImageData, ImageTexture, Texture, TextureError, TEXTURE_COLUMN,
 };
 pub use video_editing::{
-    decode_video_editing_document, VideoEditingDocument, VideoEditingError, VideoEditingFrame,
-    VideoInfo, VIDEO_EDIT_TABLE_KIND_KEY, VIDEO_EDIT_TIMELINE_KIND, VIDEO_EDIT_VERSION,
-    VIDEO_EDIT_VERSION_KEY,
+    decode_video_editing_document, Shot, VideoEditingDocument, VideoEditingError,
+    VideoEditingFrame, VideoInfo, VIDEO_EDIT_TABLE_KIND_KEY, VIDEO_EDIT_TIMELINE_KIND,
+    VIDEO_EDIT_VERSION, VIDEO_EDIT_VERSION_KEY,
 };
 
 #[cfg(not(target_arch = "wasm32"))]

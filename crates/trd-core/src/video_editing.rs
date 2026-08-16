@@ -9,7 +9,7 @@ use arrow::datatypes::{DataType, Schema};
 use arrow::ipc::reader::StreamReader;
 use thiserror::Error;
 
-pub const VIDEO_EDIT_VERSION: &str = "0.1.0";
+pub const VIDEO_EDIT_VERSION: &str = "0.2.0";
 pub const VIDEO_EDIT_VERSION_KEY: &str = "trd.video_edit.version";
 pub const VIDEO_EDIT_TABLE_KIND_KEY: &str = "trd.video_edit.table.kind";
 pub const VIDEO_EDIT_TIMELINE_KIND: &str = "timeline";
@@ -45,7 +45,69 @@ pub struct VideoEditingFrame {
 pub struct VideoEditingDocument {
     pub video: VideoInfo,
     pub poster_bytes: Vec<u8>,
+    /// The annotated frames, **sparse** and sorted by `video_frame_index`.
+    ///
+    /// A document names only the frames that carry a placement quad — a few
+    /// shots out of a clip that may run to hundreds of thousands of frames — so
+    /// this is a lookup table, not a per-frame array (#264). Use
+    /// [`frame`](Self::frame) rather than indexing.
     pub frames: Vec<VideoEditingFrame>,
+}
+
+/// A maximal run of consecutive annotated frames — what a user calls a *shot*.
+///
+/// Derived rather than stored: a run boundary is exactly "the next annotated
+/// frame is not the next frame", so storing it would be a second source of
+/// truth that could disagree with the rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shot {
+    /// First annotated frame — what "jump to this shot" seeks to.
+    pub start_frame: u32,
+    /// Last annotated frame, inclusive.
+    pub end_frame: u32,
+}
+
+impl Shot {
+    pub fn frame_count(self) -> u32 {
+        self.end_frame.saturating_sub(self.start_frame) + 1
+    }
+
+    pub fn contains(self, frame_index: u32) -> bool {
+        (self.start_frame..=self.end_frame).contains(&frame_index)
+    }
+}
+
+impl VideoEditingDocument {
+    /// The row for `frame_index`, or `None` when the frame is not annotated.
+    ///
+    /// A binary search over the sorted rows: with a sparse document the answer
+    /// is usually "no row", and that is the ordinary case, not an error.
+    pub fn frame(&self, frame_index: u32) -> Option<&VideoEditingFrame> {
+        self.frames
+            .binary_search_by_key(&frame_index, |frame| frame.video_frame_index)
+            .ok()
+            .map(|row| &self.frames[row])
+    }
+
+    /// The annotated runs, in play order.
+    ///
+    /// This is what makes a sparse document navigable: in a 79-minute clip
+    /// nothing else tells you *where* the annotated ranges are.
+    pub fn shots(&self) -> Vec<Shot> {
+        let mut shots: Vec<Shot> = Vec::new();
+        for frame in &self.frames {
+            match shots.last_mut() {
+                Some(shot) if frame.video_frame_index == shot.end_frame + 1 => {
+                    shot.end_frame = frame.video_frame_index;
+                }
+                _ => shots.push(Shot {
+                    start_frame: frame.video_frame_index,
+                    end_frame: frame.video_frame_index,
+                }),
+            }
+        }
+        shots
+    }
 }
 
 #[derive(Debug, Error)]
@@ -72,14 +134,20 @@ pub enum VideoEditingError {
     NullValue { column: &'static str, row: usize },
     #[error("frame {row} has only one of `k` / `placement_quad`")]
     PartialGeometry { row: usize },
-    #[error("video frame indices must be contiguous from zero (row {row} is {actual})")]
-    NonContiguousFrameIndex { row: usize, actual: u32 },
-    #[error("poster image is missing from video frame 0")]
-    MissingPoster,
-    #[error("poster image must only appear on video frame 0")]
+    #[error("frame index {actual} is outside the video's {frame_count} frames (row {row})")]
+    FrameIndexOutOfRange {
+        row: usize,
+        actual: u32,
+        frame_count: u32,
+    },
+    #[error("frame indices must increase (row {row} is {actual}, after {previous})")]
+    UnsortedFrameIndex {
+        row: usize,
+        actual: u32,
+        previous: u32,
+    },
+    #[error("poster image must only appear on the first row")]
     ExtraPoster,
-    #[error("document has {actual} rows but metadata declares {expected} frames")]
-    FrameCountMismatch { actual: usize, expected: u32 },
 }
 
 pub fn decode_video_editing_document(
@@ -105,11 +173,27 @@ pub fn decode_video_editing_document(
         for row in 0..batch.num_rows() {
             let absolute_row = frames.len();
             let frame_index = value_u32(video_frame_index, "video_frame_index", row)?;
-            if frame_index != absolute_row as u32 {
-                return Err(VideoEditingError::NonContiguousFrameIndex {
+            // Sparse, but ordered and in range: rows may skip freely — that is
+            // the point — while an index past the video is a document that
+            // cannot apply, and an out-of-order one would break the lookup.
+            if frame_index >= video.frame_count {
+                return Err(VideoEditingError::FrameIndexOutOfRange {
                     row: absolute_row,
                     actual: frame_index,
+                    frame_count: video.frame_count,
                 });
+            }
+            if let Some(previous) = frames
+                .last()
+                .map(|frame: &VideoEditingFrame| frame.video_frame_index)
+            {
+                if frame_index <= previous {
+                    return Err(VideoEditingError::UnsortedFrameIndex {
+                        row: absolute_row,
+                        actual: frame_index,
+                        previous,
+                    });
+                }
             }
             let k = fixed_value(k, row).map(|values| {
                 let mut result = [0.0; 9];
@@ -143,15 +227,12 @@ pub fn decode_video_editing_document(
             });
         }
     }
-    if frames.len() != video.frame_count as usize {
-        return Err(VideoEditingError::FrameCountMismatch {
-            actual: frames.len(),
-            expected: video.frame_count,
-        });
-    }
     Ok(VideoEditingDocument {
         video,
-        poster_bytes: poster_bytes.ok_or(VideoEditingError::MissingPoster)?,
+        // Optional: the poster exists so an editor can show *something* before
+        // the first decode, and a sparse document may not annotate frame 0 at
+        // all. The first decoded frame serves just as well (#264).
+        poster_bytes: poster_bytes.unwrap_or_default(),
         frames,
     })
 }
@@ -433,5 +514,164 @@ mod tests {
             decode_video_editing_document(&document_bytes(VIDEO_EDIT_VERSION, true)),
             Err(VideoEditingError::PartialGeometry { row: 0 })
         ));
+    }
+
+    /// A sparse document: rows name **only** the annotated frames, so most
+    /// lookups legitimately find nothing (#264).
+    fn sparse_bytes(frame_count: u32, indices: &[u32], poster: bool) -> Vec<u8> {
+        let rows = indices.len();
+        let metadata = [
+            (
+                VIDEO_EDIT_VERSION_KEY.to_owned(),
+                VIDEO_EDIT_VERSION.to_owned(),
+            ),
+            (
+                VIDEO_EDIT_TABLE_KIND_KEY.to_owned(),
+                VIDEO_EDIT_TIMELINE_KIND.to_owned(),
+            ),
+            ("trd.video.source_name".to_owned(), "shot.mp4".to_owned()),
+            ("trd.video.mime".to_owned(), "video/mp4".to_owned()),
+            ("trd.video.codec".to_owned(), "h264".to_owned()),
+            ("trd.video.sha256".to_owned(), "abc".to_owned()),
+            ("trd.video.byte_length".to_owned(), "10".to_owned()),
+            ("trd.video.width".to_owned(), "1920".to_owned()),
+            ("trd.video.height".to_owned(), "1080".to_owned()),
+            ("trd.video.fps_num".to_owned(), "24".to_owned()),
+            ("trd.video.fps_den".to_owned(), "1".to_owned()),
+            ("trd.video.frame_count".to_owned(), frame_count.to_string()),
+            ("trd.video.duration_us".to_owned(), "41667".to_owned()),
+        ]
+        .into_iter()
+        .collect();
+        let f32_field = Arc::new(Field::new("item", DataType::Float32, false));
+        let k_values: ArrayRef = Arc::new(Float32Array::from(
+            (0..rows)
+                .flat_map(|_| [4510.0, 0.0, 960.0, 0.0, 4510.0, 540.0, 0.0, 0.0, 1.0])
+                .collect::<Vec<f32>>(),
+        ));
+        let k = FixedSizeListArray::new(f32_field.clone(), 9, k_values, None);
+        let quad_values: ArrayRef = Arc::new(Float32Array::from(
+            (0..rows)
+                .flat_map(|_| [10.0, 20.0, 30.0, 20.0, 30.0, 40.0, 10.0, 40.0])
+                .collect::<Vec<f32>>(),
+        ));
+        let quad = FixedSizeListArray::new(f32_field, 8, quad_values, None);
+        let schema = Schema::new(vec![
+            Field::new("video_frame_index", DataType::UInt32, false),
+            Field::new("present_index", DataType::UInt32, false),
+            Field::new("timestamp_us", DataType::Int64, false),
+            Field::new("k", k.data_type().clone(), true),
+            Field::new("placement_quad", quad.data_type().clone(), true),
+            Field::new("tracked", DataType::Boolean, false),
+            Field::new("poster_bytes", DataType::Binary, true),
+        ])
+        .with_metadata(metadata);
+        let posters: Vec<Option<&[u8]>> = (0..rows)
+            .map(|row| (poster && row == 0).then_some(b"jpeg".as_slice()))
+            .collect();
+        let batch = arrow::array::RecordBatch::try_new(
+            Arc::new(schema.clone()),
+            vec![
+                Arc::new(UInt32Array::from(indices.to_vec())) as ArrayRef,
+                Arc::new(UInt32Array::from(indices.to_vec())) as ArrayRef,
+                Arc::new(Int64Array::from(
+                    indices
+                        .iter()
+                        .map(|i| i64::from(*i) * 41_667)
+                        .collect::<Vec<_>>(),
+                )) as ArrayRef,
+                Arc::new(k) as ArrayRef,
+                Arc::new(quad) as ArrayRef,
+                Arc::new(BooleanArray::from(vec![true; rows])) as ArrayRef,
+                Arc::new(BinaryArray::from(posters)) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let mut bytes = Vec::new();
+        let mut writer = StreamWriter::try_new(&mut bytes, &schema).unwrap();
+        writer.write(&batch).unwrap();
+        writer.finish().unwrap();
+        drop(writer);
+        bytes
+    }
+
+    /// The heart of `0.2.0`: rows skip freely, and a frame with no row is an
+    /// ordinary un-annotated frame rather than an error.
+    #[test]
+    fn decodes_sparse_rows_and_looks_them_up() {
+        let document =
+            decode_video_editing_document(&sparse_bytes(1000, &[10, 11, 12, 40, 41], true))
+                .unwrap();
+
+        assert_eq!(document.frames.len(), 5, "only the annotated frames");
+        assert_eq!(document.frame(11).map(|f| f.video_frame_index), Some(11));
+        assert_eq!(document.frame(40).map(|f| f.video_frame_index), Some(40));
+        assert!(document.frame(0).is_none(), "frame 0 is not annotated");
+        assert!(document.frame(20).is_none(), "the gap has no row");
+        assert!(document.frame(999).is_none());
+    }
+
+    /// Shots are what make a sparse document navigable: maximal runs of
+    /// consecutive annotated frames, in play order.
+    #[test]
+    fn derives_shots_from_consecutive_runs() {
+        let document =
+            decode_video_editing_document(&sparse_bytes(1000, &[10, 11, 12, 40, 41, 900], true))
+                .unwrap();
+
+        assert_eq!(
+            document.shots(),
+            vec![
+                Shot {
+                    start_frame: 10,
+                    end_frame: 12
+                },
+                Shot {
+                    start_frame: 40,
+                    end_frame: 41
+                },
+                Shot {
+                    start_frame: 900,
+                    end_frame: 900
+                },
+            ]
+        );
+        assert_eq!(document.shots()[0].frame_count(), 3);
+        assert!(document.shots()[0].contains(11));
+        assert!(!document.shots()[0].contains(13));
+    }
+
+    /// A poster is an editor convenience, and a sparse document may not annotate
+    /// frame 0 at all — so its absence must not be fatal.
+    #[test]
+    fn poster_is_optional() {
+        let document = decode_video_editing_document(&sparse_bytes(100, &[7, 8], false)).unwrap();
+        assert!(document.poster_bytes.is_empty());
+        assert_eq!(document.frames.len(), 2);
+    }
+
+    /// The two things a sparse document still may not do: name a frame the video
+    /// does not have, or arrive out of order (which would break the lookup).
+    #[test]
+    fn rejects_out_of_range_and_unsorted_rows() {
+        assert!(matches!(
+            decode_video_editing_document(&sparse_bytes(50, &[10, 60], true)),
+            Err(VideoEditingError::FrameIndexOutOfRange { actual: 60, .. })
+        ));
+        assert!(matches!(
+            decode_video_editing_document(&sparse_bytes(100, &[10, 9], true)),
+            Err(VideoEditingError::UnsortedFrameIndex {
+                actual: 9,
+                previous: 10,
+                ..
+            })
+        ));
+        assert!(
+            matches!(
+                decode_video_editing_document(&sparse_bytes(100, &[10, 10], true)),
+                Err(VideoEditingError::UnsortedFrameIndex { .. })
+            ),
+            "a duplicated index is not a valid lookup key either"
+        );
     }
 }

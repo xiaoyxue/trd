@@ -26,28 +26,43 @@ The editor does **not** read render protocol `0.0.6` directly. It has a separate
 authoring document:
 
 ```text
-trd.video_edit.version = 0.1.0
+trd.video_edit.version = 0.2.0
 trd.video_edit.table.kind = timeline
 ```
 
 Schema metadata records source name, MIME/codec, SHA-256, byte length,
-dimensions, frame rate, frame count, and duration. The single timeline table
-contains:
+dimensions, frame rate, frame count, and duration. The single timeline table is
+**sparse** — it holds a row only for the frames that carry an ad-placement quad,
+because those are the only frames the editor can act on. Everything else is
+ordinary video and is played as such:
 
 | Column | Type | Meaning |
 |---|---|---|
-| `video_frame_index` | `u32` | contiguous decoded frame index |
-| `present_index` | `u32` | source parquet row; equal to frame index here |
+| `video_frame_index` | `u32` | decoded frame index; **strictly increasing, with gaps** |
+| `present_index` | `u32` | source parquet row |
 | `timestamp_us` | `i64` | deterministic media timestamp |
 | `k` | nullable `FixedSizeList<f32>[9]` | row-major OpenCV intrinsics |
 | `placement_quad` | nullable `FixedSizeList<f32>[8]` | TL/TR/BR/BL pixels |
 | `tracked` | `bool` | whether K/quad geometry is valid |
-| `poster_bytes` | nullable `Binary` | encoded JPEG on row 0 only |
+| `poster_bytes` | nullable `Binary` | optional encoded JPEG, on the first row only |
 
 Every timeline row directly copies the parquet row with the same
 `present_index`; there is no frame-zero propagation. The Rust decoder rejects
-unsupported versions/table kinds, partial K/quad geometry, non-contiguous frame
-indices, misplaced posters, and metadata/frame-count mismatches.
+unsupported versions and table kinds, partial K/quad geometry, frame indices
+outside the video, out-of-order or duplicated indices, and a misplaced poster.
+What it deliberately **allows** is a document that annotates almost nothing: a
+frame with no row is looked up as `None` and rendered as plain video (#264).
+
+**Shots** are derived, not stored: a shot is a maximal run of consecutive
+annotated frames, so the run boundaries can never disagree with the rows. The
+editor lists them in the left pane and jumps to a shot's first frame; a
+**Show placement overlay** toggle governs whether the quad and gizmo are drawn,
+including *during playback* — an annotated frame shows its quad as it plays
+past, and the toggle is how that is turned off.
+
+The document is optional. Without one the editor is a plain player: the timeline
+comes from the container (ffprobe natively, the `moov` box in the browser) and
+the placement UI stays inert.
 
 The initial timeline embeds no mesh/material/edit resources. The fixed catalog
 is fetched from repository assets at runtime. Exporting edited state as a normal

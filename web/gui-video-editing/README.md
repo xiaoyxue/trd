@@ -6,14 +6,21 @@ Canonical user/developer documentation lives in
 [`docs/video-editing.md`](../../docs/video-editing.md); this package README keeps
 the local generation and launch recipe close to the bootstrap.
 
-The editor loads a separate `trd.video_edit.version = 0.1.0` authoring document
-whose rows contain:
+The editor loads an **optional**, separate `trd.video_edit.version = 0.2.0`
+authoring document. It is **sparse**: a row exists only for a frame that carries
+an ad-placement quad — for FIBA shot 1 that is frames 0-221 of 288, so the
+222-287 tail has no rows at all and simply plays. Each row contains:
 
-- `video_frame_index` and source `present_index` (identical and zero-based for
-  FIBA shot 1);
-- per-frame `K`, placement quad, and tracked state;
-- an encoded frame-0 poster on row 0;
+- `video_frame_index` and source `present_index` (strictly increasing, with gaps);
+- `K`, placement quad, and tracked state;
+- an optional encoded poster, on the first row only;
 - video identity/size/fps/count/digest in schema metadata.
+
+Without a document the editor is a plain player: the timeline comes from the
+video container and the placement UI stays inert. With one, the left pane lists
+the derived **shots** (runs of consecutive annotated frames), jumps to a shot's
+first frame, and offers a **Show placement overlay** toggle that also governs
+whether quads are drawn during playback.
 
 Each Arrow line copies `K` and `ad_quad` directly from the parquet row with the
 same zero-based `present_index`; no additional quad homography is applied.

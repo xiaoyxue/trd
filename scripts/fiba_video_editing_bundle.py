@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Build the simple #163 FIBA video-editing Arrow timeline.
+"""Build the FIBA video-editing Arrow timeline (document ``0.2.0``).
 
-For this sample, ``video_frame_index == present_index`` and both start at zero.
-The MP4 remains external; row zero embeds an encoded JPEG poster.
+The document is **sparse**: it carries only the frames that have an ad-placement
+quad, since those are the frames the editor can do anything with. Everything else
+is ordinary video, and the editor plays it as such (#264). The MP4 stays
+external; the first emitted row embeds an encoded JPEG poster.
 """
 
 import argparse
@@ -15,7 +17,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from pyarrow import ipc
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 
 def command_json(*args):
@@ -109,20 +111,28 @@ def main():
         raise SystemExit("simple FIBA bundle requires present_index contiguous from zero")
 
     video_frame_indices = expected
+    # Sparse by construction: a row exists only where the calibration has both a
+    # K and an ad quad. The frames in between are plain video, and saying so by
+    # *omission* is the point of `0.2.0` (#264).
+    annotated = [
+        index
+        for index, row in zip(video_frame_indices, rows)
+        if row.get("K") is not None and row.get("ad_quad") is not None
+    ]
+    if not annotated:
+        raise SystemExit("no annotated frames: every row lacks K or ad_quad")
+    annotated_rows = [
+        row
+        for row in rows
+        if row.get("K") is not None and row.get("ad_quad") is not None
+    ]
     timestamps_us = [
-        round(index * info["fps_den"] * 1_000_000 / info["fps_num"])
-        for index in video_frame_indices
+        round(index * info["fps_den"] * 1_000_000 / info["fps_num"]) for index in annotated
     ]
-    tracked = [row.get("K") is not None and row.get("ad_quad") is not None for row in rows]
-    ks = [
-        [float(value) for value in row["K"]] if is_tracked else None
-        for row, is_tracked in zip(rows, tracked)
-    ]
-    quads = [
-        [float(value) for value in row["ad_quad"]] if is_tracked else None
-        for row, is_tracked in zip(rows, tracked)
-    ]
-    posters = [poster] + [None] * (len(rows) - 1)
+    tracked = [True] * len(annotated)
+    ks = [[float(value) for value in row["K"]] for row in annotated_rows]
+    quads = [[float(value) for value in row["ad_quad"]] for row in annotated_rows]
+    posters = [poster] + [None] * (len(annotated) - 1)
 
     metadata = {
         b"trd.video_edit.version": VERSION.encode(),
@@ -153,8 +163,8 @@ def main():
     )
     batch = pa.record_batch(
         [
-            pa.array(video_frame_indices, type=pa.uint32()),
-            pa.array(present_indices, type=pa.uint32()),
+            pa.array(annotated, type=pa.uint32()),
+            pa.array(annotated, type=pa.uint32()),
             pa.array(timestamps_us, type=pa.int64()),
             pa.array(ks, type=pa.list_(pa.float32(), 9)),
             pa.array(quads, type=pa.list_(pa.float32(), 8)),
@@ -168,9 +178,17 @@ def main():
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("wb") as file, ipc.new_stream(file, schema) as writer:
         writer.write_batch(batch)
+    shots = []
+    for index in annotated:
+        if shots and index == shots[-1][1] + 1:
+            shots[-1][1] = index
+        else:
+            shots.append([index, index])
     print(
-        f"wrote {len(rows)} rows ({sum(tracked)} tracked), poster={len(poster)} bytes, "
-        f"video_frame_index=present_index=0..{len(rows)-1} to {output}"
+        f"wrote {len(annotated)} annotated rows of {info['frame_count']} frames, "
+        f"poster={len(poster)} bytes, shots="
+        + ", ".join(f"{start}-{end}" for start, end in shots)
+        + f" to {output}"
     )
 
 
