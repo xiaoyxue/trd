@@ -76,8 +76,8 @@ eframe = { version = "0.36.1", default-features = false, features = [
 wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = [
     "HtmlCanvasElement",
-    # The browser frame path names the `<video>` element it copies GPU→GPU (#229).
-    "HtmlVideoElement",
+    # The browser frame path copies a decoded `VideoFrame` GPU→GPU (#229, #282).
+    "VideoFrame",
     "Element",
     "Window",
 ] }

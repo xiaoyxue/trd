@@ -41,11 +41,19 @@ export interface VideoTrackFacts {
   readonly timescale: number;
   readonly sampleCount: number;
   readonly durationSeconds: number;
-  /// The largest time a seek may ask for. Neither `durationSeconds` nor simply
-  /// the last frame's presentation time: mp4box refuses to seek past its own
-  /// duration, taken from the last sample in *decode* order, and answers such a
-  /// request with an offset that decodes nothing — which then reads to the end
-  /// of the file looking for a frame that cannot exist.
+  /// Presentation time of the first frame in the container. Not always zero:
+  /// with B-frames the composition times are commonly shifted forward and an
+  /// edit list shifts the timeline back to compensate. A `<video>` element
+  /// applies that list; mp4box reports raw `cts`, so frame *N* of the timeline
+  /// is the *N*-th frame from here, not from zero. Ignoring it put the FIBA
+  /// clip two frames late on every seek.
+  readonly startSeconds: number;
+  /// The largest time a seek may ask for, relative to `startSeconds`. Neither
+  /// `durationSeconds` nor simply the last frame's presentation time: mp4box
+  /// refuses to seek past its own duration, taken from the last sample in
+  /// *decode* order, and answers such a request with an offset that decodes
+  /// nothing — which then reads to the end of the file looking for a frame that
+  /// cannot exist.
   readonly lastFrameSeconds: number;
   /// The `avcC`/`hvcC` payload. An AVC decoder configured without it accepts
   /// the configuration and then silently emits nothing, so its absence is worth
@@ -158,6 +166,10 @@ async function locateMoov(source: ByteSource, head: ArrayBuffer): Promise<BoxExt
 /// for.
 export class Mp4Video {
   readonly facts: VideoTrackFacts;
+  /// The `moov` box exactly as read. Rust derives the timeline from it — the
+  /// frame rate as a rational, which mp4box reports only as a sample count over
+  /// a duration — through the same `probe_moov` every other front-end uses.
+  readonly moovBytes: Uint8Array;
   readonly #source: ByteSource;
   readonly #file: ISOFile;
   /// Decoded frames at or after the seek target, in presentation order. The
@@ -173,10 +185,16 @@ export class Mp4Video {
   #budgetFrom = 0;
   #exhausted = true;
 
-  private constructor(source: ByteSource, file: ISOFile, facts: VideoTrackFacts) {
+  private constructor(
+    source: ByteSource,
+    file: ISOFile,
+    facts: VideoTrackFacts,
+    moovBytes: Uint8Array,
+  ) {
     this.#source = source;
     this.#file = file;
     this.facts = facts;
+    this.moovBytes = moovBytes;
   }
 
   get source(): ByteSource {
@@ -208,9 +226,13 @@ export class Mp4Video {
       // a meaningless offset.
       const samples = file.getTrackById(track.id)?.samples ?? [];
       let lastCts = 0;
+      let firstCts = Number.POSITIVE_INFINITY;
       for (const sample of samples) {
         if (sample.cts > lastCts) {
           lastCts = sample.cts;
+        }
+        if (sample.cts < firstCts) {
+          firstCts = sample.cts;
         }
       }
       const decodeLast = samples[samples.length - 1];
@@ -218,6 +240,7 @@ export class Mp4Video {
       const mp4boxEnd = decodeLast
         ? (decodeLast.cts + decodeLast.duration) / decodeLast.timescale
         : 0;
+      const startSeconds = Number.isFinite(firstCts) ? firstCts / sampleTimescale : 0;
       facts = {
         id: track.id,
         codec: track.codec,
@@ -226,7 +249,8 @@ export class Mp4Video {
         timescale: track.timescale,
         sampleCount: track.nb_samples,
         durationSeconds: track.duration / track.timescale,
-        lastFrameSeconds: Math.min(lastCts / sampleTimescale, mp4boxEnd),
+        startSeconds,
+        lastFrameSeconds: Math.min(lastCts / sampleTimescale, mp4boxEnd) - startSeconds,
         description: descriptionFor(file, track.id),
       };
       // Registering the track does not start delivery; `start()` does, and that
@@ -263,7 +287,7 @@ export class Mp4Video {
     if (!facts) {
       throw new Error(`"${source.label}" has a moov box but no readable video track`);
     }
-    return new Mp4Video(source, file, facts);
+    return new Mp4Video(source, file, facts, new Uint8Array(moovBytes));
   }
 
   #ensureDecoder(): VideoDecoder {
@@ -288,6 +312,9 @@ export class Mp4Video {
   /// Positions the reader at the key frame at or before `seconds`, discarding
   /// what precedes the target. Returns the time actually sought to.
   ///
+  /// `seconds` is **presentation time from the start of the video**, so 0 is the
+  /// first frame; `startSeconds` converts to the container's own clock.
+  ///
   /// This is what a `<video>` element does internally for `currentTime = t`.
   /// The difference is that every frame that comes out carries its container
   /// timestamp, so it is identified rather than approximated.
@@ -297,7 +324,8 @@ export class Mp4Video {
     // would then read to the end of the file looking for a frame that does not
     // exist.
     const wantedSeconds = Math.min(Math.max(0, seconds), this.facts.lastFrameSeconds);
-    this.#skipTarget = wantedSeconds * 1_000_000;
+    const containerSeconds = wantedSeconds + this.facts.startSeconds;
+    this.#skipTarget = containerSeconds * 1_000_000;
     this.#skipped = 0;
     this.#exhausted = false;
     this.#budgetFrom = this.#source.bytesRead;
@@ -336,12 +364,18 @@ export class Mp4Video {
       // The samples are in the decoder's queue now; mp4box can drop its copies.
       this.#file.releaseUsedSamples(this.facts.id, samples[samples.length - 1]?.number ?? 0);
     };
-    this.#feedOffset = this.#file.seek(wantedSeconds, true).offset;
+    this.#feedOffset = this.#file.seek(containerSeconds, true).offset;
     if (!this.#started) {
       this.#file.start();
       this.#started = true;
     }
     return wantedSeconds;
+  }
+
+  /// Presentation time of `frame` measured from the start of the video, which
+  /// is what a timeline index is derived from — not the raw container `cts`.
+  presentationSeconds(frame: VideoFrame): number {
+    return frame.timestamp / 1_000_000 - this.facts.startSeconds;
   }
 
   /// The next frame in presentation order, or `undefined` past the end.
@@ -406,7 +440,7 @@ export class Mp4Video {
         break;
       }
       if (delivered === 0) {
-        firstTime = frame.timestamp / 1_000_000;
+        firstTime = this.presentationSeconds(frame);
       }
       delivered += 1;
       onFrame(frame);

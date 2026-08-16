@@ -42,7 +42,8 @@ async function probe(source: ByteSource): Promise<void> {
   log(
     `track ${facts.id}: ${facts.codec} ${facts.width}x${facts.height}, ` +
       `${facts.sampleCount} samples, timescale ${facts.timescale}, ` +
-      `${facts.durationSeconds.toFixed(3)}s (last frame ${facts.lastFrameSeconds.toFixed(3)}s)`,
+      `${facts.durationSeconds.toFixed(3)}s (first frame at ${facts.startSeconds.toFixed(4)}s, ` +
+      `last at ${facts.lastFrameSeconds.toFixed(3)}s)`,
   );
   log(
     facts.description
@@ -72,13 +73,17 @@ async function probe(source: ByteSource): Promise<void> {
     }
     // Presentation order and no gaps is what playback depends on; a dropped or
     // reordered frame shows up here as an irregular step.
-    const seconds = frame.timestamp / 1_000_000;
+    const seconds = video.presentationSeconds(frame);
     if (Number.isFinite(previous)) {
       maxGap = Math.max(maxGap, seconds - previous);
     }
     previous = seconds;
     if (frames <= 8) {
-      log(`  frame pts=${seconds.toFixed(4)}s ${frame.codedWidth}x${frame.codedHeight}`);
+      log(
+        `  frame pts=${seconds.toFixed(4)}s coded=${frame.codedWidth}x${frame.codedHeight} ` +
+          `display=${frame.displayWidth}x${frame.displayHeight} ` +
+          `visible=${frame.visibleRect?.width}x${frame.visibleRect?.height}`,
+      );
     }
     frame.close();
   });

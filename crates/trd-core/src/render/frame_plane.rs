@@ -122,22 +122,27 @@ impl FramePlane {
         );
     }
 
-    /// Copies a browser `<video>` element's current frame **GPU→GPU**, without
-    /// it ever entering CPU memory (#229).
+    /// Copies a decoded `VideoFrame`'s pixels **GPU→GPU**, without them ever
+    /// entering CPU memory (#229).
     ///
-    /// The browser has already decoded the frame in hardware, into GPU memory.
-    /// The `upload_rgba` route drags it back down three times — `VideoFrame.copyTo`
-    /// (which also performs the YUV→RGBA conversion), the wasm-bindgen boundary,
-    /// and `write_texture` — at *source* resolution: ~99 MB per frame for 4K.
+    /// The browser has already decoded the frame, in hardware where it can, into
+    /// GPU memory. The `upload_rgba` route drags it back down three times —
+    /// `VideoFrame.copyTo` (which also performs the YUV→RGBA conversion), the
+    /// wasm-bindgen boundary, and `write_texture` — at *source* resolution:
+    /// ~99 MB per frame for 4K.
     ///
     /// Three decisions worth recording:
     ///
-    /// * **`HtmlVideoElement`, not `VideoFrame`.** `web_sys::VideoFrame` is gated
-    ///   behind `--cfg=web_sys_unstable_apis`, a **build-wide** rustflag that
-    ///   would apply to the whole wasm build to gain one type. `HtmlVideoElement`
-    ///   is stable and wgpu's `ExternalImageSource` accepts both. WebGPU snapshots
-    ///   the source during this call, so the caller may present or seek right
-    ///   after.
+    /// * **`VideoFrame`, not `HtmlVideoElement`.** #276 took the element because
+    ///   `web_sys::VideoFrame` was believed to need the build-wide
+    ///   `web_sys_unstable_apis` rustflag. Checked against web-sys 0.3.103: the
+    ///   **type is not gated** — only `rotation`, `flip` and `metadata` are, none
+    ///   of which this uses — so the `VideoFrame` feature alone is enough. With
+    ///   WebCodecs (#282) there is no element to name anyway, and a frame is the
+    ///   thing the decoder actually hands over.
+    /// * **The caller still owns the frame.** WebGPU snapshots the source during
+    ///   this call, so it may be closed immediately after — and it must be, since
+    ///   a `VideoFrame` holds a slot in a small decoder-side pool.
     /// * **Web-only by construction.** `copy_external_image_to_texture` is
     ///   `#[cfg(web)]` in wgpu, and native does not want it: its frames arrive
     ///   from an ffmpeg pipe as CPU bytes already.
@@ -146,10 +151,10 @@ impl FramePlane {
     ///   YUV→RGB pass may still run. What this guarantees is that *we* no longer
     ///   force the download.
     #[cfg(target_arch = "wasm32")]
-    pub(super) fn copy_video_element(
+    pub(super) fn copy_video_frame(
         &mut self,
         gpu: &GpuContext,
-        video: &web_sys::HtmlVideoElement,
+        frame: &web_sys::VideoFrame,
         width: u32,
         height: u32,
     ) {
@@ -161,7 +166,11 @@ impl FramePlane {
         let ft = self.texture.as_ref().expect("frame texture set above");
         gpu.queue.copy_external_image_to_texture(
             &wgpu::CopyExternalImageSourceInfo {
-                source: wgpu::ExternalImageSource::HTMLVideoElement(video.clone()),
+                // `Clone::clone`, explicitly: `frame.clone()` resolves to
+                // WebCodecs' own `clone()`, which duplicates the frame — taking
+                // a *second* pool slot that would then have to be closed too.
+                // What is wanted here is another handle to the same frame.
+                source: wgpu::ExternalImageSource::VideoFrame(Clone::clone(frame)),
                 origin: wgpu::Origin2d::ZERO,
                 flip_y: false,
             },

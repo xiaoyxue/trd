@@ -88,16 +88,16 @@ pub struct VideoRendererDiagnostics {
 /// Where a frame's pixels come from.
 ///
 /// Native decodes into CPU bytes (an ffmpeg pipe), so it has nothing to avoid.
-/// The browser has already decoded **into GPU memory**, so naming the element
-/// lets the copy stay on the GPU — the difference is a whole frame of traffic at
-/// source resolution, ~99 MB for 4K (#229). One `draw` serves both, so the scene
-/// assembly cannot drift between them.
+/// The browser's `VideoDecoder` has already decoded **into GPU memory**, so
+/// naming the frame lets the copy stay on the GPU — the difference is a whole
+/// frame of traffic at source resolution, ~99 MB for 4K (#229). One `draw`
+/// serves both, so the scene assembly cannot drift between them.
 pub enum FrameSource<'a> {
     /// Tightly-packed row-major RGBA8, `width * height * 4` bytes.
     Rgba(&'a [u8]),
-    /// A browser `<video>` element, copied GPU→GPU.
+    /// A decoded browser frame, copied GPU→GPU.
     #[cfg(target_arch = "wasm32")]
-    VideoElement(&'a web_sys::HtmlVideoElement),
+    VideoFrame(&'a web_sys::VideoFrame),
 }
 
 impl FrameSource<'_> {
@@ -107,7 +107,7 @@ impl FrameSource<'_> {
         match self {
             Self::Rgba(rgba) => rgba.len(),
             #[cfg(target_arch = "wasm32")]
-            Self::VideoElement(_) => 0,
+            Self::VideoFrame(_) => 0,
         }
     }
 }
@@ -399,9 +399,9 @@ impl VideoPlacementRenderer {
                     .update_frame_texture_rgba(rgba, frame_width, frame_height)
             }
             #[cfg(target_arch = "wasm32")]
-            FrameSource::VideoElement(video) => {
+            FrameSource::VideoFrame(frame) => {
                 self.renderer
-                    .update_frame_texture_from_video(video, frame_width, frame_height)
+                    .update_frame_texture_from_video(frame, frame_width, frame_height)
             }
         }
         let identity_camera = trd_core::FrameParams::IDENTITY
