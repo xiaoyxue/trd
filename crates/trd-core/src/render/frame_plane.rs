@@ -13,48 +13,21 @@ use super::GpuContext;
 use super::{create_frame_bind_group_layout, create_frame_plane_pipeline, Viewport};
 use super::{frame_fit_uv_scale, FrameFit};
 
-/// VRAM the frame ring may spend on decoded frames. Capacity is derived from
-/// this and the frame size rather than fixed, because a slot count that is
-/// comfortable at 960×540 (2 MB each) is a gigabyte at 4K (33 MB each).
-const RING_BUDGET_BYTES: usize = 64 * 1024 * 1024;
-
-/// Never fewer than this many slots.
+/// Slots in the frame ring, at every resolution.
 ///
-/// The ring's one hard correctness requirement is that the write cursor must not
-/// wrap onto a slot the GPU is still reading. That is a *capacity* problem, not
-/// a synchronization one: a barrier would serialize the write against the draw
-/// and defeat the pipelining. With at most a couple of frames in flight on the
-/// queue, four slots is already slack.
-const RING_MIN_SLOTS: u32 = 4;
-
-/// Never more than this, however small the frames.
+/// **Fixed, not budgeted.** The ring exists so a decoder can run ahead of the
+/// renderer (see the design issue), and a depth that shrinks with resolution is
+/// the wrong knob: 4K is exactly where decode most needs the runway, and a
+/// capacity the shell has to negotiate turns a constant into a protocol. Sixty
+/// four frames is ~1 s at 60 fps, which is a player's buffer rather than a
+/// cache's.
 ///
-/// Eight because that is where the measured benefit stops, not because a ring
-/// "should" be deep. What the ring actually earns is the repeated render of the
-/// frame **already on screen** — a gizmo drag, an overlay toggle, a selection —
-/// and one slot serves that. Simulated across four editing workloads:
+/// The cost is real and worth stating: 506 MiB at 1080p, **2 GiB at 4K**. 8K
+/// (8 GiB) would exceed most cards and is the one case this will have to
+/// revisit.
 ///
-/// | workload | 1 slot | 8 slots | 64 slots |
-/// |---|---:|---:|---:|
-/// | linear playback | 3.2% | 3.2% | 3.2% |
-/// | scrubbing to hunt a shot | 75.6% | 75.8% | 75.9% |
-/// | stepping frame by frame | 95.2% | 99.2% | 99.6% |
-/// | dragging a gizmo | 100% | 100% | 100% |
-///
-/// Depth does not help because the ring is a span of *frames* while everything
-/// that would want it is a span of *seconds*: eight slots hold 0.33 s at 24 fps,
-/// and a GOP in this project's own footage is 250 frames (`shot_0001.mp4` has
-/// keyframes only at 0.000 s and 10.417 s). So a backward step beyond the window
-/// re-decodes from the keyframe whatever the capacity, and covering a whole GOP
-/// would cost 1.9 GiB at 1080p — which is why the ring is not the answer to
-/// backward navigation and is not sized as if it were.
-///
-/// **What would change this:** uploading frames *ahead* of the renderer, which
-/// nothing does yet — the browser shell's lookahead holds decoded `VideoFrame`s
-/// in JS, not ring slots. That would need capacity ≥ the lookahead depth,
-/// because the ring is a FIFO and running further ahead wraps onto frames not
-/// yet shown. Size it there, against that measurement.
-const RING_MAX_SLOTS: u32 = 8;
+/// Only the device's own `max_texture_array_layers` overrides it.
+const RING_SLOTS: u32 = 64;
 
 /// The ring's **bookkeeping**, free of GPU resources: which frame each layer
 /// holds and which layer is filled next.
@@ -164,10 +137,11 @@ struct FrameRing {
 impl FrameRing {
     /// Layers that fit [`RING_BUDGET_BYTES`] at this frame size, clamped to
     /// [`RING_MIN_SLOTS`]..=[`RING_MAX_SLOTS`].
-    fn capacity_for(device: &wgpu::Device, width: u32, height: u32) -> u32 {
-        let bytes = (width as usize).saturating_mul(height as usize) * 4;
-        let fits = (RING_BUDGET_BYTES / bytes.max(1)) as u32;
-        fits.clamp(RING_MIN_SLOTS, RING_MAX_SLOTS)
+    /// The ring's depth. Fixed at [`RING_SLOTS`] so the decoder's runway does
+    /// not shrink exactly where it is needed most; only the device's own array
+    /// limit can reduce it.
+    fn capacity_for(device: &wgpu::Device, _width: u32, _height: u32) -> u32 {
+        RING_SLOTS
             .min(device.limits().max_texture_array_layers)
             .max(1)
     }
@@ -539,13 +513,14 @@ impl FramePlane {
 
 #[cfg(test)]
 mod tests {
-    use super::{RingSlots, RING_BUDGET_BYTES, RING_MAX_SLOTS, RING_MIN_SLOTS};
+    use super::{RingSlots, RING_SLOTS};
 
     /// The same `capacity_for` arithmetic as [`super::FrameRing`], minus the
     /// device limit — that clamp needs a GPU, the budget policy does not.
-    fn capacity_for(width: u32, height: u32) -> u32 {
-        let bytes = (width as usize).saturating_mul(height as usize) * 4;
-        ((RING_BUDGET_BYTES / bytes.max(1)) as u32).clamp(RING_MIN_SLOTS, RING_MAX_SLOTS)
+    /// The device-free half of [`super::FrameRing::capacity_for`]: the ring is
+    /// a fixed depth, so there is nothing to derive.
+    fn capacity_for(_width: u32, _height: u32) -> u32 {
+        RING_SLOTS
     }
 
     #[test]
@@ -601,38 +576,13 @@ mod tests {
         assert_eq!(slots.claim(Some(3)), 0);
     }
 
+    /// The ring is a fixed depth at every resolution: the decoder's runway must
+    /// not shrink exactly where decoding is most expensive. The VRAM this costs
+    /// is deliberate and stated on the constant.
     #[test]
-    fn capacity_scales_with_frame_size_within_bounds() {
-        // 4K frames are 31.6 MiB each, so the budget affords only the floor —
-        // and the floor wins, because it is a correctness requirement rather
-        // than a target.
-        assert_eq!(capacity_for(3840, 2160), RING_MIN_SLOTS);
-        // 1080p is 7.91 MiB, so the budget affords exactly the cap.
-        assert_eq!(capacity_for(1920, 1080), RING_MAX_SLOTS);
-        // 960x540 is 2 MiB, so the budget affords far more than the cap allows.
-        assert_eq!(capacity_for(960, 540), RING_MAX_SLOTS);
-        // A degenerate size must not divide by zero; it saturates at the cap,
-        // which is harmless because uploads reject zero dimensions anyway.
-        assert_eq!(capacity_for(0, 0), RING_MAX_SLOTS);
-    }
-
-    /// 8K is the case where the budget and the floor genuinely conflict: one
-    /// slot is 126 MiB, so even the four-slot floor overshoots. The floor wins,
-    /// because it is a correctness requirement and the budget is a target.
-    #[test]
-    fn the_correctness_floor_outranks_the_budget() {
-        assert_eq!(capacity_for(7680, 4320), RING_MIN_SLOTS);
-        assert!(RING_MIN_SLOTS as usize * 7680 * 4320 * 4 > RING_BUDGET_BYTES);
-    }
-
-    /// The ring is sized to what it was measured to earn, so the VRAM it costs
-    /// has to stay proportionate. Pinned so growing it needs a new measurement
-    /// rather than an intuition — the case that would justify depth (uploading
-    /// ahead of the renderer) does not exist yet.
-    #[test]
-    fn the_ring_costs_no_more_vram_than_it_earns() {
-        let vram = |w: usize, h: usize| capacity_for(w as u32, h as u32) as usize * w * h * 4;
-        assert!(vram(1920, 1080) <= RING_BUDGET_BYTES);
-        assert!(vram(1280, 720) <= RING_BUDGET_BYTES);
+    fn the_ring_is_the_same_depth_at_every_resolution() {
+        for (w, h) in [(1920, 1080), (3840, 2160), (960, 540), (0, 0)] {
+            assert_eq!(capacity_for(w, h), RING_SLOTS, "{w}x{h}");
+        }
     }
 }
