@@ -382,12 +382,16 @@ impl VideoEditingApp {
     }
 
     /// Adopts the letterboxed image size the panel just drew at.
+    ///
+    /// The panel fits the image to the *render target's* aspect, and the render
+    /// target is then sized from what the panel drew — a loop that preserves
+    /// whatever aspect it starts with rather than correcting to the video's. So
+    /// the source's aspect is re-imposed here: whatever the panel proposes, the
+    /// target can only ever be the video's shape. Without this a single tick
+    /// with the wrong aspect latches permanently (playback drew 1493×1080 for a
+    /// 16:9 clip).
     fn resize_render_target(&mut self, ctx: &egui::Context, fitted: (u32, u32)) {
-        let video = &self.video;
-        let fitted = (
-            fitted.0.min(video.width).max(1),
-            fitted.1.min(video.height).max(1),
-        );
+        let fitted = fit_to_source_aspect(fitted, (self.video.width, self.video.height));
         if self.image_sizing != crate::ui::ImageSizing::FitCanvas
             || fitted == self.fitted_render_size
         {
@@ -514,5 +518,97 @@ mod tests {
             player_status_label(false, 42, &document.video),
             "00:00 / 00:00  ·  frame 0/0"
         );
+    }
+}
+
+/// Fits `source`'s aspect inside the `pane` the image panel just drew at.
+///
+/// This is what keeps the render target the shape of the video. The panel sizes
+/// the image from the *render target's* aspect, and the target is then sized
+/// from what the panel drew, so nothing in that loop consults the video after
+/// the first tick: a single wrong aspect latches forever, which is how playback
+/// came to draw 1493x1080 for a 16:9 clip (#282). Re-imposing the source aspect
+/// here makes the loop self-correcting whatever it starts from.
+fn fit_to_source_aspect(pane: (u32, u32), source: (u32, u32)) -> (u32, u32) {
+    let (pane_w, pane_h) = (pane.0.max(1), pane.1.max(1));
+    let (source_w, source_h) = source;
+    // Before the source dimensions are known there is nothing to fit to, and
+    // reshaping the pane on a guess is worse than leaving it alone.
+    if source_w == 0 || source_h == 0 {
+        return (pane_w, pane_h);
+    }
+    // Round rather than truncate. The result is fed back in as the next pane,
+    // so half a pixel lost each time walks the target smaller frame after frame
+    // (measured before this: 1493 → 1491 → 1489 …). Rounding makes it a fixed
+    // point, which the tests pin.
+    let scale = |value: u32, num: u32, den: u32| {
+        let den = u64::from(den);
+        u32::try_from((u64::from(value) * u64::from(num) + den / 2) / den).unwrap_or(u32::MAX)
+    };
+    let by_width = (pane_w, scale(pane_w, source_h, source_w).max(1));
+    let by_height = (scale(pane_h, source_w, source_h).max(1), pane_h);
+    let fits = |c: (u32, u32)| c.0 <= pane_w && c.1 <= pane_h;
+    let area = |c: (u32, u32)| u64::from(c.0) * u64::from(c.1);
+    let fitted = match (fits(by_width), fits(by_height)) {
+        (true, true) if area(by_height) > area(by_width) => by_height,
+        (false, true) => by_height,
+        _ => by_width,
+    };
+    // Never ask for more pixels than the source has: upscaling costs GPU time
+    // and cannot add detail.
+    (fitted.0.min(source_w).max(1), fitted.1.min(source_h).max(1))
+}
+
+#[cfg(test)]
+mod fit_tests {
+    use super::fit_to_source_aspect;
+
+    /// The bug this function exists for: the panel proposes the full pane, and
+    /// without re-imposing the source aspect that shape is adopted and latched.
+    #[test]
+    fn full_pane_is_letterboxed_to_the_source_aspect() {
+        assert_eq!(
+            fit_to_source_aspect((1493, 1080), (1920, 1080)),
+            (1493, 840)
+        );
+    }
+
+    /// The loop feeds each result back in as the next pane, so anything but a
+    /// fixed point walks the render target smaller every frame.
+    #[test]
+    fn repeated_application_does_not_drift() {
+        let source = (1920, 1080);
+        let mut size = fit_to_source_aspect((1493, 1080), source);
+        for _ in 0..32 {
+            let next = fit_to_source_aspect(size, source);
+            assert_eq!(next, size, "drifted from {size:?} to {next:?}");
+            size = next;
+        }
+    }
+
+    #[test]
+    fn a_taller_pane_is_width_bound_and_a_wider_pane_height_bound() {
+        // Pane narrower than 16:9 -> width fills, height letterboxes.
+        assert_eq!(fit_to_source_aspect((800, 1000), (1920, 1080)), (800, 450));
+        // Pane wider than 16:9 -> height fills, width pillarboxes.
+        assert_eq!(
+            fit_to_source_aspect((4000, 1000), (1920, 1080)),
+            (1778, 1000)
+        );
+    }
+
+    #[test]
+    fn never_upscales_past_the_source() {
+        assert_eq!(
+            fit_to_source_aspect((4000, 4000), (1920, 1080)),
+            (1920, 1080)
+        );
+    }
+
+    /// An unknown source must leave the pane alone rather than collapse it.
+    #[test]
+    fn an_unknown_source_leaves_the_pane_alone() {
+        assert_eq!(fit_to_source_aspect((0, 0), (0, 0)), (1, 1));
+        assert_eq!(fit_to_source_aspect((100, 100), (0, 0)), (100, 100));
     }
 }
