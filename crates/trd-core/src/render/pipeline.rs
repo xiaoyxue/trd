@@ -3,9 +3,8 @@
 
 use super::{
     BoundUniform, GizmoLineVertex, GizmoUniform, InstanceRaw, PickInstanceRaw, ShadingVertex,
-    Uniform, Vertex,
+    Vertex,
 };
-use crate::Camera;
 
 /// The mesh pass's MSAA sample count. 4× multisampling is the WebGPU-guaranteed
 /// level for renderable formats (native Vulkan/Metal/DX + the WebGL2 downlevel
@@ -28,43 +27,100 @@ pub(crate) fn multisample_state(sample_count: u32) -> wgpu::MultisampleState {
     }
 }
 
+/// A **uniform-buffer** entry at `binding`, visible to `visibility` (#251 P1).
+///
+/// `min_binding_size` pins the size the shader declares, so a too-small buffer
+/// is rejected when the bind group is created rather than misread at draw time;
+/// `has_dynamic_offset` marks the slot as a stride-spaced *window* whose offset
+/// every `set_bind_group` must supply (the PBR material slots, #141).
+const fn uniform_entry(
+    binding: u32,
+    visibility: wgpu::ShaderStages,
+    min_binding_size: Option<wgpu::BufferSize>,
+    has_dynamic_offset: bool,
+) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset,
+            min_binding_size,
+        },
+        count: None,
+    }
+}
+
+/// A **texture** entry at `binding`: the fragment-visible, filterable
+/// `texture_2d<f32>` every trd bind group samples — the albedo map, the
+/// background frame, and the environment probe's HDR/irradiance/BRDF views
+/// (`Rgba16Float` is filterable on the downlevel target).
+const fn texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
+/// The filtering **sampler** entry pairing with [`texture_entry`], at `binding`.
+const fn sampler_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+        count: None,
+    }
+}
+
+/// Creates the `label`led bind-group layout listing `entries`.
+///
+/// The wrapper exists so each `create_*_bind_group_layout` below reads as *what
+/// the group is* — a list of [`uniform_entry`] / [`texture_entry`] /
+/// [`sampler_entry`] — instead of repeating the same nine-line
+/// [`wgpu::BindGroupLayoutEntry`] literal per binding (#251 P1).
+fn bind_group_layout(
+    device: &wgpu::Device,
+    label: &str,
+    entries: &[wgpu::BindGroupLayoutEntry],
+) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some(label),
+        entries,
+    })
+}
+
 /// The explicit bind-group layout shared by every mesh pipeline (group 0,
 /// binding 0 = the camera `P·V` uniform, vertex-stage visible). Making it
 /// explicit (rather than auto-derived per pipeline) lets the filled and
 /// wireframe pipelines share **one** layout, so a single params bind group is
 /// valid for both regardless of the active [`RenderMode`].
 pub(crate) fn create_mesh_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
-    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("trd mesh bind group layout"),
-        entries: &[wgpu::BindGroupLayoutEntry {
-            binding: 0,
-            visibility: wgpu::ShaderStages::VERTEX,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
-            count: None,
-        }],
-    })
+    bind_group_layout(
+        device,
+        "trd mesh bind group layout",
+        &[uniform_entry(0, wgpu::ShaderStages::VERTEX, None, false)],
+    )
 }
 
 /// Group-0 layout for analytic gizmo lines: camera `P·V` plus viewport pixel
 /// dimensions in one vertex-stage uniform.
 pub(crate) fn create_gizmo_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
-    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("trd gizmo bind group layout"),
-        entries: &[wgpu::BindGroupLayoutEntry {
-            binding: 0,
-            visibility: wgpu::ShaderStages::VERTEX,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<GizmoUniform>() as u64),
-            },
-            count: None,
-        }],
-    })
+    bind_group_layout(
+        device,
+        "trd gizmo bind group layout",
+        &[uniform_entry(
+            0,
+            wgpu::ShaderStages::VERTEX,
+            wgpu::BufferSize::new(std::mem::size_of::<GizmoUniform>() as u64),
+            false,
+        )],
+    )
 }
 
 /// The depth buffer format used by the mesh pass. `Depth32Float` is guaranteed
@@ -104,6 +160,99 @@ pub(crate) fn overlay_depth_stencil() -> wgpu::DepthStencilState {
 /// back without an sRGB transfer (unlike the sRGB display [`TEXTURE_TARGET_FORMAT`]).
 pub(crate) const PICK_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
+/// Everything one render pipeline differs from another by (#251 P3).
+///
+/// The seven builders below used to spell out the *same*
+/// [`wgpu::RenderPipelineDescriptor`] with two or three fields changed —
+/// identical `entry_point`s, `compilation_options`, `write_mask`,
+/// `multiview_mask` and `cache` copied per pipeline, so the lines most likely to
+/// be edited wrongly were the ones written most often. They vary along axes that
+/// are **values, not types** (a shader file, a [`wgpu::BlendState`], a
+/// topology), so this is a struct rather than a `create_pipeline<T>()`: a type
+/// parameter cannot select a `.wgsl`, it would monomorphize this one body per
+/// pipeline, and it could not hold the runtime `&wgpu::PipelineLayout`.
+///
+/// Two facts make the value shape work: [`wgpu::include_wgsl!`] expands to a
+/// [`wgpu::ShaderModuleDescriptor`] usable in a plain field, and every
+/// `*::layout()` in `gpu_types.rs` is a `const fn`, so the vertex-buffer lists
+/// can be `&'static` consts (which also avoids returning a borrow of a
+/// temporary array).
+pub(crate) struct PipelineSpec<'a> {
+    /// The debug label wgpu validation errors and RenderDoc captures show; kept
+    /// per pipeline rather than derived from the shader path, because three
+    /// pipelines share `mesh.wgsl`.
+    pub(crate) label: &'a str,
+    pub(crate) shader: wgpu::ShaderModuleDescriptor<'static>,
+    pub(crate) layout: &'a wgpu::PipelineLayout,
+    /// The vertex buffers `vs_main` reads, by slot — empty for a
+    /// shader-generated fullscreen triangle.
+    pub(crate) buffers: &'a [Option<wgpu::VertexBufferLayout<'static>>],
+    pub(crate) format: wgpu::TextureFormat,
+    /// `None` is opaque write-through — byte-identical to what
+    /// `format.into()` builds.
+    pub(crate) blend: Option<wgpu::BlendState>,
+    pub(crate) topology: wgpu::PrimitiveTopology,
+    /// `None` for a pass with no depth attachment; otherwise
+    /// [`solid_depth_stencil`] or [`overlay_depth_stencil`].
+    pub(crate) depth_stencil: Option<wgpu::DepthStencilState>,
+    /// Must match the pass's color **and** depth attachments (`1` = no MSAA).
+    pub(crate) sample_count: u32,
+}
+
+impl PipelineSpec<'_> {
+    /// Compiles the shader and builds the pipeline this spec describes. The
+    /// **one** place a [`wgpu::RenderPipelineDescriptor`] is written.
+    pub(crate) fn build(self, device: &wgpu::Device) -> wgpu::RenderPipeline {
+        let shader = device.create_shader_module(self.shader);
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(self.label),
+            layout: Some(self.layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: self.buffers,
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: self.format,
+                    blend: self.blend,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: self.topology,
+                ..Default::default()
+            },
+            depth_stencil: self.depth_stencil,
+            multisample: multisample_state(self.sample_count),
+            multiview_mask: None,
+            cache: None,
+        })
+    }
+}
+
+/// The shared untextured/textured/shadow vertex + instance slots.
+const MESH_BUFFERS: &[Option<wgpu::VertexBufferLayout<'static>>] =
+    &[Some(Vertex::layout()), Some(InstanceRaw::layout())];
+/// Slot 0 is the same [`Vertex`] buffer the filled/textured/shadow/picking
+/// pipelines read; slot 2 adds the derived shading attributes this pass alone
+/// needs (#247 S7).
+const PBR_BUFFERS: &[Option<wgpu::VertexBufferLayout<'static>>] = &[
+    Some(Vertex::layout()),
+    Some(InstanceRaw::layout()),
+    Some(ShadingVertex::layout()),
+];
+/// Model-space line segments, expanded to screen-space quads in the shader.
+const GIZMO_BUFFERS: &[Option<wgpu::VertexBufferLayout<'static>>] =
+    &[Some(GizmoLineVertex::layout()), Some(InstanceRaw::layout())];
+/// The mesh vertices plus the per-instance model + flat id color.
+const PICK_BUFFERS: &[Option<wgpu::VertexBufferLayout<'static>>] =
+    &[Some(Vertex::layout()), Some(PickInstanceRaw::layout())];
+
 /// Builds the object-id picking pipeline: the mesh vertex transform (`clip =
 /// P·V·M·p`) over the camera bind-group layout (group 0), a per-instance
 /// [`PickInstanceRaw`] carrying the flat id color, single-sampled into
@@ -113,31 +262,18 @@ pub(crate) fn create_picking_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
 ) -> wgpu::RenderPipeline {
-    let shader = device.create_shader_module(wgpu::include_wgsl!("../shader/picking.wgsl"));
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("trd picking pipeline"),
-        layout: Some(layout),
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: Some("vs_main"),
-            compilation_options: Default::default(),
-            buffers: &[Some(Vertex::layout()), Some(PickInstanceRaw::layout())],
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: Some("fs_main"),
-            compilation_options: Default::default(),
-            targets: &[Some(PICK_FORMAT.into())],
-        }),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            ..Default::default()
-        },
+    PipelineSpec {
+        label: "trd picking pipeline",
+        shader: wgpu::include_wgsl!("../shader/picking.wgsl"),
+        layout,
+        buffers: PICK_BUFFERS,
+        format: PICK_FORMAT,
+        blend: None,
+        topology: wgpu::PrimitiveTopology::TriangleList,
         depth_stencil: Some(solid_depth_stencil()),
-        multisample: multisample_state(1),
-        multiview_mask: None,
-        cache: None,
-    })
+        sample_count: 1,
+    }
+    .build(device)
 }
 
 /// A depth attachment sized to a render target. The [`Renderer`](super::Renderer) owns one
@@ -316,31 +452,18 @@ pub(crate) fn create_mesh_pipeline_with(
     depth_stencil: Option<wgpu::DepthStencilState>,
     sample_count: u32,
 ) -> wgpu::RenderPipeline {
-    let shader = device.create_shader_module(wgpu::include_wgsl!("../shader/mesh.wgsl"));
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("trd mesh pipeline"),
-        layout: Some(layout),
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: Some("vs_main"),
-            compilation_options: Default::default(),
-            buffers: &[Some(Vertex::layout()), Some(InstanceRaw::layout())],
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: Some("fs_main"),
-            compilation_options: Default::default(),
-            targets: &[Some(format.into())],
-        }),
-        primitive: wgpu::PrimitiveState {
-            topology,
-            ..Default::default()
-        },
+    PipelineSpec {
+        label: "trd mesh pipeline",
+        shader: wgpu::include_wgsl!("../shader/mesh.wgsl"),
+        layout,
+        buffers: MESH_BUFFERS,
+        format,
+        blend: None,
+        topology,
         depth_stencil,
-        multisample: multisample_state(sample_count),
-        multiview_mask: None,
-        cache: None,
-    })
+        sample_count,
+    }
+    .build(device)
 }
 
 /// Builds the analytic-AA gizmo line pipeline. Model-space segments are expanded
@@ -351,62 +474,29 @@ pub(crate) fn create_gizmo_line_pipeline(
     layout: &wgpu::PipelineLayout,
     sample_count: u32,
 ) -> wgpu::RenderPipeline {
-    let shader = device.create_shader_module(wgpu::include_wgsl!("../shader/gizmo_line.wgsl"));
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("trd gizmo line pipeline"),
-        layout: Some(layout),
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: Some("vs_main"),
-            compilation_options: Default::default(),
-            buffers: &[Some(GizmoLineVertex::layout()), Some(InstanceRaw::layout())],
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: Some("fs_main"),
-            compilation_options: Default::default(),
-            targets: &[Some(wgpu::ColorTargetState {
-                format,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-        }),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            ..Default::default()
-        },
+    PipelineSpec {
+        label: "trd gizmo line pipeline",
+        shader: wgpu::include_wgsl!("../shader/gizmo_line.wgsl"),
+        layout,
+        buffers: GIZMO_BUFFERS,
+        format,
+        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+        topology: wgpu::PrimitiveTopology::TriangleList,
         depth_stencil: Some(overlay_depth_stencil()),
-        multisample: multisample_state(sample_count),
-        multiview_mask: None,
-        cache: None,
-    })
+        sample_count,
+    }
+    .build(device)
 }
 
 /// The group-1 bind-group layout for the textured pipeline (#20): a filterable
 /// `texture_2d<f32>` (binding 0) plus a filtering `sampler` (binding 1), both
 /// fragment-stage visible.
 pub(crate) fn create_texture_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
-    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("trd texture bind group layout"),
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                count: None,
-            },
-        ],
-    })
+    bind_group_layout(
+        device,
+        "trd texture bind group layout",
+        &[texture_entry(0), sampler_entry(1)],
+    )
 }
 
 /// Builds the textured `TriangleList` pipeline (#20): `textured.wgsl` over the
@@ -418,31 +508,18 @@ pub(crate) fn create_textured_pipeline(
     layout: &wgpu::PipelineLayout,
     sample_count: u32,
 ) -> wgpu::RenderPipeline {
-    let shader = device.create_shader_module(wgpu::include_wgsl!("../shader/textured.wgsl"));
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("trd textured pipeline"),
-        layout: Some(layout),
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: Some("vs_main"),
-            compilation_options: Default::default(),
-            buffers: &[Some(Vertex::layout()), Some(InstanceRaw::layout())],
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: Some("fs_main"),
-            compilation_options: Default::default(),
-            targets: &[Some(format.into())],
-        }),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            ..Default::default()
-        },
+    PipelineSpec {
+        label: "trd textured pipeline",
+        shader: wgpu::include_wgsl!("../shader/textured.wgsl"),
+        layout,
+        buffers: MESH_BUFFERS,
+        format,
+        blend: None,
+        topology: wgpu::PrimitiveTopology::TriangleList,
         depth_stencil: Some(solid_depth_stencil()),
-        multisample: multisample_state(sample_count),
-        multiview_mask: None,
-        cache: None,
-    })
+        sample_count,
+    }
+    .build(device)
 }
 
 /// Builds the **blob-shadow** pipeline (contact / grounding shadow, #110
@@ -458,72 +535,35 @@ pub(crate) fn create_shadow_pipeline(
     layout: &wgpu::PipelineLayout,
     sample_count: u32,
 ) -> wgpu::RenderPipeline {
-    let shader = device.create_shader_module(wgpu::include_wgsl!("../shader/shadow.wgsl"));
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("trd shadow pipeline"),
-        layout: Some(layout),
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: Some("vs_main"),
-            compilation_options: Default::default(),
-            buffers: &[Some(Vertex::layout()), Some(InstanceRaw::layout())],
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: Some("fs_main"),
-            compilation_options: Default::default(),
-            targets: &[Some(wgpu::ColorTargetState {
-                format,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-        }),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            ..Default::default()
-        },
+    PipelineSpec {
+        label: "trd shadow pipeline",
+        shader: wgpu::include_wgsl!("../shader/shadow.wgsl"),
+        layout,
+        buffers: MESH_BUFFERS,
+        format,
+        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+        topology: wgpu::PrimitiveTopology::TriangleList,
         depth_stencil: Some(overlay_depth_stencil()),
-        multisample: multisample_state(sample_count),
-        multiview_mask: None,
-        cache: None,
-    })
+        sample_count,
+    }
+    .build(device)
 }
+
+/// The group-1 bind-group layout for the background **frame plane** (#63):
 /// a filterable `texture_2d<f32>` (binding 0) + a filtering `sampler` (binding 1),
 /// both fragment-visible, plus a small **fit** uniform (binding 2, vertex-visible)
 /// carrying the centered UV scale. Kept separate from the mesh albedo texture
 /// (#62 §D1): same bind pattern, different update rate.
 pub(crate) fn create_frame_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
-    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("trd frame plane bind group layout"),
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 2,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
+    bind_group_layout(
+        device,
+        "trd frame plane bind group layout",
+        &[
+            texture_entry(0),
+            sampler_entry(1),
+            uniform_entry(2, wgpu::ShaderStages::VERTEX, None, false),
         ],
-    })
+    )
 }
 
 /// Builds the fullscreen **background frame-plane** pipeline (#63):
@@ -536,49 +576,44 @@ pub(crate) fn create_frame_plane_pipeline(
     layout: &wgpu::PipelineLayout,
     sample_count: u32,
 ) -> wgpu::RenderPipeline {
-    let shader = device.create_shader_module(wgpu::include_wgsl!("../shader/frame_plane.wgsl"));
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("trd frame plane pipeline"),
-        layout: Some(layout),
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: Some("vs_main"),
-            compilation_options: Default::default(),
-            buffers: &[],
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: Some("fs_main"),
-            compilation_options: Default::default(),
-            targets: &[Some(format.into())],
-        }),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            ..Default::default()
-        },
+    PipelineSpec {
+        label: "trd frame plane pipeline",
+        shader: wgpu::include_wgsl!("../shader/frame_plane.wgsl"),
+        layout,
+        buffers: &[],
+        format,
+        blend: None,
+        topology: wgpu::PrimitiveTopology::TriangleList,
         depth_stencil: Some(overlay_depth_stencil()),
-        multisample: multisample_state(sample_count),
-        multiview_mask: None,
-        cache: None,
-    })
+        sample_count,
+    }
+    .build(device)
 }
-/// Creates the camera `P·V` uniform buffer + bind group over an **explicit**
-/// bind-group layout (shared by the filled and wireframe mesh pipelines),
-/// initialised to `camera`'s view-projection. Used by
-/// [`Renderer`](super::Renderer), whose two pipelines must share one bind group.
-pub(crate) fn create_view_proj_binding(
+
+/// Creates a uniform buffer holding `value` **plus** the single-binding bind
+/// group exposing it, over an **explicit** `layout` (#251 P2).
+///
+/// One function for every statically bound group-0 uniform — the camera `P·V`
+/// shared by the filled and wireframe mesh pipelines, and the gizmo pipeline's
+/// viewport-aware params — because they differ only in the uniform type and the
+/// debug label, which is the textbook `<U: bytemuck::Pod>` case (the same shape
+/// [`BoundSceneSlots::new`](super::BoundSceneSlots::new) already uses for the
+/// dynamic-offset half). `label` names the pair: `"<label> uniform"` and
+/// `"<label> bind group"`.
+pub(crate) fn create_uniform_binding<U: bytemuck::Pod>(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
-    camera: Camera,
+    label: &str,
+    value: &U,
 ) -> BoundUniform {
     use wgpu::util::DeviceExt;
     let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("trd view-proj uniform"),
-        contents: bytemuck::bytes_of(&Uniform::view_proj(camera)),
+        label: Some(&format!("{label} uniform")),
+        contents: bytemuck::bytes_of(value),
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     });
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("trd view-proj bind group"),
+        label: Some(&format!("{label} bind group")),
         layout,
         entries: &[wgpu::BindGroupEntry {
             binding: 0,
@@ -588,51 +623,19 @@ pub(crate) fn create_view_proj_binding(
     BoundUniform::new(buffer, bind_group)
 }
 
-/// Writes the camera-only `P · V` transform into an existing uniform buffer (the
-/// instanced mesh path supplies each model matrix per instance). Lets
-/// [`Renderer`](super::Renderer) reuse one uniform buffer across frames instead
-/// of rebuilding it.
-/// Takes the [`BoundUniform`] rather than a bare buffer (#247 B8): the camera
-/// `P·V` is written to *that* uniform, and a bare `&wgpu::Buffer` parameter
-/// accepts any buffer in the renderer.
-pub(crate) fn write_view_proj(queue: &wgpu::Queue, uniform: &BoundUniform, camera: Camera) {
-    queue.write_buffer(
-        uniform.buffer(),
-        0,
-        bytemuck::bytes_of(&Uniform::view_proj(camera)),
-    );
-}
-
-/// Creates the viewport-aware gizmo uniform and bind group.
-pub(crate) fn create_gizmo_binding(
-    device: &wgpu::Device,
-    layout: &wgpu::BindGroupLayout,
-    camera: Camera,
-) -> BoundUniform {
-    use wgpu::util::DeviceExt;
-    let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("trd gizmo uniform"),
-        contents: bytemuck::bytes_of(&GizmoUniform::new(camera)),
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-    });
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("trd gizmo bind group"),
-        layout,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: buffer.as_entire_binding(),
-        }],
-    });
-    BoundUniform::new(buffer, bind_group)
-}
-
-/// Updates the gizmo camera + viewport uniform for the current frame.
-pub(crate) fn write_gizmo_params(queue: &wgpu::Queue, uniform: &BoundUniform, camera: Camera) {
-    queue.write_buffer(
-        uniform.buffer(),
-        0,
-        bytemuck::bytes_of(&GizmoUniform::new(camera)),
-    );
+/// Rewrites `uniform`'s buffer with `value` for this frame, so a
+/// [`Renderer`](super::Renderer) reuses one buffer + bind group across frames
+/// instead of rebuilding them.
+///
+/// Takes the [`BoundUniform`] rather than a bare buffer (#247 B8): the value is
+/// written to *that* uniform, and a bare `&wgpu::Buffer` parameter would accept
+/// any buffer in the renderer.
+pub(crate) fn write_uniform<U: bytemuck::Pod>(
+    queue: &wgpu::Queue,
+    uniform: &BoundUniform,
+    value: &U,
+) {
+    queue.write_buffer(uniform.buffer(), 0, bytemuck::bytes_of(value));
 }
 
 /// The group-0 bind-group layout for the Disney PBR pipeline (#, `pbr.wgsl`):
@@ -640,94 +643,49 @@ pub(crate) fn write_gizmo_params(queue: &wgpu::Queue, uniform: &BoundUniform, ca
 /// `P·V` transform) and the fragment stage (camera position, material, lights,
 /// env/exposure controls).
 pub(crate) fn create_pbr_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
-    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("trd pbr bind group layout"),
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    // Scene-wide (#182): camera terms + the light rig, written
-                    // once per frame and bound whole.
-                    has_dynamic_offset: false,
-                    min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<
-                        super::PbrSceneUniform,
-                    >() as u64),
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    // Per-object material (#141): one `PbrUniform` slot per draw,
-                    // selected at draw time by a dynamic offset into the shared buffer.
-                    has_dynamic_offset: true,
-                    min_binding_size: wgpu::BufferSize::new(
-                        std::mem::size_of::<super::PbrUniform>() as u64,
-                    ),
-                },
-                count: None,
-            },
+    const BOTH: wgpu::ShaderStages = wgpu::ShaderStages::VERTEX_FRAGMENT;
+    bind_group_layout(
+        device,
+        "trd pbr bind group layout",
+        &[
+            // Scene-wide (#182): camera terms + the light rig, written once per
+            // frame and bound whole.
+            uniform_entry(
+                0,
+                BOTH,
+                wgpu::BufferSize::new(std::mem::size_of::<super::PbrSceneUniform>() as u64),
+                false,
+            ),
+            // Per-object material (#141): one `PbrUniform` slot per draw,
+            // selected at draw time by a dynamic offset into the shared buffer.
+            uniform_entry(
+                1,
+                BOTH,
+                wgpu::BufferSize::new(std::mem::size_of::<super::PbrUniform>() as u64),
+                true,
+            ),
         ],
-    })
+    )
 }
 
-/// The group-2 bind-group layout for the PBR pipeline's **environment map**: a
-/// filterable `texture_2d<f32>` (binding 0) + a filtering `sampler` (binding 1),
-/// both fragment-visible. Mirrors [`create_texture_bind_group_layout`], but the
-/// texture is the equirectangular HDR probe (uploaded as `Rgba16Float`, which is
-/// filterable on the downlevel target).
+/// The group-2 bind-group layout for the PBR pipeline's **environment map**:
+/// the equirectangular HDR probe (binding 0) + its sampler (1), the split-sum
+/// BRDF LUT (2) + its sampler (3), and the diffuse irradiance map (4) — every
+/// one a filterable, fragment-visible `texture_2d<f32>` like
+/// [`create_texture_bind_group_layout`]'s albedo, but uploaded as
+/// `Rgba16Float` (filterable on the downlevel target).
 pub(crate) fn create_env_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
-    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("trd env bind group layout"),
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 2,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 3,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 4,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
+    bind_group_layout(
+        device,
+        "trd env bind group layout",
+        &[
+            texture_entry(0),
+            sampler_entry(1),
+            texture_entry(2),
+            sampler_entry(3),
+            texture_entry(4),
         ],
-    })
+    )
 }
 
 /// Builds the Disney **PBR** `TriangleList` pipeline: `pbr.wgsl` over the
@@ -741,36 +699,16 @@ pub(crate) fn create_pbr_pipeline(
     layout: &wgpu::PipelineLayout,
     sample_count: u32,
 ) -> wgpu::RenderPipeline {
-    let shader = device.create_shader_module(wgpu::include_wgsl!("../shader/pbr.wgsl"));
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("trd pbr pipeline"),
-        layout: Some(layout),
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: Some("vs_main"),
-            compilation_options: Default::default(),
-            buffers: &[
-                // Slot 0 is the same `Vertex` buffer the filled/textured/shadow
-                // /picking pipelines read; slot 2 adds the derived shading
-                // attributes this pass alone needs (#247 S7).
-                Some(Vertex::layout()),
-                Some(InstanceRaw::layout()),
-                Some(ShadingVertex::layout()),
-            ],
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: Some("fs_main"),
-            compilation_options: Default::default(),
-            targets: &[Some(format.into())],
-        }),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            ..Default::default()
-        },
+    PipelineSpec {
+        label: "trd pbr pipeline",
+        shader: wgpu::include_wgsl!("../shader/pbr.wgsl"),
+        layout,
+        buffers: PBR_BUFFERS,
+        format,
+        blend: None,
+        topology: wgpu::PrimitiveTopology::TriangleList,
         depth_stencil: Some(solid_depth_stencil()),
-        multisample: multisample_state(sample_count),
-        multiview_mask: None,
-        cache: None,
-    })
+        sample_count,
+    }
+    .build(device)
 }

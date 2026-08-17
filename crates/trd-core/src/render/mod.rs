@@ -115,11 +115,11 @@ pub(crate) use pbr::{
 };
 pub(crate) use pipeline::{
     create_depth_target, create_env_bind_group_layout, create_frame_bind_group_layout,
-    create_frame_plane_pipeline, create_gizmo_bind_group_layout, create_gizmo_binding,
-    create_gizmo_line_pipeline, create_mesh_bind_group_layout, create_mesh_pipeline_with,
-    create_pbr_bind_group_layout, create_pbr_pipeline, create_picking_pipeline,
-    create_shadow_pipeline, create_texture_bind_group_layout, create_textured_pipeline,
-    create_view_proj_binding, overlay_depth_stencil, solid_depth_stencil, write_gizmo_params,
-    write_view_proj, DepthTarget, MsaaColor, MSAA_SAMPLE_COUNT, PICK_FORMAT,
+    create_frame_plane_pipeline, create_gizmo_bind_group_layout, create_gizmo_line_pipeline,
+    create_mesh_bind_group_layout, create_mesh_pipeline_with, create_pbr_bind_group_layout,
+    create_pbr_pipeline, create_picking_pipeline, create_shadow_pipeline,
+    create_texture_bind_group_layout, create_textured_pipeline, create_uniform_binding,
+    overlay_depth_stencil, solid_depth_stencil, write_uniform, DepthTarget, MsaaColor,
+    MSAA_SAMPLE_COUNT, PICK_FORMAT,
 };
 pub(crate) use render_pipelines::{create_render_pipelines, RenderPipelines, SceneUniforms};
