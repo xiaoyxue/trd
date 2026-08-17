@@ -131,7 +131,7 @@ Each is a *thin shell* that only supplies a render target and calls the core:
 | **`trd-app`** | Arrow stream (stdin) | live window swapchain | frames on screen |
 | **`trd-wasm`** | Arrow stream (buffered via `loadIpc`) | live canvas (or offscreen texture) | frames in the browser |
 | **`trd-gui`** | a mesh + live gestures | offscreen texture → egui image | an interactive orbit/zoom viewer (native + browser) |
-| **video editor** | `0.1.0` timeline + external video | offscreen texture → egui image | quad-local 3D editing over video |
+| **video editor** | `0.2.0` timeline + external video | offscreen texture → egui image | quad-local 3D editing over video |
 
 - **`trd-cli`** — headless Arrow filter: renders each frame to an offscreen
   texture and writes the pixels as an Arrow image stream. It does **not** encode
@@ -177,7 +177,7 @@ Each is a *thin shell* that only supplies a render target and calls the core:
 | `web/gui-viewer` | browser eframe shell around the `trd_wasm` GUI entry points |
 | `web/gui-video-editing` | browser video-editing surface with its own copy of the generated `trd_wasm` package |
 | `web/package.json` | shared Bun workspace for all browser delivery surfaces |
-| `scripts/fiba_video_editing_bundle.py` | FIBA video/parquet → `0.1.0` timeline document |
+| `scripts/fiba_video_editing_bundle.py` | FIBA video/parquet → `0.2.0` timeline document |
 | `examples/` | demo streams + `render.sh` / `render.ps1` wrappers + producer scripts |
 | `scripts/` | pyarrow producers (`obj`/`texture`/`jsonl`/perception `_to_arrow.py`), `encode.py`, `extract_frames.py`, `dev-env.ps1` |
 

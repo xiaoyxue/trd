@@ -272,9 +272,13 @@ from an HTTP(S) source.
 
 The native and browser surfaces share the same panels, timeline, quad selection,
 catalog, object transforms, GPU picking, PBR/IBL controls, and three-layer
-composition. Only the media adapter differs: HTML video/WebCodecs in the
+composition. Only the media adapter differs: [mediabunny] demux/decode behind the
+`FrameReader` seam in the
 browser, ffmpeg/ffprobe in the native shell. Native **Open video** supports both
-an OS file picker and HTTP(S) URLs.
+an OS file picker and HTTP(S) URLs. Both read **ranges**, so a multi-hundred-GiB
+MP4 opens and seeks in megabytes.
+
+[mediabunny]: https://mediabunny.dev/
 
 ## Documentation
 
@@ -290,7 +294,8 @@ an OS file picker and HTTP(S) URLs.
   extraction, external references, and inline frames-table authoring.
 - [`docs/gui-design.md`](docs/gui-design.md) — the `trd-gui` interactive-viewer design.
 - [`docs/video-editing.md`](docs/video-editing.md) — FIBA timeline document,
-  WebCodecs boundary, quad-local placement, catalog, playback, and known limits.
+  the browser media boundary (mediabunny + ranged reads), quad-local placement,
+  catalog, playback, and known limits.
 - [`AGENTS.md`](AGENTS.md) — contributor/agent guide: build system, GPU-adapter
   selection, testing policy, PR workflow.
 

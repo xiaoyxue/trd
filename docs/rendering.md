@@ -283,8 +283,9 @@ The same commands run natively in PowerShell 7 on Windows; no WSL or Nix is
 required.
 
 Open the local `shot_0001.mp4` or an HTTP(S) video URL, select the tracked quad,
-then place/edit Coke, beer, or Dragon. HTML video owns playback; Rust maps each
-presented frame to the separate `0.1.0` Arrow timeline and renders the video,
+then place/edit Coke, beer, or Dragon. mediabunny owns demux/decode and
+`VideoPlayer` owns playback; Rust maps each
+presented frame to the separate `0.2.0` Arrow timeline and renders the video,
 placed mesh, and editor overlays. This is not the `0.0.6` render protocol:
 edited-scene export to `[mesh][texture?][frames][params]` remains future work.
 
