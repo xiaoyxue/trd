@@ -184,6 +184,31 @@ export class Mp4Video {
   #feedOffset = 0;
   #budgetFrom = 0;
   #exhausted = true;
+  /// Serialises the operations that touch the decoder and the feed cursor. A
+  /// seek that lands while an earlier feed is mid-`await` resets the decoder
+  /// under it, and the samples that arrive after the reset begin with a delta
+  /// frame — which a `VideoDecoder` reports as a **fatal** error and never
+  /// recovers from. Dragging a scrubber produces exactly that overlap.
+  #gate: Promise<unknown> = Promise.resolve();
+  /// Bumped by every seek, so work queued for a superseded one is dropped
+  /// instead of decoding a span nobody is waiting for any more.
+  #generation = 0;
+  /// Set by the decoder's error callback. A fatal error closes the codec for
+  /// good, so it is recorded and reported rather than only logged — the next
+  /// seek then builds a fresh decoder.
+  #decoderError: Error | undefined;
+
+  /// Runs `operation` with no other reader operation in flight.
+  #exclusive<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.#gate.then(operation, operation);
+    // The gate must survive a rejected operation, or one failure would wedge
+    // every later call behind it.
+    this.#gate = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
 
   private constructor(
     source: ByteSource,
@@ -291,21 +316,30 @@ export class Mp4Video {
   }
 
   #ensureDecoder(): VideoDecoder {
-    this.#decoder ??= new VideoDecoder({
-      output: (frame) => {
-        // `?? 1` so a frame starting exactly at the target is not mistaken for
-        // one that ends there.
-        if (frame.timestamp + (frame.duration ?? 1) <= this.#skipTarget) {
-          this.#skipped += 1;
-          frame.close();
-          return;
-        }
-        this.#ready.push(frame);
-      },
-      error: (error) => {
-        console.error("video decode failed:", error);
-      },
-    });
+    // A codec that has errored is `closed` for good: reusing it makes every
+    // later `configure`/`decode` throw `InvalidStateError`, which is how one
+    // transient fault used to wedge playback permanently. Replace it instead.
+    if (!this.#decoder || this.#decoder.state === "closed") {
+      this.#decoderError = undefined;
+      this.#decoder = new VideoDecoder({
+        output: (frame) => {
+          // `?? 1` so a frame starting exactly at the target is not mistaken for
+          // one that ends there.
+          if (frame.timestamp + (frame.duration ?? 1) <= this.#skipTarget) {
+            this.#skipped += 1;
+            frame.close();
+            return;
+          }
+          this.#ready.push(frame);
+        },
+        error: (error) => {
+          // Recorded, not just logged: whoever is awaiting a frame has to learn
+          // that none is coming, and the decoder is unusable from here on.
+          this.#decoderError = error;
+          this.#exhausted = true;
+        },
+      });
+    }
     return this.#decoder;
   }
 
@@ -319,12 +353,17 @@ export class Mp4Video {
   /// The difference is that every frame that comes out carries its container
   /// timestamp, so it is identified rather than approximated.
   async seekTo(seconds: number): Promise<number> {
+    return this.#exclusive(() => this.#seek(seconds));
+  }
+
+  async #seek(seconds: number): Promise<number> {
     // Clamp into the video's real range. A scrubber can ask for a time past the
     // end, and mp4box answers that with an offset that decodes nothing — which
     // would then read to the end of the file looking for a frame that does not
     // exist.
     const wantedSeconds = Math.min(Math.max(0, seconds), this.facts.lastFrameSeconds);
     const containerSeconds = wantedSeconds + this.facts.startSeconds;
+    this.#generation += 1;
     this.#skipTarget = containerSeconds * 1_000_000;
     this.#skipped = 0;
     this.#exhausted = false;
@@ -380,15 +419,32 @@ export class Mp4Video {
 
   /// The next frame in presentation order, or `undefined` past the end.
   ///
+  /// Frames come from the **most recent** seek. A pull that is still in flight
+  /// when a newer seek arrives yields the newer seek's frames rather than the
+  /// span it originally asked for — a scrubber only cares where it ended up,
+  /// and a caller that needs to tell the two apart tracks its own generation
+  /// the way `VideoPlayer` does.
+  ///
   /// **The caller owns the frame and must `close()` it.** A `VideoFrame` holds a
   /// slot in a small decoder-side pool, so leaking one stalls decoding.
   async nextFrame(): Promise<VideoFrame | undefined> {
+    return this.#exclusive(() => this.#pullFrame());
+  }
+
+  async #pullFrame(): Promise<VideoFrame | undefined> {
     const decoder = this.#ensureDecoder();
+    const generation = this.#generation;
     let idleTicks = 0;
     // Feed until a frame is ready. Waiting on frames *out* rather than samples
     // *in* is what makes this correct across a distant key frame: the decoder
     // reports what it skipped only after decoding it.
     while (this.#ready.length === 0 && !this.#exhausted) {
+      if (this.#decoderError) {
+        throw this.#decoderError;
+      }
+      if (generation !== this.#generation) {
+        return undefined;
+      }
       if (
         this.#feedOffset >= this.#source.size ||
         this.#source.bytesRead - this.#budgetFrom > SEEK_BUDGET_BYTES
@@ -404,7 +460,7 @@ export class Mp4Video {
         await new Promise((resolve) => {
           setTimeout(resolve, 0);
         });
-        if (++idleTicks > MAX_IDLE_TICKS) {
+        if (this.#decoderError || ++idleTicks > MAX_IDLE_TICKS) {
           break;
         }
       }
@@ -419,6 +475,9 @@ export class Mp4Video {
       }
       const next = this.#file.appendBuffer(MP4BoxBuffer.fromArrayBuffer(buffer, this.#feedOffset));
       this.#feedOffset = next > this.#feedOffset ? next : this.#feedOffset + buffer.byteLength;
+    }
+    if (this.#decoderError) {
+      throw this.#decoderError;
     }
     return this.#ready.shift();
   }
@@ -459,7 +518,11 @@ export class Mp4Video {
       frame.close();
     }
     this.#ready.length = 0;
-    this.#decoder?.close();
+    // Closing a codec that has already errored throws; a teardown must not
+    // depend on whether decoding happened to fail first.
+    if (this.#decoder && this.#decoder.state !== "closed") {
+      this.#decoder.close();
+    }
     this.#decoder = undefined;
   }
 }
