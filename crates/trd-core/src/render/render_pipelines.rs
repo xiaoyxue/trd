@@ -170,8 +170,18 @@ pub(crate) fn create_render_pipelines(
         })
         .expect("the identity params are a valid camera form");
     let uniforms = SceneUniforms {
-        camera: create_view_proj_binding(device, &camera_layout, placeholder),
-        gizmo: create_gizmo_binding(device, &gizmo_layout, placeholder),
+        camera: create_uniform_binding(
+            device,
+            &camera_layout,
+            "trd view-proj",
+            &Uniform::view_proj(placeholder),
+        ),
+        gizmo: create_uniform_binding(
+            device,
+            &gizmo_layout,
+            "trd gizmo",
+            &GizmoUniform::new(placeholder),
+        ),
         // The per-object PbrUniform slots: one per mesh, each rewritten every
         // frame with the shared camera/lights + that mesh's material; a PBR
         // draw selects its slot via a dynamic offset.
@@ -197,8 +207,8 @@ pub(crate) fn create_render_pipelines(
 impl SceneUniforms {
     /// Rewrites the camera `P·V` uniform for this frame's `camera`.
     pub(super) fn write_camera(&self, queue: &wgpu::Queue, camera: Camera) {
-        write_view_proj(queue, &self.camera, camera);
-        write_gizmo_params(queue, &self.gizmo, camera);
+        write_uniform(queue, &self.camera, &Uniform::view_proj(camera));
+        write_uniform(queue, &self.gizmo, &GizmoUniform::new(camera));
     }
 
     /// Rewrites the Disney PBR uniforms for this frame, **split by frequency of
