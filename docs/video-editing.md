@@ -111,18 +111,29 @@ real 222-row document rather than on hand-built rows. Both fixtures are
 generated, so the test is `#[ignore]`d and **skips** when they are absent:
 
 ```sh
-uv run --with pyarrow python -c "import pyarrow as pa, pyarrow.parquet as pq; \
-  t = pa.ipc.open_stream(pa.memory_map('web/gui-video-editing/data/fiba-shot1.arrow')).read_all(); \
-  pq.write_table(t, '/tmp/trd-doc/fiba-shot1.parquet')"
-TRD_DOC_DIR=/tmp/trd-doc cargo test -p trd-core --lib video_editing -- --ignored
+uv run --with pyarrow scripts/doc_fixtures.py -o /tmp/trd-doc
+TRD_DOC_DIR=/tmp/trd-doc cargo test -p trd-core --lib video_editing -- --ignored --nocapture
 ```
+
+```powershell
+uv run --with pyarrow scripts\doc_fixtures.py -o $env:TEMP\trd-doc
+$env:TRD_DOC_DIR = "$env:TEMP\trd-doc"
+cargo test -p trd-core --lib video_editing -- --ignored --nocapture
+```
+
+`scripts/doc_fixtures.py` converts the generated Arrow document into the Parquet
+twin plus one copy per codec, creating the output directory. Run the two steps
+separately: the first needs the network the first time (`uv` fetches pyarrow),
+and the second may be a cold build, so a stall is otherwise hard to attribute.
+Success prints two `ok` lines and **no** `skipping:` line — a `skipping:` line
+means the test found no fixture and asserted nothing.
 
 `TRD_DOC_DIR` is where the Parquet fixtures are looked for (default: the
 platform temp dir); the Arrow fixture defaults to its generated location in the
 tree, resolved against the repository root rather than the crate directory a
 test binary runs from. `TRD_DOC_ARROW` / `TRD_DOC_PARQUET` override the two
-paths individually. Writing the same table once per codec as
-`fiba-<codec>.parquet` also drives `unsupported_compression_says_so_clearly`,
+paths individually. The per-codec copies drive
+`unsupported_compression_says_so_clearly`,
 which pins that `snappy`/uncompressed read and that `zstd`/`gzip` are refused
 with parquet's own "Disabled feature at compile time" — those codecs are C shims
 and are left out so the crate keeps cross-compiling to wasm32.
