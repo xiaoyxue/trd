@@ -85,10 +85,32 @@ class HttpByteSource implements ByteSource {
         `range request returned ${response.status} ${response.statusText}, expected 206`,
       );
     }
+    // A server may legally answer with *fewer* bytes than asked for, and the
+    // reader handles that. What it cannot survive is bytes from somewhere else:
+    // the demuxer is told where the buffer belongs, so a range served from the
+    // wrong offset is decoded as if it were the requested one. Check the start
+    // it reports rather than trust it.
+    const served = startOfContentRange(response.headers.get("content-range"));
+    if (served !== undefined && served !== offset) {
+      throw new Error(`range request for byte ${offset} was answered from byte ${served}`);
+    }
     const buffer = await response.arrayBuffer();
     this.#bytesRead += buffer.byteLength;
     return buffer;
   }
+}
+
+/// Reads the first byte position out of a `Content-Range: bytes 12-99/1000`
+/// header. `undefined` when the header is absent or unparseable — a
+/// cross-origin server need not expose it, and a missing check is better than
+/// a wrong one.
+function startOfContentRange(header: string | null): number | undefined {
+  const match = header?.match(/bytes\s+(\d+)-/);
+  if (!match?.[1]) {
+    return undefined;
+  }
+  const start = Number(match[1]);
+  return Number.isFinite(start) ? start : undefined;
 }
 
 /// Reads the total length out of a `Content-Range: bytes 0-0/12345` header.

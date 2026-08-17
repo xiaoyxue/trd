@@ -1,4 +1,5 @@
 import type { ByteSource } from "./byte-source.ts";
+import type { FrameReader } from "./frame-reader.ts";
 import { Mp4Video, type VideoTrackFacts } from "./mp4-video.ts";
 
 /// Frames kept decoded ahead of the playhead. The decoder runs well faster than
@@ -25,7 +26,7 @@ export interface FrameSink {
 /// #282 — every frame carries its container timestamp rather than being
 /// identified by rounding a `currentTime`.
 export class VideoPlayer {
-  readonly #video: Mp4Video;
+  readonly #video: FrameReader;
   readonly #sink: FrameSink;
   /// Decoded and waiting, in presentation order.
   readonly #queue: VideoFrame[] = [];
@@ -44,7 +45,7 @@ export class VideoPlayer {
   #generation = 0;
   #frameHandle: number | undefined;
 
-  private constructor(video: Mp4Video, sink: FrameSink) {
+  private constructor(video: FrameReader, sink: FrameSink) {
     this.#video = video;
     this.#sink = sink;
   }
@@ -56,16 +57,23 @@ export class VideoPlayer {
     return new VideoPlayer(video, sink);
   }
 
+  /// Attaches a player to a reader that is already open.
+  ///
+  /// `open` builds the hand-written reader; this takes any [`FrameReader`], so
+  /// a delegated one runs under the same pacing. It is also the seam the pacing
+  /// tests use — which frame is due, which are dropped, and who closes them
+  /// decide whether the decoder keeps running, and they are worth pinning
+  /// without a decoder in the loop.
+  static attach(video: FrameReader, sink: FrameSink): VideoPlayer {
+    return new VideoPlayer(video, sink);
+  }
+
   get facts(): VideoTrackFacts {
     return this.#video.facts;
   }
 
   get moovBytes(): Uint8Array {
     return this.#video.moovBytes;
-  }
-
-  get source(): ByteSource {
-    return this.#video.source;
   }
 
   get playing(): boolean {
@@ -166,6 +174,11 @@ export class VideoPlayer {
         this.#queue.push(frame);
       }
     } catch (error) {
+      // A reader that throws throws every time: `#advance` calls this on every
+      // animation frame, so without stopping here one fault becomes one report
+      // per frame for as long as the tab is open. The position is recoverable —
+      // a seek rebuilds the decoder — so this ends the run, not the player.
+      this.#exhausted = true;
       this.#sink.failed(String(error));
     } finally {
       this.#filling = false;

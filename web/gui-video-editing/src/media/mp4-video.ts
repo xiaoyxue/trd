@@ -105,7 +105,7 @@ function descriptionFor(file: ISOFile, trackId: number): Uint8Array | undefined 
 }
 
 /// Where a top-level box sits in the file.
-interface BoxExtent {
+export interface BoxExtent {
   readonly offset: number;
   readonly size: number;
 }
@@ -118,7 +118,14 @@ interface BoxExtent {
 /// compressed sample data or a metadata payload, and assuming `moov` is last
 /// (`totalSize - moovSize`) is wrong for any file that ends with `free`, `skip`
 /// or `mfra`.
-async function locateMoov(source: ByteSource, head: ArrayBuffer): Promise<BoxExtent | undefined> {
+///
+/// Exported for tests: the box layouts that matter — `moov` first, `moov` last
+/// behind a 64-bit `mdat`, a box running to end-of-file — are all reachable
+/// with a handful of synthetic headers and none of them needs a decoder.
+export async function locateMoov(
+  source: ByteSource,
+  head: ArrayBuffer,
+): Promise<BoxExtent | undefined> {
   let offset = 0;
   while (offset + 8 <= source.size) {
     // Reuse the head read wherever it reaches; past it a bare 16-byte header is
@@ -205,6 +212,11 @@ export class Mp4Video {
   /// Woken whenever the decoder emits, so a waiter is released by output rather
   /// than by polling for it.
   #outputWaiters: (() => void)[] = [];
+  /// Set by [`close`](Self::close). Without it a pull already queued on the
+  /// gate resumes after teardown, `#ensureDecoder` sees no decoder and builds a
+  /// **new** one, and the reader quietly comes back to life holding a source
+  /// its owner has finished with.
+  #closed = false;
   /// Bumped by every seek, so work queued for a superseded one is dropped
   /// instead of decoding a span nobody is waiting for any more.
   #generation = 0;
@@ -388,6 +400,9 @@ export class Mp4Video {
   }
 
   async #seek(seconds: number): Promise<number> {
+    if (this.#closed) {
+      return 0;
+    }
     // Clamp into the video's real range. A scrubber can ask for a time past the
     // end, and mp4box answers that with an offset that decodes nothing — which
     // would then read to the end of the file looking for a frame that does not
@@ -473,6 +488,9 @@ export class Mp4Video {
   }
 
   async #pullFrame(): Promise<VideoFrame | undefined> {
+    if (this.#closed) {
+      return undefined;
+    }
     const decoder = this.#ensureDecoder();
     const generation = this.#generation;
     let idleTicks = 0;
@@ -482,6 +500,9 @@ export class Mp4Video {
     while (this.#ready.length === 0 && !this.#exhausted) {
       if (this.#decoderError) {
         throw this.#decoderError;
+      }
+      if (this.#closed) {
+        return undefined;
       }
       if (generation !== this.#generation) {
         return undefined;
@@ -601,6 +622,10 @@ export class Mp4Video {
   }
 
   close(): void {
+    this.#closed = true;
+    // A pull parked on `#nextOutput()` is waiting for a decoder that will never
+    // emit again; releasing the waiters lets it observe `#closed` and return.
+    this.#wakeOutputWaiters();
     for (const frame of this.#ready) {
       frame.close();
     }

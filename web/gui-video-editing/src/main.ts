@@ -13,7 +13,7 @@ import beerTextureUrl from "../../../assets/meshes/qd_beer/textures/3d66-export-
 import editingDocumentUrl from "../data/fiba-shot1.arrow" with { type: "file" };
 import init, { startVideoEditing } from "../pkg/trd_wasm.js";
 import wasmUrl from "../pkg/trd_wasm_bg.wasm" with { type: "file" };
-import { type ByteSource, fileByteSource, urlByteSource } from "./media/byte-source.ts";
+import { byteSourceFor, MediabunnyReader, type MediaInput } from "./media/mediabunny-reader.ts";
 import { VideoPlayer } from "./media/player.ts";
 
 async function main(): Promise<void> {
@@ -144,8 +144,13 @@ async function main(): Promise<void> {
 
   /// Opens a video for decoding. The source is a local file or a URL behind the
   /// same interface, so this path no longer forks on which one it has (#282).
+  ///
+  /// Which reader demuxes it *is* a fork, deliberately: `?reader=mediabunny`
+  /// delegates that layer to a library, and the default keeps the hand-written
+  /// mp4box path. Both run under the same player, so a difference between them
+  /// is a difference in demuxing and nothing else.
   async function loadVideoSource(
-    open: () => Promise<ByteSource>,
+    media: MediaInput,
     localFile?: { filename: string; byteLength: number },
   ): Promise<void> {
     if (localFile) {
@@ -157,24 +162,31 @@ async function main(): Promise<void> {
     sourceReady = false;
     editor.setVideoStatus(false, false);
     try {
-      const source = await open();
-      if (generation !== sourceGeneration) {
-        return;
+      const label = media.kind === "file" ? media.file.name : media.url;
+      let opened: VideoPlayer;
+      let byteLength: number;
+      if (query.get("reader") === "mediabunny") {
+        const reader = await MediabunnyReader.open(media);
+        byteLength = localFile?.byteLength ?? 0;
+        opened = VideoPlayer.attach(reader, frameSink(generation));
+      } else {
+        const source = await byteSourceFor(media);
+        byteLength = source.size;
+        opened = await VideoPlayer.open(source, frameSink(generation));
       }
-      editor.setVideoSourceInfo(
-        localFile ? 1 : 2,
-        localFile?.filename ?? source.label,
-        localFile?.byteLength ?? source.size,
-      );
-      const opened = await VideoPlayer.open(source, frameSink(generation));
       if (generation !== sourceGeneration) {
         opened.close();
         return;
       }
+      editor.setVideoSourceInfo(
+        localFile ? 1 : 2,
+        localFile?.filename ?? label,
+        localFile?.byteLength ?? byteLength,
+      );
       // Adopt the container's own timeline before anything is drawn. The frame
       // rate is a rational the sample table states; deriving it from a sample
       // count over a duration would reintroduce the invented grid #264 removed.
-      editor.setVideoTimelineFromMoov(opened.moovBytes, localFile?.filename ?? source.label);
+      editor.setVideoTimelineFromMoov(opened.moovBytes, localFile?.filename ?? label);
       editor.validateVideoMetadata(
         opened.facts.width,
         opened.facts.height,
@@ -239,16 +251,16 @@ async function main(): Promise<void> {
           if (url.protocol !== "http:" && url.protocol !== "https:") {
             throw new Error("video URL must use http:// or https://");
           }
-          void loadVideoSource(() => urlByteSource(url.href));
+          void loadVideoSource({ kind: "url", url: url.href });
         } catch (error) {
           reportError(String(error));
         }
       } else if (pendingVideoFile) {
         const file = pendingVideoFile;
-        void loadVideoSource(() => Promise.resolve(fileByteSource(file)), {
-          filename: file.name,
-          byteLength: file.size,
-        });
+        void loadVideoSource(
+          { kind: "file", file },
+          { filename: file.name, byteLength: file.size },
+        );
       }
       // The document is part of the same commit, and it applies whether or not a
       // video was loaded above.
@@ -307,7 +319,7 @@ async function main(): Promise<void> {
   // the only way a scripted browser run can reach the playback path.
   const requestedVideo = query.get("video");
   if (requestedVideo) {
-    void loadVideoSource(() => urlByteSource(requestedVideo)).then(() => {
+    void loadVideoSource({ kind: "url", url: requestedVideo }).then(() => {
       // `&play=1` starts playback too, so a scripted run can exercise the
       // decode/pace loop without driving the egui transport bar.
       if (query.get("play") === "1") {
