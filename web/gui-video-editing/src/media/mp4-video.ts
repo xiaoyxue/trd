@@ -25,9 +25,15 @@ const MAX_QUEUED_CHUNKS = 32;
 /// seek rather than hanging it.
 const MAX_IDLE_TICKS = 10_000;
 
-/// Most one seek will transfer before giving up. A key-frame interval is a few
-/// seconds at worst, so needing more than this means something is wrong —
-/// report an empty seek rather than walk a multi-gigabyte file.
+/// Most one *catch-up* will transfer before giving up: the read from a key
+/// frame to the next frame handed out. A key-frame interval is ten seconds at
+/// worst, so needing more than this means the reader is walking the file
+/// without producing anything — report an empty seek rather than continue.
+///
+/// The allowance restarts every time a frame comes out, because a frame is
+/// proof of progress. Measuring it from the last *seek* instead made it a
+/// budget for the whole of playback, which silently killed any video long
+/// enough to reach it: 4K at 67 Mbps hits 256 MiB after about half a minute.
 const SEEK_BUDGET_BYTES = 256 * 1024 * 1024;
 
 /// What a decoded video's timeline is made of. Every field comes from the
@@ -479,7 +485,13 @@ export class Mp4Video {
     if (this.#decoderError) {
       throw this.#decoderError;
     }
-    return this.#ready.shift();
+    const frame = this.#ready.shift();
+    if (frame) {
+      // Progress: the allowance for reaching the *next* frame starts here, so
+      // playback is never bounded by how much it has read in total.
+      this.#budgetFrom = this.#source.bytesRead;
+    }
+    return frame;
   }
 
   /// Seeks and takes the next `wanted` frames — the measurement shape the probe

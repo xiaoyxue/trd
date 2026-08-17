@@ -119,6 +119,8 @@ pub enum VideoEditingError {
     Arrow(#[from] arrow::error::ArrowError),
     #[error("video-editing metadata `{0}` is missing")]
     MissingMetadata(&'static str),
+    #[error("not a video-editing document: {0}")]
+    NotADocument(String),
     #[error("video-editing metadata `{key}` has invalid value `{value}`")]
     InvalidMetadata { key: &'static str, value: String },
     #[error("video-editing version `{actual}` is unsupported (expected {VIDEO_EDIT_VERSION})")]
@@ -314,8 +316,63 @@ fn build_document(
     })
 }
 
+/// Says what a table that is *not* a video-editing document appears to be.
+///
+/// Every trd table is a `.arrow` or `.parquet`, and most of them are **not**
+/// documents: render-protocol streams, golden fixtures, raw perception dumps. A
+/// file picker can only filter by extension, so reaching for the wrong one is
+/// ordinary — and "metadata is missing" named the key the file lacks rather than
+/// the thing the user actually did.
+fn describe_foreign_table(schema: &Schema) -> String {
+    let metadata = schema.metadata();
+    if let Some(version) = metadata.get(crate::protocol::PROTOCOL_VERSION_KEY) {
+        let kind = metadata
+            .get(crate::protocol::TABLE_KIND_KEY)
+            .map_or("unknown", String::as_str);
+        return format!(
+            "this is a trd render-protocol `{kind}` table (version {version}), \
+             which describes a scene to render, not frames to annotate"
+        );
+    }
+    if metadata.keys().any(|key| key.starts_with("trd.")) {
+        return format!(
+            "it carries trd metadata but no `{VIDEO_EDIT_VERSION_KEY}`: {}",
+            summarise_columns(schema)
+        );
+    }
+    format!(
+        "it has no trd metadata at all — an unrelated Arrow/Parquet table: {}",
+        summarise_columns(schema)
+    )
+}
+
+/// The first few column names, so an unrecognised table is at least identifiable.
+fn summarise_columns(schema: &Schema) -> String {
+    let names: Vec<&str> = schema
+        .fields()
+        .iter()
+        .take(6)
+        .map(|field| field.name().as_str())
+        .collect();
+    format!(
+        "columns [{}{}]",
+        names.join(", "),
+        if schema.fields().len() > names.len() {
+            ", …"
+        } else {
+            ""
+        }
+    )
+}
+
 fn validate_schema_metadata(schema: &Schema) -> Result<(), VideoEditingError> {
-    let version = metadata(schema, VIDEO_EDIT_VERSION_KEY)?;
+    // Absent rather than wrong: the file is some other kind of table, so name
+    // what it is instead of the key it happens to lack.
+    let Some(version) = schema.metadata().get(VIDEO_EDIT_VERSION_KEY) else {
+        return Err(VideoEditingError::NotADocument(describe_foreign_table(
+            schema,
+        )));
+    };
     if version != VIDEO_EDIT_VERSION {
         return Err(VideoEditingError::UnsupportedVersion {
             actual: version.to_owned(),
@@ -651,6 +708,66 @@ mod tests {
             decode_video_editing_document(&document_bytes(VIDEO_EDIT_VERSION, true)),
             Err(VideoEditingError::PartialGeometry { row: 0 })
         ));
+    }
+
+    /// Picking the wrong `.arrow` is the ordinary mistake — the repository is
+    /// full of tables that are not documents and a file picker can only filter
+    /// by extension — so the error has to name what the file *is*.
+    #[test]
+    fn a_table_that_is_not_a_document_says_what_it_is() {
+        use arrow::array::{Float32Array, RecordBatch};
+        use arrow::datatypes::Field;
+
+        fn encode(metadata: &[(&str, &str)]) -> Vec<u8> {
+            let schema = Schema::new(vec![Field::new("x", DataType::Float32, false)])
+                .with_metadata(
+                    metadata
+                        .iter()
+                        .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                        .collect(),
+                );
+            let schema = Arc::new(schema);
+            let batch = RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![Arc::new(Float32Array::from(vec![1.0]))],
+            )
+            .unwrap();
+            let mut buffer = Vec::new();
+            {
+                let mut writer = StreamWriter::try_new(&mut buffer, &schema).unwrap();
+                writer.write(&batch).unwrap();
+                writer.finish().unwrap();
+            }
+            buffer
+        }
+
+        // A render-protocol table: the golden fixtures and every viewer stream.
+        let protocol = decode_video_editing_document(&encode(&[
+            (crate::protocol::PROTOCOL_VERSION_KEY, "0.0.6"),
+            (crate::protocol::TABLE_KIND_KEY, "mesh"),
+        ]))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            protocol.contains("render-protocol") && protocol.contains("mesh"),
+            "names the protocol and the table kind: {protocol}"
+        );
+
+        // A raw perception dump: `examples/frames.*.perception.arrow` carries no
+        // trd metadata whatsoever.
+        let foreign = decode_video_editing_document(&encode(&[]))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            foreign.contains("no trd metadata") && foreign.contains("columns [x]"),
+            "names the columns so the file is identifiable: {foreign}"
+        );
+
+        // A missing *version* must not be reported as a missing *key*.
+        assert!(
+            !protocol.contains("is missing") && !foreign.contains("is missing"),
+            "the old message named the key the file lacks, not what the user picked"
+        );
     }
 
     /// A sparse document: rows name **only** the annotated frames, so most

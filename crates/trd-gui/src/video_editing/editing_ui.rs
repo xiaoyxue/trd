@@ -349,6 +349,17 @@ impl VideoEditingApp {
                 .on_hover_text(
                     "Draw the quad and gizmo on annotated frames, including while playing",
                 );
+            // A sparse document annotates a few frames out of many, so the
+            // overlay drawing nothing is usually correct — and indistinguishable
+            // from a broken toggle unless it says which case this is.
+            let state = super::overlay_state(
+                self.show_overlay,
+                self.has_document(),
+                self.current_frame_index,
+                self.frame_row(self.current_frame_index)
+                    .map(|frame| frame.tracked),
+            );
+            ui.weak(state.label());
             if shots.is_empty() {
                 ui.weak(if self.has_document() {
                     "The document annotates no frames"

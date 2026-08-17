@@ -135,6 +135,62 @@ pub fn is_http_url(url: &str) -> bool {
     url.starts_with("http://") || url.starts_with("https://")
 }
 
+/// Why the placement overlay is or is not drawing at the current frame.
+///
+/// It draws nothing for four different reasons, three of which are the ordinary
+/// state of a **sparse** document — most frames of a long recording carry no
+/// row at all (#264). A checkbox that appears to do nothing is indistinguishable
+/// from a broken one, so the reason is stated rather than left to be inferred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverlayState {
+    /// The toggle is off.
+    Hidden,
+    /// No annotation document: there is nothing to draw anywhere.
+    NoDocument,
+    /// A document is loaded but does not annotate this frame.
+    NotAnnotated(u32),
+    /// Annotated, but marked video-only — the tail of a shot's tracking.
+    VideoOnly(u32),
+    /// Drawing.
+    Drawing(u32),
+}
+
+impl OverlayState {
+    /// What the panel says under the toggle.
+    pub fn label(self) -> String {
+        match self {
+            Self::Hidden => "Overlay off: annotated frames play without their quad".to_owned(),
+            Self::NoDocument => "Nothing to draw: no annotation document is loaded".to_owned(),
+            Self::NotAnnotated(frame) => {
+                format!("Nothing to draw: frame {frame} is not annotated (plain video)")
+            }
+            Self::VideoOnly(frame) => {
+                format!("Nothing to draw: frame {frame} is annotated but not tracked")
+            }
+            Self::Drawing(frame) => format!("Drawing the quad on frame {frame}"),
+        }
+    }
+}
+
+/// Resolves the overlay's state. `tracked` is `None` when the document has no
+/// row for this frame at all.
+pub fn overlay_state(
+    show_overlay: bool,
+    has_document: bool,
+    frame_index: u32,
+    tracked: Option<bool>,
+) -> OverlayState {
+    if !show_overlay {
+        return OverlayState::Hidden;
+    }
+    match (has_document, tracked) {
+        (false, _) => OverlayState::NoDocument,
+        (true, None) => OverlayState::NotAnnotated(frame_index),
+        (true, Some(false)) => OverlayState::VideoOnly(frame_index),
+        (true, Some(true)) => OverlayState::Drawing(frame_index),
+    }
+}
+
 /// Whether the dialog's Load button has anything to commit.
 ///
 /// A newly selected video is the obvious case. A video that is **already
@@ -1881,6 +1937,43 @@ pub(super) mod tests {
         shared.seek_frame.set(42);
         assert_eq!(shared.take_seek_frame(), Some(42));
         assert_eq!(shared.take_seek_frame(), None);
+    }
+
+    /// Why the overlay is drawing nothing, pinned without a UI. Three of the
+    /// four silences are the ordinary state of a sparse document, which is
+    /// exactly why the toggle looked broken.
+    #[test]
+    fn overlay_state_names_each_reason_it_draws_nothing() {
+        assert_eq!(
+            overlay_state(false, true, 7, Some(true)),
+            OverlayState::Hidden,
+            "the toggle wins over everything else"
+        );
+        assert_eq!(
+            overlay_state(true, false, 7, None),
+            OverlayState::NoDocument
+        );
+        assert_eq!(
+            overlay_state(true, true, 7, None),
+            OverlayState::NotAnnotated(7),
+            "a sparse document simply has no row here"
+        );
+        assert_eq!(
+            overlay_state(true, true, 7, Some(false)),
+            OverlayState::VideoOnly(7)
+        );
+        assert_eq!(
+            overlay_state(true, true, 7, Some(true)),
+            OverlayState::Drawing(7)
+        );
+
+        assert!(overlay_state(true, true, 7, None).label().contains("7"));
+        assert!(
+            overlay_state(true, false, 7, None)
+                .label()
+                .contains("no annotation document"),
+            "the commonest case names the missing document"
+        );
     }
 
     /// The document readout, pinned without a UI. The mismatch line is the point:
