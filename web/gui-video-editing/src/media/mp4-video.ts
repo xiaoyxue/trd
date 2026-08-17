@@ -182,7 +182,6 @@ export class Mp4Video {
   /// decoder emits in presentation order, so this needs no reordering.
   readonly #ready: VideoFrame[] = [];
   #decoder: VideoDecoder | undefined;
-  #started = false;
   /// Frames ending at or before this (microseconds) are the catch-up from the
   /// key frame and get dropped.
   #skipTarget = 0;
@@ -196,6 +195,16 @@ export class Mp4Video {
   /// frame — which a `VideoDecoder` reports as a **fatal** error and never
   /// recovers from. Dragging a scrubber produces exactly that overlap.
   #gate: Promise<unknown> = Promise.resolve();
+  /// The drain started at the end of the stream, and whether it has finished.
+  ///
+  /// Kept as state rather than awaited inline: see the end-of-stream branch in
+  /// [`Mp4Video::pullFrame`](#pullFrame) for why waiting for a `flush()` while
+  /// holding its output is a circular wait.
+  #draining: Promise<void> | undefined;
+  #drained = false;
+  /// Woken whenever the decoder emits, so a waiter is released by output rather
+  /// than by polling for it.
+  #outputWaiters: (() => void)[] = [];
   /// Bumped by every seek, so work queued for a superseded one is dropped
   /// instead of decoding a span nobody is waiting for any more.
   #generation = 0;
@@ -214,6 +223,19 @@ export class Mp4Video {
       () => undefined,
     );
     return result;
+  }
+
+  /// Resolves the next time the decoder emits — or the drain finishes.
+  #nextOutput(): Promise<void> {
+    return new Promise((resolve) => {
+      this.#outputWaiters.push(resolve);
+    });
+  }
+
+  #wakeOutputWaiters(): void {
+    for (const wake of this.#outputWaiters.splice(0)) {
+      wake();
+    }
   }
 
   private constructor(
@@ -334,15 +356,18 @@ export class Mp4Video {
           if (frame.timestamp + (frame.duration ?? 1) <= this.#skipTarget) {
             this.#skipped += 1;
             frame.close();
+            this.#wakeOutputWaiters();
             return;
           }
           this.#ready.push(frame);
+          this.#wakeOutputWaiters();
         },
         error: (error) => {
           // Recorded, not just logged: whoever is awaiting a frame has to learn
           // that none is coming, and the decoder is unusable from here on.
           this.#decoderError = error;
           this.#exhausted = true;
+          this.#wakeOutputWaiters();
         },
       });
     }
@@ -373,6 +398,11 @@ export class Mp4Video {
     this.#skipTarget = containerSeconds * 1_000_000;
     this.#skipped = 0;
     this.#exhausted = false;
+    // A seek re-opens the stream: whatever drain the previous position started
+    // is finished with, and anyone waiting on output has to be released.
+    this.#draining = undefined;
+    this.#drained = false;
+    this.#wakeOutputWaiters();
     this.#budgetFrom = this.#source.bytesRead;
     for (const frame of this.#ready) {
       frame.close();
@@ -409,11 +439,16 @@ export class Mp4Video {
       // The samples are in the decoder's queue now; mp4box can drop its copies.
       this.#file.releaseUsedSamples(this.facts.id, samples[samples.length - 1]?.number ?? 0);
     };
+    // `seek()` answers "the position you should feed me from", **not** the key
+    // frame's byte offset. Once mp4box already holds the bytes — which it does
+    // as soon as the whole file has been fed — that answer is the end of the
+    // file, meaning "I need nothing more". Reading it as end-of-stream is what
+    // made every seek after a long read return no frame at all.
     this.#feedOffset = this.#file.seek(containerSeconds, true).offset;
-    if (!this.#started) {
-      this.#file.start();
-      this.#started = true;
-    }
+    // Sample extraction has to be (re)started for mp4box to emit from the new
+    // position out of the data it is holding. Starting only once meant a seek
+    // that needed no new bytes produced no samples either.
+    this.#file.start();
     return wantedSeconds;
   }
 
@@ -455,9 +490,48 @@ export class Mp4Video {
         this.#feedOffset >= this.#source.size ||
         this.#source.bytesRead - this.#budgetFrom > SEEK_BUDGET_BYTES
       ) {
-        await decoder.flush();
-        this.#exhausted = true;
-        break;
+        // Everything is fed; the decoder still holds queued chunks. `flush()`
+        // resolves only once every one of them has been *emitted*, and a
+        // `VideoDecoder` stops emitting while its output pool is full — Chrome
+        // stalls after about eight outstanding frames at 1080p.
+        //
+        // So awaiting the flush here is a circular wait: the flush needs those
+        // frames closed, they are closed by the caller once this returns them,
+        // and this is blocked on the flush. Measured on the FIBA clip: queue
+        // frozen at 111 with 8 frames ready, forever.
+        //
+        // Start the drain, then wait for whichever comes first — a frame to
+        // hand back, or the drain finishing. Returning a frame closes one and
+        // lets the decoder emit the next, so the drain makes progress *because*
+        // this does not wait for it.
+        if (!this.#draining) {
+          this.#draining = decoder
+            .flush()
+            .catch(() => undefined)
+            .then(() => {
+              this.#drained = true;
+              this.#wakeOutputWaiters();
+            });
+        }
+        await Promise.race([this.#draining, this.#nextOutput()]);
+        if (this.#ready.length > 0) {
+          break;
+        }
+        if (this.#drained) {
+          // A flush that found nothing is no proof of end-of-stream: mp4box
+          // emits the samples for a seek *asynchronously*, so the drain can
+          // start and finish against an empty decoder and the chunks arrive
+          // straight after. Anything queued now means there is more to come —
+          // drain again rather than declaring the stream over.
+          if (decoder.decodeQueueSize > 0) {
+            this.#draining = undefined;
+            this.#drained = false;
+            continue;
+          }
+          this.#exhausted = true;
+          break;
+        }
+        continue;
       }
       // Back-pressure. Catching up from a distant key frame can mean hundreds
       // of frames, and queueing all of them at once would hold the whole span
@@ -475,9 +549,10 @@ export class Mp4Video {
       }
       const buffer = await this.#source.read(this.#feedOffset, CHUNK_BYTES);
       if (buffer.byteLength === 0) {
-        await decoder.flush();
-        this.#exhausted = true;
-        break;
+        // A short read is the end of the stream by another route; take the same
+        // non-blocking drain rather than awaiting a flush that cannot finish.
+        this.#feedOffset = this.#source.size;
+        continue;
       }
       const next = this.#file.appendBuffer(MP4BoxBuffer.fromArrayBuffer(buffer, this.#feedOffset));
       this.#feedOffset = next > this.#feedOffset ? next : this.#feedOffset + buffer.byteLength;

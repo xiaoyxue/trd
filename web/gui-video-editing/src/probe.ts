@@ -208,7 +208,11 @@ seekInput.value = auto.get("seek") ?? "0";
 const autoUrl = auto.get("url");
 const scrubTargets = (auto.get("scrub") ?? "")
   .split(",")
-  .map((value) => Number(value.trim()))
+  .map((value) => value.trim())
+  // Without this an absent `?scrub=` splits to `[""]`, and `Number("")` is 0 —
+  // a silent scrub to the start that replaces the `?seek=`/`?frames=` run.
+  .filter((value) => value.length > 0)
+  .map(Number)
   .filter((value) => Number.isFinite(value));
 if (autoUrl) {
   (document.getElementById("url") as HTMLInputElement).value = autoUrl;
