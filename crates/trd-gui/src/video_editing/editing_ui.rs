@@ -182,6 +182,22 @@ impl VideoEditingApp {
                 },
                 None => "Document: none — the video plays as-is".to_owned(),
             });
+            // What the document *contains*, as opposed to what was picked: the
+            // two differ whenever a file is selected but not yet loaded, and a
+            // name alone never says whether the rows fit this video.
+            match self.document.as_ref() {
+                Some(document) => {
+                    let summary = super::document_summary(document, &self.video);
+                    ui.label(summary.describes);
+                    ui.label(summary.annotated);
+                    if let Some(mismatch) = summary.mismatch {
+                        ui.colored_label(egui::Color32::from_rgb(240, 180, 80), mismatch);
+                    }
+                }
+                None => {
+                    ui.weak("No document loaded: every frame is plain video");
+                }
+            }
             ui.label(format!(
                 "{}x{} · {}/{} fps · {} frames",
                 video.width, video.height, video.fps_num, video.fps_den, video.frame_count

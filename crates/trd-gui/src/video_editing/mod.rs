@@ -147,6 +147,85 @@ pub fn load_is_available(video_selected: bool, video_loaded: bool) -> bool {
     video_selected || video_loaded
 }
 
+/// What a loaded annotation document says about itself, read next to the video
+/// that is actually playing.
+///
+/// Pure, so the readout is pinned by tests instead of by looking at the UI, and
+/// so both shells show the same thing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocumentSummary {
+    /// The video the document was authored against.
+    pub describes: String,
+    /// How many frames carry placement data, and where they are.
+    pub annotated: String,
+    /// Set when the document does not describe the video on screen. Rows are
+    /// keyed by frame number, so a document from another clip does not fail to
+    /// load — it silently lines its quads up with the wrong frames, which is
+    /// worth saying out loud (#264).
+    pub mismatch: Option<String>,
+}
+
+/// Summarises `document` for display, against the `playing` timeline.
+pub fn document_summary(
+    document: &trd_core::VideoEditingDocument,
+    playing: &trd_core::VideoInfo,
+) -> DocumentSummary {
+    let authored = &document.video;
+    let describes = format!(
+        "Authored for {} · {}x{} · {}/{} fps · {} frames",
+        authored.source_name,
+        authored.width,
+        authored.height,
+        authored.fps_num,
+        authored.fps_den,
+        authored.frame_count
+    );
+
+    let shots = document.shots();
+    let ranges = shots
+        .iter()
+        .take(4)
+        .map(|shot| format!("{}-{}", shot.start_frame, shot.end_frame))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let annotated = if shots.is_empty() {
+        "No annotated frames: every frame is plain video".to_owned()
+    } else {
+        format!(
+            "{} annotated frames in {} shot{}: {}{}",
+            document.frames.len(),
+            shots.len(),
+            if shots.len() == 1 { "" } else { "s" },
+            ranges,
+            if shots.len() > 4 { ", …" } else { "" }
+        )
+    };
+
+    // Resolution is the objective signal. The *names* cannot be compared: a
+    // video opened from a URL is labelled with the whole URL, so a match there
+    // would be luck rather than evidence.
+    let last_annotated = shots.last().map_or(0, |shot| shot.end_frame);
+    let mismatch = if authored.width != playing.width || authored.height != playing.height {
+        Some(format!(
+            "This document is for {}x{} video, but {}x{} is playing — its quads belong to another clip",
+            authored.width, authored.height, playing.width, playing.height
+        ))
+    } else if playing.frame_count <= last_annotated {
+        Some(format!(
+            "This document annotates up to frame {last_annotated}, but the video has only {} frames",
+            playing.frame_count
+        ))
+    } else {
+        None
+    };
+
+    DocumentSummary {
+        describes,
+        annotated,
+        mismatch,
+    }
+}
+
 /// Validates a typed annotation-document URL, naming the format its suffix
 /// suggests.
 ///
@@ -1802,6 +1881,96 @@ pub(super) mod tests {
         shared.seek_frame.set(42);
         assert_eq!(shared.take_seek_frame(), Some(42));
         assert_eq!(shared.take_seek_frame(), None);
+    }
+
+    /// The document readout, pinned without a UI. The mismatch line is the point:
+    /// a document from another clip loads perfectly well and then annotates the
+    /// wrong frames, so nothing else would tell the user.
+    #[test]
+    fn document_summary_reports_contents_and_flags_a_foreign_document() {
+        let authored = trd_core::VideoInfo {
+            source_name: "shot_0001.mp4".to_owned(),
+            mime: "video/mp4".to_owned(),
+            codec: "h264".to_owned(),
+            sha256: String::new(),
+            byte_length: 6_664_274,
+            width: 1920,
+            height: 1080,
+            fps_num: 24,
+            fps_den: 1,
+            frame_count: 288,
+            duration_us: 12_000_000,
+        };
+        let document = trd_core::VideoEditingDocument {
+            video: authored.clone(),
+            poster_bytes: Vec::new(),
+            frames: (0..3)
+                .chain(10..12)
+                .map(|index| trd_core::VideoEditingFrame {
+                    video_frame_index: index,
+                    present_index: index,
+                    timestamp_us: 0,
+                    k: None,
+                    placement_quad: None,
+                    tracked: true,
+                })
+                .collect(),
+        };
+
+        let matching = document_summary(&document, &authored);
+        assert_eq!(
+            matching.describes,
+            "Authored for shot_0001.mp4 · 1920x1080 · 24/1 fps · 288 frames"
+        );
+        assert_eq!(
+            matching.annotated,
+            "5 annotated frames in 2 shots: 0-2, 10-11"
+        );
+        assert_eq!(
+            matching.mismatch, None,
+            "the document describes the video that is playing"
+        );
+
+        // The case this session hit: a 1080p document attached to a 4K recording.
+        let four_k = trd_core::VideoInfo {
+            source_name: "2026-07-16 20-52-51.mp4".to_owned(),
+            width: 3840,
+            height: 2160,
+            frame_count: 694_840,
+            ..authored.clone()
+        };
+        let foreign = document_summary(&document, &four_k);
+        assert!(
+            foreign
+                .mismatch
+                .as_deref()
+                .is_some_and(|text| text.contains("1920x1080") && text.contains("3840x2160")),
+            "a resolution difference names both sides: {:?}",
+            foreign.mismatch
+        );
+
+        // Same resolution, but the video is too short for the rows it carries.
+        let truncated = trd_core::VideoInfo {
+            frame_count: 5,
+            ..authored.clone()
+        };
+        assert!(
+            document_summary(&document, &truncated)
+                .mismatch
+                .as_deref()
+                .is_some_and(|text| text.contains("frame 11")),
+            "rows past the end of the video are named"
+        );
+
+        let empty = trd_core::VideoEditingDocument {
+            video: authored.clone(),
+            poster_bytes: Vec::new(),
+            frames: Vec::new(),
+        };
+        assert_eq!(
+            document_summary(&empty, &authored).annotated,
+            "No annotated frames: every frame is plain video"
+        );
     }
 
     /// Load's precondition, pinned without a UI. The second case is the one that
