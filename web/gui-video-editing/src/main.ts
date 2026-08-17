@@ -38,6 +38,15 @@ async function main(): Promise<void> {
     documentBytes = new Uint8Array(await response.arrayBuffer());
   }
   const editor = await startVideoEditing(canvas, documentBytes);
+
+  /// Surfaces a failure. The editor's UI is a canvas, so an error drawn there
+  /// can be read but not selected, copied or scrolled back to — logging it as
+  /// well is what makes a failure reportable and reproducible.
+  function reportError(message: string): void {
+    console.error(`video editing: ${message}`);
+    editor.setVideoError(message);
+  }
+
   const catalog = new Map<number, { modelUrl: string; textureUrl?: string }>([
     [1, { modelUrl: cokeObjUrl, textureUrl: cokeTextureUrl }],
     [2, { modelUrl: beerObjUrl, textureUrl: beerTextureUrl }],
@@ -117,7 +126,7 @@ async function main(): Promise<void> {
         try {
           editor.presentVideoFrame(frame, editor.frameIndexAtMediaTime(mediaSeconds), mediaSeconds);
         } catch (error) {
-          editor.setVideoError(String(error));
+          reportError(String(error));
         }
       },
       ended(): void {
@@ -127,7 +136,7 @@ async function main(): Promise<void> {
       },
       failed(message: string): void {
         if (generation === sourceGeneration) {
-          editor.setVideoError(message);
+          reportError(message);
         }
       },
     };
@@ -182,7 +191,7 @@ async function main(): Promise<void> {
       if (generation === sourceGeneration) {
         sourceReady = false;
         editor.setVideoStatus(false, false);
-        editor.setVideoError(String(error));
+        reportError(String(error));
       }
     }
   }
@@ -195,7 +204,7 @@ async function main(): Promise<void> {
     try {
       editor.validateVideoFile(file.name, file.size);
     } catch (error) {
-      editor.setVideoError(String(error));
+      reportError(String(error));
       input.value = "";
       return;
     }
@@ -232,7 +241,7 @@ async function main(): Promise<void> {
           }
           void loadVideoSource(() => urlByteSource(url.href));
         } catch (error) {
-          editor.setVideoError(String(error));
+          reportError(String(error));
         }
       } else if (pendingVideoFile) {
         const file = pendingVideoFile;
@@ -244,7 +253,7 @@ async function main(): Promise<void> {
       // The document is part of the same commit, and it applies whether or not a
       // video was loaded above.
       void loadSelectedDocument().catch((error: unknown) =>
-        editor.setVideoError(`annotation document: ${String(error)}`),
+        reportError(`annotation document: ${String(error)}`),
       );
     }
 
@@ -252,7 +261,7 @@ async function main(): Promise<void> {
     if (seekFrame >= 0 && player) {
       void player
         .seekToSeconds(editor.mediaTimeAtFrame(seekFrame))
-        .catch((error: unknown) => editor.setVideoError(String(error)));
+        .catch((error: unknown) => reportError(String(error)));
     }
     const assetCode = loadingAsset ? 0 : editor.takeAssetRequest();
     const entry = catalog.get(assetCode);
@@ -284,7 +293,7 @@ async function main(): Promise<void> {
         .then(([modelBytes, textureBytes, envBytes]) =>
           editor.loadCatalogAsset(assetCode, modelBytes, textureBytes, envBytes),
         )
-        .catch((error: unknown) => editor.setVideoError(String(error)))
+        .catch((error: unknown) => reportError(String(error)))
         .finally(() => {
           loadingAsset = false;
         });

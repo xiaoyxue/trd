@@ -135,6 +135,18 @@ pub fn is_http_url(url: &str) -> bool {
     url.starts_with("http://") || url.starts_with("https://")
 }
 
+/// Whether the dialog's Load button has anything to commit.
+///
+/// A newly selected video is the obvious case. A video that is **already
+/// playing** is the other one: the annotation document is optional and
+/// independent, so it has to be attachable to the video already on screen
+/// (#264). Requiring a fresh video selection made that impossible — a video
+/// opened from `?video=`, which never goes through the picker, left Load
+/// permanently disabled and a picked `.arrow` with no way to apply it.
+pub fn load_is_available(video_selected: bool, video_loaded: bool) -> bool {
+    video_selected || video_loaded
+}
+
 /// Validates a typed annotation-document URL, naming the format its suffix
 /// suggests.
 ///
@@ -1062,11 +1074,13 @@ impl VideoEditingApp {
         ui.weak("Format is decided by the file's contents, not its name.");
     }
 
-    /// The single commit point. Disabled until a video is selected, because a
-    /// document alone has nothing to annotate. Returns whether it was pressed,
-    /// so the dialog closes only on an actual load.
+    /// The single commit point. Returns whether it was pressed, so the dialog
+    /// closes only on an actual load.
     fn load_row(&mut self, ui: &mut egui::Ui) -> bool {
-        let ready = self.shared.pending_video().is_some();
+        let ready = load_is_available(
+            self.shared.pending_video().is_some(),
+            self.shared.video_loaded.get(),
+        );
         let clicked = ui
             .add_enabled(ready, egui::Button::new("Load"))
             .on_disabled_hover_text("Select a video first — the document is optional")
@@ -1788,6 +1802,26 @@ pub(super) mod tests {
         shared.seek_frame.set(42);
         assert_eq!(shared.take_seek_frame(), Some(42));
         assert_eq!(shared.take_seek_frame(), None);
+    }
+
+    /// Load's precondition, pinned without a UI. The second case is the one that
+    /// was missing: a document has to be attachable to a video that is already
+    /// playing, including one opened from `?video=` rather than the picker.
+    #[test]
+    fn load_is_available_for_a_new_selection_or_an_already_playing_video() {
+        assert!(
+            load_is_available(true, false),
+            "a freshly selected video is the ordinary case"
+        );
+        assert!(
+            load_is_available(false, true),
+            "a document alone must commit against the video already on screen"
+        );
+        assert!(load_is_available(true, true));
+        assert!(
+            !load_is_available(false, false),
+            "with neither, Load has nothing to act on"
+        );
     }
 
     /// The document row's rules, pinned without a UI: what the dialog accepts is
