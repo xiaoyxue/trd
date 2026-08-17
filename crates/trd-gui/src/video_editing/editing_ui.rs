@@ -182,6 +182,22 @@ impl VideoEditingApp {
                 },
                 None => "Document: none — the video plays as-is".to_owned(),
             });
+            // What the document *contains*, as opposed to what was picked: the
+            // two differ whenever a file is selected but not yet loaded, and a
+            // name alone never says whether the rows fit this video.
+            match self.document.as_ref() {
+                Some(document) => {
+                    let summary = super::document_summary(document, &self.video);
+                    ui.label(summary.describes);
+                    ui.label(summary.annotated);
+                    if let Some(mismatch) = summary.mismatch {
+                        ui.colored_label(egui::Color32::from_rgb(240, 180, 80), mismatch);
+                    }
+                }
+                None => {
+                    ui.weak("No document loaded: every frame is plain video");
+                }
+            }
             ui.label(format!(
                 "{}x{} · {}/{} fps · {} frames",
                 video.width, video.height, video.fps_num, video.fps_den, video.frame_count
@@ -333,6 +349,17 @@ impl VideoEditingApp {
                 .on_hover_text(
                     "Draw the quad and gizmo on annotated frames, including while playing",
                 );
+            // A sparse document annotates a few frames out of many, so the
+            // overlay drawing nothing is usually correct — and indistinguishable
+            // from a broken toggle unless it says which case this is.
+            let state = super::overlay_state(
+                self.show_overlay,
+                self.has_document(),
+                self.current_frame_index,
+                self.frame_row(self.current_frame_index)
+                    .map(|frame| frame.tracked),
+            );
+            ui.weak(state.label());
             if shots.is_empty() {
                 ui.weak(if self.has_document() {
                     "The document annotates no frames"

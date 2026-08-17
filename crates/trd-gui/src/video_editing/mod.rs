@@ -135,6 +135,153 @@ pub fn is_http_url(url: &str) -> bool {
     url.starts_with("http://") || url.starts_with("https://")
 }
 
+/// Why the placement overlay is or is not drawing at the current frame.
+///
+/// It draws nothing for four different reasons, three of which are the ordinary
+/// state of a **sparse** document — most frames of a long recording carry no
+/// row at all (#264). A checkbox that appears to do nothing is indistinguishable
+/// from a broken one, so the reason is stated rather than left to be inferred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverlayState {
+    /// The toggle is off.
+    Hidden,
+    /// No annotation document: there is nothing to draw anywhere.
+    NoDocument,
+    /// A document is loaded but does not annotate this frame.
+    NotAnnotated(u32),
+    /// Annotated, but marked video-only — the tail of a shot's tracking.
+    VideoOnly(u32),
+    /// Drawing.
+    Drawing(u32),
+}
+
+impl OverlayState {
+    /// What the panel says under the toggle.
+    pub fn label(self) -> String {
+        match self {
+            Self::Hidden => "Overlay off: annotated frames play without their quad".to_owned(),
+            Self::NoDocument => "Nothing to draw: no annotation document is loaded".to_owned(),
+            Self::NotAnnotated(frame) => {
+                format!("Nothing to draw: frame {frame} is not annotated (plain video)")
+            }
+            Self::VideoOnly(frame) => {
+                format!("Nothing to draw: frame {frame} is annotated but not tracked")
+            }
+            Self::Drawing(frame) => format!("Drawing the quad on frame {frame}"),
+        }
+    }
+}
+
+/// Resolves the overlay's state. `tracked` is `None` when the document has no
+/// row for this frame at all.
+pub fn overlay_state(
+    show_overlay: bool,
+    has_document: bool,
+    frame_index: u32,
+    tracked: Option<bool>,
+) -> OverlayState {
+    if !show_overlay {
+        return OverlayState::Hidden;
+    }
+    match (has_document, tracked) {
+        (false, _) => OverlayState::NoDocument,
+        (true, None) => OverlayState::NotAnnotated(frame_index),
+        (true, Some(false)) => OverlayState::VideoOnly(frame_index),
+        (true, Some(true)) => OverlayState::Drawing(frame_index),
+    }
+}
+
+/// Whether the dialog's Load button has anything to commit.
+///
+/// A newly selected video is the obvious case. A video that is **already
+/// playing** is the other one: the annotation document is optional and
+/// independent, so it has to be attachable to the video already on screen
+/// (#264). Requiring a fresh video selection made that impossible — a video
+/// opened from `?video=`, which never goes through the picker, left Load
+/// permanently disabled and a picked `.arrow` with no way to apply it.
+pub fn load_is_available(video_selected: bool, video_loaded: bool) -> bool {
+    video_selected || video_loaded
+}
+
+/// What a loaded annotation document says about itself, read next to the video
+/// that is actually playing.
+///
+/// Pure, so the readout is pinned by tests instead of by looking at the UI, and
+/// so both shells show the same thing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocumentSummary {
+    /// The video the document was authored against.
+    pub describes: String,
+    /// How many frames carry placement data, and where they are.
+    pub annotated: String,
+    /// Set when the document does not describe the video on screen. Rows are
+    /// keyed by frame number, so a document from another clip does not fail to
+    /// load — it silently lines its quads up with the wrong frames, which is
+    /// worth saying out loud (#264).
+    pub mismatch: Option<String>,
+}
+
+/// Summarises `document` for display, against the `playing` timeline.
+pub fn document_summary(
+    document: &trd_core::VideoEditingDocument,
+    playing: &trd_core::VideoInfo,
+) -> DocumentSummary {
+    let authored = &document.video;
+    let describes = format!(
+        "Authored for {} · {}x{} · {}/{} fps · {} frames",
+        authored.source_name,
+        authored.width,
+        authored.height,
+        authored.fps_num,
+        authored.fps_den,
+        authored.frame_count
+    );
+
+    let shots = document.shots();
+    let ranges = shots
+        .iter()
+        .take(4)
+        .map(|shot| format!("{}-{}", shot.start_frame, shot.end_frame))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let annotated = if shots.is_empty() {
+        "No annotated frames: every frame is plain video".to_owned()
+    } else {
+        format!(
+            "{} annotated frames in {} shot{}: {}{}",
+            document.frames.len(),
+            shots.len(),
+            if shots.len() == 1 { "" } else { "s" },
+            ranges,
+            if shots.len() > 4 { ", …" } else { "" }
+        )
+    };
+
+    // Resolution is the objective signal. The *names* cannot be compared: a
+    // video opened from a URL is labelled with the whole URL, so a match there
+    // would be luck rather than evidence.
+    let last_annotated = shots.last().map_or(0, |shot| shot.end_frame);
+    let mismatch = if authored.width != playing.width || authored.height != playing.height {
+        Some(format!(
+            "This document is for {}x{} video, but {}x{} is playing — its quads belong to another clip",
+            authored.width, authored.height, playing.width, playing.height
+        ))
+    } else if playing.frame_count <= last_annotated {
+        Some(format!(
+            "This document annotates up to frame {last_annotated}, but the video has only {} frames",
+            playing.frame_count
+        ))
+    } else {
+        None
+    };
+
+    DocumentSummary {
+        describes,
+        annotated,
+        mismatch,
+    }
+}
+
 /// Validates a typed annotation-document URL, naming the format its suffix
 /// suggests.
 ///
@@ -1062,11 +1209,13 @@ impl VideoEditingApp {
         ui.weak("Format is decided by the file's contents, not its name.");
     }
 
-    /// The single commit point. Disabled until a video is selected, because a
-    /// document alone has nothing to annotate. Returns whether it was pressed,
-    /// so the dialog closes only on an actual load.
+    /// The single commit point. Returns whether it was pressed, so the dialog
+    /// closes only on an actual load.
     fn load_row(&mut self, ui: &mut egui::Ui) -> bool {
-        let ready = self.shared.pending_video().is_some();
+        let ready = load_is_available(
+            self.shared.pending_video().is_some(),
+            self.shared.video_loaded.get(),
+        );
         let clicked = ui
             .add_enabled(ready, egui::Button::new("Load"))
             .on_disabled_hover_text("Select a video first — the document is optional")
@@ -1788,6 +1937,153 @@ pub(super) mod tests {
         shared.seek_frame.set(42);
         assert_eq!(shared.take_seek_frame(), Some(42));
         assert_eq!(shared.take_seek_frame(), None);
+    }
+
+    /// Why the overlay is drawing nothing, pinned without a UI. Three of the
+    /// four silences are the ordinary state of a sparse document, which is
+    /// exactly why the toggle looked broken.
+    #[test]
+    fn overlay_state_names_each_reason_it_draws_nothing() {
+        assert_eq!(
+            overlay_state(false, true, 7, Some(true)),
+            OverlayState::Hidden,
+            "the toggle wins over everything else"
+        );
+        assert_eq!(
+            overlay_state(true, false, 7, None),
+            OverlayState::NoDocument
+        );
+        assert_eq!(
+            overlay_state(true, true, 7, None),
+            OverlayState::NotAnnotated(7),
+            "a sparse document simply has no row here"
+        );
+        assert_eq!(
+            overlay_state(true, true, 7, Some(false)),
+            OverlayState::VideoOnly(7)
+        );
+        assert_eq!(
+            overlay_state(true, true, 7, Some(true)),
+            OverlayState::Drawing(7)
+        );
+
+        assert!(overlay_state(true, true, 7, None).label().contains("7"));
+        assert!(
+            overlay_state(true, false, 7, None)
+                .label()
+                .contains("no annotation document"),
+            "the commonest case names the missing document"
+        );
+    }
+
+    /// The document readout, pinned without a UI. The mismatch line is the point:
+    /// a document from another clip loads perfectly well and then annotates the
+    /// wrong frames, so nothing else would tell the user.
+    #[test]
+    fn document_summary_reports_contents_and_flags_a_foreign_document() {
+        let authored = trd_core::VideoInfo {
+            source_name: "shot_0001.mp4".to_owned(),
+            mime: "video/mp4".to_owned(),
+            codec: "h264".to_owned(),
+            sha256: String::new(),
+            byte_length: 6_664_274,
+            width: 1920,
+            height: 1080,
+            fps_num: 24,
+            fps_den: 1,
+            frame_count: 288,
+            duration_us: 12_000_000,
+        };
+        let document = trd_core::VideoEditingDocument {
+            video: authored.clone(),
+            poster_bytes: Vec::new(),
+            frames: (0..3)
+                .chain(10..12)
+                .map(|index| trd_core::VideoEditingFrame {
+                    video_frame_index: index,
+                    present_index: index,
+                    timestamp_us: 0,
+                    k: None,
+                    placement_quad: None,
+                    tracked: true,
+                })
+                .collect(),
+        };
+
+        let matching = document_summary(&document, &authored);
+        assert_eq!(
+            matching.describes,
+            "Authored for shot_0001.mp4 · 1920x1080 · 24/1 fps · 288 frames"
+        );
+        assert_eq!(
+            matching.annotated,
+            "5 annotated frames in 2 shots: 0-2, 10-11"
+        );
+        assert_eq!(
+            matching.mismatch, None,
+            "the document describes the video that is playing"
+        );
+
+        // The case this session hit: a 1080p document attached to a 4K recording.
+        let four_k = trd_core::VideoInfo {
+            source_name: "2026-07-16 20-52-51.mp4".to_owned(),
+            width: 3840,
+            height: 2160,
+            frame_count: 694_840,
+            ..authored.clone()
+        };
+        let foreign = document_summary(&document, &four_k);
+        assert!(
+            foreign
+                .mismatch
+                .as_deref()
+                .is_some_and(|text| text.contains("1920x1080") && text.contains("3840x2160")),
+            "a resolution difference names both sides: {:?}",
+            foreign.mismatch
+        );
+
+        // Same resolution, but the video is too short for the rows it carries.
+        let truncated = trd_core::VideoInfo {
+            frame_count: 5,
+            ..authored.clone()
+        };
+        assert!(
+            document_summary(&document, &truncated)
+                .mismatch
+                .as_deref()
+                .is_some_and(|text| text.contains("frame 11")),
+            "rows past the end of the video are named"
+        );
+
+        let empty = trd_core::VideoEditingDocument {
+            video: authored.clone(),
+            poster_bytes: Vec::new(),
+            frames: Vec::new(),
+        };
+        assert_eq!(
+            document_summary(&empty, &authored).annotated,
+            "No annotated frames: every frame is plain video"
+        );
+    }
+
+    /// Load's precondition, pinned without a UI. The second case is the one that
+    /// was missing: a document has to be attachable to a video that is already
+    /// playing, including one opened from `?video=` rather than the picker.
+    #[test]
+    fn load_is_available_for_a_new_selection_or_an_already_playing_video() {
+        assert!(
+            load_is_available(true, false),
+            "a freshly selected video is the ordinary case"
+        );
+        assert!(
+            load_is_available(false, true),
+            "a document alone must commit against the video already on screen"
+        );
+        assert!(load_is_available(true, true));
+        assert!(
+            !load_is_available(false, false),
+            "with neither, Load has nothing to act on"
+        );
     }
 
     /// The document row's rules, pinned without a UI: what the dialog accepts is

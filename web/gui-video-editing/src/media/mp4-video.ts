@@ -25,9 +25,15 @@ const MAX_QUEUED_CHUNKS = 32;
 /// seek rather than hanging it.
 const MAX_IDLE_TICKS = 10_000;
 
-/// Most one seek will transfer before giving up. A key-frame interval is a few
-/// seconds at worst, so needing more than this means something is wrong —
-/// report an empty seek rather than walk a multi-gigabyte file.
+/// Most one *catch-up* will transfer before giving up: the read from a key
+/// frame to the next frame handed out. A key-frame interval is ten seconds at
+/// worst, so needing more than this means the reader is walking the file
+/// without producing anything — report an empty seek rather than continue.
+///
+/// The allowance restarts every time a frame comes out, because a frame is
+/// proof of progress. Measuring it from the last *seek* instead made it a
+/// budget for the whole of playback, which silently killed any video long
+/// enough to reach it: 4K at 67 Mbps hits 256 MiB after about half a minute.
 const SEEK_BUDGET_BYTES = 256 * 1024 * 1024;
 
 /// What a decoded video's timeline is made of. Every field comes from the
@@ -99,7 +105,7 @@ function descriptionFor(file: ISOFile, trackId: number): Uint8Array | undefined 
 }
 
 /// Where a top-level box sits in the file.
-interface BoxExtent {
+export interface BoxExtent {
   readonly offset: number;
   readonly size: number;
 }
@@ -112,7 +118,14 @@ interface BoxExtent {
 /// compressed sample data or a metadata payload, and assuming `moov` is last
 /// (`totalSize - moovSize`) is wrong for any file that ends with `free`, `skip`
 /// or `mfra`.
-async function locateMoov(source: ByteSource, head: ArrayBuffer): Promise<BoxExtent | undefined> {
+///
+/// Exported for tests: the box layouts that matter — `moov` first, `moov` last
+/// behind a 64-bit `mdat`, a box running to end-of-file — are all reachable
+/// with a handful of synthetic headers and none of them needs a decoder.
+export async function locateMoov(
+  source: ByteSource,
+  head: ArrayBuffer,
+): Promise<BoxExtent | undefined> {
   let offset = 0;
   while (offset + 8 <= source.size) {
     // Reuse the head read wherever it reaches; past it a bare 16-byte header is
@@ -176,7 +189,6 @@ export class Mp4Video {
   /// decoder emits in presentation order, so this needs no reordering.
   readonly #ready: VideoFrame[] = [];
   #decoder: VideoDecoder | undefined;
-  #started = false;
   /// Frames ending at or before this (microseconds) are the catch-up from the
   /// key frame and get dropped.
   #skipTarget = 0;
@@ -184,6 +196,59 @@ export class Mp4Video {
   #feedOffset = 0;
   #budgetFrom = 0;
   #exhausted = true;
+  /// Serialises the operations that touch the decoder and the feed cursor. A
+  /// seek that lands while an earlier feed is mid-`await` resets the decoder
+  /// under it, and the samples that arrive after the reset begin with a delta
+  /// frame — which a `VideoDecoder` reports as a **fatal** error and never
+  /// recovers from. Dragging a scrubber produces exactly that overlap.
+  #gate: Promise<unknown> = Promise.resolve();
+  /// The drain started at the end of the stream, and whether it has finished.
+  ///
+  /// Kept as state rather than awaited inline: see the end-of-stream branch in
+  /// [`Mp4Video::pullFrame`](#pullFrame) for why waiting for a `flush()` while
+  /// holding its output is a circular wait.
+  #draining: Promise<void> | undefined;
+  #drained = false;
+  /// Woken whenever the decoder emits, so a waiter is released by output rather
+  /// than by polling for it.
+  #outputWaiters: (() => void)[] = [];
+  /// Set by [`close`](Self::close). Without it a pull already queued on the
+  /// gate resumes after teardown, `#ensureDecoder` sees no decoder and builds a
+  /// **new** one, and the reader quietly comes back to life holding a source
+  /// its owner has finished with.
+  #closed = false;
+  /// Bumped by every seek, so work queued for a superseded one is dropped
+  /// instead of decoding a span nobody is waiting for any more.
+  #generation = 0;
+  /// Set by the decoder's error callback. A fatal error closes the codec for
+  /// good, so it is recorded and reported rather than only logged — the next
+  /// seek then builds a fresh decoder.
+  #decoderError: Error | undefined;
+
+  /// Runs `operation` with no other reader operation in flight.
+  #exclusive<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.#gate.then(operation, operation);
+    // The gate must survive a rejected operation, or one failure would wedge
+    // every later call behind it.
+    this.#gate = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
+  /// Resolves the next time the decoder emits — or the drain finishes.
+  #nextOutput(): Promise<void> {
+    return new Promise((resolve) => {
+      this.#outputWaiters.push(resolve);
+    });
+  }
+
+  #wakeOutputWaiters(): void {
+    for (const wake of this.#outputWaiters.splice(0)) {
+      wake();
+    }
+  }
 
   private constructor(
     source: ByteSource,
@@ -291,21 +356,33 @@ export class Mp4Video {
   }
 
   #ensureDecoder(): VideoDecoder {
-    this.#decoder ??= new VideoDecoder({
-      output: (frame) => {
-        // `?? 1` so a frame starting exactly at the target is not mistaken for
-        // one that ends there.
-        if (frame.timestamp + (frame.duration ?? 1) <= this.#skipTarget) {
-          this.#skipped += 1;
-          frame.close();
-          return;
-        }
-        this.#ready.push(frame);
-      },
-      error: (error) => {
-        console.error("video decode failed:", error);
-      },
-    });
+    // A codec that has errored is `closed` for good: reusing it makes every
+    // later `configure`/`decode` throw `InvalidStateError`, which is how one
+    // transient fault used to wedge playback permanently. Replace it instead.
+    if (!this.#decoder || this.#decoder.state === "closed") {
+      this.#decoderError = undefined;
+      this.#decoder = new VideoDecoder({
+        output: (frame) => {
+          // `?? 1` so a frame starting exactly at the target is not mistaken for
+          // one that ends there.
+          if (frame.timestamp + (frame.duration ?? 1) <= this.#skipTarget) {
+            this.#skipped += 1;
+            frame.close();
+            this.#wakeOutputWaiters();
+            return;
+          }
+          this.#ready.push(frame);
+          this.#wakeOutputWaiters();
+        },
+        error: (error) => {
+          // Recorded, not just logged: whoever is awaiting a frame has to learn
+          // that none is coming, and the decoder is unusable from here on.
+          this.#decoderError = error;
+          this.#exhausted = true;
+          this.#wakeOutputWaiters();
+        },
+      });
+    }
     return this.#decoder;
   }
 
@@ -319,15 +396,28 @@ export class Mp4Video {
   /// The difference is that every frame that comes out carries its container
   /// timestamp, so it is identified rather than approximated.
   async seekTo(seconds: number): Promise<number> {
+    return this.#exclusive(() => this.#seek(seconds));
+  }
+
+  async #seek(seconds: number): Promise<number> {
+    if (this.#closed) {
+      return 0;
+    }
     // Clamp into the video's real range. A scrubber can ask for a time past the
     // end, and mp4box answers that with an offset that decodes nothing — which
     // would then read to the end of the file looking for a frame that does not
     // exist.
     const wantedSeconds = Math.min(Math.max(0, seconds), this.facts.lastFrameSeconds);
     const containerSeconds = wantedSeconds + this.facts.startSeconds;
+    this.#generation += 1;
     this.#skipTarget = containerSeconds * 1_000_000;
     this.#skipped = 0;
     this.#exhausted = false;
+    // A seek re-opens the stream: whatever drain the previous position started
+    // is finished with, and anyone waiting on output has to be released.
+    this.#draining = undefined;
+    this.#drained = false;
+    this.#wakeOutputWaiters();
     this.#budgetFrom = this.#source.bytesRead;
     for (const frame of this.#ready) {
       frame.close();
@@ -364,11 +454,16 @@ export class Mp4Video {
       // The samples are in the decoder's queue now; mp4box can drop its copies.
       this.#file.releaseUsedSamples(this.facts.id, samples[samples.length - 1]?.number ?? 0);
     };
+    // `seek()` answers "the position you should feed me from", **not** the key
+    // frame's byte offset. Once mp4box already holds the bytes — which it does
+    // as soon as the whole file has been fed — that answer is the end of the
+    // file, meaning "I need nothing more". Reading it as end-of-stream is what
+    // made every seek after a long read return no frame at all.
     this.#feedOffset = this.#file.seek(containerSeconds, true).offset;
-    if (!this.#started) {
-      this.#file.start();
-      this.#started = true;
-    }
+    // Sample extraction has to be (re)started for mp4box to emit from the new
+    // position out of the data it is holding. Starting only once meant a seek
+    // that needed no new bytes produced no samples either.
+    this.#file.start();
     return wantedSeconds;
   }
 
@@ -380,22 +475,84 @@ export class Mp4Video {
 
   /// The next frame in presentation order, or `undefined` past the end.
   ///
+  /// Frames come from the **most recent** seek. A pull that is still in flight
+  /// when a newer seek arrives yields the newer seek's frames rather than the
+  /// span it originally asked for — a scrubber only cares where it ended up,
+  /// and a caller that needs to tell the two apart tracks its own generation
+  /// the way `VideoPlayer` does.
+  ///
   /// **The caller owns the frame and must `close()` it.** A `VideoFrame` holds a
   /// slot in a small decoder-side pool, so leaking one stalls decoding.
   async nextFrame(): Promise<VideoFrame | undefined> {
+    return this.#exclusive(() => this.#pullFrame());
+  }
+
+  async #pullFrame(): Promise<VideoFrame | undefined> {
+    if (this.#closed) {
+      return undefined;
+    }
     const decoder = this.#ensureDecoder();
+    const generation = this.#generation;
     let idleTicks = 0;
     // Feed until a frame is ready. Waiting on frames *out* rather than samples
     // *in* is what makes this correct across a distant key frame: the decoder
     // reports what it skipped only after decoding it.
     while (this.#ready.length === 0 && !this.#exhausted) {
+      if (this.#decoderError) {
+        throw this.#decoderError;
+      }
+      if (this.#closed) {
+        return undefined;
+      }
+      if (generation !== this.#generation) {
+        return undefined;
+      }
       if (
         this.#feedOffset >= this.#source.size ||
         this.#source.bytesRead - this.#budgetFrom > SEEK_BUDGET_BYTES
       ) {
-        await decoder.flush();
-        this.#exhausted = true;
-        break;
+        // Everything is fed; the decoder still holds queued chunks. `flush()`
+        // resolves only once every one of them has been *emitted*, and a
+        // `VideoDecoder` stops emitting while its output pool is full — Chrome
+        // stalls after about eight outstanding frames at 1080p.
+        //
+        // So awaiting the flush here is a circular wait: the flush needs those
+        // frames closed, they are closed by the caller once this returns them,
+        // and this is blocked on the flush. Measured on the FIBA clip: queue
+        // frozen at 111 with 8 frames ready, forever.
+        //
+        // Start the drain, then wait for whichever comes first — a frame to
+        // hand back, or the drain finishing. Returning a frame closes one and
+        // lets the decoder emit the next, so the drain makes progress *because*
+        // this does not wait for it.
+        if (!this.#draining) {
+          this.#draining = decoder
+            .flush()
+            .catch(() => undefined)
+            .then(() => {
+              this.#drained = true;
+              this.#wakeOutputWaiters();
+            });
+        }
+        await Promise.race([this.#draining, this.#nextOutput()]);
+        if (this.#ready.length > 0) {
+          break;
+        }
+        if (this.#drained) {
+          // A flush that found nothing is no proof of end-of-stream: mp4box
+          // emits the samples for a seek *asynchronously*, so the drain can
+          // start and finish against an empty decoder and the chunks arrive
+          // straight after. Anything queued now means there is more to come —
+          // drain again rather than declaring the stream over.
+          if (decoder.decodeQueueSize > 0) {
+            this.#draining = undefined;
+            this.#drained = false;
+            continue;
+          }
+          this.#exhausted = true;
+          break;
+        }
+        continue;
       }
       // Back-pressure. Catching up from a distant key frame can mean hundreds
       // of frames, and queueing all of them at once would hold the whole span
@@ -404,7 +561,7 @@ export class Mp4Video {
         await new Promise((resolve) => {
           setTimeout(resolve, 0);
         });
-        if (++idleTicks > MAX_IDLE_TICKS) {
+        if (this.#decoderError || ++idleTicks > MAX_IDLE_TICKS) {
           break;
         }
       }
@@ -413,14 +570,24 @@ export class Mp4Video {
       }
       const buffer = await this.#source.read(this.#feedOffset, CHUNK_BYTES);
       if (buffer.byteLength === 0) {
-        await decoder.flush();
-        this.#exhausted = true;
-        break;
+        // A short read is the end of the stream by another route; take the same
+        // non-blocking drain rather than awaiting a flush that cannot finish.
+        this.#feedOffset = this.#source.size;
+        continue;
       }
       const next = this.#file.appendBuffer(MP4BoxBuffer.fromArrayBuffer(buffer, this.#feedOffset));
       this.#feedOffset = next > this.#feedOffset ? next : this.#feedOffset + buffer.byteLength;
     }
-    return this.#ready.shift();
+    if (this.#decoderError) {
+      throw this.#decoderError;
+    }
+    const frame = this.#ready.shift();
+    if (frame) {
+      // Progress: the allowance for reaching the *next* frame starts here, so
+      // playback is never bounded by how much it has read in total.
+      this.#budgetFrom = this.#source.bytesRead;
+    }
+    return frame;
   }
 
   /// Seeks and takes the next `wanted` frames — the measurement shape the probe
@@ -455,11 +622,19 @@ export class Mp4Video {
   }
 
   close(): void {
+    this.#closed = true;
+    // A pull parked on `#nextOutput()` is waiting for a decoder that will never
+    // emit again; releasing the waiters lets it observe `#closed` and return.
+    this.#wakeOutputWaiters();
     for (const frame of this.#ready) {
       frame.close();
     }
     this.#ready.length = 0;
-    this.#decoder?.close();
+    // Closing a codec that has already errored throws; a teardown must not
+    // depend on whether decoding happened to fail first.
+    if (this.#decoder && this.#decoder.state !== "closed") {
+      this.#decoder.close();
+    }
     this.#decoder = undefined;
   }
 }

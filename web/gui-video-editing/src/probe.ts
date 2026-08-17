@@ -10,6 +10,8 @@
 // The number to watch is "read": opening a multi-gigabyte video must cost
 // megabytes, and so must each seek.
 import { type ByteSource, fileByteSource, urlByteSource } from "./media/byte-source.ts";
+import type { FrameReader } from "./media/frame-reader.ts";
+import { MediabunnyReader } from "./media/mediabunny-reader.ts";
 import { Mp4Video } from "./media/mp4-video.ts";
 
 const logElement = document.getElementById("log") as HTMLDivElement;
@@ -106,6 +108,81 @@ async function probe(source: ByteSource): Promise<void> {
   video.close();
 }
 
+/// Repeated seeks against **one** reader, which is what the editor does and
+/// what a single-seek probe run structurally cannot reach: a decoder is
+/// configured once and reused, so a fault that only appears on the second and
+/// later seek — a reset racing a feed, or a decoder left `closed` by an earlier
+/// error — is invisible until the same instance is seeked twice.
+///
+/// `overlap` fires the seeks without awaiting the previous one, the way dragging
+/// a scrubber does. Taking a [`FrameReader`] rather than a `ByteSource` is what
+/// lets the hand-written and the delegated reader be measured by the same run.
+async function scrub(
+  video: FrameReader,
+  label: string,
+  targets: number[],
+  overlap: boolean,
+): Promise<void> {
+  logElement.textContent = "";
+  log(`source: ${label}`);
+  log(
+    `opened: ${video.facts.codec} ${video.facts.width}x${video.facts.height}, ` +
+      `${video.facts.durationSeconds.toFixed(1)}s`,
+  );
+  log(`scrubbing ${targets.length} targets on one reader, overlap=${overlap}`);
+
+  let failures = 0;
+  // Under `overlap` every pull is expected to deliver the *winning* seek's
+  // frames, because a scrubber only cares where the drag ended. What must not
+  // happen is a throw, or a reader that stops working afterwards.
+  const expected = (target: number) => (overlap ? (targets[targets.length - 1] ?? target) : target);
+  const step = async (target: number, index: number): Promise<void> => {
+    const startedAt = performance.now();
+    try {
+      await video.seekTo(target);
+      const frame = await video.nextFrame();
+      const elapsed = performance.now() - startedAt;
+      if (!frame) {
+        failures += 1;
+        log(
+          `  ${index}: seek ${target.toFixed(1)}s → no frame after ${elapsed.toFixed(0)}ms  ← MISSING`,
+        );
+        return;
+      }
+      const landed = video.presentationSeconds(frame);
+      frame.close();
+      // A tolerance of a second covers the consecutive frames handed to
+      // coalesced pulls; it is far tighter than the 10s key-frame interval, so
+      // landing in the wrong GOP still fails.
+      const drift = Math.abs(landed - expected(target));
+      if (drift > 1) {
+        failures += 1;
+      }
+      log(
+        `  ${index}: seek ${target.toFixed(1)}s → landed ${landed.toFixed(3)}s ` +
+          `in ${elapsed.toFixed(0)}ms${drift > 1 ? "  ← WRONG FRAME" : ""}`,
+      );
+    } catch (error) {
+      failures += 1;
+      log(`  ${index}: seek ${target.toFixed(1)}s → THREW ${String(error)}`);
+    }
+  };
+
+  if (overlap) {
+    await Promise.all(targets.map(step));
+    // Whatever the overlap did to the intermediate seeks, the reader has to
+    // still work afterwards — that is the property a wedged decoder breaks.
+    const last = targets[targets.length - 1] ?? 0;
+    await step(last, targets.length);
+  } else {
+    for (const [index, target] of targets.entries()) {
+      await step(target, index);
+    }
+  }
+  log(`${failures === 0 ? "OK" : `${failures} FAILED`} — reader usable after the run`);
+  video.close();
+}
+
 function run(open: () => Promise<ByteSource>): void {
   void open()
     .then(probe)
@@ -129,12 +206,52 @@ document.getElementById("load")?.addEventListener("click", () => {
 // `?url=…&seek=…` runs the whole probe without a click, so a result is a
 // command rather than a click-through — repeatable, and checkable from a
 // driven browser. `?seek=` alone pre-fills the target for a local pick.
+// `?scrub=t1,t2,…` instead seeks repeatedly on one reader, and `?overlap=1`
+// fires those seeks without awaiting the previous one — the shape a dragged
+// scrubber produces. `?reader=mediabunny` runs the scrub against the delegated
+// reader instead of the hand-written one, on the same file and the same targets.
 const auto = new URLSearchParams(location.search);
 seekInput.value = auto.get("seek") ?? "0";
 const autoUrl = auto.get("url");
+const scrubTargets = (auto.get("scrub") ?? "")
+  .split(",")
+  .map((value) => value.trim())
+  // Without this an absent `?scrub=` splits to `[""]`, and `Number("")` is 0 —
+  // a silent scrub to the start that replaces the `?seek=`/`?frames=` run.
+  .filter((value) => value.length > 0)
+  .map(Number)
+  .filter((value) => Number.isFinite(value));
+
+/// Opens whichever reader `?reader=` names, timing it: how long a multi-gigabyte
+/// file takes to become seekable is the first thing that separates the two.
+async function openReader(url: string): Promise<{ reader: FrameReader; label: string }> {
+  const startedAt = performance.now();
+  if (auto.get("reader") === "mediabunny") {
+    const reader = await MediabunnyReader.open({ kind: "url", url });
+    return {
+      reader,
+      label: `${url} · mediabunny · opened in ${(performance.now() - startedAt).toFixed(0)}ms`,
+    };
+  }
+  const source = await urlByteSource(url);
+  const reader = await Mp4Video.open(source);
+  return {
+    reader,
+    label:
+      `${url} (${mib(source.size)}) · mp4box · opened in ${(performance.now() - startedAt).toFixed(0)}ms, ` +
+      `read ${mib(source.bytesRead)}`,
+  };
+}
+
 if (autoUrl) {
   (document.getElementById("url") as HTMLInputElement).value = autoUrl;
-  run(() => urlByteSource(autoUrl));
+  if (scrubTargets.length > 0) {
+    void openReader(autoUrl)
+      .then(({ reader, label }) => scrub(reader, label, scrubTargets, auto.get("overlap") === "1"))
+      .catch((error: unknown) => log(`ERROR: ${String(error)}`));
+  } else {
+    run(() => urlByteSource(autoUrl));
+  }
 } else {
   log("pick a local MP4, or enter a URL and press Decode from URL");
 }
