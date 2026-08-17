@@ -140,9 +140,28 @@ and are left out so the crate keeps cross-compiling to wasm32.
 
 ## Browser/media boundary
 
-`HTMLVideoElement` owns demux, play/pause, seeking, and the media clock.
-`requestVideoFrameCallback` reports the presented `mediaTime`; TypeScript wraps
-the current image in a WebCodecs `VideoFrame`, copies RGBA, and sends it to Rust.
+The browser owns no `<video>` element. [mediabunny] demuxes and decodes the MP4
+behind the `FrameReader` seam (`src/media/frame-reader.ts`), and
+`MediabunnyReader` is **the** browser media adapter: range reads, locating
+`moov`, feeding the demuxer, decoder configuration/reset, key-frame catch-up and
+the end-of-stream drain are the library's job, not ours. Do not extend the
+hand-written mp4box + `VideoDecoder` reader (`src/media/mp4-video.ts`) — fix the
+mediabunny path instead. The one part deliberately kept ours is the raw `moov`
+box walk (`locateMoov`), because Rust reads the frame rate from it as a
+**rational**, which mediabunny does not surface.
+
+Bytes arrive through a `ByteSource` (`src/media/byte-source.ts`) that reads
+**ranges**, so cost is set by what is watched, not by file size: a local file and
+an HTTP(S) URL behave identically, and opening a 218 GiB / 694,840-frame 4K MP4
+over HTTP costs ~11 MiB and under two seconds, with each deep seek a further few
+tens of MiB. A URL source therefore needs `Accept-Ranges` **and**
+`Access-Control-Allow-Origin`; `serve-documents.ts` is the local helper that
+sends both and streams its responses.
+
+`VideoPlayer` (`src/media/player.ts`) drives play/pause/seek over that reader and
+is the media clock. Each decoded `VideoFrame` has its RGBA copied and sent to
+Rust; overlapping seeks — what dragging the scrubber produces — coalesce to the
+last target rather than queueing.
 
 Rust validates the local filename/byte length and decoded
 dimensions/duration, maps media time to `video_frame_index`, selects the Arrow
@@ -150,9 +169,15 @@ row, recomputes placement, and returns a composed RGBA image. HTTP(S) sources
 use decoded dimensions/duration validation. There is no independent Arrow timer,
 so video pixels and calibration rows do not drift.
 
+`probe.html` (`?url=&seek=&frames=`, `?scrub=t1,t2,…`, `?overlap=1`,
+`?reader=mediabunny`) exercises that layer alone, reporting bytes read and where
+each seek landed — the cheapest way to tell a media fault from an editor fault.
+
 The canvas starts blank until a local file or HTTP(S) URL is opened. Playback
 then pauses on frame 0. Completing the embedded-poster/digest UX before video
 selection remains follow-up work.
+
+[mediabunny]: https://mediabunny.dev/
 
 ## Placement
 
@@ -296,7 +321,8 @@ Open <http://localhost:8085> in a WebGPU browser and select the local MP4.
 
 ### Native editor
 
-The native delivery surface replaces HTML video/WebCodecs with ffprobe plus an
+The native delivery surface replaces the browser's mediabunny reader with ffprobe
+plus an
 ffmpeg raw-RGBA stream while hosting the same Rust `VideoEditingApp`:
 
 ```sh
@@ -339,6 +365,7 @@ duration before playback.
 | `crates/trd-gui/src/video_editing/details_ui.rs` | Details inspector presentation |
 | `crates/trd-gui/src/video_editing_renderer.rs` | shared native/wasm composition and picking |
 | `web/gui-video-editing/src/main.ts` | thin video/file/resource byte bridge |
+| `web/gui-video-editing/src/media/` | mediabunny reader, ranged byte source, player (the `FrameReader` seam) |
 | `crates/trd-wasm/src/gui.rs` | the browser bridge (`VideoEditingHandle`) and JS ABI |
 | `web/gui-video-editing/pkg` | editor-owned copy of the generated `trd_wasm` package |
 | `native/trd-gui-video-editing` | native ffmpeg-backed host for the shared editor |

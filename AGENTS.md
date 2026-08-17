@@ -88,6 +88,23 @@ Guidance for agents working in this repository.
   `VideoEditingApp`, renderer, catalog, placement, picking, and egui panels;
   only their media adapters differ. Current catalog resources are loaded at
   runtime; protocol export remains a separate later slice.
+- **Browser demuxing/decoding is [mediabunny](https://mediabunny.dev/), always —
+  never a hand-rolled reader.** `MediabunnyReader`
+  (`web/gui-video-editing/src/media/mediabunny-reader.ts`) is *the* browser media
+  adapter, behind the `FrameReader` seam (#290). Range reads, locating `moov`,
+  feeding the demuxer, decoder configuration/reset, key-frame catch-up and the
+  end-of-stream drain are the library's job — that layer is where every playback
+  fault this package has hit lives (a `flush()` deadlocking on its own output
+  pool, a seek offset misread as end of stream, samples arriving after a drain,
+  a decoder left `closed` by an overlapping seek), and re-implementing it is how
+  they come back. So: **do not extend the hand-written mp4box + `VideoDecoder`
+  reader** (`media/mp4-video.ts`, and `VideoPlayer.open`, which still defaults to
+  it while `?reader=mediabunny` opts in) — fix things in the mediabunny path,
+  make it the default, and delete rather than grow the self-implemented one. The
+  only part deliberately kept ours is the raw `moov` box walk (`locateMoov`),
+  because Rust needs the frame rate as a **rational**, which mediabunny does not
+  surface. New media work goes through `FrameReader` so both delivery surfaces
+  and the `?reader=` probe keep measuring the same seam.
 - **The input protocol is NOT backward compatible.** Wire format is **mesh-first**
   `[mesh][texture?][frames?][params]`; only the current `PROTOCOL_VERSION`
   (`trd_core::protocol::PROTOCOL_VERSION`, currently `0.0.6`) is accepted — every
@@ -282,6 +299,21 @@ not complete until these tiers pass; **record the results on the PR.**
      frame identity does not jump ahead during rapid seek/render, and that the
      Dragon reports its GLB material maps, raw tracking pose delta, zero direct
      light/ambient, and Uffizi IBL. The MP4 stays external/uncommitted.
+   - **large video over a URL (media-layer gate):** any change to
+     `web/gui-video-editing/src/media/` must also be run against a
+     *multi-hundred-GiB* MP4 **served over HTTP**, because file size is exactly
+     what a ranged reader is for and a local short clip cannot fail the way a
+     218 GiB one does. Serve it with the CORS+range helper
+     (`bun web/gui-video-editing/serve-documents.ts <dir> --port 8092`), then:
+     drive `probe.html` — `?url=…&seek=…&frames=…` for one deep seek and
+     `?reader=mediabunny&scrub=t1,t2,…` (plus `&overlap=1`, the dragged-scrubber
+     shape) for repeated seeks on one reader — and open the editor itself at
+     `?document=none&reader=mediabunny&video=<url>`. Expect: **opening costs
+     megabytes, not gigabytes** (~11 MiB / <2 s for 218 GiB), every seek lands on
+     its exact target, overlapping seeks coalesce to the last target, the reader
+     is still usable after the run, and Details reports one consistent
+     requested/presented/displayed/rendered frame with no pending or in-flight
+     frame.
    - **native video editor:** run `trd-gui-video-editing --document ... --video
      ...`; verify source validation, streaming RGBA playback, play/pause/seek,
      timeline row identity, and the tracked/video-only transition. ffmpeg and
