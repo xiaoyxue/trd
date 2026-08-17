@@ -60,6 +60,13 @@ export class MediabunnyReader implements FrameReader {
   /// mediabunny frees the iterator's decoder when it is returned.
   #samples: AsyncGenerator<import("mediabunny").VideoSample, void, unknown> | undefined;
   #closed = false;
+  /// Bumped by every seek, so that overlapping ones cannot install the loser's
+  /// run — the same guard the mp4box reader keeps next door. Both clear
+  /// `#samples` before awaiting, so without it the seek that *resumes* last
+  /// installs its iterator over the one the seek asked for last, and that
+  /// overwritten iterator is never returned — which mediabunny reports as a
+  /// `VideoSample` garbage collected without being closed.
+  #generation = 0;
 
   private constructor(facts: VideoTrackFacts, moovBytes: Uint8Array, sink: VideoSampleSink) {
     this.facts = facts;
@@ -115,8 +122,12 @@ export class MediabunnyReader implements FrameReader {
 
   async seekTo(seconds: number): Promise<number> {
     const wanted = Math.min(Math.max(0, seconds), this.facts.lastFrameSeconds);
+    const generation = ++this.#generation;
     await this.#endRun();
-    if (this.#closed) {
+    // A later seek having started while this one waited makes this one stale:
+    // its frames are not the ones a scrubber is asking for, and installing them
+    // would orphan the run the winner already opened.
+    if (this.#closed || generation !== this.#generation) {
       return wanted;
     }
     // Presentation time in the container's own clock, the same conversion the
