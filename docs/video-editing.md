@@ -77,8 +77,9 @@ They are separate because the questions are: the outline alone judges the quad
 against the plate, the gizmos alone read the reconstructed basis. Selecting a
 quad (clicking it) highlights the outline, washes its face, enables the catalog
 and switches **Show gizmos** on — working in a quad's basis is the point of
-selecting it, so its frame is revealed — while leaving the toggle free to be
-switched off again.
+selecting it, so its frame is revealed — and clicking away deselects the quad and
+switches the gizmos back off. The toggle is flipped, not overridden, so it still
+describes what is drawn and can be set by hand between clicks.
 
 The document is optional. Without one the editor is a plain player: the timeline
 comes from the container (ffprobe natively, the `moov` box in the browser) and
@@ -261,7 +262,8 @@ The quad outline and the gizmos follow their own **Show placement quads** /
 **Show gizmos** toggles, which apply during playback too. Hovering a quad and
 selecting it both add a `QuadFill` — a translucent green wash over the quad's
 face — and selection additionally turns the outline yellow and switches
-**Show gizmos** on; clicking off the quad deselects it. The placed object does
+**Show gizmos** on; clicking off the quad deselects it and switches them back
+off. The placed object does
 not depend on that selection and remains visible on tracked rows. Rows 222–287
 have no annotation, so quad, gizmos and object are all absent while the original
 video continues.

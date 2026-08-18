@@ -113,7 +113,8 @@ Click the green quad to select its Rust-reconstructed local coordinate frame,
 then choose Coca-Cola can, beer can, or dragon from the left pane. Pointing at a
 quad washes its face translucent green; clicking selects it, keeping the wash,
 turning the edge yellow and switching **Show gizmos** on so its local frame is
-visible; clicking anywhere else deselects it. A placed object
+visible; clicking anywhere else deselects it and hides the gizmos again. A placed
+object
 does not depend on that selection, so it stays on the plane while you click
 around. Object
 interaction, numeric transforms, render mode, PBR material, tone mapping, and
