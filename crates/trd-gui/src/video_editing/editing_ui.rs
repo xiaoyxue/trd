@@ -299,6 +299,22 @@ impl VideoEditingApp {
             } else {
                 "Background-only row: quad and object hidden"
             });
+            // The wash is the only feedback for these two, so when it is missing
+            // there is otherwise no way to tell a pointer that never resolved
+            // from a fill that never drew.
+            ui.weak(format!(
+                "Pointer: {} · quad: {}",
+                if self.hovered_quad {
+                    "over the quad"
+                } else {
+                    "off the quad"
+                },
+                if self.selected_quad {
+                    "selected"
+                } else {
+                    "not selected"
+                }
+            ));
             if let Some(local) = quad_frame {
                 ui.label(format!("Local axis length: {:.4}", local.axis_length));
                 ui.weak("RGB axes: e1 / e2 / e3");

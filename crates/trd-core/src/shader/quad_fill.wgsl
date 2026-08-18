@@ -39,11 +39,12 @@ fn vs_main(in: VsIn) -> VsOut {
     return out;
 }
 
-// The same green as the unselected quad outline, at an alpha that tints the
-// plate without hiding what is on it — the quad is an authoring aid laid over
-// live footage, and players walking through it have to stay readable.
+// The same green as the unselected quad outline, at an alpha that reads clearly
+// over bright footage while still showing what is underneath — the quad is an
+// authoring aid laid over live video, and players walking through it have to
+// stay visible. Against a lit hardwood court anything much weaker disappears.
 const FILL: vec3<f32> = vec3<f32>(0.0, 1.0, 0.0);
-const ALPHA: f32 = 0.2;
+const ALPHA: f32 = 0.35;
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
