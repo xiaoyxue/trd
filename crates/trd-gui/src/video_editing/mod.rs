@@ -173,7 +173,9 @@ impl OverlayState {
 }
 
 /// Resolves the overlay's state. `tracked` is `None` when the document has no
-/// row for this frame at all.
+/// row for this frame at all. `show_overlay` is the combined toggle state: with
+/// both the quads and the gizmos switched off there is nothing to draw, and the
+/// reason is the toggle rather than the document.
 pub fn overlay_state(
     show_overlay: bool,
     has_document: bool,
@@ -380,7 +382,7 @@ struct RenderedFrameDiagnostics {
     move_direction: crate::interaction::MoveDirection,
     playing: bool,
     show_quad: bool,
-    show_quad_gizmo: bool,
+    show_gizmos: bool,
     draw_model: Option<trd_core::Matrix4>,
     renderer: crate::video_editing_renderer::VideoRendererDiagnostics,
 }
@@ -892,11 +894,15 @@ pub struct VideoEditingApp {
     shared: Rc<VideoEditingShared>,
     controller: crate::interaction::InteractionController,
     selected_quad: bool,
-    show_quad_gizmo: bool,
-    /// Whether the placement overlay is drawn at all — including **during
+    /// Whether the local grid + basis axes are drawn. Independent of
+    /// [`show_placement_quads`](Self::show_placement_quads): the quad says where
+    /// an object may be placed, the gizmos describe the basis it is placed in,
+    /// and either is useful without the other.
+    show_gizmos: bool,
+    /// Whether the placement quads are drawn at all — including **during
     /// playback**, which is the point: an annotated frame shows its quad as it
     /// plays past, and this is how you turn that off (#264).
-    show_overlay: bool,
+    show_placement_quads: bool,
     was_playing: bool,
     selected_asset: Option<CatalogAsset>,
     image_sizing: crate::ui::ImageSizing,
@@ -964,8 +970,8 @@ impl VideoEditingApp {
             shared,
             controller,
             selected_quad: false,
-            show_quad_gizmo: false,
-            show_overlay: true,
+            show_gizmos: true,
+            show_placement_quads: true,
             was_playing: false,
             selected_asset: None,
             image_sizing: crate::ui::ImageSizing::FitCanvas,
@@ -1017,7 +1023,6 @@ impl VideoEditingApp {
     pub fn set_document(&mut self, document: Option<trd_core::VideoEditingDocument>) {
         self.document = document;
         self.selected_quad = false;
-        self.show_quad_gizmo = false;
         self.selected_asset = None;
         self.last_pick_result = None;
         self.controller.state.selected = None;
@@ -1325,17 +1330,19 @@ impl VideoEditingApp {
         };
         let background_frame = self.frame_row(video.frame_index).cloned();
         let quad_frame = self.quad_frame_at(video.frame_index);
-        // The overlay follows the **toggle**, not the play state: an annotated
+        // The overlay follows the **toggles**, not the play state: an annotated
         // frame shows its quad as it plays past, which is how a sparse document
         // announces itself during ordinary playback (#264).
-        let show_quad =
-            self.show_overlay && background_frame.as_ref().is_some_and(|frame| frame.tracked);
-        let quad_model = quad_frame
-            .filter(|_| show_quad)
-            .map(trd_placement::quad_outline_model);
-        let quad_axes = quad_frame
-            .filter(|_| show_quad)
-            .map(trd_placement::quad_axes_model);
+        let tracked = background_frame.as_ref().is_some_and(|frame| frame.tracked);
+        let show_quad = self.show_placement_quads && tracked;
+        let show_gizmos = self.show_gizmos && tracked;
+        let quad_overlay = crate::video_editing_renderer::QuadOverlay {
+            model: quad_frame.map(trd_placement::quad_outline_model),
+            axes: quad_frame.map(trd_placement::quad_axes_model),
+            show_quads: show_quad,
+            show_gizmos,
+            selected: self.selected_quad,
+        };
         let show_object = self.selected_asset.is_some()
             && self.selected_quad
             && background_frame.as_ref().is_some_and(|frame| frame.tracked);
@@ -1386,7 +1393,6 @@ impl VideoEditingApp {
         let renderer_generation = shared.renderer_generation.get();
         let width = self.video.width;
         let height = self.video.height;
-        let show_quad_gizmo = self.show_quad_gizmo && self.show_overlay;
         let selected_asset = self.selected_asset;
         let selected_quad = self.selected_quad;
         let move_direction = self.controller.move_direction;
@@ -1419,9 +1425,7 @@ impl VideoEditingApp {
                         video.height,
                         (width, height),
                         background_frame.as_ref(),
-                        quad_model,
-                        quad_axes,
-                        show_quad_gizmo,
+                        quad_overlay,
                         placement_frame.as_ref(),
                         model,
                         &state,
@@ -1435,9 +1439,7 @@ impl VideoEditingApp {
                         video.height,
                         (width, height),
                         background_frame.as_ref(),
-                        quad_model,
-                        quad_axes,
-                        show_quad_gizmo,
+                        quad_overlay,
                         placement_frame.as_ref(),
                         model,
                         &state,
@@ -1479,7 +1481,7 @@ impl VideoEditingApp {
                             move_direction,
                             playing: rendered_playing,
                             show_quad,
-                            show_quad_gizmo,
+                            show_gizmos,
                             draw_model: rendered_model,
                             renderer: renderer_diagnostics,
                         },
@@ -1727,9 +1729,10 @@ impl VideoEditingApp {
             });
 
         let show_quad = displayed.is_some_and(|d| d.show_quad);
-        let show_quad_gizmo = displayed.is_some_and(|d| d.show_quad_gizmo);
-        let background_drawables =
-            1 + u32::from(show_quad) + if show_quad && show_quad_gizmo { 2 } else { 0 };
+        let show_gizmos = displayed.is_some_and(|d| d.show_gizmos);
+        // The gizmos no longer ride on the quad: each toggle contributes its own
+        // drawables, so the count follows them independently.
+        let background_drawables = 1 + u32::from(show_quad) + if show_gizmos { 2 } else { 0 };
         let foreground_drawables = if object_visible {
             1 + u32::from(scene.show_local_axes)
                 + u32::from(scene.show_axes)
@@ -2395,7 +2398,7 @@ pub(super) mod tests {
             move_direction: crate::interaction::MoveDirection::Reference1,
             playing: false,
             show_quad: false,
-            show_quad_gizmo: false,
+            show_gizmos: false,
             draw_model: None,
             renderer: crate::video_editing_renderer::VideoRendererDiagnostics {
                 identity: Rc::new(crate::video_editing_renderer::RendererIdentity {

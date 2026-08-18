@@ -65,10 +65,18 @@ frame with no row is looked up as `None` and rendered as plain video (#264).
 
 **Shots** are derived, not stored: a shot is a maximal run of consecutive
 annotated frames, so the run boundaries can never disagree with the rows. The
-editor lists them in the left pane and jumps to a shot's first frame; a
-**Show placement overlay** toggle governs whether the quad and gizmo are drawn,
-including *during playback* — an annotated frame shows its quad as it plays
-past, and the toggle is how that is turned off.
+editor lists them in the left pane and jumps to a shot's first frame. Two
+independent toggles govern what is drawn over an annotated frame, including
+*during playback* — an annotated frame shows its quad as it plays past, and the
+toggles are how that is turned off:
+
+- **Show placement quads** — the quad outline itself;
+- **Show gizmos** — the quad's local floor grid and basis axes.
+
+They are separate because the questions are: the outline alone judges the quad
+against the plate, the gizmos alone read the reconstructed basis. Selecting a
+quad (clicking it) highlights the outline and enables the catalog; it no longer
+also decides whether the gizmos are drawn.
 
 The document is optional. Without one the editor is a plain player: the timeline
 comes from the container (ffprobe natively, the `moov` box in the browser) and
@@ -245,9 +253,10 @@ The editor uses `trd-core` `DrawableObject`s and isolated GPU submissions:
 GPU ID picking selects the mesh. Shared `trd-gui` controls edit transform,
 render mode, Disney material, IBL, tone mapping, and overlays.
 
-All editor gizmos are hidden during playback. The placed object remains visible
-on tracked rows. Rows 222–287 hide both quad and object while the original video
-continues.
+The quad outline and the gizmos follow their own **Show placement quads** /
+**Show gizmos** toggles, which apply during playback too. The placed object
+remains visible on tracked rows. Rows 222–287 have no annotation, so quad,
+gizmos and object are all absent while the original video continues.
 
 ## Details and diagnostics
 

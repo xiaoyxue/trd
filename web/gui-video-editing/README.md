@@ -25,8 +25,9 @@ is the same either way.
 Without a document the editor is a plain player: the timeline comes from the
 video container and the placement UI stays inert. With one, the left pane lists
 the derived **shots** (runs of consecutive annotated frames), jumps to a shot's
-first frame, and offers a **Show placement overlay** toggle that also governs
-whether quads are drawn during playback.
+first frame, and offers **Show placement quads** and **Show gizmos** toggles —
+the quad outline and its local grid/axes are independent, and both also govern
+what is drawn during playback.
 
 Each Arrow line copies `K` and `ad_quad` directly from the parquet row with the
 same zero-based `present_index`; no additional quad homography is applied.
@@ -122,11 +123,10 @@ selected `ObjectTransform`, and Rust computes
 `draw_model = quad_placement * object_transform`; JavaScript never computes
 model matrices.
 
-Playback follows the FIBA visibility policy: the complete placement quad is
-hidden while playing, together with every object/world AABB, axis, and grid
-gizmo. Tracked rows still render the placed object; rows 222–287 have
-`tracked=false`, so both quad and object are absent while the original video
-frames continue playing.
+Playback follows the FIBA visibility policy: the quad outline and the gizmos each
+follow their own toggle, so either can stay on while playing. Tracked rows still
+render the placed object; rows 222–287 carry no annotation, so quad, gizmos and
+object are all absent while the original video frames continue playing.
 
 The initial catalog placement matches the Olympic demo's upper can:
 `size_factor=0.24`, `offset_e1=1.3`, `offset_e2=-1.7`, `lift=1.0`. The

@@ -39,10 +39,6 @@ impl eframe::App for VideoEditingApp {
             self.ensure_texture(ui.ctx());
         }
         let playing = self.shared.video_playing.get();
-        if playing && !self.was_playing {
-            self.show_quad_gizmo = false;
-            self.shared.request_overlay();
-        }
         self.was_playing = playing;
         self.schedule_pick();
         self.schedule_overlay();
@@ -239,14 +235,12 @@ impl VideoEditingApp {
             };
             ui.label(format!("Frame {}", frame.video_frame_index));
             ui.label(if frame.tracked {
-                if self.shared.video_playing.get() {
+                if self.shared.video_playing.get() && !self.show_placement_quads {
                     "Placement quad hidden during playback"
                 } else if !self.selected_quad {
                     "Click the green quad to select it"
-                } else if self.show_quad_gizmo {
-                    "Placement quad selected; gizmo visible"
                 } else {
-                    "Placement quad selected; click it to show gizmo"
+                    "Placement quad selected"
                 }
             } else {
                 "Background-only row: quad and object hidden"
@@ -343,17 +337,29 @@ impl VideoEditingApp {
     fn shot_controls(&mut self, ui: &mut egui::Ui) {
         let shots = self.shots();
         ui.collapsing(format!("Shots ({})", shots.len()), |ui| {
-            // The overlay is an authoring aid, not something to watch a cut
-            // through — so it is a toggle, and it governs playback too.
-            ui.checkbox(&mut self.show_overlay, "Show placement overlay")
+            // Authoring aids, not something to watch a cut through — so they are
+            // toggles, and they govern playback too. Two of them, because the
+            // quad and the basis it defines are separate questions: judging the
+            // quad against the plate wants the outline alone, reading the basis
+            // wants the gizmos alone.
+            let mut changed = ui
+                .checkbox(&mut self.show_placement_quads, "Show placement quads")
                 .on_hover_text(
-                    "Draw the quad and gizmo on annotated frames, including while playing",
-                );
+                    "Draw the placement quad on annotated frames, including while playing",
+                )
+                .changed();
+            changed |= ui
+                .checkbox(&mut self.show_gizmos, "Show gizmos")
+                .on_hover_text("Draw the quad's local floor grid and basis axes (e1 / e2 / e3)")
+                .changed();
+            if changed {
+                self.shared.request_overlay();
+            }
             // A sparse document annotates a few frames out of many, so the
             // overlay drawing nothing is usually correct — and indistinguishable
             // from a broken toggle unless it says which case this is.
             let state = super::overlay_state(
-                self.show_overlay,
+                self.show_placement_quads || self.show_gizmos,
                 self.has_document(),
                 self.current_frame_index,
                 self.frame_row(self.current_frame_index)
@@ -448,15 +454,9 @@ impl VideoEditingApp {
                 self.shared.request_pick((x, y));
             }
         } else if self.selected_asset.is_some() && self.selected_quad {
-            if clicked_quad && !self.show_quad_gizmo {
-                self.show_quad_gizmo = true;
-                scene_changed = true;
-            } else {
-                self.shared.request_pick((x, y));
-            }
+            self.shared.request_pick((x, y));
         } else {
             self.selected_quad = clicked_quad;
-            self.show_quad_gizmo = clicked_quad;
             scene_changed = true;
         }
         if self.selected_quad {
