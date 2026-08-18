@@ -267,8 +267,14 @@ render mode, Disney material, IBL, tone mapping, and overlays. **Reset all** in
 the left pane returns the quad selection, placed object, transform, material and
 overlay toggles to their opening state while keeping the video and document.
 
-The quad outline and the gizmos follow their own **Show placement quads** /
-**Show gizmos** toggles, which apply during playback too. Hovering a quad and
+The basis arms are labelled `e1`/`e2`/`e3` at their tips. Those labels are the
+one overlay drawn as **egui text over the image** rather than as scene geometry:
+`trd-core` draws lines and triangles and has no glyphs, so labelling in the
+render pass would mean adding a font atlas. The positions are still Rust's —
+each tip is projected through the same `K` the pass uses — so the text tracks the
+arm instead of being placed by eye.
+
+The quad outline and the gizmos follow their own **Show placement quads** /**Show gizmos** toggles, which apply during playback too. Hovering a quad and
 selecting it both add a `QuadFill` — a translucent green wash over the quad's
 face — and selection additionally turns the outline yellow and switches
 **Show gizmos** on; clicking off the quad deselects it and switches them back

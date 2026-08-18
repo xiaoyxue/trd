@@ -139,6 +139,9 @@ impl eframe::App for VideoEditingApp {
             }
             pick = outcome.pick;
             hover = outcome.hover;
+            if let Some(rect) = outcome.image_rect {
+                self.paint_axis_labels(ui, rect, overlay_frame_index, quad_frame);
+            }
         });
 
         self.settle_frame(ui.ctx(), needs_render, pick, hover, quad);
@@ -487,6 +490,82 @@ impl VideoEditingApp {
         self.shared.renderer.borrow_mut().take();
         self.shared.asset_request.set(asset.code());
         self.shared.request_overlay();
+    }
+
+    /// Names the basis arms `e1`/`e2`/`e3` at their tips, in the arm colours.
+    ///
+    /// egui text over the image rather than geometry in the scene: `trd-core`
+    /// draws lines and triangles and has no glyphs at all, so labelling in the
+    /// render pass would mean a font atlas — a far larger thing than the label.
+    /// The tips are still Rust's, projected through the same `K` the pass uses,
+    /// so the text lands exactly where the arm ends rather than being positioned
+    /// by eye.
+    ///
+    /// Only drawn with the gizmos, since it annotates them.
+    fn paint_axis_labels(
+        &self,
+        ui: &egui::Ui,
+        rect: egui::Rect,
+        frame_index: u32,
+        quad_frame: Option<trd_placement::QuadFrame>,
+    ) {
+        if !self.show_gizmos {
+            return;
+        }
+        let Some(frame) = quad_frame else {
+            return;
+        };
+        let Some(k) = self.frame_row(frame_index).and_then(|row| row.k) else {
+            return;
+        };
+        let intrinsics = trd_placement::CameraIntrinsics { row_major: k };
+        // The arms the gizmo actually draws: the quad's own half-edges in plane,
+        // the unit normal scaled to match them.
+        let tips = [
+            ("e1", frame.half_edge1, egui::Color32::from_rgb(255, 80, 80)),
+            ("e2", frame.half_edge2, egui::Color32::from_rgb(80, 255, 80)),
+            (
+                "e3",
+                [
+                    frame.e3[0] * frame.axis_length,
+                    frame.e3[1] * frame.axis_length,
+                    frame.e3[2] * frame.axis_length,
+                ],
+                egui::Color32::from_rgb(120, 160, 255),
+            ),
+        ];
+        let painter = ui.painter_at(rect);
+        for (label, arm, color) in tips {
+            let tip = [
+                frame.origin_camera[0] + arm[0],
+                frame.origin_camera[1] + arm[1],
+                frame.origin_camera[2] + arm[2],
+            ];
+            let Ok([x, y]) = trd_placement::project_camera(intrinsics, tip) else {
+                continue;
+            };
+            // Source pixels are the calibration's space; the image is whatever
+            // egui laid it out at, so the mapping is one ratio per axis.
+            let position = egui::pos2(
+                rect.min.x + x / self.video.width as f32 * rect.width(),
+                rect.min.y + y / self.video.height as f32 * rect.height(),
+            );
+            if !rect.contains(position) {
+                continue;
+            }
+            // Drawn twice: a dark backing under the coloured glyphs, because the
+            // labels sit over live footage that is bright in places and dark in
+            // others, and either alone vanishes into one of them.
+            let font = egui::FontId::proportional(14.0);
+            painter.text(
+                position + egui::vec2(1.0, 1.0),
+                egui::Align2::LEFT_TOP,
+                label,
+                font.clone(),
+                egui::Color32::from_black_alpha(200),
+            );
+            painter.text(position, egui::Align2::LEFT_TOP, label, font, color);
+        }
     }
 
     /// Adopts the letterboxed image size the panel just drew at.

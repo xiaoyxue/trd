@@ -100,6 +100,10 @@ pub struct ImageOutcome {
     /// Under [`ImageSizing::FitCanvas`], the letterboxed size the image was
     /// drawn at, in physical pixels — what a host should resize its target to.
     pub fitted_size: Option<(u32, u32)>,
+    /// The screen rectangle the image occupies, for hosts that annotate it —
+    /// projecting a point into render-target pixels only gets you as far as the
+    /// image, and this maps that to where it actually landed on screen.
+    pub image_rect: Option<egui::Rect>,
 }
 
 /// The per-frame view [`show`] draws for the plain viewers.
@@ -664,6 +668,7 @@ pub fn image_panel(ui: &mut egui::Ui, image: Image<'_>) -> ImageOutcome {
     if size.x <= 0.0 || size.y <= 0.0 {
         return outcome;
     }
+    outcome.image_rect = Some(response.rect);
     let delta = response.drag_delta();
     let (dx, dy) = (delta.x / size.x, delta.y / size.y);
     // Render-target pixels from a pointer position in the letterboxed image —

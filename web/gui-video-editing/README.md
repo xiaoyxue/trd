@@ -32,8 +32,10 @@ what is drawn during playback.
 Each Arrow line copies `K` and `ad_quad` directly from the parquet row with the
 same zero-based `present_index`; no additional quad homography is applied.
 Rust renders that row's quad/grid/axes in the GPU background pass using the
-shared analytic-AA gizmo pipeline (1.5 px quad stroke); no separate egui
-screen-space transform is applied to the overlay.
+shared analytic-AA gizmo pipeline (1.5 px quad stroke). The only overlay drawn
+outside that pass is the `e1`/`e2`/`e3` text at the axis tips, which is egui text
+positioned by projecting each tip through the same `K` — `trd-core` has no glyph
+rendering, and a font atlas is a bigger thing than three labels.
 
 The initial document contains no 3D model resources. After a user selects a
 quad, chooses an asset, and edits it, Rust will compose the final model matrix
