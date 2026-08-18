@@ -23,7 +23,7 @@ Guidance for agents working in this repository.
   `Copy` struct pairing a `Primitive` — *what* to draw — with the `model` that
   places it (`Primitive::Mesh { mesh_id, mode }` | `AabbBox { mesh_id }` |
   `CoordinateAxes` | `PlaneGrid { plane }` | `QuadOutline { selected }` |
-  `BlobShadow`) — the single base
+  `QuadFill` | `BlobShadow`) — the single base
   interface for every primitive. **Every drawable is a placed primitive**: it
   names geometry and carries the model that places it, so it can be instanced.
   What a frame draws *behind* them — the HDR environment probe and the

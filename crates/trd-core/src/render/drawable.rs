@@ -61,6 +61,13 @@ pub enum Primitive {
     /// gizmo line pipeline at 1.5 px. `selected` picks the highlight color (the
     /// renderer keeps one line buffer per state).
     QuadOutline { selected: bool },
+    /// A translucent wash over the placement quad's whole face — the hover /
+    /// selection highlight that the [outline](Self::QuadOutline) alone cannot
+    /// give, since pointing at a quad has to tint the *area* an object would be
+    /// placed on. Shares the blob shadow's unit-quad geometry and differs only in
+    /// its fragment shader; alpha-blended under the outline so the coloured edge
+    /// still reads on top.
+    QuadFill,
     /// The world-orientation coordinate gizmo (#42): three anti-aliased shafts
     /// with cone arrowheads from the origin along +X/+Y/+Z, colored
     /// red/green/blue. Placed by the drawable's model (identity marks the world
@@ -99,10 +106,11 @@ impl Primitive {
     /// | 0 | [`BlobShadow`](Self::BlobShadow) | a floor decal — everything sits *on* it |
     /// | 1 | [`Mesh`](Self::Mesh), solid modes | the opaque content, z-tested against itself |
     /// | 2 | [`PlaneGrid`](Self::PlaneGrid) | floor lattice, under the other line gizmos |
-    /// | 3 | [`QuadOutline`](Self::QuadOutline) | the placement quad over its own grid |
-    /// | 4 | [`Mesh`](Self::Mesh) in [`Wireframe`](super::RenderMode::Wireframe) | mesh edges over the grid/quad they stand on |
-    /// | 5 | [`AabbBox`](Self::AabbBox) | the tracking/selection box over its mesh |
-    /// | 6 | [`CoordinateAxes`](Self::CoordinateAxes) | the topmost reference gizmo |
+    /// | 3 | [`QuadFill`](Self::QuadFill) | the quad's highlight wash, under its own edge |
+    /// | 4 | [`QuadOutline`](Self::QuadOutline) | the placement quad over its own grid and wash |
+    /// | 5 | [`Mesh`](Self::Mesh) in [`Wireframe`](super::RenderMode::Wireframe) | mesh edges over the grid/quad they stand on |
+    /// | 6 | [`AabbBox`](Self::AabbBox) | the tracking/selection box over its mesh |
+    /// | 7 | [`CoordinateAxes`](Self::CoordinateAxes) | the topmost reference gizmo |
     ///
     /// Note that a **wireframe mesh is not on the solid mesh layer**: it is an
     /// overlay like the gizmos, and it composites *over* the grid and the quad
@@ -112,12 +120,13 @@ impl Primitive {
             Primitive::BlobShadow => 0,
             Primitive::Mesh { mode, .. } => match mode {
                 RenderMode::Filled | RenderMode::Textured | RenderMode::Shaded => 1,
-                RenderMode::Wireframe => 4,
+                RenderMode::Wireframe => 5,
             },
             Primitive::PlaneGrid { .. } => 2,
-            Primitive::QuadOutline { .. } => 3,
-            Primitive::AabbBox { .. } => 5,
-            Primitive::CoordinateAxes => 6,
+            Primitive::QuadFill => 3,
+            Primitive::QuadOutline { .. } => 4,
+            Primitive::AabbBox { .. } => 6,
+            Primitive::CoordinateAxes => 7,
         }
     }
 
@@ -148,7 +157,7 @@ impl Primitive {
                     RenderMode::Filled => 0,
                     RenderMode::Textured => 1,
                     RenderMode::Shaded => 2,
-                    // Alone on layer 4, so its rank within the layer is free.
+                    // Alone on layer 5, so its rank within the layer is free.
                     RenderMode::Wireframe => 0,
                 };
                 (variation, mesh_id)
@@ -156,7 +165,7 @@ impl Primitive {
             Primitive::AabbBox { mesh_id } => (0, mesh_id),
             Primitive::PlaneGrid { plane } => (0, plane.index() as u32),
             Primitive::QuadOutline { selected } => (0, u32::from(selected)),
-            Primitive::CoordinateAxes | Primitive::BlobShadow => (0, 0),
+            Primitive::CoordinateAxes | Primitive::BlobShadow | Primitive::QuadFill => (0, 0),
         };
         (self.layer(), variation, geometry)
     }
@@ -227,6 +236,12 @@ impl DrawableObject {
         Self::new(Primitive::QuadOutline { selected }, model)
     }
 
+    /// The placement quad's translucent highlight wash, placed by the same
+    /// `model` as its outline.
+    pub fn quad_fill(model: Matrix4) -> Self {
+        Self::new(Primitive::QuadFill, model)
+    }
+
     /// The coordinate-axes gizmo placed by `model` (identity marks the world
     /// origin).
     pub fn coordinate_axes(model: Matrix4) -> Self {
@@ -279,6 +294,7 @@ mod tests {
             Primitive::PlaneGrid {
                 plane: GridPlane::Xy,
             },
+            Primitive::QuadFill,
             Primitive::QuadOutline { selected: false },
             Primitive::Mesh {
                 mesh_id: 0,
@@ -289,7 +305,7 @@ mod tests {
         ]
         .map(Primitive::layer);
 
-        assert_eq!(layers, [0, 1, 1, 1, 2, 3, 4, 5, 6]);
+        assert_eq!(layers, [0, 1, 1, 1, 2, 3, 4, 5, 6, 7]);
     }
 
     /// Within the solid mesh layer the render *mode* outranks the mesh id, so

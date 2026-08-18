@@ -46,6 +46,10 @@ pub(crate) struct RenderPipelines {
     /// The contact / blob grounding-shadow pipeline (alpha-blended, depth-write
     /// off); shares the untextured camera bind-group layout (group 0).
     pub(super) shadow: wgpu::RenderPipeline,
+    /// The placement-quad highlight wash (alpha-blended, depth-write off); same
+    /// layout and unit-quad geometry as [`shadow`](Self::shadow), flat green
+    /// fragment instead of a feathered dark blob.
+    pub(super) quad_fill: wgpu::RenderPipeline,
     /// The Disney PBR pipeline (`pbr.wgsl`): group 0 = [`SceneUniforms::pbr`]'s
     /// slot for the drawn mesh, group 1 = the bound albedo texture, group 2 =
     /// the HDR environment map, group 3 = the material maps.
@@ -136,6 +140,9 @@ pub(crate) fn create_render_pipelines(
     // Contact / blob grounding-shadow pipeline (#110 follow-up): shares the
     // untextured camera layout (group 0), alpha-blended, depth-write off.
     let shadow = create_shadow_pipeline(device, format, &pipeline_layout, sample_count);
+    // The quad highlight wash reuses that layout and geometry wholesale — only
+    // its fragment differs.
+    let quad_fill = create_quad_fill_pipeline(device, format, &pipeline_layout, sample_count);
     // Textured pipeline (#20): group 0 = the shared camera uniform, group 1 =
     // the bound albedo texture + sampler.
     let textured_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -189,6 +196,7 @@ pub(crate) fn create_render_pipelines(
         gizmo_solid,
         textured,
         shadow,
+        quad_fill,
         pbr,
     };
     (pipelines, uniforms)

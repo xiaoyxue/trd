@@ -65,10 +65,30 @@ frame with no row is looked up as `None` and rendered as plain video (#264).
 
 **Shots** are derived, not stored: a shot is a maximal run of consecutive
 annotated frames, so the run boundaries can never disagree with the rows. The
-editor lists them in the left pane and jumps to a shot's first frame; a
-**Show placement overlay** toggle governs whether the quad and gizmo are drawn,
-including *during playback* — an annotated frame shows its quad as it plays
-past, and the toggle is how that is turned off.
+editor lists them in the left pane and jumps to a shot's first frame. Two
+independent toggles govern what is drawn over an annotated frame, including
+*during playback* — an annotated frame shows its quad as it plays past, and the
+toggles are how that is turned off:
+
+- **Show placement quads** — the quad outline itself;
+- **Show gizmos** — the quad's local floor grid and basis axes.
+
+They are separate because the questions are: the outline alone judges the quad
+against the plate, the gizmos alone read the reconstructed basis. **Show
+placement quads** starts on so the editable frames announce themselves; **Show
+gizmos** starts off and follows selection, since a basis is only meaningful for a
+quad you are working in.
+
+Selecting a quad (clicking it) highlights the outline, washes its face, enables
+the catalog and switches **Show gizmos** on; clicking away deselects it and
+switches them back off. The toggle is flipped, not overridden, so it still
+describes what is drawn and can be set by hand between clicks.
+
+**A placed object and its quad are bound.** The object is authored in that quad's
+frame (`draw_model = quad_placement * object_transform`), so while one is placed
+the quad stays selected and its gizmos stay up, and clicks go to the object's id
+pass. Editing an object whose basis had silently disappeared would be editing
+blind. **Reset all** is what unbinds them.
 
 The document is optional. Without one the editor is a plain player: the timeline
 comes from the container (ffprobe natively, the `moov` box in the browser) and
@@ -243,11 +263,26 @@ The editor uses `trd-core` `DrawableObject`s and isolated GPU submissions:
 3. optional selection AABB.
 
 GPU ID picking selects the mesh. Shared `trd-gui` controls edit transform,
-render mode, Disney material, IBL, tone mapping, and overlays.
+render mode, Disney material, IBL, tone mapping, and overlays. **Reset all** in
+the left pane returns the quad selection, placed object, transform, material and
+overlay toggles to their opening state while keeping the video and document.
 
-All editor gizmos are hidden during playback. The placed object remains visible
-on tracked rows. Rows 222–287 hide both quad and object while the original video
-continues.
+The basis arms are labelled `e1`/`e2`/`e3` at their tips. Those labels are the
+one overlay drawn as **egui text over the image** rather than as scene geometry:
+`trd-core` draws lines and triangles and has no glyphs, so labelling in the
+render pass would mean adding a font atlas. The positions are still Rust's —
+each tip is projected through the same `K` the pass uses — so the text tracks the
+arm instead of being placed by eye.
+
+The quad outline and the gizmos follow their own **Show placement quads** /**Show gizmos** toggles, which apply during playback too. Hovering a quad and
+selecting it both add a `QuadFill` — a translucent green wash over the quad's
+face — and selection additionally turns the outline yellow and switches
+**Show gizmos** on; clicking off the quad deselects it and switches them back
+off — unless an object is placed, which binds the two: its quad stays selected
+and its basis stays visible while it is edited. The placed object does
+not depend on that selection and remains visible on tracked rows. Rows 222–287
+have no annotation, so quad, gizmos and object are all absent while the original
+video continues.
 
 ## Details and diagnostics
 

@@ -473,6 +473,52 @@ fn render_layers_composites_and_matches_render_for_one_layer() {
     );
 }
 
+/// The placement quad's highlight wash actually reaches the framebuffer, as a
+/// **translucent green** — not merely as a batched draw nobody records.
+///
+/// `QuadFill` is the only primitive whose whole job is a colour, so "the scene
+/// contains it" says nothing: a missing pipeline arm, a wrong layer or an
+/// unblended target would each leave the picture identical while every CPU-side
+/// assertion still passed. This renders it over a known background and reads the
+/// pixels back.
+#[test]
+#[ignore = "requires a GPU adapter"]
+#[cfg(not(target_arch = "wasm32"))]
+fn the_quad_fill_washes_the_target_translucent_green() {
+    let (width, height) = (64, 48);
+    let mut renderer = single(TEXTURE_TARGET_FORMAT, &Mesh::hello_triangle());
+    let target = renderer
+        .create_texture_target(width, height)
+        .expect("target builds");
+    let camera = camera_of(FrameParams::IDENTITY, width, height);
+
+    // The unit XY quad at identity covers the whole clip square, so every pixel
+    // is inside it.
+    let empty = Scene::new();
+    let washed: Scene = [DrawableObject::quad_fill(Matrix4::IDENTITY)]
+        .into_iter()
+        .collect();
+
+    let before =
+        pollster::block_on(renderer.render_layers(&[SceneLayer::new(camera, &empty)], &target))
+            .expect("the empty scene renders");
+    let after =
+        pollster::block_on(renderer.render_layers(&[SceneLayer::new(camera, &washed)], &target))
+            .expect("the wash renders");
+
+    assert_ne!(before, after, "the wash changed nothing on screen");
+    let centre = ((height / 2) * width + width / 2) as usize * 4;
+    let (base, lit) = (&before[centre..centre + 4], &after[centre..centre + 4]);
+    assert!(
+        lit[1] > base[1],
+        "the wash must add green: {base:?} -> {lit:?}"
+    );
+    assert!(
+        lit[0] <= base[0] + 1 && lit[2] <= base[2] + 1,
+        "only green, and it must be translucent rather than opaque: {base:?} -> {lit:?}"
+    );
+}
+
 /// The harness must render correctly into a **caller-owned** target that is
 /// resized independently of the renderer.
 ///

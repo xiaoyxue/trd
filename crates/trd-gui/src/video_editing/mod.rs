@@ -173,7 +173,9 @@ impl OverlayState {
 }
 
 /// Resolves the overlay's state. `tracked` is `None` when the document has no
-/// row for this frame at all.
+/// row for this frame at all. `show_overlay` is the combined toggle state: with
+/// both the quads and the gizmos switched off there is nothing to draw, and the
+/// reason is the toggle rather than the document.
 pub fn overlay_state(
     show_overlay: bool,
     has_document: bool,
@@ -380,7 +382,8 @@ struct RenderedFrameDiagnostics {
     move_direction: crate::interaction::MoveDirection,
     playing: bool,
     show_quad: bool,
-    show_quad_gizmo: bool,
+    show_gizmos: bool,
+    hovered_quad: bool,
     draw_model: Option<trd_core::Matrix4>,
     renderer: crate::video_editing_renderer::VideoRendererDiagnostics,
 }
@@ -892,11 +895,18 @@ pub struct VideoEditingApp {
     shared: Rc<VideoEditingShared>,
     controller: crate::interaction::InteractionController,
     selected_quad: bool,
-    show_quad_gizmo: bool,
-    /// Whether the placement overlay is drawn at all — including **during
+    /// The pointer is over the tracked quad. Purely a highlight, recomputed from
+    /// the pointer every frame, so it never has to be cleared by hand.
+    hovered_quad: bool,
+    /// Whether the local grid + basis axes are drawn. Independent of
+    /// [`show_placement_quads`](Self::show_placement_quads): the quad says where
+    /// an object may be placed, the gizmos describe the basis it is placed in,
+    /// and either is useful without the other.
+    show_gizmos: bool,
+    /// Whether the placement quads are drawn at all — including **during
     /// playback**, which is the point: an annotated frame shows its quad as it
     /// plays past, and this is how you turn that off (#264).
-    show_overlay: bool,
+    show_placement_quads: bool,
     was_playing: bool,
     selected_asset: Option<CatalogAsset>,
     image_sizing: crate::ui::ImageSizing,
@@ -964,8 +974,12 @@ impl VideoEditingApp {
             shared,
             controller,
             selected_quad: false,
-            show_quad_gizmo: false,
-            show_overlay: true,
+            hovered_quad: false,
+            // Nothing is selected at start-up, and the gizmos describe a
+            // *selected* quad's basis, so they start off and are revealed by the
+            // first selection.
+            show_gizmos: false,
+            show_placement_quads: true,
             was_playing: false,
             selected_asset: None,
             image_sizing: crate::ui::ImageSizing::FitCanvas,
@@ -1017,11 +1031,39 @@ impl VideoEditingApp {
     pub fn set_document(&mut self, document: Option<trd_core::VideoEditingDocument>) {
         self.document = document;
         self.selected_quad = false;
-        self.show_quad_gizmo = false;
+        self.hovered_quad = false;
         self.selected_asset = None;
         self.last_pick_result = None;
         self.controller.state.selected = None;
         self.controller.state.objects[0] = crate::scene::ObjectTransform::default();
+        self.shared.request_overlay();
+    }
+
+    /// Returns every editing decision to its opening state, keeping the loaded
+    /// video and document.
+    ///
+    /// Editing accumulates state across several panels — a chosen quad, a
+    /// catalog asset with its own material and lighting, a transform built up by
+    /// dragging, a render mode, overlay toggles, a pick — and unpicking that by
+    /// hand means visiting all of them and knowing what each started as. The
+    /// media is deliberately untouched: the point is to start the *placement*
+    /// over, not to reload the clip and lose the playhead.
+    pub fn reset_all(&mut self) {
+        self.selected_quad = false;
+        self.hovered_quad = false;
+        self.selected_asset = None;
+        self.last_pick_result = None;
+        self.show_placement_quads = true;
+        self.show_gizmos = false;
+        self.controller.state = crate::scene::SceneState::default();
+        self.controller.target = crate::interaction::InteractionTarget::Camera;
+        self.controller.mode = crate::interaction::TransformMode::default();
+        self.controller.move_direction = crate::interaction::MoveDirection::default();
+        self.controller.rebase_reset();
+        // The renderer holds the imported mesh and its material; dropping it is
+        // what makes "no asset" true on the GPU as well as in this struct.
+        self.shared.renderer.borrow_mut().take();
+        self.shared.asset_request.set(0);
         self.shared.request_overlay();
     }
 
@@ -1325,19 +1367,21 @@ impl VideoEditingApp {
         };
         let background_frame = self.frame_row(video.frame_index).cloned();
         let quad_frame = self.quad_frame_at(video.frame_index);
-        // The overlay follows the **toggle**, not the play state: an annotated
+        // The overlay follows the **toggles**, not the play state: an annotated
         // frame shows its quad as it plays past, which is how a sparse document
         // announces itself during ordinary playback (#264).
-        let show_quad =
-            self.show_overlay && background_frame.as_ref().is_some_and(|frame| frame.tracked);
-        let quad_model = quad_frame
-            .filter(|_| show_quad)
-            .map(trd_placement::quad_outline_model);
-        let quad_axes = quad_frame
-            .filter(|_| show_quad)
-            .map(trd_placement::quad_axes_model);
+        let tracked = background_frame.as_ref().is_some_and(|frame| frame.tracked);
+        let show_quad = self.show_placement_quads && tracked;
+        let show_gizmos = self.show_gizmos && tracked;
+        let quad_overlay = crate::video_editing_renderer::QuadOverlay {
+            model: quad_frame.map(trd_placement::quad_outline_model),
+            axes: quad_frame.map(trd_placement::quad_axes_model),
+            show_quads: show_quad,
+            show_gizmos,
+            hovered: self.hovered_quad,
+            selected: self.selected_quad,
+        };
         let show_object = self.selected_asset.is_some()
-            && self.selected_quad
             && background_frame.as_ref().is_some_and(|frame| frame.tracked);
         let placement_frame = show_object.then(|| background_frame.clone()).flatten();
         let model = if show_object {
@@ -1386,9 +1430,9 @@ impl VideoEditingApp {
         let renderer_generation = shared.renderer_generation.get();
         let width = self.video.width;
         let height = self.video.height;
-        let show_quad_gizmo = self.show_quad_gizmo && self.show_overlay;
         let selected_asset = self.selected_asset;
         let selected_quad = self.selected_quad;
+        let hovered_quad = self.hovered_quad;
         let move_direction = self.controller.move_direction;
         let rendered_model = model;
         let background_frame_index = video.frame_index;
@@ -1419,9 +1463,7 @@ impl VideoEditingApp {
                         video.height,
                         (width, height),
                         background_frame.as_ref(),
-                        quad_model,
-                        quad_axes,
-                        show_quad_gizmo,
+                        quad_overlay,
                         placement_frame.as_ref(),
                         model,
                         &state,
@@ -1435,9 +1477,7 @@ impl VideoEditingApp {
                         video.height,
                         (width, height),
                         background_frame.as_ref(),
-                        quad_model,
-                        quad_axes,
-                        show_quad_gizmo,
+                        quad_overlay,
                         placement_frame.as_ref(),
                         model,
                         &state,
@@ -1479,7 +1519,8 @@ impl VideoEditingApp {
                             move_direction,
                             playing: rendered_playing,
                             show_quad,
-                            show_quad_gizmo,
+                            show_gizmos,
+                            hovered_quad,
                             draw_model: rendered_model,
                             renderer: renderer_diagnostics,
                         },
@@ -1688,14 +1729,15 @@ impl VideoEditingApp {
             .or_else(|| self.shared.renderer_diagnostics.borrow().clone());
 
         let tracked = timeline_frame.is_some_and(|frame| frame.tracked);
+        // Quad *selection* is no longer part of this: a placed object stays on
+        // the plane once its asset is chosen, so it survives clicking away from
+        // the quad.
         let visibility_reason = if playing {
             "playing"
         } else if selected_asset.is_none() {
             "no asset"
         } else if !tracked {
             "untracked tail"
-        } else if !selected_quad {
-            "no quad selected"
         } else {
             "tracked"
         };
@@ -1727,9 +1769,13 @@ impl VideoEditingApp {
             });
 
         let show_quad = displayed.is_some_and(|d| d.show_quad);
-        let show_quad_gizmo = displayed.is_some_and(|d| d.show_quad_gizmo);
+        let show_gizmos = displayed.is_some_and(|d| d.show_gizmos);
+        let quad_washed = show_quad && displayed.is_some_and(|d| d.hovered_quad || d.selected_quad);
+        // The gizmos no longer ride on the quad: each toggle contributes its own
+        // drawables, so the count follows them independently. The hover /
+        // selection wash is one more, and only when the quads are drawn at all.
         let background_drawables =
-            1 + u32::from(show_quad) + if show_quad && show_quad_gizmo { 2 } else { 0 };
+            1 + u32::from(show_quad) + u32::from(quad_washed) + if show_gizmos { 2 } else { 0 };
         let foreground_drawables = if object_visible {
             1 + u32::from(scene.show_local_axes)
                 + u32::from(scene.show_axes)
@@ -2257,7 +2303,7 @@ pub(super) mod tests {
         // if the app went back to handling the pick before the revision settled,
         // which is the bug (#205).
         let before = shared.render_revision.get();
-        app.settle_frame(&egui::Context::default(), true, Some((3, 4)), None);
+        app.settle_frame(&egui::Context::default(), true, Some((3, 4)), None, None);
         let settled = shared.render_revision.get();
         assert_ne!(settled, before, "the render request must bump the revision");
 
@@ -2281,6 +2327,94 @@ pub(super) mod tests {
             hit: Some(0),
         };
         assert!(shared.accepts_pick(&result));
+    }
+
+    /// Clicking a quad selects it *and* reveals its local frame: the gizmos are
+    /// what "work in this quad's basis" looks like, so selecting without showing
+    /// them leaves the choice invisible, and letting go of the quad takes them
+    /// away again. It flips the user-visible toggle rather than overriding it,
+    /// so the checkbox still describes what is drawn.
+    #[test]
+    fn selecting_a_quad_reveals_its_gizmos() {
+        let shared = Rc::new(VideoEditingShared::default());
+        let mut app = VideoEditingApp::new(document(), shared.clone());
+        app.display_size = (1920, 1080);
+        app.show_gizmos = false;
+        // Source-pixel quad; `display_size` matches the video, so target pixels
+        // map through unchanged.
+        let quad = Some([[0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0]]);
+
+        app.handle_pick((50, 50), quad);
+        assert!(app.selected_quad, "clicking inside selects the quad");
+        assert!(app.show_gizmos, "selection reveals the local frame");
+
+        app.handle_pick((500, 500), quad);
+        assert!(!app.selected_quad, "clicking outside deselects it");
+        assert!(!app.show_gizmos, "and takes its local frame away again");
+    }
+
+    /// Hovering the quad raises the wash flag and asks for a new overlay, and
+    /// does so only when the answer *changes* — hover fires every frame the
+    /// pointer rests on the image, and re-rendering each one would peg the GPU
+    /// for a picture that is already correct.
+    #[test]
+    fn hovering_the_quad_requests_one_overlay_per_change() {
+        let shared = Rc::new(VideoEditingShared::default());
+        let mut app = VideoEditingApp::new(document(), shared.clone());
+        app.display_size = (1920, 1080);
+        let quad = Some([[0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0]]);
+        let ctx = egui::Context::default();
+
+        let before = shared.render_revision.get();
+        app.settle_frame(&ctx, false, None, Some((50, 50)), quad);
+        assert!(app.hovered_quad, "the pointer is inside the quad");
+        let entered = shared.render_revision.get();
+        assert_ne!(entered, before, "entering asks for a new overlay");
+
+        app.settle_frame(&ctx, false, None, Some((60, 60)), quad);
+        assert!(app.hovered_quad);
+        assert_eq!(
+            shared.render_revision.get(),
+            entered,
+            "moving within the quad changes nothing to draw"
+        );
+
+        app.settle_frame(&ctx, false, None, Some((500, 500)), quad);
+        assert!(!app.hovered_quad, "the pointer left the quad");
+        assert_ne!(
+            shared.render_revision.get(),
+            entered,
+            "leaving asks for a new overlay"
+        );
+
+        app.settle_frame(&ctx, false, None, None, quad);
+        assert!(!app.hovered_quad, "off the image is not hovering either");
+    }
+
+    /// A placed object and its quad are bound: the object is authored in that
+    /// quad's reconstructed frame, so editing it must not silently take the
+    /// frame away. Clicks go to the object's pick pass while the quad stays
+    /// selected and its gizmos stay up.
+    #[test]
+    fn a_placed_object_keeps_its_quad_selected() {
+        let shared = Rc::new(VideoEditingShared::default());
+        let mut app = VideoEditingApp::new(document(), shared.clone());
+        app.display_size = (1920, 1080);
+        let quad = Some([[0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0]]);
+
+        app.handle_pick((50, 50), quad);
+        assert!(app.selected_quad);
+        assert!(app.show_gizmos);
+
+        app.selected_asset = Some(CatalogAsset::CocaColaCan);
+        // Clicking the object — or anywhere else — while it is placed.
+        app.handle_pick((500, 500), quad);
+        assert!(app.selected_quad, "the object's frame stays selected");
+        assert!(app.show_gizmos, "and its basis stays visible");
+        assert!(
+            shared.pending_pick.get().is_some(),
+            "the click asks the id pass about the object"
+        );
     }
 
     #[test]
@@ -2395,7 +2529,8 @@ pub(super) mod tests {
             move_direction: crate::interaction::MoveDirection::Reference1,
             playing: false,
             show_quad: false,
-            show_quad_gizmo: false,
+            show_gizmos: false,
+            hovered_quad: false,
             draw_model: None,
             renderer: crate::video_editing_renderer::VideoRendererDiagnostics {
                 identity: Rc::new(crate::video_editing_renderer::RendererIdentity {

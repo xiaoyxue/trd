@@ -39,10 +39,6 @@ impl eframe::App for VideoEditingApp {
             self.ensure_texture(ui.ctx());
         }
         let playing = self.shared.video_playing.get();
-        if playing && !self.was_playing {
-            self.show_quad_gizmo = false;
-            self.shared.request_overlay();
-        }
         self.was_playing = playing;
         self.schedule_pick();
         self.schedule_overlay();
@@ -56,6 +52,7 @@ impl eframe::App for VideoEditingApp {
         let quad_frame = self.quad_frame_at(overlay_frame_index);
         let mut needs_render = false;
         let mut pick = None;
+        let mut hover = None;
 
         egui::Panel::left("controls")
             .resizable(true)
@@ -81,6 +78,22 @@ impl eframe::App for VideoEditingApp {
                     self.catalog_controls(ui);
                     self.details_controls(ui);
                     needs_render |= crate::ui::reset_button(ui, &mut self.controller);
+                    // "Reset view" only re-frames the camera; this puts the whole
+                    // editing session back to its opening state, which is the
+                    // only way out of an accumulated quad/asset/transform without
+                    // reloading the clip.
+                    if ui
+                        .button("Reset all")
+                        .on_hover_text(
+                            "Clear the quad selection, the placed object, its transform and \
+                             material, and restore the overlay toggles. Keeps the video and \
+                             document.",
+                        )
+                        .clicked()
+                    {
+                        self.reset_all();
+                        needs_render = true;
+                    }
                     ui.separator();
                     crate::ui::status(ui, self.display_size, None);
                 });
@@ -125,9 +138,13 @@ impl eframe::App for VideoEditingApp {
                 self.resize_render_target(ui.ctx(), fitted);
             }
             pick = outcome.pick;
+            hover = outcome.hover;
+            if let Some(rect) = outcome.image_rect {
+                self.paint_axis_labels(ui, rect, overlay_frame_index, quad_frame);
+            }
         });
 
-        self.settle_frame(ui.ctx(), needs_render, pick, quad);
+        self.settle_frame(ui.ctx(), needs_render, pick, hover, quad);
     }
 }
 
@@ -153,15 +170,51 @@ impl VideoEditingApp {
         ctx: &egui::Context,
         needs_render: bool,
         pick: Option<(u32, u32)>,
+        hover: Option<(u32, u32)>,
         quad: Option<[[f32; 2]; 4]>,
     ) {
         if needs_render {
             self.shared.request_overlay();
             ctx.request_repaint();
         }
+        self.update_quad_hover(hover, quad);
         if let Some(point) = pick {
             self.handle_pick(point, quad);
         }
+    }
+
+    /// Tracks whether the pointer is over the tracked quad, so the face can be
+    /// washed before anything is clicked.
+    ///
+    /// Only a *change* acts: hover fires on every frame the pointer rests on the
+    /// image, and re-rendering each of those would peg the GPU for a picture that
+    /// is already correct.
+    ///
+    /// A change has to ask for a repaint as well as an overlay. `request_overlay`
+    /// only raises a flag, and [`schedule_overlay`](Self::schedule_overlay) reads
+    /// it at the *top* of the next frame — while hover is resolved near the
+    /// bottom, after the image has been drawn. Without a repaint the flag would
+    /// sit unread the moment the pointer stopped moving, which is exactly when a
+    /// hover highlight is supposed to be showing.
+    fn update_quad_hover(&mut self, hover: Option<(u32, u32)>, quad: Option<[[f32; 2]; 4]>) {
+        let hovered = hover.is_some_and(|point| self.point_hits_quad(point, quad));
+        if hovered != self.hovered_quad {
+            self.hovered_quad = hovered;
+            self.shared.request_overlay();
+            self.shared.request_repaint();
+        }
+    }
+
+    /// Whether a render-target pixel lands inside the tracked quad, mapping it
+    /// back to source-video coordinates first.
+    fn point_hits_quad(&self, (x, y): (u32, u32), quad: Option<[[f32; 2]; 4]>) -> bool {
+        quad.is_some_and(|points| {
+            let source = [
+                x as f32 * self.video.width as f32 / self.display_size.0 as f32,
+                y as f32 * self.video.height as f32 / self.display_size.1 as f32,
+            ];
+            point_in_quad(source, points)
+        })
     }
 
     /// Source heading, the Open button, and the loaded-source readout.
@@ -239,18 +292,32 @@ impl VideoEditingApp {
             };
             ui.label(format!("Frame {}", frame.video_frame_index));
             ui.label(if frame.tracked {
-                if self.shared.video_playing.get() {
+                if self.shared.video_playing.get() && !self.show_placement_quads {
                     "Placement quad hidden during playback"
                 } else if !self.selected_quad {
                     "Click the green quad to select it"
-                } else if self.show_quad_gizmo {
-                    "Placement quad selected; gizmo visible"
                 } else {
-                    "Placement quad selected; click it to show gizmo"
+                    "Placement quad selected"
                 }
             } else {
                 "Background-only row: quad and object hidden"
             });
+            // The wash is the only feedback for these two, so when it is missing
+            // there is otherwise no way to tell a pointer that never resolved
+            // from a fill that never drew.
+            ui.weak(format!(
+                "Pointer: {} · quad: {}",
+                if self.hovered_quad {
+                    "over the quad"
+                } else {
+                    "off the quad"
+                },
+                if self.selected_quad {
+                    "selected"
+                } else {
+                    "not selected"
+                }
+            ));
             if let Some(local) = quad_frame {
                 ui.label(format!("Local axis length: {:.4}", local.axis_length));
                 ui.weak("RGB axes: e1 / e2 / e3");
@@ -343,17 +410,29 @@ impl VideoEditingApp {
     fn shot_controls(&mut self, ui: &mut egui::Ui) {
         let shots = self.shots();
         ui.collapsing(format!("Shots ({})", shots.len()), |ui| {
-            // The overlay is an authoring aid, not something to watch a cut
-            // through — so it is a toggle, and it governs playback too.
-            ui.checkbox(&mut self.show_overlay, "Show placement overlay")
+            // Authoring aids, not something to watch a cut through — so they are
+            // toggles, and they govern playback too. Two of them, because the
+            // quad and the basis it defines are separate questions: judging the
+            // quad against the plate wants the outline alone, reading the basis
+            // wants the gizmos alone.
+            let mut changed = ui
+                .checkbox(&mut self.show_placement_quads, "Show placement quads")
                 .on_hover_text(
-                    "Draw the quad and gizmo on annotated frames, including while playing",
-                );
+                    "Draw the placement quad on annotated frames, including while playing",
+                )
+                .changed();
+            changed |= ui
+                .checkbox(&mut self.show_gizmos, "Show gizmos")
+                .on_hover_text("Draw the quad's local floor grid and basis axes (e1 / e2 / e3)")
+                .changed();
+            if changed {
+                self.shared.request_overlay();
+            }
             // A sparse document annotates a few frames out of many, so the
             // overlay drawing nothing is usually correct — and indistinguishable
             // from a broken toggle unless it says which case this is.
             let state = super::overlay_state(
-                self.show_overlay,
+                self.show_placement_quads || self.show_gizmos,
                 self.has_document(),
                 self.current_frame_index,
                 self.frame_row(self.current_frame_index)
@@ -400,12 +479,96 @@ impl VideoEditingApp {
 
     fn select_catalog_asset(&mut self, asset: CatalogAsset) {
         self.selected_asset = Some(asset);
+        // The object is authored in this quad's frame, so placing it binds the
+        // two: the quad stays selected and its basis stays visible for as long
+        // as the object is there to be edited.
+        self.selected_quad = true;
+        self.show_gizmos = true;
         self.controller.state.objects[0] = crate::scene::ObjectTransform::default();
         self.controller.state.selected = Some(0);
         self.controller.target = crate::interaction::InteractionTarget::Object;
         self.shared.renderer.borrow_mut().take();
         self.shared.asset_request.set(asset.code());
         self.shared.request_overlay();
+    }
+
+    /// Names the basis arms `e1`/`e2`/`e3` at their tips, in the arm colours.
+    ///
+    /// egui text over the image rather than geometry in the scene: `trd-core`
+    /// draws lines and triangles and has no glyphs at all, so labelling in the
+    /// render pass would mean a font atlas — a far larger thing than the label.
+    /// The tips are still Rust's, projected through the same `K` the pass uses,
+    /// so the text lands exactly where the arm ends rather than being positioned
+    /// by eye.
+    ///
+    /// Only drawn with the gizmos, since it annotates them.
+    fn paint_axis_labels(
+        &self,
+        ui: &egui::Ui,
+        rect: egui::Rect,
+        frame_index: u32,
+        quad_frame: Option<trd_placement::QuadFrame>,
+    ) {
+        if !self.show_gizmos {
+            return;
+        }
+        let Some(frame) = quad_frame else {
+            return;
+        };
+        let Some(k) = self.frame_row(frame_index).and_then(|row| row.k) else {
+            return;
+        };
+        let intrinsics = trd_placement::CameraIntrinsics { row_major: k };
+        // The arms the gizmo actually draws: the quad's own half-edges in plane,
+        // the unit normal scaled to match them.
+        // Deeper greens/blues than the arms themselves: a thin anti-aliased line
+        // reads at a lightness that glyph strokes wash out at, so the text needs
+        // more saturation to stay legible over bright footage.
+        let tips = [
+            ("e1", frame.half_edge1, egui::Color32::from_rgb(255, 70, 70)),
+            ("e2", frame.half_edge2, egui::Color32::from_rgb(20, 200, 45)),
+            (
+                "e3",
+                [
+                    frame.e3[0] * frame.axis_length,
+                    frame.e3[1] * frame.axis_length,
+                    frame.e3[2] * frame.axis_length,
+                ],
+                egui::Color32::from_rgb(45, 105, 245),
+            ),
+        ];
+        let painter = ui.painter_at(rect);
+        for (label, arm, color) in tips {
+            let tip = [
+                frame.origin_camera[0] + arm[0],
+                frame.origin_camera[1] + arm[1],
+                frame.origin_camera[2] + arm[2],
+            ];
+            let Ok([x, y]) = trd_placement::project_camera(intrinsics, tip) else {
+                continue;
+            };
+            // Source pixels are the calibration's space; the image is whatever
+            // egui laid it out at, so the mapping is one ratio per axis.
+            let position = egui::pos2(
+                rect.min.x + x / self.video.width as f32 * rect.width(),
+                rect.min.y + y / self.video.height as f32 * rect.height(),
+            );
+            if !rect.contains(position) {
+                continue;
+            }
+            // Drawn twice: a dark backing under the coloured glyphs, because the
+            // labels sit over live footage that is bright in places and dark in
+            // others, and either alone vanishes into one of them.
+            let font = egui::FontId::proportional(20.0);
+            painter.text(
+                position + egui::vec2(1.5, 1.5),
+                egui::Align2::LEFT_TOP,
+                label,
+                font.clone(),
+                egui::Color32::from_black_alpha(220),
+            );
+            painter.text(position, egui::Align2::LEFT_TOP, label, font, color);
+        }
     }
 
     /// Adopts the letterboxed image size the panel just drew at.
@@ -431,39 +594,42 @@ impl VideoEditingApp {
         }
     }
 
-    /// Resolves a click on the image into a quad selection, a gizmo reveal, or a
-    /// GPU pick request.
+    /// Resolves a click on the image into a quad selection or a GPU pick request.
+    ///
+    /// **A placed object and its quad are bound.** The object is authored in that
+    /// quad's reconstructed frame — `draw_model = quad_placement * object` — so
+    /// while one is placed the quad stays selected and its gizmos stay up, and
+    /// every click is about the object. Editing an object whose frame had
+    /// silently deselected itself would be editing against an invisible basis.
+    ///
+    /// With no object placed the quad simply follows the click: inside selects
+    /// it and reveals its frame, outside deselects it and takes the frame away.
+    ///
+    /// The selection change is published **before** any pick is requested, for
+    /// the reason [`settle_frame`](Self::settle_frame) spells out: a pick
+    /// captures the current render revision, and bumping the revision afterwards
+    /// would invalidate the very pick this click asked for (#205).
     pub(super) fn handle_pick(&mut self, (x, y): (u32, u32), quad: Option<[[f32; 2]; 4]>) {
-        let video = &self.video;
-        let clicked_quad = quad.is_some_and(|points| {
-            let source = [
-                x as f32 * video.width as f32 / self.display_size.0 as f32,
-                y as f32 * video.height as f32 / self.display_size.1 as f32,
-            ];
-            point_in_quad(source, points)
-        });
-        let mut scene_changed = false;
+        if self.selected_asset.is_some() {
+            self.shared.request_pick((x, y));
+            return;
+        }
         if self.shared.video_playing.get() {
-            if self.selected_asset.is_some() && self.selected_quad {
-                self.shared.request_pick((x, y));
-            }
-        } else if self.selected_asset.is_some() && self.selected_quad {
-            if clicked_quad && !self.show_quad_gizmo {
-                self.show_quad_gizmo = true;
-                scene_changed = true;
-            } else {
-                self.shared.request_pick((x, y));
-            }
-        } else {
+            return;
+        }
+        let clicked_quad = self.point_hits_quad((x, y), quad);
+        if clicked_quad != self.selected_quad {
             self.selected_quad = clicked_quad;
-            self.show_quad_gizmo = clicked_quad;
-            scene_changed = true;
+            // Selecting a quad is asking to work in its frame, so reveal that
+            // frame; letting go of the quad takes it away again. This flips the
+            // visible toggle rather than overriding it behind its back, so the
+            // checkbox keeps saying what is drawn and stays free to be set by
+            // hand between clicks.
+            self.show_gizmos = clicked_quad;
+            self.shared.request_overlay();
         }
         if self.selected_quad {
             self.controller.target = crate::interaction::InteractionTarget::Object;
-        }
-        if scene_changed {
-            self.shared.request_overlay();
         }
     }
 }

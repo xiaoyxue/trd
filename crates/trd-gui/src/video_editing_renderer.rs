@@ -329,9 +329,7 @@ impl VideoPlacementRenderer {
         frame_height: u32,
         calibration_size: (u32, u32),
         background_frame: Option<&trd_core::VideoEditingFrame>,
-        quad_model: Option<trd_core::Matrix4>,
-        quad_axes: Option<trd_core::Matrix4>,
-        selected_quad: bool,
+        quad: QuadOverlay,
         placement_frame: Option<&trd_core::VideoEditingFrame>,
         model: Option<trd_core::Matrix4>,
         state: &crate::scene::SceneState,
@@ -342,9 +340,7 @@ impl VideoPlacementRenderer {
             frame_height,
             calibration_size,
             background_frame,
-            quad_model,
-            quad_axes,
-            selected_quad,
+            quad,
             placement_frame,
             model,
             state,
@@ -377,9 +373,7 @@ impl VideoPlacementRenderer {
         frame_height: u32,
         calibration_size: (u32, u32),
         background_frame: Option<&trd_core::VideoEditingFrame>,
-        quad_model: Option<trd_core::Matrix4>,
-        quad_axes: Option<trd_core::Matrix4>,
-        selected_quad: bool,
+        quad: QuadOverlay,
         placement_frame: Option<&trd_core::VideoEditingFrame>,
         model: Option<trd_core::Matrix4>,
         state: &crate::scene::SceneState,
@@ -429,13 +423,8 @@ impl VideoPlacementRenderer {
         }
 
         let has_mesh = self.renderer.mesh_count() > 0;
-        let (background, foreground, selection_overlay) = placement_scenes(
-            quad_model,
-            quad_axes,
-            selected_quad,
-            model.filter(|_| has_mesh),
-            state,
-        );
+        let (background, foreground, selection_overlay) =
+            placement_scenes(quad, model.filter(|_| has_mesh), state);
 
         self.renderer.draw_layers(
             &[
@@ -600,10 +589,37 @@ impl ImportedAsset {
 ///
 /// Free function rather than a method: this is placement logic, not rendering, and
 /// keeping it out of the renderer makes it testable without a GPU (#180).
+/// What the background pass draws for the tracked quad on one frame.
+///
+/// The outline and the gizmos are **independent** toggles over the same
+/// reconstructed frame: the quad says *where* an object may be placed, while the
+/// grid and axes describe the local basis it is placed in. Wanting one without
+/// the other is ordinary — the quad alone to judge the fit against the plate,
+/// the gizmos alone to read the basis — so neither implies the other, and a row
+/// with no reconstruction simply carries `None` matrices.
+///
+/// `hovered` and `selected` are the pointer states the outline alone cannot
+/// express: both wash the quad's face translucent green so the *area* an object
+/// would land on is visible, and `selected` additionally turns the edge yellow.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct QuadOverlay {
+    /// Places the quad outline, the fill and the local grid. `None` on an
+    /// untracked row.
+    pub model: Option<trd_core::Matrix4>,
+    /// Places the local-frame axes. `None` on an untracked row.
+    pub axes: Option<trd_core::Matrix4>,
+    /// Draw the quad outline.
+    pub show_quads: bool,
+    /// Draw the local grid and axes.
+    pub show_gizmos: bool,
+    /// The pointer is over the quad: wash its face.
+    pub hovered: bool,
+    /// Highlight the outline as the selected object, and wash its face.
+    pub selected: bool,
+}
+
 pub fn placement_scenes(
-    quad_model: Option<trd_core::Matrix4>,
-    quad_axes: Option<trd_core::Matrix4>,
-    selected_quad: bool,
+    quad: QuadOverlay,
     model: Option<trd_core::Matrix4>,
     state: &crate::scene::SceneState,
 ) -> (trd_core::Scene, trd_core::Scene, trd_core::Scene) {
@@ -611,19 +627,26 @@ pub fn placement_scenes(
         environment: None,
         frame: Some(trd_core::FrameFit::Stretch),
     });
-    if let Some(quad_model) = quad_model {
+    if let Some(quad_model) = quad.model.filter(|_| quad.show_quads) {
+        // The wash rides with the outline: it is that outline's hover/selection
+        // feedback, so hiding the quads hides it too.
+        if quad.hovered || quad.selected {
+            background.push(trd_core::DrawableObject::quad_fill(quad_model));
+        }
         background.push(trd_core::DrawableObject::quad_outline(
             quad_model,
-            selected_quad,
+            quad.selected,
         ));
-        if selected_quad {
+    }
+    if quad.show_gizmos {
+        if let Some(quad_model) = quad.model {
             background.push(trd_core::DrawableObject::plane_grid(
                 trd_core::GridPlane::Xy,
                 quad_model,
             ));
-            if let Some(axes) = quad_axes {
-                background.push(trd_core::DrawableObject::coordinate_axes(axes));
-            }
+        }
+        if let Some(axes) = quad.axes {
+            background.push(trd_core::DrawableObject::coordinate_axes(axes));
         }
     }
 
@@ -679,27 +702,132 @@ mod tests {
     /// drawable (#204).
     #[test]
     fn the_video_plane_is_always_the_background() {
-        let (background, _, _) = placement_scenes(None, None, false, None, &SceneState::default());
+        let (background, _, _) =
+            placement_scenes(QuadOverlay::default(), None, &SceneState::default());
         assert_eq!(
             background.background().frame,
             Some(trd_core::FrameFit::Stretch)
         );
     }
 
-    /// Selecting the quad reveals its floor grid + basis axes; deselecting hides
-    /// them but keeps the outline. The video plane rides on the background, so it
-    /// is not one of the counted objects.
+    /// The quad outline and the gizmos are independent toggles over one
+    /// reconstruction: either can be drawn without the other, and selection only
+    /// highlights the outline.
     #[test]
-    fn selecting_the_quad_adds_its_grid_and_axes() {
-        let quad = trd_core::Matrix4::IDENTITY;
+    fn the_quad_outline_and_the_gizmos_toggle_independently() {
+        let matrix = trd_core::Matrix4::IDENTITY;
         let state = SceneState::default();
+        let quad = QuadOverlay {
+            model: Some(matrix),
+            axes: Some(matrix),
+            ..QuadOverlay::default()
+        };
 
-        let (unselected, _, _) = placement_scenes(Some(quad), Some(quad), false, None, &state);
-        assert_eq!(unselected.objects().len(), 1, "quad outline only");
+        let (neither, _, _) = placement_scenes(quad, None, &state);
+        assert!(neither.objects().is_empty(), "both toggles off");
 
-        let (selected, _, _) = placement_scenes(Some(quad), Some(quad), true, None, &state);
-        assert_eq!(selected.objects().len(), 3, "+ floor grid + basis axes");
-        assert!(selected.objects().iter().any(is_axes));
+        let (outline_only, _, _) = placement_scenes(
+            QuadOverlay {
+                show_quads: true,
+                ..quad
+            },
+            None,
+            &state,
+        );
+        assert_eq!(outline_only.objects().len(), 1, "quad outline only");
+        assert!(!outline_only.objects().iter().any(is_axes));
+
+        let (gizmos_only, _, _) = placement_scenes(
+            QuadOverlay {
+                show_gizmos: true,
+                ..quad
+            },
+            None,
+            &state,
+        );
+        assert_eq!(gizmos_only.objects().len(), 2, "floor grid + basis axes");
+        assert!(gizmos_only.objects().iter().any(is_axes));
+
+        let (both, _, _) = placement_scenes(
+            QuadOverlay {
+                show_quads: true,
+                show_gizmos: true,
+                selected: true,
+                ..quad
+            },
+            None,
+            &state,
+        );
+        assert_eq!(
+            both.objects().len(),
+            4,
+            "selection wash + outline + floor grid + basis axes"
+        );
+    }
+
+    /// Pointing at a quad washes its face; selecting keeps the wash and turns the
+    /// edge yellow. Neither adds anything when the quads are hidden.
+    #[test]
+    fn hover_and_selection_wash_the_quad_face() {
+        let matrix = trd_core::Matrix4::IDENTITY;
+        let state = SceneState::default();
+        let quad = QuadOverlay {
+            model: Some(matrix),
+            axes: Some(matrix),
+            show_quads: true,
+            ..QuadOverlay::default()
+        };
+        let fill = |scene: &trd_core::Scene| {
+            scene
+                .objects()
+                .iter()
+                .filter(|d| d.primitive() == trd_core::Primitive::QuadFill)
+                .count()
+        };
+        let outline_selected = |scene: &trd_core::Scene| {
+            scene
+                .objects()
+                .iter()
+                .any(|d| d.primitive() == trd_core::Primitive::QuadOutline { selected: true })
+        };
+
+        let (idle, _, _) = placement_scenes(quad, None, &state);
+        assert_eq!(fill(&idle), 0, "no wash until pointed at");
+        assert!(!outline_selected(&idle));
+
+        let (hovered, _, _) = placement_scenes(
+            QuadOverlay {
+                hovered: true,
+                ..quad
+            },
+            None,
+            &state,
+        );
+        assert_eq!(fill(&hovered), 1, "hover washes the face");
+        assert!(!outline_selected(&hovered), "hover keeps the green edge");
+
+        let (selected, _, _) = placement_scenes(
+            QuadOverlay {
+                selected: true,
+                ..quad
+            },
+            None,
+            &state,
+        );
+        assert_eq!(fill(&selected), 1, "selection keeps the wash");
+        assert!(outline_selected(&selected), "selection yellows the edge");
+
+        let (hidden, _, _) = placement_scenes(
+            QuadOverlay {
+                show_quads: false,
+                hovered: true,
+                selected: true,
+                ..quad
+            },
+            None,
+            &state,
+        );
+        assert_eq!(fill(&hidden), 0, "no wash with the quads switched off");
     }
 
     /// The selection AABB goes in its own layer, so it is drawn over the object it
@@ -710,8 +838,11 @@ mod tests {
             selected: Some(0),
             ..SceneState::default()
         };
-        let (_, foreground, overlay) =
-            placement_scenes(None, None, false, Some(trd_core::Matrix4::IDENTITY), &state);
+        let (_, foreground, overlay) = placement_scenes(
+            QuadOverlay::default(),
+            Some(trd_core::Matrix4::IDENTITY),
+            &state,
+        );
         assert_eq!(
             overlay
                 .objects()
@@ -731,7 +862,7 @@ mod tests {
     #[test]
     fn a_video_only_frame_has_an_empty_foreground() {
         let (background, foreground, overlay) =
-            placement_scenes(None, None, false, None, &SceneState::default());
+            placement_scenes(QuadOverlay::default(), None, &SceneState::default());
         assert!(
             background.objects().is_empty(),
             "video plane only, and it is a setting"
