@@ -488,6 +488,47 @@ pub(crate) fn create_shadow_pipeline(
         cache: None,
     })
 }
+/// Builds the **placement-quad fill** pipeline: `quad_fill.wgsl` over the same
+/// vertex/instance layout and unit-quad geometry as the blob shadow, group 0 =
+/// the camera `P·V` uniform. Alpha-blended with depth-write off
+/// ([`overlay_depth_stencil`]) so the translucent wash composites over the
+/// background frame plane and under the quad outline.
+pub(crate) fn create_quad_fill_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    layout: &wgpu::PipelineLayout,
+    sample_count: u32,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::include_wgsl!("../shader/quad_fill.wgsl"));
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("trd quad fill pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            compilation_options: Default::default(),
+            buffers: &[Some(Vertex::layout()), Some(InstanceRaw::layout())],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            ..Default::default()
+        },
+        depth_stencil: Some(overlay_depth_stencil()),
+        multisample: multisample_state(sample_count),
+        multiview_mask: None,
+        cache: None,
+    })
+}
 /// a filterable `texture_2d<f32>` (binding 0) + a filtering `sampler` (binding 1),
 /// both fragment-visible, plus a small **fit** uniform (binding 2, vertex-visible)
 /// carrying the centered UV scale. Kept separate from the mesh albedo texture

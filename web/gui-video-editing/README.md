@@ -110,7 +110,11 @@ aspect ratio, centers the image with letterboxing when necessary, and resizes th
 GPU video/mesh/gizmo composite target to the fitted image dimensions.
 
 Click the green quad to select its Rust-reconstructed local coordinate frame,
-then choose Coca-Cola can, beer can, or dragon from the left pane. Object
+then choose Coca-Cola can, beer can, or dragon from the left pane. Pointing at a
+quad washes its face translucent green; clicking selects it, keeping the wash and
+turning the edge yellow; clicking anywhere else deselects it. A placed object
+does not depend on that selection, so it stays on the plane while you click
+around. Object
 interaction, numeric transforms, render mode, PBR material, tone mapping, and
 overlays use the shared `trd-gui` controls. Catalog meshes are centered and
 normalized to the reconstructed quad scale, start at the Olympic-demo anchor

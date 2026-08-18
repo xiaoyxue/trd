@@ -92,6 +92,11 @@ pub struct ImageOutcome {
     /// A primary **click** requested a pick at these render-target pixel
     /// coordinates (#141). The host resolves it into a selection.
     pub pick: Option<(u32, u32)>,
+    /// Where the pointer is hovering, in the same render-target pixel
+    /// coordinates as [`pick`](Self::pick). `None` when the pointer is not over
+    /// the image, which is itself the signal that any hover highlight should be
+    /// cleared.
+    pub hover: Option<(u32, u32)>,
     /// Under [`ImageSizing::FitCanvas`], the letterboxed size the image was
     /// drawn at, in physical pixels — what a host should resize its target to.
     pub fitted_size: Option<(u32, u32)>,
@@ -661,6 +666,19 @@ pub fn image_panel(ui: &mut egui::Ui, image: Image<'_>) -> ImageOutcome {
     }
     let delta = response.drag_delta();
     let (dx, dy) = (delta.x / size.x, delta.y / size.y);
+    // Render-target pixels from a pointer position in the letterboxed image —
+    // shared by the click pick and the hover report so the two can never
+    // disagree about where the pointer is.
+    let to_target_pixels = |pos: egui::Pos2| {
+        let (rw, rh) = render_size;
+        let u = ((pos.x - response.rect.min.x) / size.x).clamp(0.0, 1.0);
+        let v = ((pos.y - response.rect.min.y) / size.y).clamp(0.0, 1.0);
+        (
+            ((u * rw as f32) as u32).min(rw.saturating_sub(1)),
+            ((v * rh as f32) as u32).min(rh.saturating_sub(1)),
+        )
+    };
+    outcome.hover = response.hover_pos().map(to_target_pixels);
 
     if response.dragged_by(PointerButton::Primary) {
         outcome.needs_render |= controller.apply(InteractionEvent::Primary { dx, dy });
@@ -675,12 +693,7 @@ pub fn image_panel(ui: &mut egui::Ui, image: Image<'_>) -> ImageOutcome {
     // for the host app to resolve into a selection (#141).
     if response.clicked() {
         if let Some(pos) = response.interact_pointer_pos() {
-            let (rw, rh) = render_size;
-            let u = ((pos.x - response.rect.min.x) / size.x).clamp(0.0, 1.0);
-            let v = ((pos.y - response.rect.min.y) / size.y).clamp(0.0, 1.0);
-            let px = ((u * rw as f32) as u32).min(rw.saturating_sub(1));
-            let py = ((v * rh as f32) as u32).min(rh.saturating_sub(1));
-            outcome.pick = Some((px, py));
+            outcome.pick = Some(to_target_pixels(pos));
             outcome.needs_render = true;
         }
     }

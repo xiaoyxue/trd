@@ -383,6 +383,7 @@ struct RenderedFrameDiagnostics {
     playing: bool,
     show_quad: bool,
     show_gizmos: bool,
+    hovered_quad: bool,
     draw_model: Option<trd_core::Matrix4>,
     renderer: crate::video_editing_renderer::VideoRendererDiagnostics,
 }
@@ -894,6 +895,9 @@ pub struct VideoEditingApp {
     shared: Rc<VideoEditingShared>,
     controller: crate::interaction::InteractionController,
     selected_quad: bool,
+    /// The pointer is over the tracked quad. Purely a highlight, recomputed from
+    /// the pointer every frame, so it never has to be cleared by hand.
+    hovered_quad: bool,
     /// Whether the local grid + basis axes are drawn. Independent of
     /// [`show_placement_quads`](Self::show_placement_quads): the quad says where
     /// an object may be placed, the gizmos describe the basis it is placed in,
@@ -970,6 +974,7 @@ impl VideoEditingApp {
             shared,
             controller,
             selected_quad: false,
+            hovered_quad: false,
             show_gizmos: true,
             show_placement_quads: true,
             was_playing: false,
@@ -1023,10 +1028,39 @@ impl VideoEditingApp {
     pub fn set_document(&mut self, document: Option<trd_core::VideoEditingDocument>) {
         self.document = document;
         self.selected_quad = false;
+        self.hovered_quad = false;
         self.selected_asset = None;
         self.last_pick_result = None;
         self.controller.state.selected = None;
         self.controller.state.objects[0] = crate::scene::ObjectTransform::default();
+        self.shared.request_overlay();
+    }
+
+    /// Returns every editing decision to its opening state, keeping the loaded
+    /// video and document.
+    ///
+    /// Editing accumulates state across several panels — a chosen quad, a
+    /// catalog asset with its own material and lighting, a transform built up by
+    /// dragging, a render mode, overlay toggles, a pick — and unpicking that by
+    /// hand means visiting all of them and knowing what each started as. The
+    /// media is deliberately untouched: the point is to start the *placement*
+    /// over, not to reload the clip and lose the playhead.
+    pub fn reset_all(&mut self) {
+        self.selected_quad = false;
+        self.hovered_quad = false;
+        self.selected_asset = None;
+        self.last_pick_result = None;
+        self.show_placement_quads = true;
+        self.show_gizmos = true;
+        self.controller.state = crate::scene::SceneState::default();
+        self.controller.target = crate::interaction::InteractionTarget::Camera;
+        self.controller.mode = crate::interaction::TransformMode::default();
+        self.controller.move_direction = crate::interaction::MoveDirection::default();
+        self.controller.rebase_reset();
+        // The renderer holds the imported mesh and its material; dropping it is
+        // what makes "no asset" true on the GPU as well as in this struct.
+        self.shared.renderer.borrow_mut().take();
+        self.shared.asset_request.set(0);
         self.shared.request_overlay();
     }
 
@@ -1341,10 +1375,10 @@ impl VideoEditingApp {
             axes: quad_frame.map(trd_placement::quad_axes_model),
             show_quads: show_quad,
             show_gizmos,
+            hovered: self.hovered_quad,
             selected: self.selected_quad,
         };
         let show_object = self.selected_asset.is_some()
-            && self.selected_quad
             && background_frame.as_ref().is_some_and(|frame| frame.tracked);
         let placement_frame = show_object.then(|| background_frame.clone()).flatten();
         let model = if show_object {
@@ -1395,6 +1429,7 @@ impl VideoEditingApp {
         let height = self.video.height;
         let selected_asset = self.selected_asset;
         let selected_quad = self.selected_quad;
+        let hovered_quad = self.hovered_quad;
         let move_direction = self.controller.move_direction;
         let rendered_model = model;
         let background_frame_index = video.frame_index;
@@ -1482,6 +1517,7 @@ impl VideoEditingApp {
                             playing: rendered_playing,
                             show_quad,
                             show_gizmos,
+                            hovered_quad,
                             draw_model: rendered_model,
                             renderer: renderer_diagnostics,
                         },
@@ -1690,14 +1726,15 @@ impl VideoEditingApp {
             .or_else(|| self.shared.renderer_diagnostics.borrow().clone());
 
         let tracked = timeline_frame.is_some_and(|frame| frame.tracked);
+        // Quad *selection* is no longer part of this: a placed object stays on
+        // the plane once its asset is chosen, so it survives clicking away from
+        // the quad.
         let visibility_reason = if playing {
             "playing"
         } else if selected_asset.is_none() {
             "no asset"
         } else if !tracked {
             "untracked tail"
-        } else if !selected_quad {
-            "no quad selected"
         } else {
             "tracked"
         };
@@ -1730,9 +1767,12 @@ impl VideoEditingApp {
 
         let show_quad = displayed.is_some_and(|d| d.show_quad);
         let show_gizmos = displayed.is_some_and(|d| d.show_gizmos);
+        let quad_washed = show_quad && displayed.is_some_and(|d| d.hovered_quad || d.selected_quad);
         // The gizmos no longer ride on the quad: each toggle contributes its own
-        // drawables, so the count follows them independently.
-        let background_drawables = 1 + u32::from(show_quad) + if show_gizmos { 2 } else { 0 };
+        // drawables, so the count follows them independently. The hover /
+        // selection wash is one more, and only when the quads are drawn at all.
+        let background_drawables =
+            1 + u32::from(show_quad) + u32::from(quad_washed) + if show_gizmos { 2 } else { 0 };
         let foreground_drawables = if object_visible {
             1 + u32::from(scene.show_local_axes)
                 + u32::from(scene.show_axes)
@@ -2260,7 +2300,7 @@ pub(super) mod tests {
         // if the app went back to handling the pick before the revision settled,
         // which is the bug (#205).
         let before = shared.render_revision.get();
-        app.settle_frame(&egui::Context::default(), true, Some((3, 4)), None);
+        app.settle_frame(&egui::Context::default(), true, Some((3, 4)), None, None);
         let settled = shared.render_revision.get();
         assert_ne!(settled, before, "the render request must bump the revision");
 
@@ -2399,6 +2439,7 @@ pub(super) mod tests {
             playing: false,
             show_quad: false,
             show_gizmos: false,
+            hovered_quad: false,
             draw_model: None,
             renderer: crate::video_editing_renderer::VideoRendererDiagnostics {
                 identity: Rc::new(crate::video_editing_renderer::RendererIdentity {

@@ -52,6 +52,7 @@ impl eframe::App for VideoEditingApp {
         let quad_frame = self.quad_frame_at(overlay_frame_index);
         let mut needs_render = false;
         let mut pick = None;
+        let mut hover = None;
 
         egui::Panel::left("controls")
             .resizable(true)
@@ -77,6 +78,22 @@ impl eframe::App for VideoEditingApp {
                     self.catalog_controls(ui);
                     self.details_controls(ui);
                     needs_render |= crate::ui::reset_button(ui, &mut self.controller);
+                    // "Reset view" only re-frames the camera; this puts the whole
+                    // editing session back to its opening state, which is the
+                    // only way out of an accumulated quad/asset/transform without
+                    // reloading the clip.
+                    if ui
+                        .button("Reset all")
+                        .on_hover_text(
+                            "Clear the quad selection, the placed object, its transform and \
+                             material, and restore the overlay toggles. Keeps the video and \
+                             document.",
+                        )
+                        .clicked()
+                    {
+                        self.reset_all();
+                        needs_render = true;
+                    }
                     ui.separator();
                     crate::ui::status(ui, self.display_size, None);
                 });
@@ -121,9 +138,10 @@ impl eframe::App for VideoEditingApp {
                 self.resize_render_target(ui.ctx(), fitted);
             }
             pick = outcome.pick;
+            hover = outcome.hover;
         });
 
-        self.settle_frame(ui.ctx(), needs_render, pick, quad);
+        self.settle_frame(ui.ctx(), needs_render, pick, hover, quad);
     }
 }
 
@@ -149,15 +167,43 @@ impl VideoEditingApp {
         ctx: &egui::Context,
         needs_render: bool,
         pick: Option<(u32, u32)>,
+        hover: Option<(u32, u32)>,
         quad: Option<[[f32; 2]; 4]>,
     ) {
         if needs_render {
             self.shared.request_overlay();
             ctx.request_repaint();
         }
+        self.update_quad_hover(hover, quad);
         if let Some(point) = pick {
             self.handle_pick(point, quad);
         }
+    }
+
+    /// Tracks whether the pointer is over the tracked quad, so the face can be
+    /// washed before anything is clicked.
+    ///
+    /// Only a *change* requests a redraw: hover fires on every frame the pointer
+    /// rests on the image, and re-rendering each of those would peg the GPU for
+    /// a picture that is already correct.
+    fn update_quad_hover(&mut self, hover: Option<(u32, u32)>, quad: Option<[[f32; 2]; 4]>) {
+        let hovered = hover.is_some_and(|point| self.point_hits_quad(point, quad));
+        if hovered != self.hovered_quad {
+            self.hovered_quad = hovered;
+            self.shared.request_overlay();
+        }
+    }
+
+    /// Whether a render-target pixel lands inside the tracked quad, mapping it
+    /// back to source-video coordinates first.
+    fn point_hits_quad(&self, (x, y): (u32, u32), quad: Option<[[f32; 2]; 4]>) -> bool {
+        quad.is_some_and(|points| {
+            let source = [
+                x as f32 * self.video.width as f32 / self.display_size.0 as f32,
+                y as f32 * self.video.height as f32 / self.display_size.1 as f32,
+            ];
+            point_in_quad(source, points)
+        })
     }
 
     /// Source heading, the Open button, and the loaded-source readout.
@@ -437,33 +483,35 @@ impl VideoEditingApp {
         }
     }
 
-    /// Resolves a click on the image into a quad selection, a gizmo reveal, or a
-    /// GPU pick request.
+    /// Resolves a click on the image into a quad selection or a GPU pick request.
+    ///
+    /// Clicking the quad selects it; clicking anywhere else deselects it. A
+    /// placed object does **not** depend on that selection — it stays on the
+    /// plane and is picked in its own right — so deselecting the quad is safe
+    /// while an object is being edited.
+    ///
+    /// The selection change is published **before** any pick is requested, for
+    /// the reason [`settle_frame`](Self::settle_frame) spells out: a pick
+    /// captures the current render revision, and bumping the revision afterwards
+    /// would invalidate the very pick this click asked for (#205).
     pub(super) fn handle_pick(&mut self, (x, y): (u32, u32), quad: Option<[[f32; 2]; 4]>) {
-        let video = &self.video;
-        let clicked_quad = quad.is_some_and(|points| {
-            let source = [
-                x as f32 * video.width as f32 / self.display_size.0 as f32,
-                y as f32 * video.height as f32 / self.display_size.1 as f32,
-            ];
-            point_in_quad(source, points)
-        });
-        let mut scene_changed = false;
         if self.shared.video_playing.get() {
-            if self.selected_asset.is_some() && self.selected_quad {
+            if self.selected_asset.is_some() {
                 self.shared.request_pick((x, y));
             }
-        } else if self.selected_asset.is_some() && self.selected_quad {
-            self.shared.request_pick((x, y));
-        } else {
+            return;
+        }
+        let clicked_quad = self.point_hits_quad((x, y), quad);
+        if clicked_quad != self.selected_quad {
             self.selected_quad = clicked_quad;
-            scene_changed = true;
+            self.shared.request_overlay();
         }
         if self.selected_quad {
             self.controller.target = crate::interaction::InteractionTarget::Object;
-        }
-        if scene_changed {
-            self.shared.request_overlay();
+        } else if self.selected_asset.is_some() {
+            // Off the quad with an object placed: the click is asking about the
+            // object, so let the GPU id pass answer it.
+            self.shared.request_pick((x, y));
         }
     }
 }

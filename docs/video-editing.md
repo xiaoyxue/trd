@@ -251,12 +251,17 @@ The editor uses `trd-core` `DrawableObject`s and isolated GPU submissions:
 3. optional selection AABB.
 
 GPU ID picking selects the mesh. Shared `trd-gui` controls edit transform,
-render mode, Disney material, IBL, tone mapping, and overlays.
+render mode, Disney material, IBL, tone mapping, and overlays. **Reset all** in
+the left pane returns the quad selection, placed object, transform, material and
+overlay toggles to their opening state while keeping the video and document.
 
 The quad outline and the gizmos follow their own **Show placement quads** /
-**Show gizmos** toggles, which apply during playback too. The placed object
-remains visible on tracked rows. Rows 222–287 have no annotation, so quad,
-gizmos and object are all absent while the original video continues.
+**Show gizmos** toggles, which apply during playback too. Hovering a quad and
+selecting it both add a `QuadFill` — a translucent green wash over the quad's
+face — and selection additionally turns the outline yellow; clicking off the quad
+deselects it. The placed object does not depend on that selection and remains
+visible on tracked rows. Rows 222–287 have no annotation, so quad, gizmos and
+object are all absent while the original video continues.
 
 ## Details and diagnostics
 

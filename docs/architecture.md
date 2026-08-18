@@ -62,8 +62,8 @@ Platform-agnostic wgpu logic, shared verbatim by every target:
   for every primitive (#41). A `DrawableObject` is a small `Copy` struct pairing
   a `Primitive` — *what* to draw: `Mesh { mesh_id, mode }`, `AabbBox { mesh_id }`,
   `CoordinateAxes`, `PlaneGrid { plane }`, `QuadOutline { selected }`,
-  `BlobShadow` — with the `model` that places it, so every one of them can be
-  instanced. Geometry is owned once
+  `QuadFill`, `BlobShadow` — with the `model` that places it, so every one of
+  them can be instanced. Geometry is owned once
   (decode-once mesh store + shared
   line-quad/arrow buffers); a drawable is a light handle naming *which* primitive
   + its per-frame model. A `Scene` (an object list plus its `Background`) is

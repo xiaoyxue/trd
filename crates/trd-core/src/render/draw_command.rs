@@ -105,6 +105,7 @@ pub(super) fn build_batches(
             }
             Primitive::PlaneGrid { .. }
             | Primitive::QuadOutline { .. }
+            | Primitive::QuadFill
             | Primitive::CoordinateAxes
             | Primitive::BlobShadow => object.model(),
         };

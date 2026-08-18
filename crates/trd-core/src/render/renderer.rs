@@ -1179,6 +1179,7 @@ impl Renderer {
                 Primitive::QuadOutline { selected } => {
                     self.record_quad_outline(&mut pass, selected, range)
                 }
+                Primitive::QuadFill => self.record_quad_fill(&mut pass, range),
                 Primitive::BlobShadow => self.record_blob_shadow(&mut pass, range),
                 Primitive::CoordinateAxes => self.record_coordinate_axes(&mut pass, range),
             }
@@ -1574,6 +1575,16 @@ impl Renderer {
         pass.set_bind_group(0, self.uniforms.camera.bind_group(), &[]);
         self.bind_instances(pass);
         // The quad's own count, not a constant kept in step with it by hand.
+        draw_vertices(pass, &self.gizmos.shadow_vertex_buffer, range);
+    }
+
+    /// Records the placement quad's highlight wash. Identical staging to the blob
+    /// shadow — same geometry buffer, same bind group — with the fill pipeline,
+    /// so the two differ only in their fragment shader.
+    fn record_quad_fill(&self, pass: &mut wgpu::RenderPass<'_>, range: Range<u32>) {
+        pass.set_pipeline(&self.pipelines.quad_fill);
+        pass.set_bind_group(0, self.uniforms.camera.bind_group(), &[]);
+        self.bind_instances(pass);
         draw_vertices(pass, &self.gizmos.shadow_vertex_buffer, range);
     }
 

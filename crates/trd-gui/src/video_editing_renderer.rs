@@ -597,9 +597,14 @@ impl ImportedAsset {
 /// the other is ordinary — the quad alone to judge the fit against the plate,
 /// the gizmos alone to read the basis — so neither implies the other, and a row
 /// with no reconstruction simply carries `None` matrices.
+///
+/// `hovered` and `selected` are the pointer states the outline alone cannot
+/// express: both wash the quad's face translucent green so the *area* an object
+/// would land on is visible, and `selected` additionally turns the edge yellow.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct QuadOverlay {
-    /// Places the quad outline and the local grid. `None` on an untracked row.
+    /// Places the quad outline, the fill and the local grid. `None` on an
+    /// untracked row.
     pub model: Option<trd_core::Matrix4>,
     /// Places the local-frame axes. `None` on an untracked row.
     pub axes: Option<trd_core::Matrix4>,
@@ -607,7 +612,9 @@ pub struct QuadOverlay {
     pub show_quads: bool,
     /// Draw the local grid and axes.
     pub show_gizmos: bool,
-    /// Highlight the outline as the selected object.
+    /// The pointer is over the quad: wash its face.
+    pub hovered: bool,
+    /// Highlight the outline as the selected object, and wash its face.
     pub selected: bool,
 }
 
@@ -621,6 +628,11 @@ pub fn placement_scenes(
         frame: Some(trd_core::FrameFit::Stretch),
     });
     if let Some(quad_model) = quad.model.filter(|_| quad.show_quads) {
+        // The wash rides with the outline: it is that outline's hover/selection
+        // feedback, so hiding the quads hides it too.
+        if quad.hovered || quad.selected {
+            background.push(trd_core::DrawableObject::quad_fill(quad_model));
+        }
         background.push(trd_core::DrawableObject::quad_outline(
             quad_model,
             quad.selected,
@@ -746,7 +758,76 @@ mod tests {
             None,
             &state,
         );
-        assert_eq!(both.objects().len(), 3, "outline + floor grid + basis axes");
+        assert_eq!(
+            both.objects().len(),
+            4,
+            "selection wash + outline + floor grid + basis axes"
+        );
+    }
+
+    /// Pointing at a quad washes its face; selecting keeps the wash and turns the
+    /// edge yellow. Neither adds anything when the quads are hidden.
+    #[test]
+    fn hover_and_selection_wash_the_quad_face() {
+        let matrix = trd_core::Matrix4::IDENTITY;
+        let state = SceneState::default();
+        let quad = QuadOverlay {
+            model: Some(matrix),
+            axes: Some(matrix),
+            show_quads: true,
+            ..QuadOverlay::default()
+        };
+        let fill = |scene: &trd_core::Scene| {
+            scene
+                .objects()
+                .iter()
+                .filter(|d| d.primitive() == trd_core::Primitive::QuadFill)
+                .count()
+        };
+        let outline_selected = |scene: &trd_core::Scene| {
+            scene
+                .objects()
+                .iter()
+                .any(|d| d.primitive() == trd_core::Primitive::QuadOutline { selected: true })
+        };
+
+        let (idle, _, _) = placement_scenes(quad, None, &state);
+        assert_eq!(fill(&idle), 0, "no wash until pointed at");
+        assert!(!outline_selected(&idle));
+
+        let (hovered, _, _) = placement_scenes(
+            QuadOverlay {
+                hovered: true,
+                ..quad
+            },
+            None,
+            &state,
+        );
+        assert_eq!(fill(&hovered), 1, "hover washes the face");
+        assert!(!outline_selected(&hovered), "hover keeps the green edge");
+
+        let (selected, _, _) = placement_scenes(
+            QuadOverlay {
+                selected: true,
+                ..quad
+            },
+            None,
+            &state,
+        );
+        assert_eq!(fill(&selected), 1, "selection keeps the wash");
+        assert!(outline_selected(&selected), "selection yellows the edge");
+
+        let (hidden, _, _) = placement_scenes(
+            QuadOverlay {
+                show_quads: false,
+                hovered: true,
+                selected: true,
+                ..quad
+            },
+            None,
+            &state,
+        );
+        assert_eq!(fill(&hidden), 0, "no wash with the quads switched off");
     }
 
     /// The selection AABB goes in its own layer, so it is drawn over the object it
