@@ -521,9 +521,12 @@ impl VideoEditingApp {
         let intrinsics = trd_placement::CameraIntrinsics { row_major: k };
         // The arms the gizmo actually draws: the quad's own half-edges in plane,
         // the unit normal scaled to match them.
+        // Deeper greens/blues than the arms themselves: a thin anti-aliased line
+        // reads at a lightness that glyph strokes wash out at, so the text needs
+        // more saturation to stay legible over bright footage.
         let tips = [
-            ("e1", frame.half_edge1, egui::Color32::from_rgb(255, 80, 80)),
-            ("e2", frame.half_edge2, egui::Color32::from_rgb(80, 255, 80)),
+            ("e1", frame.half_edge1, egui::Color32::from_rgb(255, 70, 70)),
+            ("e2", frame.half_edge2, egui::Color32::from_rgb(20, 200, 45)),
             (
                 "e3",
                 [
@@ -531,7 +534,7 @@ impl VideoEditingApp {
                     frame.e3[1] * frame.axis_length,
                     frame.e3[2] * frame.axis_length,
                 ],
-                egui::Color32::from_rgb(120, 160, 255),
+                egui::Color32::from_rgb(45, 105, 245),
             ),
         ];
         let painter = ui.painter_at(rect);
@@ -556,13 +559,13 @@ impl VideoEditingApp {
             // Drawn twice: a dark backing under the coloured glyphs, because the
             // labels sit over live footage that is bright in places and dark in
             // others, and either alone vanishes into one of them.
-            let font = egui::FontId::proportional(14.0);
+            let font = egui::FontId::proportional(20.0);
             painter.text(
-                position + egui::vec2(1.0, 1.0),
+                position + egui::vec2(1.5, 1.5),
                 egui::Align2::LEFT_TOP,
                 label,
                 font.clone(),
-                egui::Color32::from_black_alpha(200),
+                egui::Color32::from_black_alpha(220),
             );
             painter.text(position, egui::Align2::LEFT_TOP, label, font, color);
         }
