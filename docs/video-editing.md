@@ -75,8 +75,10 @@ toggles are how that is turned off:
 
 They are separate because the questions are: the outline alone judges the quad
 against the plate, the gizmos alone read the reconstructed basis. Selecting a
-quad (clicking it) highlights the outline and enables the catalog; it no longer
-also decides whether the gizmos are drawn.
+quad (clicking it) highlights the outline, washes its face, enables the catalog
+and switches **Show gizmos** on — working in a quad's basis is the point of
+selecting it, so its frame is revealed — while leaving the toggle free to be
+switched off again.
 
 The document is optional. Without one the editor is a plain player: the timeline
 comes from the container (ffprobe natively, the `moov` box in the browser) and
@@ -258,10 +260,11 @@ overlay toggles to their opening state while keeping the video and document.
 The quad outline and the gizmos follow their own **Show placement quads** /
 **Show gizmos** toggles, which apply during playback too. Hovering a quad and
 selecting it both add a `QuadFill` — a translucent green wash over the quad's
-face — and selection additionally turns the outline yellow; clicking off the quad
-deselects it. The placed object does not depend on that selection and remains
-visible on tracked rows. Rows 222–287 have no annotation, so quad, gizmos and
-object are all absent while the original video continues.
+face — and selection additionally turns the outline yellow and switches
+**Show gizmos** on; clicking off the quad deselects it. The placed object does
+not depend on that selection and remains visible on tracked rows. Rows 222–287
+have no annotation, so quad, gizmos and object are all absent while the original
+video continues.
 
 ## Details and diagnostics
 

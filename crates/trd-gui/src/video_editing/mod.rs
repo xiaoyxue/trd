@@ -2326,6 +2326,33 @@ pub(super) mod tests {
         assert!(shared.accepts_pick(&result));
     }
 
+    /// Clicking a quad selects it *and* reveals its local frame: the gizmos are
+    /// what "work in this quad's basis" looks like, so selecting without showing
+    /// them leaves the choice invisible. It flips the user-visible toggle rather
+    /// than overriding it, so the checkbox still describes what is drawn.
+    /// Clicking off the quad deselects it but leaves the toggle alone.
+    #[test]
+    fn selecting_a_quad_reveals_its_gizmos() {
+        let shared = Rc::new(VideoEditingShared::default());
+        let mut app = VideoEditingApp::new(document(), shared.clone());
+        app.display_size = (1920, 1080);
+        app.show_gizmos = false;
+        // Source-pixel quad; `display_size` matches the video, so target pixels
+        // map through unchanged.
+        let quad = Some([[0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0]]);
+
+        app.handle_pick((50, 50), quad);
+        assert!(app.selected_quad, "clicking inside selects the quad");
+        assert!(app.show_gizmos, "selection reveals the local frame");
+
+        app.handle_pick((500, 500), quad);
+        assert!(!app.selected_quad, "clicking outside deselects it");
+        assert!(
+            app.show_gizmos,
+            "deselecting leaves the toggle where the user can see it"
+        );
+    }
+
     #[test]
     fn newer_pick_request_invalidates_older_pick_completion() {
         let shared = VideoEditingShared::default();

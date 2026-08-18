@@ -504,6 +504,13 @@ impl VideoEditingApp {
         let clicked_quad = self.point_hits_quad((x, y), quad);
         if clicked_quad != self.selected_quad {
             self.selected_quad = clicked_quad;
+            // Selecting a quad is asking to work in its frame, so reveal that
+            // frame. This flips the visible toggle rather than overriding it
+            // behind its back: the checkbox keeps saying what is drawn, and it
+            // can still be switched off with the quad selected.
+            if clicked_quad {
+                self.show_gizmos = true;
+            }
             self.shared.request_overlay();
         }
         if self.selected_quad {
