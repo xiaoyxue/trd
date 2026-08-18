@@ -460,6 +460,11 @@ impl VideoEditingApp {
 
     fn select_catalog_asset(&mut self, asset: CatalogAsset) {
         self.selected_asset = Some(asset);
+        // The object is authored in this quad's frame, so placing it binds the
+        // two: the quad stays selected and its basis stays visible for as long
+        // as the object is there to be edited.
+        self.selected_quad = true;
+        self.show_gizmos = true;
         self.controller.state.objects[0] = crate::scene::ObjectTransform::default();
         self.controller.state.selected = Some(0);
         self.controller.target = crate::interaction::InteractionTarget::Object;
@@ -493,20 +498,25 @@ impl VideoEditingApp {
 
     /// Resolves a click on the image into a quad selection or a GPU pick request.
     ///
-    /// Clicking the quad selects it; clicking anywhere else deselects it. A
-    /// placed object does **not** depend on that selection — it stays on the
-    /// plane and is picked in its own right — so deselecting the quad is safe
-    /// while an object is being edited.
+    /// **A placed object and its quad are bound.** The object is authored in that
+    /// quad's reconstructed frame — `draw_model = quad_placement * object` — so
+    /// while one is placed the quad stays selected and its gizmos stay up, and
+    /// every click is about the object. Editing an object whose frame had
+    /// silently deselected itself would be editing against an invisible basis.
+    ///
+    /// With no object placed the quad simply follows the click: inside selects
+    /// it and reveals its frame, outside deselects it and takes the frame away.
     ///
     /// The selection change is published **before** any pick is requested, for
     /// the reason [`settle_frame`](Self::settle_frame) spells out: a pick
     /// captures the current render revision, and bumping the revision afterwards
     /// would invalidate the very pick this click asked for (#205).
     pub(super) fn handle_pick(&mut self, (x, y): (u32, u32), quad: Option<[[f32; 2]; 4]>) {
+        if self.selected_asset.is_some() {
+            self.shared.request_pick((x, y));
+            return;
+        }
         if self.shared.video_playing.get() {
-            if self.selected_asset.is_some() {
-                self.shared.request_pick((x, y));
-            }
             return;
         }
         let clicked_quad = self.point_hits_quad((x, y), quad);
@@ -522,10 +532,6 @@ impl VideoEditingApp {
         }
         if self.selected_quad {
             self.controller.target = crate::interaction::InteractionTarget::Object;
-        } else if self.selected_asset.is_some() {
-            // Off the quad with an object placed: the click is asking about the
-            // object, so let the GPU id pass answer it.
-            self.shared.request_pick((x, y));
         }
     }
 }

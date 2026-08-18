@@ -975,7 +975,10 @@ impl VideoEditingApp {
             controller,
             selected_quad: false,
             hovered_quad: false,
-            show_gizmos: true,
+            // Nothing is selected at start-up, and the gizmos describe a
+            // *selected* quad's basis, so they start off and are revealed by the
+            // first selection.
+            show_gizmos: false,
             show_placement_quads: true,
             was_playing: false,
             selected_asset: None,
@@ -1051,7 +1054,7 @@ impl VideoEditingApp {
         self.selected_asset = None;
         self.last_pick_result = None;
         self.show_placement_quads = true;
-        self.show_gizmos = true;
+        self.show_gizmos = false;
         self.controller.state = crate::scene::SceneState::default();
         self.controller.target = crate::interaction::InteractionTarget::Camera;
         self.controller.mode = crate::interaction::TransformMode::default();
@@ -2386,6 +2389,32 @@ pub(super) mod tests {
 
         app.settle_frame(&ctx, false, None, None, quad);
         assert!(!app.hovered_quad, "off the image is not hovering either");
+    }
+
+    /// A placed object and its quad are bound: the object is authored in that
+    /// quad's reconstructed frame, so editing it must not silently take the
+    /// frame away. Clicks go to the object's pick pass while the quad stays
+    /// selected and its gizmos stay up.
+    #[test]
+    fn a_placed_object_keeps_its_quad_selected() {
+        let shared = Rc::new(VideoEditingShared::default());
+        let mut app = VideoEditingApp::new(document(), shared.clone());
+        app.display_size = (1920, 1080);
+        let quad = Some([[0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0]]);
+
+        app.handle_pick((50, 50), quad);
+        assert!(app.selected_quad);
+        assert!(app.show_gizmos);
+
+        app.selected_asset = Some(CatalogAsset::CocaColaCan);
+        // Clicking the object — or anywhere else — while it is placed.
+        app.handle_pick((500, 500), quad);
+        assert!(app.selected_quad, "the object's frame stays selected");
+        assert!(app.show_gizmos, "and its basis stays visible");
+        assert!(
+            shared.pending_pick.get().is_some(),
+            "the click asks the id pass about the object"
+        );
     }
 
     #[test]

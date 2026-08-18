@@ -113,10 +113,10 @@ Click the green quad to select its Rust-reconstructed local coordinate frame,
 then choose Coca-Cola can, beer can, or dragon from the left pane. Pointing at a
 quad washes its face translucent green; clicking selects it, keeping the wash,
 turning the edge yellow and switching **Show gizmos** on so its local frame is
-visible; clicking anywhere else deselects it and hides the gizmos again. A placed
-object
-does not depend on that selection, so it stays on the plane while you click
-around. Object
+visible; clicking anywhere else deselects it and hides the gizmos again. Once an
+object is placed the two are bound: its quad stays selected and its basis stays
+visible while you edit, and clicks go to the object. **Reset all** unbinds them.
+Object
 interaction, numeric transforms, render mode, PBR material, tone mapping, and
 overlays use the shared `trd-gui` controls. Catalog meshes are centered and
 normalized to the reconstructed quad scale, start at the Olympic-demo anchor
