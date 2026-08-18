@@ -183,14 +183,22 @@ impl VideoEditingApp {
     /// Tracks whether the pointer is over the tracked quad, so the face can be
     /// washed before anything is clicked.
     ///
-    /// Only a *change* requests a redraw: hover fires on every frame the pointer
-    /// rests on the image, and re-rendering each of those would peg the GPU for
-    /// a picture that is already correct.
+    /// Only a *change* acts: hover fires on every frame the pointer rests on the
+    /// image, and re-rendering each of those would peg the GPU for a picture that
+    /// is already correct.
+    ///
+    /// A change has to ask for a repaint as well as an overlay. `request_overlay`
+    /// only raises a flag, and [`schedule_overlay`](Self::schedule_overlay) reads
+    /// it at the *top* of the next frame — while hover is resolved near the
+    /// bottom, after the image has been drawn. Without a repaint the flag would
+    /// sit unread the moment the pointer stopped moving, which is exactly when a
+    /// hover highlight is supposed to be showing.
     fn update_quad_hover(&mut self, hover: Option<(u32, u32)>, quad: Option<[[f32; 2]; 4]>) {
         let hovered = hover.is_some_and(|point| self.point_hits_quad(point, quad));
         if hovered != self.hovered_quad {
             self.hovered_quad = hovered;
             self.shared.request_overlay();
+            self.shared.request_repaint();
         }
     }
 

@@ -2350,6 +2350,44 @@ pub(super) mod tests {
         assert!(!app.show_gizmos, "and takes its local frame away again");
     }
 
+    /// Hovering the quad raises the wash flag and asks for a new overlay, and
+    /// does so only when the answer *changes* — hover fires every frame the
+    /// pointer rests on the image, and re-rendering each one would peg the GPU
+    /// for a picture that is already correct.
+    #[test]
+    fn hovering_the_quad_requests_one_overlay_per_change() {
+        let shared = Rc::new(VideoEditingShared::default());
+        let mut app = VideoEditingApp::new(document(), shared.clone());
+        app.display_size = (1920, 1080);
+        let quad = Some([[0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0]]);
+        let ctx = egui::Context::default();
+
+        let before = shared.render_revision.get();
+        app.settle_frame(&ctx, false, None, Some((50, 50)), quad);
+        assert!(app.hovered_quad, "the pointer is inside the quad");
+        let entered = shared.render_revision.get();
+        assert_ne!(entered, before, "entering asks for a new overlay");
+
+        app.settle_frame(&ctx, false, None, Some((60, 60)), quad);
+        assert!(app.hovered_quad);
+        assert_eq!(
+            shared.render_revision.get(),
+            entered,
+            "moving within the quad changes nothing to draw"
+        );
+
+        app.settle_frame(&ctx, false, None, Some((500, 500)), quad);
+        assert!(!app.hovered_quad, "the pointer left the quad");
+        assert_ne!(
+            shared.render_revision.get(),
+            entered,
+            "leaving asks for a new overlay"
+        );
+
+        app.settle_frame(&ctx, false, None, None, quad);
+        assert!(!app.hovered_quad, "off the image is not hovering either");
+    }
+
     #[test]
     fn newer_pick_request_invalidates_older_pick_completion() {
         let shared = VideoEditingShared::default();
