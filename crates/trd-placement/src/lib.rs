@@ -144,8 +144,12 @@ pub fn placement_model(frame: QuadFrame, edit: LocalPlacement) -> Result<Matrix4
         add(anchor, scale3(frame.e3, edit.lift * size)),
         scale3(local_translation, size),
     );
+    // `[e1, e3, -e2] * rotate_y(yaw)`, exactly as the Python reference composes
+    // it. The first column takes `+sin * e2` — writing `-e2` there instead
+    // shears the basis (`x · z == sin 2·yaw`), collapses it at ±45° and mirrors
+    // it beyond, because the result is then no longer a rotation.
     let (sin, cos) = edit.yaw.sin_cos();
-    let x = add(scale3(frame.e1, cos), scale3(scale3(frame.e2, -1.0), sin));
+    let x = add(scale3(frame.e1, cos), scale3(frame.e2, sin));
     let z = add(scale3(frame.e1, sin), scale3(scale3(frame.e2, -1.0), cos));
     let model_camera = [
         x[0] * size,
@@ -182,15 +186,24 @@ pub fn project_camera(
 
 /// Model for the local-coordinate axes, converted from the OpenCV camera frame
 /// to trd's GL camera frame. Use this for a `CoordinateAxes` drawable.
+///
+/// The red/green arms are the quad's own half-edges, not the orthonormalised
+/// `e1`/`e2`, so they lie **on** the reconstructed quad edges — the gizmo the
+/// Python reference draws (`--axes-local` over its placement-quad model, whose
+/// columns are `r1/2`, `r2/2`, `n/2`). It is also the basis the in-plane
+/// offsets are expressed in, so "move along green" matches what is on screen.
+/// Orthonormalising dumps the quad's whole non-squareness onto the green arm:
+/// on the FIBA tail, where the reconstructed edges close to 75°, `e2` swings
+/// ~14° off the edge it is supposed to name.
 pub fn quad_axes_model(frame: QuadFrame) -> Matrix4 {
     let model_camera = [
-        frame.e1[0] * frame.axis_length,
-        frame.e1[1] * frame.axis_length,
-        frame.e1[2] * frame.axis_length,
+        frame.half_edge1[0],
+        frame.half_edge1[1],
+        frame.half_edge1[2],
         0.0,
-        frame.e2[0] * frame.axis_length,
-        frame.e2[1] * frame.axis_length,
-        frame.e2[2] * frame.axis_length,
+        frame.half_edge2[0],
+        frame.half_edge2[1],
+        frame.half_edge2[2],
         0.0,
         frame.e3[0] * frame.axis_length,
         frame.e3[1] * frame.axis_length,
@@ -485,6 +498,148 @@ mod tests {
         ];
         for (actual, expected) in actual.into_iter().zip(expected) {
             assert_relative_eq!(actual, expected, epsilon = 2e-4);
+        }
+    }
+
+    #[test]
+    fn yaw_matches_python_rotate_y_composition() {
+        let frame = quad_frame(
+            CameraIntrinsics {
+                row_major: [4510.0986, 0.0, 960.0, 0.0, 4510.0986, 540.0, 0.0, 0.0, 1.0],
+            },
+            PlacementQuad {
+                points_px: [
+                    [752.1081, 541.8749],
+                    [1292.765, 501.09924],
+                    [1480.5444, 645.707],
+                    [872.6903, 696.28595],
+                ],
+            },
+        )
+        .unwrap();
+        let actual = placement_model(
+            frame,
+            LocalPlacement {
+                offset_e1: 1.3,
+                offset_e2: -1.7,
+                size_factor: 0.24,
+                yaw: 0.7,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .to_cols_array();
+        // `C4 * (translate * [e1, e3, -e2] * rotate_y(0.7) * scale)`, from
+        // examples/placement_quad_by_local_coord.py on FIBA shot 1 frame 0.
+        let expected = [
+            0.072_293_14,
+            0.025365753,
+            -0.092_359_52,
+            0.0,
+            -0.0023500241,
+            0.11615017,
+            0.030060203,
+            0.0,
+            0.095_750_61,
+            -0.016300828,
+            0.070_470_59,
+            0.0,
+            0.668_500_8,
+            0.28248345,
+            -8.546_489,
+            1.0,
+        ];
+        for (actual, expected) in actual.into_iter().zip(expected) {
+            assert_relative_eq!(actual, expected, epsilon = 2e-4);
+        }
+    }
+
+    #[test]
+    fn axes_arms_lie_on_the_quad_edges() {
+        // The FIBA geometry: `cross(r1, r2)` points into the floor, so the
+        // tip-above-origin test flips `e3` and `e2 = e3 × e1` lands
+        // *anti-parallel* to the second half-edge — 165° apart once the
+        // reconstructed edges close to 75° on frames 200–221. An axes gizmo
+        // built from `e2` therefore points back out of the quad it annotates.
+        let edge2 = (180.0f32 + 75.0).to_radians();
+        let frame = QuadFrame {
+            origin_camera: [0.0, 0.0, 5.0],
+            e1: [1.0, 0.0, 0.0],
+            e2: [0.0, 1.0, 0.0],
+            e3: [0.0, 0.0, 1.0],
+            half_edge1: [0.5, 0.0, 0.0],
+            half_edge2: [0.5 * edge2.cos(), 0.5 * edge2.sin(), 0.0],
+            axis_length: 0.5,
+        };
+        assert!(
+            dot(frame.e2, frame.half_edge2) < 0.0,
+            "fixture must reproduce the reversed orthonormal arm"
+        );
+        let columns = quad_axes_model(frame).to_cols_array();
+        let red = [columns[0], columns[1], columns[2]];
+        let green = [columns[4], columns[5], columns[6]];
+        // `cv_to_gl` negates y and z, so compare against the flipped half-edges.
+        for (actual, expected) in red.into_iter().zip([0.5, 0.0, 0.0]) {
+            assert_relative_eq!(actual, expected, epsilon = 1e-6);
+        }
+        for (actual, expected) in
+            green
+                .into_iter()
+                .zip([0.5 * edge2.cos(), -0.5 * edge2.sin(), 0.0])
+        {
+            assert_relative_eq!(actual, expected, epsilon = 1e-6);
+        }
+        // Same frame as the quad outline, which is what the reference draws.
+        for (axes, outline) in columns
+            .into_iter()
+            .zip(quad_outline_model(frame).to_cols_array())
+        {
+            assert_relative_eq!(axes, outline, epsilon = 1e-6);
+        }
+    }
+
+    #[test]
+    fn yaw_keeps_the_basis_a_rotation() {
+        let frame = QuadFrame {
+            origin_camera: [0.0, 0.0, 5.0],
+            e1: [1.0, 0.0, 0.0],
+            e2: [0.0, 1.0, 0.0],
+            e3: [0.0, 0.0, 1.0],
+            half_edge1: [1.0, 0.0, 0.0],
+            half_edge2: [0.0, 1.0, 0.0],
+            axis_length: 1.0,
+        };
+        // A sheared basis survives yaw = 0 and hides at small angles; ±45° is
+        // where the mis-signed column degenerates outright.
+        for yaw in [0.0, 0.3, std::f32::consts::FRAC_PI_4, 2.5, -1.9] {
+            let size = 0.24;
+            let columns = placement_model(
+                frame,
+                LocalPlacement {
+                    size_factor: size,
+                    yaw,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .to_cols_array();
+            let basis: [[f32; 3]; 3] = [
+                [columns[0], columns[1], columns[2]],
+                [columns[4], columns[5], columns[6]],
+                [columns[8], columns[9], columns[10]],
+            ];
+            for axis in basis {
+                assert_relative_eq!(length(axis), size, epsilon = 1e-6);
+            }
+            assert_relative_eq!(dot(basis[0], basis[1]), 0.0, epsilon = 1e-6);
+            assert_relative_eq!(dot(basis[1], basis[2]), 0.0, epsilon = 1e-6);
+            assert_relative_eq!(dot(basis[0], basis[2]), 0.0, epsilon = 1e-6);
+            // Right-handed, so the mesh keeps its winding and normals.
+            assert_relative_eq!(
+                dot(cross(basis[0], basis[1]), basis[2]),
+                size * size * size,
+                epsilon = 1e-6
+            );
         }
     }
 }
