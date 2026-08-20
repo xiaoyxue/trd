@@ -53,9 +53,10 @@ pub enum StreamError {
     /// I/O error reading or writing the stream.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
-    /// A draw references a mesh index outside the uploaded mesh set.
-    #[error("draw references mesh index {mesh_id} but only {mesh_count} mesh(es) are loaded")]
-    MeshIndexOutOfRange { mesh_id: u32, mesh_count: usize },
+    /// Assembling a frame's scene failed — today, a draw naming a mesh the
+    /// stream never sent.
+    #[error(transparent)]
+    Scene(#[from] crate::SceneError),
     /// The input is not mesh-first: the protocol requires a leading mesh table
     /// before the params stream (`[mesh][texture?][frames?][params]`). Params-only
     /// streams are no longer accepted.
@@ -79,24 +80,22 @@ pub fn decode_frames(batch: &RecordBatch) -> Result<Vec<FrameParams>, StreamErro
     Ok(crate::protocol::decode_batch(batch)?)
 }
 
-/// Resolves one decoded frame's instanced draw list: its wire `draws` when
-/// present (an explicit empty list ⇒ no meshes, so just the background plate),
-/// else one instance of mesh 0 placed by the frame's own model (legacy
-/// single-object behavior) — see [`DecodedFrame::resolved_draws`]. Every
-/// referenced `mesh_id` is validated against `mesh_count`. Shared by the headless
-/// [`run_stream`] path and the live [`read_scene_stream_with_meta`] front-end so
-/// both resolve draws identically.
-fn resolve_frame_draws(
+/// The draw list a decoded frame resolves to, with every `mesh_id` checked
+/// against the uploaded mesh set — the callback path hands callers a `Vec<Draw>`
+/// rather than a `Scene`, so it validates through the same rule
+/// [`Scene::try_from_frame`](crate::Scene::try_from_frame) applies.
+fn validated_draws(
     frame: &crate::DecodedFrame,
     mesh_count: usize,
 ) -> Result<Vec<Draw>, StreamError> {
     let draws = frame.resolved_draws();
     for draw in &draws {
         if draw.mesh_id as usize >= mesh_count {
-            return Err(StreamError::MeshIndexOutOfRange {
+            return Err(crate::SceneError::MeshIndexOutOfRange {
                 mesh_id: draw.mesh_id,
                 mesh_count,
-            });
+            }
+            .into());
         }
     }
     Ok(draws)
@@ -134,7 +133,7 @@ pub fn read_scene_stream_with_meta<R: Read>(
     let mut on_meta = Some(on_meta);
     let mut mesh_count = 0usize;
     let mut ready = false;
-    let mut background_state = FrameBackgroundState::default();
+    let mut inline_cache = crate::InlineFrameCache::default();
 
     let mut buf = [0u8; 64 * 1024];
     loop {
@@ -164,10 +163,11 @@ pub fn read_scene_stream_with_meta<R: Read>(
 
         for batch in batches {
             for frame in batch {
-                let draws = resolve_frame_draws(&frame, mesh_count)?;
-                let inline =
-                    resolve_inline_frame(frame.frame_id, session.frames(), &mut background_state)?
-                        .map(|(image, _changed)| image);
+                let draws = validated_draws(&frame, mesh_count)?;
+                let inline = inline_cache
+                    .resolve(frame.frame_id, session.frames())
+                    .map_err(ProtocolError::from)?
+                    .map(|(image, _changed)| image);
                 on_frame(frame.params, draws, frame.frame_ref, inline);
             }
         }
@@ -190,37 +190,13 @@ pub fn read_scene_stream_with_meta<R: Read>(
 /// background plane (the shell decides how to report the miss).
 pub type FrameResolver<'a> = &'a dyn Fn(&str) -> Option<crate::texture::ImageData>;
 
+/// The **external** background reference currently uploaded, so consecutive
+/// frames naming the same `frame_path`/`frame_url` skip the resolver + upload.
+/// Its inline-`frame_id` counterpart is the shared
+/// [`InlineFrameCache`](crate::InlineFrameCache).
 #[derive(Default)]
 struct FrameBackgroundState {
     last_ref: Option<String>,
-    last_inline_id: Option<u32>,
-    last_inline_image: Option<Arc<crate::ImageData>>,
-}
-
-fn resolve_inline_frame(
-    frame_id: Option<u32>,
-    frames: &[crate::InlineFrame],
-    state: &mut FrameBackgroundState,
-) -> Result<Option<(Arc<crate::ImageData>, bool)>, StreamError> {
-    let Some(frame_id) = frame_id else {
-        state.last_inline_id = None;
-        state.last_inline_image = None;
-        return Ok(None);
-    };
-    if state.last_inline_id == Some(frame_id) {
-        return Ok(state.last_inline_image.clone().map(|image| (image, false)));
-    }
-    let resource = frames
-        .get(frame_id as usize)
-        .ok_or(ProtocolError::FrameIdOutOfRange {
-            row: 0,
-            frame_id,
-            frame_count: frames.len(),
-        })?;
-    let image = Arc::new(resource.decode().map_err(ProtocolError::from)?);
-    state.last_inline_id = Some(frame_id);
-    state.last_inline_image = Some(image.clone());
-    Ok(Some((image, true)))
 }
 
 /// Renders one decoded [`FrameBatch`](crate::FrameBatch) and writes its output
@@ -240,15 +216,16 @@ fn render_and_write_batch<W: Write>(
     inline_frames: &[crate::InlineFrame],
     frame_resolver: Option<FrameResolver>,
     background_state: &mut FrameBackgroundState,
+    inline_cache: &mut crate::InlineFrameCache,
     output: &mut W,
 ) -> Result<(), StreamError> {
     let mesh_count = renderer.mesh_count();
     let mut planes: Vec<Vec<u8>> = Vec::with_capacity(batch.len());
     for frame in batch {
-        let draws = resolve_frame_draws(frame, mesh_count)?;
         let mut frame_fit = None;
-        if let Some((image, changed)) =
-            resolve_inline_frame(frame.frame_id, inline_frames, background_state)?
+        if let Some((image, changed)) = inline_cache
+            .resolve(frame.frame_id, inline_frames)
+            .map_err(ProtocolError::from)?
         {
             if changed {
                 renderer.update_frame_texture(&image);
@@ -271,7 +248,7 @@ fn render_and_write_batch<W: Write>(
         // The scene is assembled here, from the wire draw list plus the CLI's
         // appearance options — the same `scene_with_overlays` every other
         // front-end uses, so they cannot drift apart (#180).
-        let scene = crate::render::Scene::from_draws(&draws, options, frame_fit);
+        let scene = crate::render::Scene::try_from_frame(frame, mesh_count, options, frame_fit)?;
         // `run_stream` is a synchronous `Read`/`Write` filter, while the renderer
         // is async because GPU read-back is (the browser must not block its event
         // loop). Natively blocking here is free: the future is already complete
@@ -325,6 +302,7 @@ pub fn run_stream<R: Read, W: Write>(
     // The background currently uploaded, so consecutive frames sharing it skip
     // the decode + re-upload.
     let mut background_state = FrameBackgroundState::default();
+    let mut inline_cache = crate::InlineFrameCache::default();
 
     let mut buf = [0u8; 64 * 1024];
     loop {
@@ -380,6 +358,7 @@ pub fn run_stream<R: Read, W: Write>(
                     session.frames(),
                     frame_resolver,
                     &mut background_state,
+                    &mut inline_cache,
                     &mut output,
                 )?;
             }

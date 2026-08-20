@@ -18,7 +18,9 @@ mod texture;
 mod video_editing;
 
 pub use camera::{Camera, DEFAULT_FIT_MARGIN, DEFAULT_FOV_Y, DEFAULT_VIEW_DIR};
-pub use frame::{FrameError, InlineFrame, FRAME_BYTES_COLUMN, FRAME_PIXELS_COLUMN};
+pub use frame::{
+    FrameError, InlineFrame, InlineFrameCache, FRAME_BYTES_COLUMN, FRAME_PIXELS_COLUMN,
+};
 // A directional light is universal domain vocabulary — zero wgpu — so it sits
 // at the crate root beside `mesh`/`texture`/`camera`/`material` rather than in
 // the render backend (#223).
@@ -55,7 +57,7 @@ pub use render::{
 // renderer that dispatches on it (#223). Public paths are unchanged.
 pub use render::{
     Background, Draw, DrawSelection, DrawableObject, EnvironmentBackground, FrameFit, GridPlane,
-    Primitive, RenderMode, Scene,
+    Primitive, RenderMode, Scene, SceneError,
 };
 // The render harness; available on both platforms since readback became async
 // (#180) — the browser could not use it while it blocked on readback.

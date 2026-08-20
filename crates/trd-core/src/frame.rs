@@ -6,6 +6,7 @@
 
 use arrow::array::{Array, BinaryArray, FixedSizeListArray, RecordBatch, UInt8Array};
 use arrow::datatypes::{DataType, Field, Schema};
+use std::sync::Arc;
 use thiserror::Error;
 
 use crate::texture::{
@@ -78,6 +79,62 @@ impl InlineFrame {
     }
 }
 
+/// The decoded background frame currently in hand, keyed by its `frame_id`.
+///
+/// A frames-table resource stays compressed until a params row selects it, and
+/// consecutive frames routinely select the *same* one — so decoding per frame
+/// would redo the same PNG/JPEG work every time. This caches the last decode and
+/// reports whether it changed, which is the signal a caller needs to decide
+/// whether to re-upload the GPU texture.
+///
+/// Cross-platform on purpose: the CLI, `CanvasRenderer` and `OffscreenRenderer`
+/// each grew their own copy of this two-field cache.
+#[derive(Debug, Default)]
+pub struct InlineFrameCache {
+    id: Option<u32>,
+    image: Option<Arc<ImageData>>,
+}
+
+impl InlineFrameCache {
+    /// Resolves `frame_id` against `frames`, decoding only on a change.
+    ///
+    /// Returns `None` when the frame selects no inline resource, else the
+    /// decoded image plus whether it differs from the previous call — `false`
+    /// means the caller's existing upload is still current.
+    pub fn resolve(
+        &mut self,
+        frame_id: Option<u32>,
+        frames: &[InlineFrame],
+    ) -> Result<Option<(Arc<ImageData>, bool)>, FrameError> {
+        let Some(frame_id) = frame_id else {
+            self.id = None;
+            self.image = None;
+            return Ok(None);
+        };
+        if self.id == Some(frame_id) {
+            return Ok(self.image.clone().map(|image| (image, false)));
+        }
+        let resource = frames
+            .get(frame_id as usize)
+            .ok_or(FrameError::IdOutOfRange {
+                frame_id,
+                frame_count: frames.len(),
+            })?;
+        let image = Arc::new(resource.decode()?);
+        self.id = Some(frame_id);
+        self.image = Some(image.clone());
+        Ok(Some((image, true)))
+    }
+
+    /// Forgets the cached decode, so the next [`resolve`](Self::resolve) reports
+    /// a change even for the same `frame_id`. For callers whose GPU texture was
+    /// overwritten from elsewhere (an externally uploaded video frame).
+    pub fn invalidate(&mut self) {
+        self.id = None;
+        self.image = None;
+    }
+}
+
 /// Validates a frames-table schema even when its IPC stream has no record
 /// batches. This keeps schema-only resource tables from bypassing the same
 /// payload and tensor checks applied during row decoding.
@@ -123,6 +180,11 @@ pub enum FrameError {
     NullValues(&'static str),
     #[error("frames row {row} has {actual} payloads; expected exactly one")]
     PayloadCount { row: usize, actual: usize },
+    /// A params row selected a `frame_id` past the end of the frames table. The
+    /// protocol decoder range-checks this, so reaching it means a caller built a
+    /// frame by hand.
+    #[error("frame_id {frame_id} is out of range for a frames table of {frame_count} row(s)")]
+    IdOutOfRange { frame_id: u32, frame_count: usize },
     #[error("frames row {row} has an empty encoded-image payload")]
     EmptyEncoded { row: usize },
     #[error("frames tensor byte length {actual} != {width}x{height}x{channels} = {expected}")]
@@ -710,6 +772,55 @@ mod tests {
             Err(FrameError::ColumnType {
                 column: FRAME_PIXELS_COLUMN,
                 ..
+            })
+        ));
+    }
+
+    #[test]
+    fn inline_frame_cache_decodes_once_per_id_change() {
+        let frames = vec![
+            InlineFrame::Pixels(ImageData {
+                width: 1,
+                height: 1,
+                rgba: vec![1, 2, 3, 4],
+            }),
+            InlineFrame::Pixels(ImageData {
+                width: 1,
+                height: 1,
+                rgba: vec![5, 6, 7, 8],
+            }),
+        ];
+        let mut cache = InlineFrameCache::default();
+
+        // First sight of an id decodes and reports the change.
+        let (image, changed) = cache.resolve(Some(0), &frames).unwrap().unwrap();
+        assert!(changed);
+        assert_eq!(image.rgba, vec![1, 2, 3, 4]);
+        // The same id hands back the same decode, flagged unchanged, so a caller
+        // knows its GPU upload is still current.
+        let (again, changed) = cache.resolve(Some(0), &frames).unwrap().unwrap();
+        assert!(!changed);
+        assert!(Arc::ptr_eq(&image, &again));
+        // A different id decodes again.
+        let (other, changed) = cache.resolve(Some(1), &frames).unwrap().unwrap();
+        assert!(changed);
+        assert_eq!(other.rgba, vec![5, 6, 7, 8]);
+        // An external upload invalidates, so the same id re-uploads.
+        cache.invalidate();
+        assert!(cache.resolve(Some(1), &frames).unwrap().unwrap().1);
+        // A frame selecting no inline resource clears the cache.
+        assert!(cache.resolve(None, &frames).unwrap().is_none());
+        assert!(cache.resolve(Some(1), &frames).unwrap().unwrap().1);
+    }
+
+    #[test]
+    fn inline_frame_cache_reports_an_out_of_range_id() {
+        let mut cache = InlineFrameCache::default();
+        assert!(matches!(
+            cache.resolve(Some(2), &[]),
+            Err(FrameError::IdOutOfRange {
+                frame_id: 2,
+                frame_count: 0
             })
         ));
     }
