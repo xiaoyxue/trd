@@ -1903,3 +1903,91 @@ fn picking_resolves_object_ids_and_background() {
     // Out-of-bounds coordinates are safely rejected.
     assert_eq!(pick(width, 0), None, "x == width is out of bounds");
 }
+
+#[test]
+#[ignore = "requires a GPU adapter"]
+#[cfg(not(target_arch = "wasm32"))]
+fn frame_ring_presents_the_layer_the_index_names() {
+    // The ring's unit tests cover its bookkeeping without a device, and the
+    // golden suite only ever shows one frame — so nothing yet proves the
+    // *shader* samples the layer the index names. That is the whole mechanism:
+    // presenting a resident frame writes a layer into `Fit.uv_scale.z` and
+    // changes nothing else, so a wrong layer would show the wrong frame with no
+    // other symptom.
+    let gpu = test_gpu();
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+    let (width, height) = (32, 32);
+    let empty = Mesh {
+        vertices: Vec::new(),
+        indices: Vec::new(),
+        shading: None,
+    };
+    let mut mesh = single(format, &empty);
+
+    // Three 1x1 frames, each a colour that cannot be confused with the others.
+    let red = [255u8, 0, 0, 255];
+    let green = [0u8, 255, 0, 255];
+    let blue = [0u8, 0, 255, 255];
+    mesh.update_frame_texture_indexed(&red, 1, 1, 10);
+    mesh.update_frame_texture_indexed(&green, 1, 1, 11);
+    mesh.update_frame_texture_indexed(&blue, 1, 1, 12);
+
+    let plane_only = Scene::new().with_background(Background {
+        environment: None,
+        frame: Some(FrameFit::Stretch),
+    });
+    let centre = |px: &[u8]| -> [u8; 3] {
+        let i = (((height / 2) * width + width / 2) * 4) as usize;
+        [px[i], px[i + 1], px[i + 2]]
+    };
+    let show = |mesh: &mut Renderer| {
+        render_with_readback(&gpu, format, width, height, |e, v| {
+            mesh.encode(
+                e,
+                v,
+                camera_of(FrameParams::IDENTITY, width, height),
+                &plane_only,
+            );
+        })
+    };
+
+    // The last upload is presented, so the ring starts on blue.
+    assert_eq!(
+        centre(&show(&mut mesh)),
+        [0, 0, 255],
+        "last upload presented"
+    );
+
+    // Each earlier frame is still resident, and presenting it by index must
+    // bring back *its* colour — not the most recent one.
+    assert!(mesh.present_frame(10), "frame 10 must still be resident");
+    assert_eq!(
+        centre(&show(&mut mesh)),
+        [255, 0, 0],
+        "presenting frame 10 must show the frame-10 layer"
+    );
+    assert!(mesh.present_frame(11), "frame 11 must still be resident");
+    assert_eq!(
+        centre(&show(&mut mesh)),
+        [0, 255, 0],
+        "presenting frame 11 must show the frame-11 layer"
+    );
+
+    // A frame never uploaded is a miss, and a miss must not disturb what is
+    // presented — the caller decides what to do, and until it does the last
+    // good frame stays on screen.
+    assert!(!mesh.present_frame(99), "frame 99 was never uploaded");
+    assert_eq!(
+        centre(&show(&mut mesh)),
+        [0, 255, 0],
+        "a missed lookup must leave the presented layer alone"
+    );
+
+    // Invalidation drops residency without touching the allocation, so the same
+    // index no longer resolves.
+    mesh.invalidate_frame_ring();
+    assert!(
+        !mesh.present_frame(10),
+        "invalidate must drop residency for every frame"
+    );
+}

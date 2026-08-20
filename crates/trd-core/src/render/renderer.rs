@@ -584,7 +584,47 @@ impl Renderer {
     ///
     /// Panics if `rgba.len() != width * height * 4` or either dimension is zero.
     pub fn update_frame_texture_rgba(&mut self, rgba: &[u8], width: u32, height: u32) {
-        self.frame_plane.upload_rgba(&self.gpu, rgba, width, height);
+        self.frame_plane
+            .upload_rgba(&self.gpu, rgba, width, height, None);
+    }
+
+    /// Uploads `rgba` into the **frame ring** as `frame_index`, so returning to
+    /// this frame later can present it without decoding or uploading again.
+    ///
+    /// Prefer [`present_frame`](Self::present_frame) first: it reports whether
+    /// the frame is still resident, in which case there is nothing to decode.
+    pub fn update_frame_texture_indexed(
+        &mut self,
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+        frame_index: u32,
+    ) {
+        self.frame_plane
+            .upload_rgba(&self.gpu, rgba, width, height, Some(frame_index));
+    }
+
+    /// Presents `frame_index` from the ring if it is still resident.
+    ///
+    /// Returns `false` when it is not, meaning the caller must decode and upload
+    /// it. A `true` is the ring paying off: the frame is shown by writing its
+    /// layer into the fit uniform — no decode, no upload, no CPU traffic.
+    pub fn present_frame(&mut self, frame_index: u32) -> bool {
+        self.frame_plane.present_resident(frame_index)
+    }
+
+    /// Drops every frame resident in the ring.
+    ///
+    /// Call on a seek or a source change: the resident frames' indices refer to
+    /// a timeline that no longer applies, so presenting them would show the
+    /// wrong image. The allocation is kept.
+    pub fn invalidate_frame_ring(&mut self) {
+        self.frame_plane.invalidate_ring();
+    }
+
+    /// How full the frame ring is, and how often frames were reused.
+    pub fn frame_ring_stats(&self) -> FrameRingStats {
+        self.frame_plane.ring_stats()
     }
 
     /// Copies a browser `<video>` element's current frame into the **background
@@ -605,9 +645,10 @@ impl Renderer {
         frame: &web_sys::VideoFrame,
         width: u32,
         height: u32,
+        frame_index: Option<u32>,
     ) {
         self.frame_plane
-            .copy_video_frame(&self.gpu, frame, width, height);
+            .copy_video_frame(&self.gpu, frame, width, height, frame_index);
     }
 
     /// Uploads `image` as the **background frame texture** (#63) sampled by a

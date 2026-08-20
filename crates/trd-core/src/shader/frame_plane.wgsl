@@ -3,20 +3,25 @@
 // off, compare Always) so the mesh scene + gizmos composite on top. It ignores
 // the camera entirely — the plane is authored in clip space directly.
 //
-// Group 0 is the background texture (binding 0) + sampler (binding 1) + a small
-// fit uniform (binding 2). `uv_scale` maps the fullscreen UVs to the sampled
-// sub-rectangle so the image can `Stretch` (scale = (1,1)) or `Cover` the
-// viewport (scale < 1 on the cropped axis), centered. The texture is
-// `Rgba8UnormSrgb`, so texels linearize on sample and the sRGB target re-encodes
-// on store — matching the mesh textured path and the CLI output.
+// Group 0 is the background frame **ring** (binding 0) + sampler (binding 1) + a
+// small fit uniform (binding 2). The ring is a `texture_2d_array`: the decoder
+// fills layers ahead of the renderer, which presents one by index, so showing a
+// different frame costs a uniform write rather than a re-upload. `uv_scale` maps
+// the fullscreen UVs to the sampled sub-rectangle so the image can `Stretch`
+// (scale = (1,1)) or `Cover` the viewport (scale < 1 on the cropped axis),
+// centered. The texture is `Rgba8UnormSrgb`, so texels linearize on sample and
+// the sRGB target re-encodes on store — matching the mesh textured path and the
+// CLI output.
 
 struct Fit {
-    // (scale.x, scale.y, _pad, _pad) — the fullscreen UV is remapped around its
-    // center by `scale`, so `< 1` zooms in (crops) and `1` fills.
+    // (scale.x, scale.y, layer, _pad) — the fullscreen UV is remapped around its
+    // center by `scale`, so `< 1` zooms in (crops) and `1` fills. `layer` selects
+    // which ring slot to present; it is the only thing that changes when the
+    // renderer moves to a frame the ring already holds.
     uv_scale: vec4<f32>,
 };
 
-@group(0) @binding(0) var frame_tex: texture_2d<f32>;
+@group(0) @binding(0) var frame_tex: texture_2d_array<f32>;
 @group(0) @binding(1) var frame_samp: sampler;
 @group(0) @binding(2) var<uniform> fit: Fit;
 
@@ -42,5 +47,5 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    return textureSample(frame_tex, frame_samp, in.uv);
+    return textureSample(frame_tex, frame_samp, in.uv, i32(fit.uv_scale.z));
 }

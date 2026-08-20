@@ -542,7 +542,10 @@ pub(crate) fn create_frame_bind_group_layout(device: &wgpu::Device) -> wgpu::Bin
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Texture {
                     sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2,
+                    // The frame ring: decoded frames occupy array layers, and the
+                    // fit uniform names which one to present. One binding serves
+                    // every slot, so moving to another frame is a uniform write.
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
                     multisampled: false,
                 },
                 count: None,
@@ -555,7 +558,9 @@ pub(crate) fn create_frame_bind_group_layout(device: &wgpu::Device) -> wgpu::Bin
             },
             wgpu::BindGroupLayoutEntry {
                 binding: 2,
-                visibility: wgpu::ShaderStages::VERTEX,
+                // The vertex stage reads `uv_scale.xy` to fit the frame; the
+                // fragment stage reads `uv_scale.z` to pick the ring layer.
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,

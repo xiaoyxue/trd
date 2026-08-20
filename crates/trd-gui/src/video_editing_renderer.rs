@@ -83,6 +83,7 @@ pub struct VideoRendererDiagnostics {
     pub msaa_samples: u32,
     pub asset: Option<ImportedAssetDiagnostics>,
     pub transfers: TransferCounts,
+    pub frame_ring: trd_core::FrameRingStats,
 }
 
 /// Where a frame's pixels come from.
@@ -98,6 +99,10 @@ pub enum FrameSource<'a> {
     /// A decoded browser frame, copied GPU→GPU.
     #[cfg(target_arch = "wasm32")]
     VideoFrame(&'a web_sys::VideoFrame),
+    /// Already resident in the GPU frame ring and presented by
+    /// [`present_resident_frame`](VideoPlacementRenderer::present_resident_frame)
+    /// — there is nothing to upload at all, which is the point of the ring.
+    Resident,
 }
 
 impl FrameSource<'_> {
@@ -108,6 +113,7 @@ impl FrameSource<'_> {
             Self::Rgba(rgba) => rgba.len(),
             #[cfg(target_arch = "wasm32")]
             Self::VideoFrame(_) => 0,
+            Self::Resident => 0,
         }
     }
 }
@@ -281,7 +287,26 @@ impl VideoPlacementRenderer {
             msaa_samples: 4,
             asset: self.asset_diagnostics.clone(),
             transfers: self.transfers,
+            frame_ring: self.renderer.frame_ring_stats(),
         }
+    }
+
+    /// Presents an already-resident frame from the GPU frame ring, if it is
+    /// still there.
+    ///
+    /// A `true` means the caller can skip decoding **and** uploading this frame
+    /// entirely and pass [`FrameSource::Resident`] to [`draw`](Self::draw) — the
+    /// point of the ring. A `false` means it must supply the pixels as usual.
+    pub fn present_resident_frame(&mut self, frame_index: u32) -> bool {
+        self.renderer.present_frame(frame_index)
+    }
+
+    /// Drops every frame resident in the ring — call on a source change, where
+    /// the resident frames' indices no longer refer to the same images. A seek
+    /// deliberately does **not**: those indices still name the same frames, and
+    /// they are exactly what a scrub back wants.
+    pub fn invalidate_frame_ring(&mut self) {
+        self.renderer.invalidate_frame_ring();
     }
 
     /// Resizes the editor's own render target (#203): the harness owns no target
@@ -327,6 +352,7 @@ impl VideoPlacementRenderer {
         rgba: &[u8],
         frame_width: u32,
         frame_height: u32,
+        frame_index: u32,
         calibration_size: (u32, u32),
         background_frame: Option<&trd_core::VideoEditingFrame>,
         quad: QuadOverlay,
@@ -338,6 +364,7 @@ impl VideoPlacementRenderer {
             FrameSource::Rgba(rgba),
             frame_width,
             frame_height,
+            frame_index,
             calibration_size,
             background_frame,
             quad,
@@ -371,6 +398,8 @@ impl VideoPlacementRenderer {
         source: FrameSource<'_>,
         frame_width: u32,
         frame_height: u32,
+        // Which video frame this is, so the ring can serve it again later.
+        frame_index: u32,
         calibration_size: (u32, u32),
         background_frame: Option<&trd_core::VideoEditingFrame>,
         quad: QuadOverlay,
@@ -388,15 +417,22 @@ impl VideoPlacementRenderer {
             ui_upload: 0,
         };
         match source {
-            FrameSource::Rgba(rgba) => {
-                self.renderer
-                    .update_frame_texture_rgba(rgba, frame_width, frame_height)
-            }
+            FrameSource::Rgba(rgba) => self.renderer.update_frame_texture_indexed(
+                rgba,
+                frame_width,
+                frame_height,
+                frame_index,
+            ),
             #[cfg(target_arch = "wasm32")]
-            FrameSource::VideoFrame(frame) => {
-                self.renderer
-                    .update_frame_texture_from_video(frame, frame_width, frame_height)
-            }
+            FrameSource::VideoFrame(frame) => self.renderer.update_frame_texture_from_video(
+                frame,
+                frame_width,
+                frame_height,
+                Some(frame_index),
+            ),
+            // Already presented by `present_resident_frame`; there is nothing to
+            // upload, which is the entire point of the ring.
+            FrameSource::Resident => {}
         }
         let identity_camera = trd_core::FrameParams::IDENTITY
             .to_camera(self.viewport())
