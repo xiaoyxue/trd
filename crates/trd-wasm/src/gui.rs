@@ -447,19 +447,8 @@ impl VideoEditingHandle {
             width: probed.width,
             height: probed.height,
         });
-        self.shared.set_pending_video_info(trd_core::VideoInfo {
-            source_name,
-            mime: String::new(),
-            codec: String::new(),
-            sha256: String::new(),
-            byte_length: 0,
-            width: probed.width,
-            height: probed.height,
-            fps_num: probed.fps_num,
-            fps_den: probed.fps_den,
-            frame_count: probed.frame_count,
-            duration_us: probed.duration_us,
-        });
+        self.shared
+            .set_pending_video_info(trd_core::VideoInfo::from_probe(probed, source_name));
         Ok(())
     }
 

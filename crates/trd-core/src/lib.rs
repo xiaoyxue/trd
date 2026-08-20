@@ -9,8 +9,8 @@ mod frame;
 mod light;
 mod material;
 mod math;
+mod media;
 mod mesh;
-mod mp4_probe;
 // Byte transports live in `io/`; the sessions they drive stay with the format
 // they implement, in `protocol/` (see `io/mod.rs`).
 mod io;
@@ -18,7 +18,6 @@ mod protocol;
 mod render;
 mod session_state;
 mod texture;
-mod video_editing;
 
 pub use camera::{Camera, DEFAULT_FIT_MARGIN, DEFAULT_FOV_Y, DEFAULT_VIEW_DIR};
 pub use frame::{
@@ -68,15 +67,15 @@ pub use render::{
 };
 // The render harness; available on both platforms since readback became async
 // (#180) — the browser could not use it while it blocked on readback.
-pub use mp4_probe::{probe_moov, Mp4VideoInfo};
+pub use media::{
+    decode_video_editing_document, Shot, VideoEditingDocument, VideoEditingError,
+    VideoEditingFrame, VIDEO_EDIT_TABLE_KIND_KEY, VIDEO_EDIT_TIMELINE_KIND, VIDEO_EDIT_VERSION,
+    VIDEO_EDIT_VERSION_KEY,
+};
+pub use media::{probe_moov, VideoInfo, VideoTiming};
 pub use render::{RenderError, Renderer};
 pub use texture::{
     ConstantTexture, ImageData, ImageTexture, Texture, TextureError, TEXTURE_COLUMN,
-};
-pub use video_editing::{
-    decode_video_editing_document, Shot, VideoEditingDocument, VideoEditingError,
-    VideoEditingFrame, VideoInfo, VIDEO_EDIT_TABLE_KIND_KEY, VIDEO_EDIT_TIMELINE_KIND,
-    VIDEO_EDIT_VERSION, VIDEO_EDIT_VERSION_KEY,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
