@@ -19,7 +19,6 @@ use glam::{Mat4, Vec3};
 /// former `assert!`s are one typed variant now.
 #[test]
 #[ignore = "requires a GPU adapter"]
-#[cfg(not(target_arch = "wasm32"))]
 fn renderer_rejects_an_unusable_mesh_set_without_panicking() {
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let mesh = Mesh::hello_triangle();
@@ -59,7 +58,6 @@ fn renderer_rejects_an_unusable_mesh_set_without_panicking() {
     .is_ok());
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 /// The [`Camera`] a set of wire params resolves to for a `width`x`height`
 /// target — the tests' stand-in for what a front-end does at the decode
 /// boundary (#203).
@@ -79,7 +77,6 @@ fn single(format: wgpu::TextureFormat, mesh: &Mesh) -> Renderer {
     .expect("one mesh with one base model is a valid mesh set")
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn render_with_readback(
     gpu: &GpuContext,
     format: wgpu::TextureFormat,
@@ -173,7 +170,6 @@ fn render_with_readback(
 /// once (serialized by `OnceLock`) and hand out clones. Concurrent rendering on
 /// one device is fully supported, so the tests run at the default parallelism
 /// again without tripping the driver's device-creation deadlock.
-#[cfg(not(target_arch = "wasm32"))]
 fn test_gpu() -> std::sync::Arc<GpuContext> {
     static SHARED: std::sync::OnceLock<std::sync::Arc<GpuContext>> = std::sync::OnceLock::new();
     SHARED
@@ -181,7 +177,6 @@ fn test_gpu() -> std::sync::Arc<GpuContext> {
         .clone()
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 async fn create_test_device() -> std::sync::Arc<GpuContext> {
     let instance =
         wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
@@ -221,7 +216,6 @@ async fn create_test_device() -> std::sync::Arc<GpuContext> {
 /// spans the two (#203).
 #[test]
 #[ignore = "requires a GPU adapter"]
-#[cfg(not(target_arch = "wasm32"))]
 fn texture_target_reports_its_render_format_and_size() {
     let (width, height) = (32, 24);
     let renderer = single(TEXTURE_TARGET_FORMAT, &Mesh::hello_triangle());
@@ -253,7 +247,6 @@ fn texture_target_reports_its_render_format_and_size() {
 /// or the submission order.
 #[test]
 #[ignore = "requires a GPU adapter"]
-#[cfg(not(target_arch = "wasm32"))]
 fn draw_then_read_pixels_matches_render_layers() {
     let (width, height) = (32, 24);
     let mut renderer = single(TEXTURE_TARGET_FORMAT, &Mesh::hello_triangle());
@@ -302,7 +295,6 @@ fn draw_then_read_pixels_matches_render_layers() {
 /// `Rgba8Unorm` entry in `view_formats` (or `create_view` is).
 #[test]
 #[ignore = "requires a GPU adapter"]
-#[cfg(not(target_arch = "wasm32"))]
 fn the_target_view_samples_the_bytes_read_pixels_returns() {
     let (width, height) = (32, 24);
     let mut renderer = single(TEXTURE_TARGET_FORMAT, &Mesh::hello_triangle());
@@ -356,7 +348,6 @@ fn the_target_view_samples_the_bytes_read_pixels_returns() {
 /// trd its UI toolkit's device instead of letting trd open a second one.
 #[test]
 #[ignore = "requires a GPU adapter"]
-#[cfg(not(target_arch = "wasm32"))]
 fn an_adopted_context_renders_like_a_requested_one() {
     let (width, height) = (48, 32);
     let meshes = [Mesh::hello_triangle()];
@@ -409,7 +400,6 @@ fn an_adopted_context_renders_like_a_requested_one() {
 /// additional layers actually composite rather than overwrite.
 #[test]
 #[ignore = "requires a GPU adapter"]
-#[cfg(not(target_arch = "wasm32"))]
 fn render_layers_composites_and_matches_render_for_one_layer() {
     let (width, height) = (64, 48);
     let mut renderer = single(TEXTURE_TARGET_FORMAT, &Mesh::hello_triangle());
@@ -483,7 +473,6 @@ fn render_layers_composites_and_matches_render_for_one_layer() {
 /// pixels back.
 #[test]
 #[ignore = "requires a GPU adapter"]
-#[cfg(not(target_arch = "wasm32"))]
 fn the_quad_fill_washes_the_target_translucent_green() {
     let (width, height) = (64, 48);
     let mut renderer = single(TEXTURE_TARGET_FORMAT, &Mesh::hello_triangle());
@@ -532,7 +521,6 @@ fn the_quad_fill_washes_the_target_translucent_green() {
 /// out from under the renderer, render again at the new size.
 #[test]
 #[ignore = "requires a GPU adapter"]
-#[cfg(not(target_arch = "wasm32"))]
 fn render_params_after_resizing_a_caller_owned_target() {
     let scene: Scene = vec![DrawableObject::mesh(
         0,
@@ -588,7 +576,6 @@ fn render_params_after_resizing_a_caller_owned_target() {
 /// compares them byte for byte.
 #[test]
 #[ignore = "requires a GPU adapter"]
-#[cfg(not(target_arch = "wasm32"))]
 fn with_gpu_renders_identically_to_with_meshes() {
     use crate::Renderer;
 
@@ -637,7 +624,6 @@ fn with_gpu_renders_identically_to_with_meshes() {
 /// cache rather than an optimization.
 #[test]
 #[ignore = "requires a GPU adapter"]
-#[cfg(not(target_arch = "wasm32"))]
 fn a_material_change_between_frames_still_reaches_the_slots() {
     let gpu = test_gpu();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -688,7 +674,6 @@ fn a_material_change_between_frames_still_reaches_the_slots() {
 
 #[test]
 #[ignore = "requires a GPU adapter"]
-#[cfg(not(target_arch = "wasm32"))]
 fn first_frame_renders_with_no_setters_called() {
     let gpu = test_gpu();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -719,7 +704,6 @@ fn first_frame_renders_with_no_setters_called() {
 
 #[test]
 #[ignore = "requires a GPU adapter"]
-#[cfg(not(target_arch = "wasm32"))]
 fn mesh_renderer_draws_multiple_instances() {
     let gpu = test_gpu();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -785,7 +769,6 @@ fn mesh_renderer_draws_multiple_instances() {
 
 #[test]
 #[ignore = "requires a GPU adapter"]
-#[cfg(not(target_arch = "wasm32"))]
 fn mesh_renderer_depth_buffer_occludes_far_behind_near() {
     // Two full-screen quads fully overlapping in screen space: a RED quad
     // nearer the camera (NDC z=0.25) and a GREEN quad farther (z=0.75). The
@@ -865,7 +848,6 @@ fn mesh_renderer_depth_buffer_occludes_far_behind_near() {
 
 #[test]
 #[ignore = "requires a GPU adapter"]
-#[cfg(not(target_arch = "wasm32"))]
 fn mesh_renderer_wireframe_lights_edges_only() {
     let gpu = test_gpu();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -938,7 +920,6 @@ fn mesh_renderer_wireframe_lights_edges_only() {
 
 #[test]
 #[ignore = "requires a GPU adapter"]
-#[cfg(not(target_arch = "wasm32"))]
 fn mesh_renderer_textured_samples_bound_texture() {
     // A full-screen quad mapped 1:1 to a 2×2 checker texture (#20): white,
     // red / green, blue (top-left origin). Each screen quadrant must show the
@@ -1039,7 +1020,6 @@ fn mesh_renderer_textured_samples_bound_texture() {
 
 #[test]
 #[ignore = "requires a GPU adapter"]
-#[cfg(not(target_arch = "wasm32"))]
 fn mesh_renderer_aabb_overlay_draws_green_box() {
     let gpu = test_gpu();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -1099,7 +1079,6 @@ fn mesh_renderer_aabb_overlay_draws_green_box() {
 
 #[test]
 #[ignore = "requires a GPU adapter"]
-#[cfg(not(target_arch = "wasm32"))]
 fn mesh_renderer_axes_overlay_draws_rgb_gizmo() {
     let gpu = test_gpu();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -1162,7 +1141,6 @@ fn mesh_renderer_axes_overlay_draws_rgb_gizmo() {
 
 #[test]
 #[ignore = "requires a GPU adapter"]
-#[cfg(not(target_arch = "wasm32"))]
 fn gizmo_lines_and_arrowheads_stay_smooth_without_msaa() {
     let gpu = test_gpu();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -1223,7 +1201,6 @@ fn gizmo_lines_and_arrowheads_stay_smooth_without_msaa() {
 
 #[test]
 #[ignore = "requires a GPU adapter"]
-#[cfg(not(target_arch = "wasm32"))]
 fn scene_composes_all_drawable_kinds_together() {
     // #41: every primitive is a `DrawableObject`, and every front-end submits
     // the same heterogeneous `Scene` for draw-kind batching. A scene mixing a
@@ -1294,7 +1271,6 @@ fn scene_composes_all_drawable_kinds_together() {
 
 /// A unit quad centered at the origin in the z=0 plane, spanning
 /// `[-0.5, 0.5]²`. Used to render a *loaded* mesh (not the baked triangle).
-#[cfg(not(target_arch = "wasm32"))]
 const QUAD_OBJ: &str = "\
 v -0.5 -0.5 0.0
 v 0.5 -0.5 0.0
@@ -1324,7 +1300,6 @@ f 1 2 6 5
 
 #[test]
 #[ignore = "requires a GPU adapter"]
-#[cfg(not(target_arch = "wasm32"))]
 fn environment_background_draws_bound_probe() {
     let gpu = test_gpu();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -1360,7 +1335,6 @@ fn environment_background_draws_bound_probe() {
 
 #[test]
 #[ignore = "requires a GPU adapter"]
-#[cfg(not(target_arch = "wasm32"))]
 fn mesh_renderer_renders_loaded_quad_filled_with_correct_coverage() {
     // #37/#41: a mesh loaded from OBJ (not the baked triangle) renders filled
     // via `draw_indexed` as a `Primitive::Mesh`. Under the identity camera
@@ -1423,7 +1397,6 @@ fn mesh_renderer_renders_loaded_quad_filled_with_correct_coverage() {
 
 #[test]
 #[ignore = "requires a GPU adapter"]
-#[cfg(not(target_arch = "wasm32"))]
 fn cg_and_cv_cameras_render_matching_output() {
     // #43/#49: a CG-authored camera (eye/target/up/fovy) and its CV-lowered
     // equivalent (pose = world-from-camera, K = intrinsics) describe the *same*
@@ -1507,7 +1480,6 @@ fn cg_and_cv_cameras_render_matching_output() {
 
 #[test]
 #[ignore = "requires a GPU adapter"]
-#[cfg(not(target_arch = "wasm32"))]
 fn dolly_turntable_bird_eye_cg_cv_wireframe_stays_framed() {
     // #49 scenario end-to-end: a fixed 45° bird's-eye camera dollies in and
     // out while a mesh spins about +Y, rendered as a **wireframe**. At every
@@ -1657,7 +1629,6 @@ fn dolly_turntable_bird_eye_cg_cv_wireframe_stays_framed() {
 
 #[test]
 #[ignore = "requires a GPU adapter"]
-#[cfg(not(target_arch = "wasm32"))]
 fn frame_plane_composites_background_under_scene() {
     // The scene's background frame plane fills the frame from a reused 2×2 texture (upload +
     // fullscreen sample + top-left `v=0` orientation), and a solid mesh drawn
@@ -1811,7 +1782,6 @@ fn frame_plane_composites_background_under_scene() {
 
 #[test]
 #[ignore = "requires a GPU adapter"]
-#[cfg(not(target_arch = "wasm32"))]
 fn triangle_renderer_draws_gradient_triangle() {
     let gpu = test_gpu();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -1857,7 +1827,6 @@ fn triangle_renderer_draws_gradient_triangle() {
 /// on a real GPU, including the lazily allocated `PickTarget` it owns (#235 R4).
 #[test]
 #[ignore = "requires a GPU adapter"]
-#[cfg(not(target_arch = "wasm32"))]
 fn picking_resolves_object_ids_and_background() {
     let quad = Mesh::from_obj(QUAD_OBJ).expect("quad OBJ parses");
     // The main-pass format is irrelevant to picking (its pipeline is PICK_FORMAT).
