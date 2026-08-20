@@ -3,8 +3,9 @@ use crate::protocol::{
     check_version, decode_draws, decode_frame_refs, ProtocolError, PROTOCOL_VERSION,
 };
 use crate::protocol::{MESH_TABLE_KIND, PARAMS_TABLE_KIND, PROTOCOL_VERSION_KEY, TABLE_KIND_KEY};
-use crate::render::{DrawSelection, RenderMode};
+use crate::render::{Draw, DrawSelection, RenderMode};
 use crate::stream::*;
+use crate::Mesh;
 use arrow::array::{
     Array, ArrayRef, FixedSizeListArray, FixedSizeListArray as U8List, Float32Array, ListArray,
     StringArray, UInt32Array, UInt8Array,

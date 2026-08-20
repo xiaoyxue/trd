@@ -19,15 +19,13 @@
 
 use arrow::array::RecordBatch;
 use std::io::{Read, Write};
-use std::sync::Arc;
 
 // `Matrix4` is referenced only by the `#[cfg(test)]` unit tests (imported there).
 use crate::protocol::ProtocolError;
+use crate::render::FrameFit;
 use crate::render::{
-    check_dimensions, FrameParams, Mesh, RenderOptions, Renderer, TargetError, TextureTarget,
+    check_dimensions, FrameParams, RenderOptions, Renderer, TargetError, TextureTarget,
 };
-use crate::render::{Draw, FrameFit};
-use crate::texture::ImageTexture;
 use crate::OutputStream;
 
 /// Errors from decoding, validating, rendering, or encoding a trd stream.
@@ -73,76 +71,20 @@ impl From<TargetError> for StreamError {
     }
 }
 
+/// [`FrameError`](crate::FrameError) likewise reaches [`StreamError`] through
+/// [`ProtocolError::Frames`], so decoding an inline background needs no
+/// hand-written mapping at the call site.
+impl From<crate::FrameError> for StreamError {
+    fn from(error: crate::FrameError) -> Self {
+        StreamError::Protocol(error.into())
+    }
+}
+
 /// Decodes every row of `batch` into [`FrameParams`]. Delegates to the single
 /// shared per-batch decoder [`crate::protocol::decode_batch`] (the source of
 /// truth for both the native and wasm paths).
 pub fn decode_frames(batch: &RecordBatch) -> Result<Vec<FrameParams>, StreamError> {
     Ok(crate::protocol::decode_batch(batch)?)
-}
-
-/// The draw list a decoded frame resolves to, with every `mesh_id` checked
-/// against the uploaded mesh set — the callback path hands callers a `Vec<Draw>`
-/// rather than a `Scene`, so it validates through the same rule
-/// [`Scene::try_from_frame`](crate::Scene::try_from_frame) applies.
-fn validated_draws(
-    frame: &crate::DecodedFrame,
-    mesh_count: usize,
-) -> Result<Vec<Draw>, StreamError> {
-    let draws = frame.resolved_draws();
-    for draw in &draws {
-        if draw.mesh_id as usize >= mesh_count {
-            return Err(crate::SceneError::MeshIndexOutOfRange {
-                mesh_id: draw.mesh_id,
-                mesh_count,
-            }
-            .into());
-        }
-    }
-    Ok(draws)
-}
-
-/// Reads a trd input stream **mesh-aware** — the same
-/// `[mesh][texture?][frames?][params]`
-/// framing [`run_stream`] uses — for a live front-end (e.g. the windowed
-/// `trd-app`) that owns its own render target and encodes each frame's
-/// [`Scene`](crate::Scene) itself, rather than the headless byte-stream path
-/// [`run_stream`] drives.
-///
-/// Invokes `on_meshes` **once** with the decoded (required) leading mesh table,
-/// then `on_texture` **once** with the optional bound texture (`Some` only when
-/// the stream carries a texture table), then `on_meta` with the stream's declared
-/// playback rate, then `on_frame` for each frame's `(FrameParams, draws)` in
-/// order. A frame carrying no wire draw list defaults to one instance of mesh 0
-/// placed by the frame's own model — matching [`run_stream`]. The mesh table's
-/// rows are referenced by 0-based index; out-of-range `mesh_id`s are an error. A
-/// params-only stream with no leading mesh table is a
-/// [`StreamError::MissingMeshStream`].
-pub fn read_scene_stream_with_meta<R: Read>(
-    input: R,
-    on_meshes: impl FnOnce(Vec<Mesh>),
-    on_texture: impl FnOnce(Option<ImageTexture>),
-    on_meta: impl FnOnce(f64),
-    mut on_frame: impl FnMut(FrameParams, Vec<Draw>, Option<String>, Option<Arc<crate::ImageData>>),
-) -> Result<(), StreamError> {
-    let mut input = crate::InputStream::new(input);
-    let prologue = input.prologue()?;
-    let mesh_count = prologue.meshes.len();
-    on_meshes(prologue.meshes.to_vec());
-    on_texture(prologue.texture.cloned());
-    on_meta(prologue.frame_rate);
-
-    let mut inline_cache = crate::InlineFrameCache::default();
-    while let Some(batch) = input.next_batch() {
-        for frame in batch? {
-            let draws = validated_draws(&frame, mesh_count)?;
-            let inline = inline_cache
-                .resolve(frame.frame_id, input.frames())
-                .map_err(ProtocolError::from)?
-                .map(|(image, _changed)| image);
-            on_frame(frame.params, draws, frame.frame_ref, inline);
-        }
-    }
-    input.finish()
 }
 
 /// A shell-provided closure that resolves a per-frame background frame reference
@@ -186,10 +128,7 @@ fn render_and_write_batch<W: Write>(
     let mut planes: Vec<Vec<u8>> = Vec::with_capacity(batch.len());
     for frame in batch {
         let mut frame_fit = None;
-        if let Some((image, changed)) = inline_cache
-            .resolve(frame.frame_id, inline_frames)
-            .map_err(ProtocolError::from)?
-        {
+        if let Some((image, changed)) = inline_cache.resolve(frame.frame_id, inline_frames)? {
             if changed {
                 renderer.update_frame_texture(&image);
             }

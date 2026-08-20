@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::Arc;
 
-use trd_core::{read_scene_stream_with_meta, Draw, FrameParams, ImageData, ImageTexture, Mesh};
+use trd_core::{
+    Draw, FrameParams, ImageData, ImageTexture, InlineFrameCache, InputStream, Mesh, SceneError,
+};
 
 /// A message from the stdin reader thread: the decoded mesh table (sent once,
 /// first), then the optional bound texture (once, only for a `0.0.4` stream
@@ -50,45 +52,64 @@ pub(crate) fn spawn_stdin_reader(tx: mpsc::Sender<StreamMsg>, frames_base: Optio
     let spawned = std::thread::Builder::new()
         .name("trd-stdin-reader".to_string())
         .spawn(move || {
-            let stdin = std::io::stdin().lock();
-            let meshes_tx = tx.clone();
-            let texture_tx = tx.clone();
-            let rate_tx = tx.clone();
             // A send error just means the window closed; stop reading in that case.
-            if let Err(err) = read_scene_stream_with_meta(
-                stdin,
-                |meshes| {
-                    let _ = meshes_tx.send(StreamMsg::Meshes(meshes));
-                },
-                |texture| {
-                    if let Some(texture) = texture {
-                        let _ = texture_tx.send(StreamMsg::Texture(texture));
-                    }
-                },
-                |rate| {
-                    let _ = rate_tx.send(StreamMsg::Rate(rate));
-                },
-                |params, draws, frame_ref, inline_frame| {
-                    let frame_image = inline_frame.or_else(|| {
-                        frame_ref
-                            .as_deref()
-                            .zip(frames_base.as_ref())
-                            .and_then(|(rel, base)| load_frame_image(&base.join(rel)))
-                            .map(Arc::new)
-                    });
-                    let _ = tx.send(StreamMsg::Frame(Box::new(FrameData {
-                        params,
-                        draws,
-                        frame_image,
-                    })));
-                },
-            ) {
+            if let Err(err) = read_stdin(&tx, frames_base) {
                 log::error!("input stream error: {err}");
             }
         });
     if let Err(err) = spawned {
         log::error!("failed to spawn stdin reader thread: {err}");
     }
+}
+
+/// Drives the stream: the prologue once, then a frame per timeline row.
+///
+/// The loop lives here rather than behind a callback API in `trd-core` because
+/// it is three lines and this shell is the only thing that knows what to do with
+/// each frame — forward it to the window thread, which paces playback itself.
+fn read_stdin(
+    tx: &mpsc::Sender<StreamMsg>,
+    frames_base: Option<PathBuf>,
+) -> Result<(), trd_core::StreamError> {
+    let mut input = InputStream::new(std::io::stdin().lock());
+    let prologue = input.prologue()?;
+    let mesh_count = prologue.meshes.len();
+    let _ = tx.send(StreamMsg::Meshes(prologue.meshes.to_vec()));
+    if let Some(texture) = prologue.texture {
+        let _ = tx.send(StreamMsg::Texture(texture.clone()));
+    }
+    let _ = tx.send(StreamMsg::Rate(prologue.frame_rate));
+
+    let mut inline_cache = InlineFrameCache::default();
+    while let Some(batch) = input.next_batch() {
+        for frame in batch? {
+            let draws = frame.resolved_draws();
+            if let Some(bad) = draws.iter().find(|d| d.mesh_id as usize >= mesh_count) {
+                return Err(SceneError::MeshIndexOutOfRange {
+                    mesh_id: bad.mesh_id,
+                    mesh_count,
+                }
+                .into());
+            }
+            let frame_image = inline_cache
+                .resolve(frame.frame_id, input.frames())?
+                .map(|(image, _changed)| image)
+                .or_else(|| {
+                    frame
+                        .frame_ref
+                        .as_deref()
+                        .zip(frames_base.as_ref())
+                        .and_then(|(rel, base)| load_frame_image(&base.join(rel)))
+                        .map(Arc::new)
+                });
+            let _ = tx.send(StreamMsg::Frame(Box::new(FrameData {
+                params: frame.params,
+                draws,
+                frame_image,
+            })));
+        }
+    }
+    input.finish()
 }
 
 /// Decodes a background frame image file (PNG/JPEG) to RGBA at its full source
