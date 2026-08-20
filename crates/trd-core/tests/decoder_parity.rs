@@ -1,18 +1,28 @@
 //! Decoder parity test (issue #88, guards #84).
 //!
-//! The native decoder ([`trd_core::InputStream`], `io/input_stream.rs`)
-//! and the wasm push decoder ([`trd_core::InputSession`], `protocol.rs`)
-//! reimplement the same Arrow column decode + schema validation independently.
-//! Divergence causes "fix the bug in one decoder but not the other" regressions
-//! — e.g. the `input field `center` must be non-nullable` bug (`08c113a`), where
-//! the wasm decoder rejected a stream the native decoder accepted.
+//! The column decode is **no longer duplicated**: since #104/#108 unified the
+//! per-batch decoders and #296 split transport from format, both paths run the
+//! same [`trd_core::InputSession`] over the one decoder in
+//! `protocol/arrow_decode.rs`. The native side ([`trd_core::InputStream`],
+//! `io/input_stream.rs`) is a *byte transport* that owns a `Read` and feeds that
+//! session; the browser pushes bytes into it directly.
+//!
+//! So what this test guards is no longer decoder-versus-decoder divergence — it
+//! is **driver** divergence. A pull loop over an IPC stream and a push session
+//! differ in framing, chunk boundaries, accumulation across sub-streams,
+//! external-reference resolution and inline-image decode, and a bug in any of
+//! those appears on one path only. The original motivating defect — the
+//! `input field `center` must be non-nullable` bug (`08c113a`), where the wasm
+//! decoder rejected a stream the native decoder accepted — is the shape of
+//! failure still worth catching, even though its specific cause is now shared
+//! code.
 //!
 //! This test decodes the **same committed Arrow bytes** (the golden fixtures,
-//! `[mesh][texture?][frames][params]`) through both paths and asserts they yield
-//! identical per-frame params, draws, external references, and decoded inline
-//! background pixels. It needs no GPU, so —
+//! `[mesh][texture?][frames][params]`) through both drivers and asserts they
+//! yield identical per-frame params, draws, external references, and decoded
+//! inline background pixels. It needs no GPU, so —
 //! unlike the golden render test — it runs in `nix flake check` (`cargo test`)
-//! and guards the decoders on every change.
+//! and guards both drivers on every change.
 
 use std::path::{Path, PathBuf};
 

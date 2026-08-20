@@ -237,9 +237,13 @@ python3 scripts/golden_fixtures.py
 TRD_UPDATE_GOLDENS=1 cargo test -p trd-core --test golden_render -- --ignored
 ```
 The companion **non-GPU** `tests/decoder_parity.rs` decodes the same fixtures
-through both the native (`stream.rs`) and wasm (`protocol.rs`) decoders and
-asserts identical frames — it runs in `nix flake check` and guards against
-decoder divergence (e.g. the `center` non-nullable bug).
+through both **drivers** — the native `InputStream` (`io/input_stream.rs`, a byte
+transport owning a `Read`) and the browser's push `InputSession` — and asserts
+identical frames. The column decode itself is *not* duplicated: both run the one
+decoder in `protocol/arrow_decode.rs`, so what this guards is driver divergence
+(framing, chunk boundaries, sub-stream accumulation, external references, inline
+decode), the shape of failure the `center` non-nullable bug had. It runs in
+`nix flake check`.
 
 ## PR Workflow
 
