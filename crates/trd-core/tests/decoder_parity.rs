@@ -8,21 +8,33 @@
 //! session; the browser pushes bytes into it directly.
 //!
 //! So what this test guards is no longer decoder-versus-decoder divergence — it
-//! is **driver** divergence. A pull loop over an IPC stream and a push session
-//! differ in framing, chunk boundaries, accumulation across sub-streams,
-//! external-reference resolution and inline-image decode, and a bug in any of
-//! those appears on one path only. The original motivating defect — the
-//! `input field `center` must be non-nullable` bug (`08c113a`), where the wasm
-//! decoder rejected a stream the native decoder accepted — is the shape of
-//! failure still worth catching, even though its specific cause is now shared
-//! code.
+//! is **API-surface** divergence. Framing, sub-stream boundary recovery and
+//! external-reference decode all live *inside* `InputSession`, so they cannot
+//! differ; what can are the two public surfaces a caller actually assembles a
+//! frame through:
+//!
+//! * the drivers — `InputStream::{prologue, next_batch, finish}` versus a bare
+//!   `InputSession::push`, which the browser calls without a prologue or a
+//!   `finish` at all;
+//! * the inline-background APIs — [`trd_core::InlineFrameCache`], which decodes
+//!   once per `frame_id` change, versus `InlineFrame::decode` called per frame;
+//! * the chunking — 64 KiB reads versus one push, though
+//!   `protocol`'s own `*_across_every_split` tests already cover boundary
+//!   independence far more thoroughly than this test's single split does.
+//!
+//! A bug in any of those appears on one path only. The original motivating
+//! defect — the `input field `center` must be non-nullable` bug (`08c113a`),
+//! where the wasm decoder rejected a stream the native decoder accepted — is the
+//! shape of failure still worth catching, even though its specific cause is now
+//! shared code.
 //!
 //! This test decodes the **same committed Arrow bytes** (the golden fixtures,
-//! `[mesh][texture?][frames][params]`) through both drivers and asserts they
+//! `[mesh][texture?][frames][params]`) through both surfaces and asserts they
 //! yield identical per-frame params, draws, external references, and decoded
-//! inline background pixels. It needs no GPU, so —
-//! unlike the golden render test — it runs in `nix flake check` (`cargo test`)
-//! and guards both drivers on every change.
+//! inline background pixels — agreement at the *assembled frame*, not merely at
+//! the `RecordBatch`. It needs no GPU, so — unlike the golden render test — it
+//! runs in `nix flake check` (`cargo test`) and guards both surfaces on every
+//! change.
 
 use std::path::{Path, PathBuf};
 
