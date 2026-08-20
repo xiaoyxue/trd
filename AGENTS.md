@@ -184,8 +184,9 @@ Guidance for agents working in this repository.
   `RTX PRO 6000 > RTX 5090 > RTX 6000 Ada > RTX 4090 > RTX A6000 > RTX 3090 > others`.
   List adapters with `nvidia-smi --query-gpu=index,name,memory.total --format=csv`;
   confirm trd's choice from its `trd_core=info` log line
-  `using Vulkan adapter "…" (DiscreteGpu)`. The native render path (`stream.rs`)
-  requests `PowerPreference::HighPerformance`, so Vulkan prefers the discrete card
+  `using Vulkan adapter "…" (DiscreteGpu)`. Adapter selection lives in
+  `render/gpu_context.rs`, whose `GpuRequest` defaults to
+  `PowerPreference::HighPerformance`, so Vulkan prefers the discrete card
   (verified: picks the RTX 3090 over a P620). To force one: Mesa
   `MESA_VK_DEVICE_SELECT=<vendorId>:<deviceId>`; multi-GPU NVIDIA
   `__NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia` (GL) — plain
