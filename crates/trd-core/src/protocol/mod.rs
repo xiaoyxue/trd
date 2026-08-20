@@ -877,9 +877,9 @@ mod tests {
     #[test]
     fn accepts_nullable_declared_fields_with_non_null_values() {
         // Producers (e.g. pyarrow) emit nullable-by-default fields whose *values*
-        // are non-null. The native decoder (`stream.rs`) accepts these, so this
-        // cross-platform/wasm decoder must too — otherwise the same stream
-        // renders on the CLI but fails to load in the browser. Only null
+        // are non-null. The native path accepted these before #104/#108 unified
+        // the decoders, so the one shared decoder must too — otherwise the same
+        // stream renders on the CLI but fails to load in the browser. Only null
         // *values* are rejected (see `rejects_schema_type_errors_and_runtime_nulls`).
         let nullable_model = test_batch_with(
             schema_with(

@@ -13,7 +13,8 @@ A trd texture table is **one row = one image**, carried in a single column
     height/width come from that shape, not a separate column.
 
 This is the *same* ``fixed_shape_tensor<u8>`` canonical extension family trd
-already emits on its output (a rendered frame, ``output.rs``), so a texture input
+already emits on its output (a rendered frame,
+``crates/trd-core/src/protocol/output_session.rs``), so a texture input
 is symmetric with a rendered frame — only the layout differs (a texture is one
 interleaved ``[H, W, 4]`` tensor; the output is per-channel planar ``[H, W]``
 tensors). ``ImageTexture::from_arrow`` reads row 0's ``H*W*4`` bytes as row-major
