@@ -184,8 +184,9 @@ Guidance for agents working in this repository.
   `RTX PRO 6000 > RTX 5090 > RTX 6000 Ada > RTX 4090 > RTX A6000 > RTX 3090 > others`.
   List adapters with `nvidia-smi --query-gpu=index,name,memory.total --format=csv`;
   confirm trd's choice from its `trd_core=info` log line
-  `using Vulkan adapter "…" (DiscreteGpu)`. The native render path (`stream.rs`)
-  requests `PowerPreference::HighPerformance`, so Vulkan prefers the discrete card
+  `using Vulkan adapter "…" (DiscreteGpu)`. The native render path
+  (`stream_filter/`) requests `PowerPreference::HighPerformance`, so Vulkan
+  prefers the discrete card
   (verified: picks the RTX 3090 over a P620). To force one: Mesa
   `MESA_VK_DEVICE_SELECT=<vendorId>:<deviceId>`; multi-GPU NVIDIA
   `__NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia` (GL) — plain
@@ -237,7 +238,8 @@ python3 scripts/golden_fixtures.py
 TRD_UPDATE_GOLDENS=1 cargo test -p trd-core --test golden_render -- --ignored
 ```
 The companion **non-GPU** `tests/decoder_parity.rs` decodes the same fixtures
-through both the native (`stream.rs`) and wasm (`protocol.rs`) decoders and
+through both the native (`io/input_stream.rs`) and wasm
+(`protocol/input_session.rs`) decoders and
 asserts identical frames — it runs in `nix flake check` and guards against
 decoder divergence (e.g. the `center` non-nullable bug).
 

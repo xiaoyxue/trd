@@ -1,7 +1,8 @@
 //! Decoder parity test (issue #88, guards #84).
 //!
 //! The native decoder ([`trd_core::InputStream`], `io/input_stream.rs`)
-//! and the wasm push decoder ([`trd_core::InputSession`], `protocol.rs`)
+//! and the wasm push decoder ([`trd_core::InputSession`],
+//! `protocol/input_session.rs`)
 //! reimplement the same Arrow column decode + schema validation independently.
 //! Divergence causes "fix the bug in one decoder but not the other" regressions
 //! — e.g. the `input field `center` must be non-nullable` bug (`08c113a`), where

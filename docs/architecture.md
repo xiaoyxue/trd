@@ -103,18 +103,26 @@ Platform-agnostic wgpu logic, shared verbatim by every target:
   **device-free**: a mesh's GPU residency is its face in `render/mesh_store.rs`,
   and the `Vertex` layout it is written in stays with the other `repr(C)` + `Pod`
   types in `render/gpu_types.rs`.
-- **`stream.rs` + `protocol.rs`** — the Arrow input layer. `protocol.rs`'s
-  `InputSession` is the **single framing driver** (native + wasm): it feeds byte
-  chunks through `arrow`'s `StreamDecoder`, validates explicit `0.0.6`
-  `trd.table.kind` metadata, decodes `[mesh][texture?][frames?][params]`, and
-  yields one `FrameBatch` per params record batch. `stream.rs` (`run_stream` for
-  the CLI, `read_scene_stream_with_meta` for the window) drives it from a
-  blocking `Read`. Params stay one batch in flight; optional indexed frames
-  resources are retained for playback/reuse (encoded Binary stays compressed
-  until selected).
-- **`output.rs`** — the Arrow IPC *output* serialization. `OutputSession` writes
-  the `r,g,b,a` `fixed_shape_tensor<u8>` stream incrementally; `tightly_pack_rgba`
-  strips GPU row padding. Shared by the CLI and the browser offscreen renderer.
+- **`protocol/` + `io/` + `stream_filter/`** — the Arrow input layer, split by
+  role (#296). `protocol/` is the **wire format**: `protocol/input_session.rs`'s
+  `InputSession` is the single framing driver (native + wasm), feeding byte
+  chunks through `arrow`'s `StreamDecoder`, validating explicit `0.0.6`
+  `trd.table.kind` metadata, decoding `[mesh][texture?][frames?][params]`, and
+  yielding one `FrameBatch` per params record batch. `io/` is the **byte
+  transport** — `io/input_stream.rs` and `io/output_stream.rs` adapt a blocking
+  `Read`/`Write` to those sessions, and are native-only. `stream_filter/`
+  (`run_stream` for the CLI, `read_scene_stream_with_meta` for the window) is the
+  filter that joins them. Params stay one batch in flight; optional indexed
+  frames resources are retained for playback/reuse (encoded Binary stays
+  compressed until selected).
+- **`protocol/image_encode.rs`** — the Arrow IPC *output* serialization.
+  `OutputSession` (`protocol/output_session.rs`) writes the `r,g,b,a`
+  `fixed_shape_tensor<u8>` stream incrementally; `tightly_pack_rgba` strips GPU
+  row padding. Shared by the CLI and the browser offscreen renderer.
+- **`media/`** — everything about a *video* rather than the render wire: one
+  `VideoTiming` shared by the container probe (`media/mp4_probe/`) and the
+  `0.2.0` authoring document (`media/video_document/`), plus the columnar
+  helpers in `media/arrow_columns.rs` (#296).
 - **`math/`** — the typed homogeneous linear-algebra layer over glam
   (`Vector`/`Point`/`Normal`/`Matrix`/`Rotation`/`Transform`/`Aabb`): zero-cost
   `#[repr(transparent)]` newtypes with **private** fields enforcing affine rules
@@ -165,11 +173,11 @@ Each is a *thin shell* that only supplies a render target and calls the core:
 
 | Path | What it is |
 |---|---|
-| `crates/trd-core` | the unified render core (`render/` module tree, `shader/*.wgsl`, `stream.rs`, `protocol.rs`) |
+| `crates/trd-core` | the unified render core (`render/` module tree, `shader/*.wgsl`, `protocol/`, `io/`, `media/`, `stream_filter/`) |
 | `crates/trd-cli` | headless CLI: Arrow stream in → Arrow image out |
-| `crates/trd-gui` | reusable egui UI, scene/interaction state, native render backends, and browser wasm entry |
+| `crates/trd-gui` | reusable egui UI, scene/interaction state, and render backends — a plain `rlib`, native + wasm, with no `wasm-bindgen` of its own |
 | `crates/trd-placement` | GPU-free K + image-quad reconstruction and placement matrices |
-| `crates/trd-wasm` | `wasm-bindgen` browser bindings (`canvas_renderer`/`offscreen_renderer`); the `trd-wasm` npm library |
+| `crates/trd-wasm` | the **only** `wasm-bindgen` crate: viewer bindings (`canvas_renderer`/`offscreen_renderer`) + the GUI entry points (`gui.rs`, `gui_web_app.rs`); the `trd-wasm` npm library |
 | `native/trd-app` | native stream-playback window (winit + live wgpu surface) |
 | `native/trd-gui-app` | native eframe shell around the reusable `trd-gui` library |
 | `native/trd-gui-video-editing` | native ffmpeg-backed video timeline/player shell |
