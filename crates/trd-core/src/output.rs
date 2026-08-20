@@ -68,20 +68,6 @@ enum OutputState {
     Failed,
 }
 
-#[derive(Clone, Default)]
-struct OutputBytes(Rc<RefCell<Vec<u8>>>);
-
-impl Write for OutputBytes {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.borrow_mut().extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 #[derive(Clone, Copy)]
 struct OutputLayout {
     pixels: usize,
@@ -212,38 +198,96 @@ pub fn output_batch(
     Ok(RecordBatch::try_new(schema, columns)?)
 }
 
+/// The **semantic** half of the output protocol: the schema, and RGBA frames →
+/// one [`RecordBatch`]. Owns no transport, so it is a plain non-generic type
+/// usable on any platform (its `*Stream` counterpart carries the `W`).
 pub struct OutputSession {
     schema: Arc<Schema>,
-    sink: OutputBytes,
-    writer: StreamWriter<OutputBytes>,
-    state: OutputState,
     width: u32,
     height: u32,
 }
 
 impl OutputSession {
-    pub fn new(width: u32, height: u32) -> Result<Self, OutputError> {
-        Self::with_frame_rate(width, height, None)
+    /// Builds the session for a `width` × `height` image stream, optionally
+    /// stamping the playback rate (`trd.stream.frame_rate`) into the schema.
+    pub fn new(width: u32, height: u32, frame_rate: Option<f64>) -> Result<Self, OutputError> {
+        Ok(Self {
+            schema: Arc::new(output_schema_with_frame_rate(width, height, frame_rate)?),
+            width,
+            height,
+        })
     }
 
-    /// Builds an output session whose schema also carries the stream playback
-    /// rate (`trd.stream.frame_rate`) when `frame_rate` is `Some`.
-    pub fn with_frame_rate(
+    /// The stream's schema, as written by the IPC writer's header.
+    pub fn schema(&self) -> Arc<Schema> {
+        self.schema.clone()
+    }
+
+    /// Encodes one batch of tightly packed RGBA frames into its planar
+    /// `r`/`g`/`b`/`a` [`RecordBatch`].
+    pub fn encode(&self, frames: &[Vec<u8>]) -> Result<RecordBatch, OutputError> {
+        output_batch(self.schema.clone(), frames, self.width, self.height)
+    }
+}
+
+/// An in-memory [`Write`] sink shared with its writer, for callers that have no
+/// real transport to write into — the browser's `OffscreenRenderer`, which hands
+/// finished IPC bytes to JS as a `Uint8Array`.
+///
+/// Native callers pass a real `W` (`StdoutLock`, a socket, a file) instead and
+/// never need [`OutputStream::drain_new`].
+#[derive(Clone, Default)]
+pub struct SharedBuffer(Rc<RefCell<Vec<u8>>>);
+
+impl SharedBuffer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Removes and returns everything written since the last take.
+    pub fn take(&self) -> Vec<u8> {
+        std::mem::take(&mut *self.0.borrow_mut())
+    }
+}
+
+impl Write for SharedBuffer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.borrow_mut().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The **transport** half of the output protocol: an [`OutputSession`] plus the
+/// arrow IPC writer that owns the sink `W`.
+///
+/// `StreamWriter<W>` is welded to its `W` — arrow ships no transport-free
+/// encoder — so the generic lives out here and `OutputSession` stays clean. The
+/// header is written at construction, so a caller that passes a real `W` never
+/// touches [`drain_new`](Self::drain_new).
+pub struct OutputStream<W: Write> {
+    session: OutputSession,
+    writer: StreamWriter<W>,
+    state: OutputState,
+}
+
+impl<W: Write> OutputStream<W> {
+    /// Opens the stream over `sink`, writing the IPC header immediately.
+    pub fn new(
+        sink: W,
         width: u32,
         height: u32,
         frame_rate: Option<f64>,
     ) -> Result<Self, OutputError> {
-        let schema = Arc::new(output_schema_with_frame_rate(width, height, frame_rate)?);
-        let sink = OutputBytes::default();
-        let writer = StreamWriter::try_new(sink.clone(), &schema)?;
-
+        let session = OutputSession::new(width, height, frame_rate)?;
+        let writer = StreamWriter::try_new(sink, &session.schema())?;
         Ok(Self {
-            schema,
-            sink,
+            session,
             writer,
             state: OutputState::Open,
-            width,
-            height,
         })
     }
 
@@ -260,10 +304,11 @@ impl OutputSession {
         Err(error)
     }
 
+    /// Encodes and writes one batch of tightly packed RGBA frames.
     pub fn write_rgba_batch(&mut self, frames: &[Vec<u8>]) -> Result<(), OutputError> {
         self.ensure_open()?;
 
-        let batch = match output_batch(self.schema.clone(), frames, self.width, self.height) {
+        let batch = match self.session.encode(frames) {
             Ok(batch) => batch,
             Err(error) => return self.fail(error),
         };
@@ -275,6 +320,7 @@ impl OutputSession {
         Ok(())
     }
 
+    /// Writes the end-of-stream marker. The stream is unusable afterwards.
     pub fn finish(&mut self) -> Result<(), OutputError> {
         self.ensure_open()?;
 
@@ -285,19 +331,25 @@ impl OutputSession {
         self.state = OutputState::Finished;
         Ok(())
     }
+}
+
+impl OutputStream<SharedBuffer> {
+    /// Opens a stream over a fresh in-memory [`SharedBuffer`], for callers with
+    /// no `Write` target of their own.
+    pub fn buffered(width: u32, height: u32, frame_rate: Option<f64>) -> Result<Self, OutputError> {
+        Self::new(SharedBuffer::new(), width, height, frame_rate)
+    }
 
     /// Removes and returns all output bytes produced since the last drain.
     ///
-    /// The `StreamWriter` appends to an in-memory sink; each call hands back the
-    /// bytes accumulated so far (schema, record batches, or EOS) so the caller
-    /// can forward them incrementally. Fails if the session previously failed,
-    /// so a partially-written batch is never handed back as success-shaped bytes.
+    /// Only meaningful for the buffered form: a caller writing into a real `W`
+    /// has already received the bytes. Fails if the stream previously failed, so
+    /// a partially-written batch is never handed back as success-shaped bytes.
     pub fn drain_new(&mut self) -> Result<Vec<u8>, OutputError> {
         if self.state == OutputState::Failed {
             return Err(OutputError::OutputSessionFailed);
         }
-
-        Ok(std::mem::take(&mut *self.sink.0.borrow_mut()))
+        Ok(self.writer.get_ref().take())
     }
 }
 
@@ -435,7 +487,7 @@ mod tests {
 
     #[test]
     fn output_session_drains_schema_batches_and_eos_once() {
-        let mut output = OutputSession::new(2, 1).unwrap();
+        let mut output = OutputStream::buffered(2, 1, None).unwrap();
 
         let schema = output.drain_new().unwrap();
         assert!(!schema.is_empty());
@@ -482,7 +534,7 @@ mod tests {
         let frame0: Vec<u8> = (0..(w * h * 4) as u8).collect();
         let frame1: Vec<u8> = (0..(w * h * 4) as u8).map(|b| 255 - b).collect();
 
-        let mut output = OutputSession::new(w, h).unwrap();
+        let mut output = OutputStream::buffered(w, h, None).unwrap();
         let mut bytes = output.drain_new().unwrap();
         output
             .write_rgba_batch(&[frame0.clone(), frame1.clone()])
@@ -497,21 +549,21 @@ mod tests {
 
     #[test]
     fn output_session_drain_releases_drained_bytes() {
-        let mut output = OutputSession::new(2, 1).unwrap();
+        let mut output = OutputStream::buffered(2, 1, None).unwrap();
 
         assert!(!output.drain_new().unwrap().is_empty());
-        assert!(output.sink.0.borrow().is_empty());
+        assert!(output.writer.get_ref().0.borrow().is_empty());
 
         output
             .write_rgba_batch(&[vec![1, 2, 3, 255, 4, 5, 6, 255]])
             .unwrap();
         assert!(!output.drain_new().unwrap().is_empty());
-        assert!(output.sink.0.borrow().is_empty());
+        assert!(output.writer.get_ref().0.borrow().is_empty());
     }
 
     #[test]
     fn output_session_finish_without_batches_emits_eos() {
-        let mut output = OutputSession::new(2, 1).unwrap();
+        let mut output = OutputStream::buffered(2, 1, None).unwrap();
 
         let schema = output.drain_new().unwrap();
         output.finish().unwrap();
@@ -533,7 +585,7 @@ mod tests {
 
     #[test]
     fn output_session_is_terminal_after_batch_failure() {
-        let mut output = OutputSession::new(2, 1).unwrap();
+        let mut output = OutputStream::buffered(2, 1, None).unwrap();
 
         assert!(matches!(
             output.write_rgba_batch(&[vec![0; 7]]),

@@ -2,7 +2,7 @@ use wasm_bindgen::prelude::*;
 
 use trd_core::{
     DecodedFrame, DisneyMaterial, EnvMapData, FrameBatch, FrameFit, FrameParams,
-    ImageBasedLighting, InlineFrameCache, InputSession, Lighting, OutputSession, RenderMode,
+    ImageBasedLighting, InlineFrameCache, InputSession, Lighting, OutputStream, RenderMode,
     RenderOptions, Renderer, Scene, ToneMapping, Tonemap,
 };
 
@@ -80,7 +80,7 @@ pub struct OffscreenRenderer {
     inline_frames: InlineFrameCache,
     /// An external/manual upload waiting to be consumed by the next render.
     external_frame_ready: bool,
-    output: OutputSession,
+    output: OutputStream<trd_core::SharedBuffer>,
     width: u32,
     height: u32,
     state: RendererState,
@@ -92,7 +92,9 @@ impl OffscreenRenderer {
     pub async fn create(width: u32, height: u32) -> Result<Self, JsValue> {
         console_error_panic_hook::set_once();
 
-        let output = OutputSession::new(width, height).map_err(|error| {
+        // The browser has no `Write` target: JS wants the finished IPC bytes as
+        // a `Uint8Array`, so this is the buffered form and keeps `drain_new`.
+        let output = OutputStream::buffered(width, height, None).map_err(|error| {
             crate::js_error(error_message("invalid OffscreenRenderer dimensions", error))
         })?;
 

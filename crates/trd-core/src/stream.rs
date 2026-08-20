@@ -28,7 +28,7 @@ use crate::render::{
 };
 use crate::render::{Draw, FrameFit};
 use crate::texture::ImageTexture;
-use crate::OutputSession;
+use crate::OutputStream;
 
 /// Errors from decoding, validating, rendering, or encoding a trd stream.
 ///
@@ -211,13 +211,12 @@ fn render_and_write_batch<W: Write>(
     renderer: &mut Renderer,
     target: &TextureTarget,
     options: &RenderOptions,
-    output_session: &mut OutputSession,
+    output: &mut OutputStream<W>,
     batch: &crate::FrameBatch,
     inline_frames: &[crate::InlineFrame],
     frame_resolver: Option<FrameResolver>,
     background_state: &mut FrameBackgroundState,
     inline_cache: &mut crate::InlineFrameCache,
-    output: &mut W,
 ) -> Result<(), StreamError> {
     let mesh_count = renderer.mesh_count();
     let mut planes: Vec<Vec<u8>> = Vec::with_capacity(batch.len());
@@ -259,8 +258,9 @@ fn render_and_write_batch<W: Write>(
             target,
         ))?);
     }
-    output_session.write_rgba_batch(&planes)?;
-    output.write_all(&output_session.drain_new()?)?;
+    // `OutputStream` owns the sink, so encoding *is* writing — no drain + hand
+    // -off pair at the call site.
+    output.write_rgba_batch(&planes)?;
     Ok(())
 }
 
@@ -281,7 +281,7 @@ fn render_and_write_batch<W: Write>(
 /// [`Read`] byte source.
 pub fn run_stream<R: Read, W: Write>(
     mut input: R,
-    mut output: W,
+    output: W,
     width: u32,
     height: u32,
     options: RenderOptions,
@@ -298,7 +298,10 @@ pub fn run_stream<R: Read, W: Write>(
     // stream holds both and threads the target through each render call.
     let mut renderer: Option<Renderer> = None;
     let mut target: Option<TextureTarget> = None;
-    let mut output_session: Option<OutputSession> = None;
+    let mut output_stream: Option<OutputStream<W>> = None;
+    // The sink is moved into the stream once the params schema arrives (the
+    // header needs the stream's frame rate), so it waits here until then.
+    let mut sink = Some(output);
     // The background currently uploaded, so consecutive frames sharing it skip
     // the decode + re-upload.
     let mut background_state = FrameBackgroundState::default();
@@ -340,26 +343,25 @@ pub fn run_stream<R: Read, W: Write>(
             target = Some(built_target);
 
             let frame_rate = session.frame_rate().unwrap_or(crate::DEFAULT_FRAME_RATE);
-            let mut session_out = OutputSession::with_frame_rate(width, height, Some(frame_rate))?;
-            output.write_all(&session_out.drain_new()?)?;
-            output_session = Some(session_out);
+            // Opening the stream writes its IPC header straight into `output`.
+            let sink = sink.take().expect("sink moved exactly once");
+            output_stream = Some(OutputStream::new(sink, width, height, Some(frame_rate))?);
         }
 
-        if let (Some(renderer), Some(target), Some(output_session)) =
-            (renderer.as_mut(), target.as_ref(), output_session.as_mut())
+        if let (Some(renderer), Some(target), Some(output_stream)) =
+            (renderer.as_mut(), target.as_ref(), output_stream.as_mut())
         {
             for batch in &batches {
                 render_and_write_batch(
                     renderer,
                     target,
                     &options,
-                    output_session,
+                    output_stream,
                     batch,
                     session.frames(),
                     frame_resolver,
                     &mut background_state,
                     &mut inline_cache,
-                    &mut output,
                 )?;
             }
         }
@@ -368,9 +370,8 @@ pub fn run_stream<R: Read, W: Write>(
 
     // A stream that never reached a params schema (empty input) — the mesh-first
     // contract wasn't satisfied.
-    let mut output_session = output_session.ok_or(StreamError::MissingMeshStream)?;
-    output_session.finish()?;
-    output.write_all(&output_session.drain_new()?)?;
+    let mut output_stream = output_stream.ok_or(StreamError::MissingMeshStream)?;
+    output_stream.finish()?;
     Ok(())
 }
 

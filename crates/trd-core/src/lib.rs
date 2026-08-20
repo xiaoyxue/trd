@@ -37,7 +37,9 @@ pub use mesh::{
     import_glb, import_gltf_materials, GltfAsset, GltfImportError, Mesh, MeshError, MeshShading,
     DEFAULT_PREVIEW_TARGET,
 };
-pub use output::{output_schema, read_image_stream, OutputError, OutputSession};
+pub use output::{
+    output_schema, read_image_stream, OutputError, OutputSession, OutputStream, SharedBuffer,
+};
 pub use protocol::{
     frame_rate_from_metadata, DecodedFrame, FrameBatch, InputSession, ProtocolError,
     DEFAULT_FRAME_RATE, FRAME_RATE_KEY, PROTOCOL_VERSION, PROTOCOL_VERSION_KEY, TABLE_KIND_KEY,
