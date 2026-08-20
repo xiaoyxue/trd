@@ -1,14 +1,16 @@
-use crate::stream::*;
 use crate::math::Matrix4;
 use crate::protocol::{
-    MESH_TABLE_KIND, PARAMS_TABLE_KIND, PROTOCOL_VERSION_KEY, TABLE_KIND_KEY,
+    check_version, decode_draws, decode_frame_refs, ProtocolError, PROTOCOL_VERSION,
 };
+use crate::protocol::{MESH_TABLE_KIND, PARAMS_TABLE_KIND, PROTOCOL_VERSION_KEY, TABLE_KIND_KEY};
 use crate::render::{DrawSelection, RenderMode};
+use crate::stream::*;
 use arrow::array::{
     Array, ArrayRef, FixedSizeListArray, FixedSizeListArray as U8List, Float32Array, ListArray,
     StringArray, UInt32Array, UInt8Array,
 };
 use arrow::datatypes::Field;
+use arrow::datatypes::{DataType, Schema};
 use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::StreamWriter;
 use std::sync::Arc;
@@ -125,10 +127,7 @@ fn rejects_incomplete_and_conflicting_camera_forms() {
     let list_field = |name, len| {
         Field::new(
             name,
-            DataType::FixedSizeList(
-                Arc::new(Field::new("item", DataType::Float32, false)),
-                len,
-            ),
+            DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, false)), len),
             false,
         )
     };
@@ -139,7 +138,7 @@ fn rejects_incomplete_and_conflicting_camera_forms() {
     )]);
     assert!(matches!(
         decode_frames(&incomplete),
-        Err(StreamError::IncompleteCameraForm)
+        Err(StreamError::Protocol(ProtocolError::IncompleteCameraForm))
     ));
     // CV `k` mixed with CG `eye` is conflicting.
     let conflicting = camera_batch(vec![
@@ -148,7 +147,7 @@ fn rejects_incomplete_and_conflicting_camera_forms() {
     ]);
     assert!(matches!(
         decode_frames(&conflicting),
-        Err(StreamError::ConflictingCameraForms)
+        Err(StreamError::Protocol(ProtocolError::ConflictingCameraForms))
     ));
 }
 
@@ -317,7 +316,7 @@ fn rejects_mismatched_draw_lists() {
     let batch = draw_batch(&[vec![0, 1]], &[vec![m]]);
     assert!(matches!(
         decode_draws(&batch),
-        Err(StreamError::MismatchedDrawLists {
+        Err(ProtocolError::MismatchedDrawLists {
             row: 0,
             mesh_len: 2,
             model_len: 1,
@@ -395,13 +394,13 @@ fn rejects_invalid_and_mismatched_draw_modes() {
     let bad = draw_batch_with_modes(&[vec![0]], &[vec![m]], Some(&[vec![7]]));
     assert!(matches!(
         decode_draws(&bad),
-        Err(StreamError::InvalidDrawMode { value: 7 })
+        Err(ProtocolError::InvalidDrawMode { value: 7 })
     ));
     // A `draw_mode` list shorter than the draw list is rejected.
     let short = draw_batch_with_modes(&[vec![0, 1]], &[vec![m, m]], Some(&[vec![0]]));
     assert!(matches!(
         decode_draws(&short),
-        Err(StreamError::MismatchedDrawModes {
+        Err(ProtocolError::MismatchedDrawModes {
             row: 0,
             mode_len: 1,
             draw_len: 2,
@@ -423,7 +422,7 @@ fn draw_columns_must_come_as_a_pair() {
     .unwrap();
     assert!(matches!(
         decode_draws(&with_mesh_only),
-        Err(StreamError::MissingColumn("draw_model"))
+        Err(ProtocolError::MissingColumn("draw_model"))
     ));
 }
 
@@ -441,7 +440,7 @@ fn child_null_in_camera_list_is_error() {
     let batch = RecordBatch::try_new(schema, vec![Arc::new(eye) as ArrayRef]).unwrap();
     assert!(matches!(
         decode_frames(&batch),
-        Err(StreamError::NullValues("eye"))
+        Err(StreamError::Protocol(ProtocolError::NullValues("eye")))
     ));
 }
 
@@ -458,7 +457,10 @@ fn wrong_type_is_error() {
     let batch = RecordBatch::try_new(schema, vec![Arc::new(fovy) as ArrayRef]).unwrap();
     assert!(matches!(
         decode_frames(&batch),
-        Err(StreamError::ColumnType { column: "fovy", .. })
+        Err(StreamError::Protocol(ProtocolError::ColumnType {
+            column: "fovy",
+            ..
+        }))
     ));
 }
 
@@ -471,7 +473,7 @@ fn version_check_rejects_mismatch() {
     );
     assert!(matches!(
         check_version(&schema),
-        Err(StreamError::UnsupportedVersion(v)) if v == "9.9.9"
+        Err(ProtocolError::UnsupportedVersion(v)) if v == "9.9.9"
     ));
 }
 
@@ -479,8 +481,7 @@ fn version_check_rejects_mismatch() {
 fn version_check_rejects_absent_and_allows_matching() {
     assert!(matches!(
         check_version(&Schema::empty()),
-        Err(StreamError::Render(message))
-            if message.contains(PROTOCOL_VERSION_KEY)
+        Err(ProtocolError::MissingMetadata(key)) if key == PROTOCOL_VERSION_KEY
     ));
     let versioned = Schema::empty().with_metadata(
         [(
@@ -506,10 +507,11 @@ fn check_dimensions_rejects_zero_and_overflow() {
         check_dimensions(100_000, 100_000),
         Err(RenderError::InvalidDimensions { .. })
     ));
-    // ...and still surfaces as the stream's own error for CLI callers.
+    // ...and still surfaces as the stream's own error for CLI callers, wrapped
+    // transparently rather than re-declared.
     assert!(matches!(
         StreamError::from(check_dimensions(0, 3).unwrap_err()),
-        StreamError::InvalidDimensions { .. }
+        StreamError::Render(RenderError::InvalidDimensions { .. })
     ));
 }
 

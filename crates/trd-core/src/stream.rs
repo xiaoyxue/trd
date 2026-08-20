@@ -18,17 +18,11 @@
 //! `fixed_shape_tensor<u8>` channels `r,g,b,a` of shape `[H, W]`.
 
 use arrow::array::RecordBatch;
-use arrow::datatypes::DataType;
-use arrow::error::ArrowError;
 use std::io::{Read, Write};
 use std::sync::Arc;
 
-// `Schema` is only referenced by the `#[cfg(test)]` decode wrappers + unit tests.
-#[cfg(test)]
-use arrow::datatypes::Schema;
-
 // `Matrix4` is referenced only by the `#[cfg(test)]` unit tests (imported there).
-use crate::protocol::{ProtocolError, PROTOCOL_VERSION};
+use crate::protocol::ProtocolError;
 use crate::render::{
     check_dimensions, FrameParams, Mesh, RenderOptions, Renderer, TargetError, TextureTarget,
 };
@@ -37,216 +31,45 @@ use crate::texture::ImageTexture;
 use crate::OutputSession;
 
 /// Errors from decoding, validating, rendering, or encoding a trd stream.
+///
+/// Each layer keeps its own error and is wrapped **transparently**, so a message
+/// is identical whether it surfaces here, in `trd-wasm` (which reports
+/// [`ProtocolError`] directly) or from the renderer. Only the two genuinely
+/// stream-level conditions — a draw naming a mesh the stream never sent, and a
+/// stream that is not mesh-first — are declared here.
 #[derive(Debug, thiserror::Error)]
 pub enum StreamError {
-    /// An underlying Arrow or IPC error.
-    #[error("arrow error: {0}")]
-    Arrow(#[from] ArrowError),
+    /// Decoding or validating the input protocol failed.
+    #[error(transparent)]
+    Protocol(#[from] ProtocolError),
+    /// Encoding the rendered image stream failed.
+    #[error(transparent)]
+    Output(#[from] crate::OutputError),
+    /// Rendering failed, including invalid dimensions and render-target
+    /// allocation ([`TargetError`] arrives through
+    /// [`RenderError::Target`](crate::render::RenderError::Target)).
+    #[error(transparent)]
+    Render(#[from] crate::render::RenderError),
     /// I/O error reading or writing the stream.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
-    /// A required input column is missing.
-    #[error("input is missing required column `{0}`")]
-    MissingColumn(&'static str),
-    /// A required input column has the wrong Arrow type.
-    #[error("input column `{column}` has type {actual:?}, expected {expected}")]
-    ColumnType {
-        column: &'static str,
-        expected: &'static str,
-        actual: DataType,
-    },
-    /// A required input column contains null values (protocol requires non-null).
-    #[error("input column `{0}` contains null values")]
-    NullValues(&'static str),
-    /// The stream mixes the CV (`k`/`pose`) and CG (`eye`/`target`/`direction`/
-    /// `fovy`) camera forms; exactly one must be used.
-    #[error(
-        "conflicting camera forms: use either CV (`k`/`pose`) or CG \
-         (`eye`/`target`/`direction`/`fovy`), not both"
-    )]
-    ConflictingCameraForms,
-    /// The CG camera form is incomplete (an `eye` without a look
-    /// `target`/`direction`, or vice versa).
-    #[error("incomplete CG camera: `eye` requires a look `target`/`direction` (and vice versa)")]
-    IncompleteCameraForm,
-    /// A frame's per-instance `draw_mesh` and `draw_model` lists differ in
-    /// length; each drawn instance needs exactly one mesh id and one model.
-    #[error(
-        "frame {row}: draw_mesh has {mesh_len} entries but draw_model has {model_len} \
-         (each instance needs one mesh id and one model)"
-    )]
-    MismatchedDrawLists {
-        row: usize,
-        mesh_len: usize,
-        model_len: usize,
-    },
-    /// A frame's per-instance `draw_mode` list differs in length from its
-    /// `draw_mesh`/`draw_model` lists; each drawn instance needs exactly one
-    /// mode byte when the column is present.
-    #[error(
-        "frame {row}: draw_mode has {mode_len} entries but there are {draw_len} \
-         draw(s) (each instance needs one mode byte)"
-    )]
-    MismatchedDrawModes {
-        row: usize,
-        mode_len: usize,
-        draw_len: usize,
-    },
-    /// A `draw_mode` byte is not a recognized [`crate::RenderMode`] encoding
-    /// (`0`=filled, `1`=wireframe, `2`=textured, `255`=inherit global).
-    #[error("draw_mode byte {value} is not a valid render mode (0/1/2/255)")]
-    InvalidDrawMode { value: u8 },
     /// A draw references a mesh index outside the uploaded mesh set.
     #[error("draw references mesh index {mesh_id} but only {mesh_count} mesh(es) are loaded")]
     MeshIndexOutOfRange { mesh_id: u32, mesh_count: usize },
-    /// The requested image dimensions are invalid or too large.
-    #[error("invalid image dimensions {width}x{height}: {reason}")]
-    InvalidDimensions {
-        width: u32,
-        height: u32,
-        reason: &'static str,
-    },
-    /// The stream declares a protocol version this build does not support.
-    #[error("unsupported protocol version `{0}` (expected `{PROTOCOL_VERSION}`)")]
-    UnsupportedVersion(String),
     /// The input is not mesh-first: the protocol requires a leading mesh table
     /// before the params stream (`[mesh][texture?][frames?][params]`). Params-only
     /// streams are no longer accepted.
     #[error("input is missing the required leading mesh table (protocol is mesh-first)")]
     MissingMeshStream,
-    /// GPU rendering failed.
-    #[error("render error: {0}")]
-    Render(String),
-    /// The leading mesh table could not be decoded into a [`Mesh`].
-    #[error("mesh decode error: {0}")]
-    Mesh(#[from] crate::MeshError),
-    /// The optional leading texture table could not be decoded.
-    #[error("texture decode error: {0}")]
-    Texture(#[from] crate::TextureError),
-    /// The optional inline frames table or a selected encoded frame failed to decode.
-    #[error("inline frame decode error: {0}")]
-    Frames(#[from] crate::FrameError),
-    #[error(transparent)]
-    Output(#[from] crate::OutputError),
 }
 
-/// Maps the shared [`ProtocolError`] (from the single decoder in
-/// [`crate::protocol`]) onto this module's [`StreamError`], so the native
-/// `run_stream` path keeps its flat error surface while the per-batch decode
-/// logic lives in exactly one place.
-/// The renderer has its own platform-neutral error (it must compile for wasm,
-/// which the native-only stream module cannot); this keeps `run_stream`'s error
-/// surface unchanged.
-impl From<crate::render::RenderError> for StreamError {
-    fn from(error: crate::render::RenderError) -> Self {
-        match error {
-            crate::render::RenderError::InvalidDimensions {
-                width,
-                height,
-                reason,
-            } => StreamError::InvalidDimensions {
-                width,
-                height,
-                reason,
-            },
-            other => StreamError::Render(other.to_string()),
-        }
-    }
-}
-
-impl From<ProtocolError> for StreamError {
-    fn from(error: ProtocolError) -> Self {
-        match error {
-            ProtocolError::Arrow(e) => StreamError::Arrow(e),
-            ProtocolError::MissingColumn(c) => StreamError::MissingColumn(c),
-            ProtocolError::ColumnType {
-                column,
-                expected,
-                actual,
-            } => StreamError::ColumnType {
-                column,
-                expected,
-                actual,
-            },
-            ProtocolError::NullValues(c) => StreamError::NullValues(c),
-            ProtocolError::ConflictingCameraForms => StreamError::ConflictingCameraForms,
-            ProtocolError::IncompleteCameraForm => StreamError::IncompleteCameraForm,
-            ProtocolError::UnsupportedVersion(v) => StreamError::UnsupportedVersion(v),
-            ProtocolError::Mesh(e) => StreamError::Mesh(e),
-            ProtocolError::Texture(e) => StreamError::Texture(e),
-            ProtocolError::Frames(e) => StreamError::Frames(e),
-            ProtocolError::MismatchedDrawLists {
-                row,
-                mesh_len,
-                model_len,
-            } => StreamError::MismatchedDrawLists {
-                row,
-                mesh_len,
-                model_len,
-            },
-            ProtocolError::MismatchedDrawModes {
-                row,
-                mode_len,
-                draw_len,
-            } => StreamError::MismatchedDrawModes {
-                row,
-                mode_len,
-                draw_len,
-            },
-            ProtocolError::InvalidDrawMode { value } => StreamError::InvalidDrawMode { value },
-            // The session-framing errors can't arise from the per-batch decoders
-            // used by `run_stream`; surface them as a generic render error if they
-            // ever do.
-            other @ (ProtocolError::SessionFinished
-            | ProtocolError::SessionFailed
-            | ProtocolError::MissingSchema
-            | ProtocolError::NoProgress
-            | ProtocolError::MissingMetadata(_)
-            | ProtocolError::UnsupportedTableKind(_)
-            | ProtocolError::UnexpectedTable { .. }
-            | ProtocolError::MissingFramesTable { .. }
-            | ProtocolError::FrameIdOutOfRange { .. }
-            | ProtocolError::ConflictingFrameSources { .. }) => {
-                StreamError::Render(other.to_string())
-            }
-        }
-    }
-}
-
-/// Maps a render target's [`TargetError`] onto this module's [`StreamError`],
-/// so [`Renderer`] keeps its flat error surface while the target's allocation
-/// invariants live in [`crate::render::TextureTarget`].
+/// [`TargetError`] reaches [`StreamError`] through
+/// [`RenderError`](crate::render::RenderError), which already wraps it — this
+/// only spares call sites an explicit hop.
 impl From<TargetError> for StreamError {
     fn from(error: TargetError) -> Self {
-        match error {
-            TargetError::InvalidDimensions { width, height } => StreamError::InvalidDimensions {
-                width,
-                height,
-                reason: "dimensions must be non-zero",
-            },
-            TargetError::ExceedsMaxDimension { width, height, .. } => {
-                StreamError::InvalidDimensions {
-                    width,
-                    height,
-                    reason: "exceeds adapter max_texture_dimension_2d",
-                }
-            }
-            TargetError::RowOverflow { .. } | TargetError::Gpu(_) => {
-                StreamError::Render(error.to_string())
-            }
-            TargetError::Output(e) => StreamError::Output(e),
-        }
+        StreamError::Render(error.into())
     }
-}
-
-/// If the schema declares a protocol version, require it to be supported.
-/// Delegates to the shared [`crate::protocol::check_version`]. A test-only
-/// [`StreamError`]-typed wrapper: `run_stream` now validates the version inside
-/// the shared [`InputSession`](crate::InputSession), so this only exists to
-/// exercise the [`ProtocolError`] → [`StreamError`] mapping in unit tests.
-#[cfg(test)]
-pub fn check_version(schema: &Schema) -> Result<(), StreamError> {
-    Ok(crate::protocol::check_version(schema)?)
 }
 
 /// Decodes every row of `batch` into [`FrameParams`]. Delegates to the single
@@ -254,25 +77,6 @@ pub fn check_version(schema: &Schema) -> Result<(), StreamError> {
 /// truth for both the native and wasm paths).
 pub fn decode_frames(batch: &RecordBatch) -> Result<Vec<FrameParams>, StreamError> {
     Ok(crate::protocol::decode_batch(batch)?)
-}
-
-/// Decodes the optional per-frame **instanced draw list** columns into one
-/// `Vec<Draw>` per row. A test-only [`StreamError`]-typed wrapper over
-/// [`crate::protocol::decode_draws`] — the native/wasm paths use the shared
-/// [`InputSession`](crate::InputSession) decoder directly; this only exercises
-/// the [`ProtocolError`] → [`StreamError`] mapping in unit tests.
-#[cfg(test)]
-fn decode_draws(batch: &RecordBatch) -> Result<Option<Vec<Vec<Draw>>>, StreamError> {
-    Ok(crate::protocol::decode_draws(batch)?)
-}
-
-/// Decodes the optional per-frame external **background frame reference** columns
-/// into one `Option<String>` per row. A test-only [`StreamError`]-typed wrapper
-/// over [`crate::protocol::decode_frame_refs`], exercising the [`ProtocolError`]
-/// → [`StreamError`] mapping in unit tests.
-#[cfg(test)]
-fn decode_frame_refs(batch: &RecordBatch) -> Result<Option<Vec<Option<String>>>, StreamError> {
-    Ok(crate::protocol::decode_frame_refs(batch)?)
 }
 
 /// Resolves one decoded frame's instanced draw list: its wire `draws` when
@@ -406,12 +210,14 @@ fn resolve_inline_frame(
     if state.last_inline_id == Some(frame_id) {
         return Ok(state.last_inline_image.clone().map(|image| (image, false)));
     }
-    let resource = frames.get(frame_id as usize).ok_or_else(|| {
-        StreamError::Render(format!(
-            "frame_id {frame_id} escaped protocol range validation"
-        ))
-    })?;
-    let image = Arc::new(resource.decode()?);
+    let resource = frames
+        .get(frame_id as usize)
+        .ok_or(ProtocolError::FrameIdOutOfRange {
+            row: 0,
+            frame_id,
+            frame_count: frames.len(),
+        })?;
+    let image = Arc::new(resource.decode().map_err(ProtocolError::from)?);
     state.last_inline_id = Some(frame_id);
     state.last_inline_image = Some(image.clone());
     Ok(Some((image, true)))

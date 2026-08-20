@@ -289,7 +289,12 @@ fn main() -> Result<(), trd_core::StreamError> {
 fn load_env_map(path: &std::path::Path) -> Result<trd_core::EnvMapData, trd_core::StreamError> {
     let img = image::open(path)
         .map_err(|e| {
-            trd_core::StreamError::Render(format!("read env map {}: {e}", path.display()))
+            // A CLI file read, not a render failure — the transparent
+            // `StreamError` no longer has a string-shaped `Render` to abuse.
+            trd_core::StreamError::Io(std::io::Error::other(format!(
+                "read env map {}: {e}",
+                path.display()
+            )))
         })?
         .to_rgba32f();
     let (w, h) = img.dimensions();
