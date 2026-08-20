@@ -1,9 +1,9 @@
 use wasm_bindgen::prelude::*;
 
 use trd_core::{
-    DecodedFrame, DisneyMaterial, Draw, EnvMapData, FrameBatch, FrameFit, FrameParams,
-    ImageBasedLighting, InputSession, Lighting, OutputSession, RenderMode, RenderOptions, Renderer,
-    Scene, ToneMapping, Tonemap,
+    DecodedFrame, DisneyMaterial, EnvMapData, FrameBatch, FrameFit, FrameParams,
+    ImageBasedLighting, InlineFrameCache, InputSession, Lighting, OutputStream, RenderMode,
+    RenderOptions, Renderer, Scene, ToneMapping, Tonemap,
 };
 
 use crate::PbrState;
@@ -77,10 +77,10 @@ pub struct OffscreenRenderer {
     /// viewer's paced playback).
     frames: Vec<DecodedFrame>,
     /// Last inline frames-table resource uploaded to the frame-plane texture.
-    last_inline_frame_id: Option<u32>,
+    inline_frames: InlineFrameCache,
     /// An external/manual upload waiting to be consumed by the next render.
     external_frame_ready: bool,
-    output: OutputSession,
+    output: OutputStream<trd_core::SharedBuffer>,
     width: u32,
     height: u32,
     state: RendererState,
@@ -92,7 +92,9 @@ impl OffscreenRenderer {
     pub async fn create(width: u32, height: u32) -> Result<Self, JsValue> {
         console_error_panic_hook::set_once();
 
-        let output = OutputSession::new(width, height).map_err(|error| {
+        // The browser has no `Write` target: JS wants the finished IPC bytes as
+        // a `Uint8Array`, so this is the buffered form and keeps `drain_new`.
+        let output = OutputStream::buffered(width, height, None).map_err(|error| {
             crate::js_error(error_message("invalid OffscreenRenderer dimensions", error))
         })?;
 
@@ -120,7 +122,7 @@ impl OffscreenRenderer {
             env_background_blur: None,
             input: InputSession::new(),
             frames: Vec::new(),
-            last_inline_frame_id: None,
+            inline_frames: InlineFrameCache::default(),
             external_frame_ready: false,
             output,
             state: RendererState::Open,
@@ -342,7 +344,7 @@ impl OffscreenRenderer {
         self.ensure_renderer()
             .map_err(crate::js_error)?
             .update_frame_texture_rgba(rgba, width, height);
-        self.last_inline_frame_id = None;
+        self.inline_frames.invalidate();
         self.external_frame_ready = true;
         Ok(())
     }
@@ -478,26 +480,18 @@ impl OffscreenRenderer {
         let params = frame.params;
         let has_inline_frame = self.upload_inline_frame(frame.frame_id)?;
         let has_external_frame = std::mem::take(&mut self.external_frame_ready);
-        // Explicit wire draw list ⇒ drawn verbatim (an empty list ⇒ background
-        // only); an absent draw list ⇒ one instance of mesh 0 placed by the
-        // frame's own model (legacy single-object behavior).
-        let draws: Vec<Draw> = frame.resolved_draws();
-
         let mesh_count = self.ensure_renderer()?.mesh_count();
-        for draw in &draws {
-            if draw.mesh_id as usize >= mesh_count {
-                return Err(format!(
-                    "draw references mesh {} but only {mesh_count} mesh(es) are loaded",
-                    draw.mesh_id
-                ));
-            }
-        }
-        let scene = Scene::from_draws(
-            &draws,
+        // Draw-list resolution + mesh-id validation are the protocol's rules, not
+        // this harness's, so they come from the shared assembly every front-end
+        // uses — same scene, same error text, as the CLI.
+        let scene = Scene::try_from_frame(
+            frame,
+            mesh_count,
             &self.options,
             (has_inline_frame || (self.composite_frame && has_external_frame))
                 .then_some(FrameFit::Stretch),
         )
+        .map_err(|error| error.to_string())?
         // The staged light rig belongs to the frame, not to the harness (#182).
         .with_lighting(
             self.pbr
@@ -509,24 +503,21 @@ impl OffscreenRenderer {
     }
 
     fn upload_inline_frame(&mut self, frame_id: Option<u32>) -> Result<bool, String> {
-        let Some(frame_id) = frame_id else {
-            self.last_inline_frame_id = None;
+        let resolved = self
+            .inline_frames
+            .resolve(frame_id, self.input.frames())
+            .map_err(|error| error.to_string())?;
+        let Some((image, changed)) = resolved else {
             return Ok(false);
         };
         self.external_frame_ready = false;
-        if self.last_inline_frame_id == Some(frame_id) {
-            return Ok(true);
+        if changed {
+            self.ensure_renderer()?.update_frame_texture_rgba(
+                &image.rgba,
+                image.width,
+                image.height,
+            );
         }
-        let image = self
-            .input
-            .frames()
-            .get(frame_id as usize)
-            .ok_or_else(|| format!("frame_id {frame_id} is out of range"))?
-            .decode()
-            .map_err(|error| format!("decode frame_id {frame_id}: {error}"))?;
-        self.ensure_renderer()?
-            .update_frame_texture_rgba(&image.rgba, image.width, image.height);
-        self.last_inline_frame_id = Some(frame_id);
         Ok(true)
     }
 

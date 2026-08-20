@@ -13,7 +13,19 @@
 use super::{Draw, DrawableObject, FrameFit, GridPlane, RenderMode};
 use crate::math::Matrix4;
 use crate::render::Tonemap;
-use crate::{Lighting, RenderOptions};
+use crate::{DecodedFrame, Lighting, RenderOptions};
+
+/// Errors from assembling a [`Scene`] out of a decoded frame.
+///
+/// Separate from `RenderError` because assembly touches no GPU: it is a pure
+/// function of the wire frame plus the caller's appearance options, so every
+/// front-end can validate a frame before it has a device.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SceneError {
+    /// A draw references a mesh index outside the uploaded mesh set.
+    #[error("draw references mesh index {mesh_id} but only {mesh_count} mesh(es) are loaded")]
+    MeshIndexOutOfRange { mesh_id: u32, mesh_count: usize },
+}
 
 /// The camera-centered spherical HDR **environment background**: the bound
 /// environment map drawn behind everything else, as seen through this frame's
@@ -193,6 +205,37 @@ impl Scene {
             .map(|pbr| pbr.lighting)
             .unwrap_or_default();
         scene
+    }
+
+    /// Assembles a decoded wire frame into its [`Scene`], validating that every
+    /// draw names a mesh the stream actually sent.
+    ///
+    /// The wire draw list is resolved through
+    /// [`DecodedFrame::resolved_draws`] — an explicit list is drawn verbatim (an
+    /// empty one leaves just the background), an absent one places a single
+    /// instance of mesh `0` by the frame's own model — and each `mesh_id` is
+    /// checked against `mesh_count` before [`from_draws`](Self::from_draws) runs.
+    ///
+    /// This is the whole of what the CLI, `CanvasRenderer` and
+    /// `OffscreenRenderer` used to spell out separately, in three different
+    /// error types. Pure: no GPU, no render target, so it is testable without a
+    /// device and identical on every platform.
+    pub fn try_from_frame(
+        frame: &DecodedFrame,
+        mesh_count: usize,
+        options: &RenderOptions,
+        frame_fit: Option<FrameFit>,
+    ) -> Result<Self, SceneError> {
+        let draws = frame.resolved_draws();
+        for draw in &draws {
+            if draw.mesh_id as usize >= mesh_count {
+                return Err(SceneError::MeshIndexOutOfRange {
+                    mesh_id: draw.mesh_id,
+                    mesh_count,
+                });
+            }
+        }
+        Ok(Self::from_draws(&draws, options, frame_fit))
     }
 }
 
@@ -1110,5 +1153,48 @@ mod tests {
                 DrawableObject::mesh(1, b, RenderMode::Wireframe),
             ]
         );
+    }
+
+    #[test]
+    fn try_from_frame_rejects_a_draw_naming_a_mesh_the_stream_never_sent() {
+        let frame = crate::DecodedFrame {
+            params: crate::FrameParams::IDENTITY,
+            draws: Some(vec![Draw {
+                mesh_id: 3,
+                model: Matrix4::IDENTITY,
+                selection: crate::DrawSelection::INHERIT,
+            }]),
+            frame_ref: None,
+            frame_id: None,
+        };
+        assert_eq!(
+            Scene::try_from_frame(&frame, 2, &RenderOptions::default(), None),
+            Err(SceneError::MeshIndexOutOfRange {
+                mesh_id: 3,
+                mesh_count: 2
+            })
+        );
+    }
+
+    #[test]
+    fn try_from_frame_defaults_an_absent_draw_list_to_mesh_zero() {
+        // An absent wire draw list is the legacy single-object stream: one
+        // instance of mesh 0 placed by the frame's own model.
+        let frame = crate::DecodedFrame {
+            params: crate::FrameParams::IDENTITY,
+            draws: None,
+            frame_ref: None,
+            frame_id: None,
+        };
+        let scene = Scene::try_from_frame(&frame, 1, &RenderOptions::default(), None).unwrap();
+        assert_eq!(scene.objects().len(), 1);
+        // An explicit empty list draws no meshes at all — the background plate only.
+        let background_only = crate::DecodedFrame {
+            draws: Some(Vec::new()),
+            ..frame
+        };
+        let scene =
+            Scene::try_from_frame(&background_only, 1, &RenderOptions::default(), None).unwrap();
+        assert!(scene.objects().is_empty());
     }
 }

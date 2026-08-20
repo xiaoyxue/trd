@@ -9,16 +9,20 @@ mod frame;
 mod light;
 mod material;
 mod math;
+mod media;
 mod mesh;
-mod mp4_probe;
-mod output;
+// Byte transports live in `io/`; the sessions they drive stay with the format
+// they implement, in `protocol/` (see `io/mod.rs`).
+mod io;
 mod protocol;
 mod render;
+mod session_state;
 mod texture;
-mod video_editing;
 
 pub use camera::{Camera, DEFAULT_FIT_MARGIN, DEFAULT_FOV_Y, DEFAULT_VIEW_DIR};
-pub use frame::{FrameError, InlineFrame, FRAME_BYTES_COLUMN, FRAME_PIXELS_COLUMN};
+pub use frame::{
+    FrameError, InlineFrame, InlineFrameCache, FRAME_BYTES_COLUMN, FRAME_PIXELS_COLUMN,
+};
 // A directional light is universal domain vocabulary — zero wgpu — so it sits
 // at the crate root beside `mesh`/`texture`/`camera`/`material` rather than in
 // the render backend (#223).
@@ -35,10 +39,14 @@ pub use mesh::{
     import_glb, import_gltf_materials, GltfAsset, GltfImportError, Mesh, MeshError, MeshShading,
     DEFAULT_PREVIEW_TARGET,
 };
-pub use output::{output_schema, read_image_stream, OutputError, OutputSession};
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use io::{InputStream, Prologue};
+pub use io::{OutputStream, SharedBuffer};
 pub use protocol::{
-    frame_rate_from_metadata, DecodedFrame, FrameBatch, InputSession, ProtocolError,
-    DEFAULT_FRAME_RATE, FRAME_RATE_KEY, PROTOCOL_VERSION, PROTOCOL_VERSION_KEY, TABLE_KIND_KEY,
+    frame_rate_from_metadata, output_schema, read_image_stream, DecodedFrame, FrameBatch,
+    InputSession, OutputError, OutputSession, ProtocolError, DEFAULT_FRAME_RATE, FRAME_RATE_KEY,
+    PROTOCOL_VERSION, PROTOCOL_VERSION_KEY, TABLE_KIND_KEY,
 };
 // Material models are plain data (no wgpu, no bytemuck), so they sit beside
 // `mesh`/`texture`/`camera` at the crate root rather than inside the render
@@ -55,27 +63,25 @@ pub use render::{
 // renderer that dispatches on it (#223). Public paths are unchanged.
 pub use render::{
     Background, Draw, DrawSelection, DrawableObject, EnvironmentBackground, FrameFit, GridPlane,
-    Primitive, RenderMode, Scene,
+    Primitive, RenderMode, Scene, SceneError,
 };
 // The render harness; available on both platforms since readback became async
 // (#180) — the browser could not use it while it blocked on readback.
-pub use mp4_probe::{probe_moov, Mp4VideoInfo};
+pub use media::{
+    decode_video_editing_document, Shot, VideoEditingDocument, VideoEditingError,
+    VideoEditingFrame, VIDEO_EDIT_TABLE_KIND_KEY, VIDEO_EDIT_TIMELINE_KIND, VIDEO_EDIT_VERSION,
+    VIDEO_EDIT_VERSION_KEY,
+};
+pub use media::{probe_moov, VideoInfo, VideoTiming};
 pub use render::{RenderError, Renderer};
 pub use texture::{
     ConstantTexture, ImageData, ImageTexture, Texture, TextureError, TEXTURE_COLUMN,
 };
-pub use video_editing::{
-    decode_video_editing_document, Shot, VideoEditingDocument, VideoEditingError,
-    VideoEditingFrame, VideoInfo, VIDEO_EDIT_TABLE_KIND_KEY, VIDEO_EDIT_TIMELINE_KIND,
-    VIDEO_EDIT_VERSION, VIDEO_EDIT_VERSION_KEY,
-};
 
 #[cfg(not(target_arch = "wasm32"))]
-mod stream;
+mod stream_filter;
 #[cfg(not(target_arch = "wasm32"))]
-pub use stream::{
-    decode_frames, read_scene_stream_with_meta, run_stream, FrameResolver, StreamError,
-};
+pub use stream_filter::{decode_frames, run_stream, FrameResolver, StreamError};
 
 /// Returns the project greeting used by the CLI and web entry points.
 pub fn greeting() -> String {

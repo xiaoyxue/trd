@@ -82,7 +82,7 @@ pub use render_target::{
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use renderer::check_dimensions;
 pub use renderer::{RenderError, Renderer, SurfaceError, SurfaceRepair};
-pub use scene::{Background, EnvironmentBackground, Scene};
+pub use scene::{Background, EnvironmentBackground, Scene, SceneError};
 pub use tonemap::{ToneMapping, Tonemap};
 /// Reference + test scaffolding only (#202): the minimal canonical wgpu
 /// renderer, kept to be *read* and exercised by `render::gpu_tests`. It has no

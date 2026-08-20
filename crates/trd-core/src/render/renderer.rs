@@ -86,7 +86,7 @@ use super::*;
 use super::{Draw, GridPlane, Primitive, RenderMode, Scene};
 use crate::material::DisneyMaterial;
 use crate::math::Matrix4;
-use crate::output::tightly_pack_rgba;
+use crate::protocol::tightly_pack_rgba;
 use crate::texture::Texture;
 use crate::Camera;
 use futures_channel::oneshot;

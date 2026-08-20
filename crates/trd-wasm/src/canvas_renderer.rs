@@ -1,6 +1,6 @@
 use trd_core::{
-    DecodedFrame, DisneyMaterial, Draw, EnvMapData, FrameFit, FrameParams, ImageBasedLighting,
-    Lighting, RenderError, RenderMode, RenderOptions, RenderTarget, Renderer, Scene, SurfaceRepair,
+    DecodedFrame, DisneyMaterial, EnvMapData, FrameFit, FrameParams, ImageBasedLighting, Lighting,
+    RenderError, RenderMode, RenderOptions, RenderTarget, Renderer, Scene, SurfaceRepair,
     SurfaceTarget, ToneMapping, Tonemap,
 };
 use wasm_bindgen::prelude::*;
@@ -64,7 +64,7 @@ pub struct CanvasRenderer {
     /// JS shell can upload each frame's background *before* rendering it).
     frames: Vec<DecodedFrame>,
     /// Last inline frames-table resource uploaded to the frame-plane texture.
-    last_inline_frame_id: Option<u32>,
+    inline_frames: trd_core::InlineFrameCache,
     /// An external/manual upload waiting to be consumed by the next render.
     external_frame_ready: bool,
     state: CanvasState,
@@ -121,7 +121,7 @@ impl CanvasRenderer {
             target,
             input: trd_core::InputSession::new(),
             frames: Vec::new(),
-            last_inline_frame_id: None,
+            inline_frames: trd_core::InlineFrameCache::default(),
             external_frame_ready: false,
             state: CanvasState::Open,
         })
@@ -435,7 +435,7 @@ impl CanvasRenderer {
         }
         self.ensure_renderer()?
             .update_frame_texture_rgba(rgba, width, height);
-        self.last_inline_frame_id = None;
+        self.inline_frames.invalidate();
         self.external_frame_ready = true;
         Ok(())
     }
@@ -467,25 +467,18 @@ impl CanvasRenderer {
         let params = frame.params;
         let has_inline_frame = self.upload_inline_frame(frame.frame_id)?;
         let has_external_frame = std::mem::take(&mut self.external_frame_ready);
-        // Explicit wire draw list ⇒ drawn verbatim (an empty list ⇒ background
-        // only); an absent draw list ⇒ one instance of mesh 0 placed by the
-        // frame's own model (legacy single-object behavior).
-        let draws: Vec<Draw> = frame.resolved_draws();
         let mesh_count = self.ensure_renderer()?.mesh_count();
-        for draw in &draws {
-            if draw.mesh_id as usize >= mesh_count {
-                return Err(js_error(format!(
-                    "draw references mesh {} but only {mesh_count} mesh(es) are loaded",
-                    draw.mesh_id
-                )));
-            }
-        }
-        let scene = Scene::from_draws(
-            &draws,
+        // Draw-list resolution + mesh-id validation are the protocol's rules, not
+        // this harness's, so they come from the shared assembly every front-end
+        // uses — same scene, same error text, as the CLI.
+        let scene = Scene::try_from_frame(
+            frame,
+            mesh_count,
             &self.options,
             (has_inline_frame || (self.composite_frame && has_external_frame))
                 .then_some(FrameFit::Stretch),
         )
+        .map_err(|error| js_error(error.to_string()))?
         // The staged light rig belongs to the frame, not to the harness (#182).
         .with_lighting(
             self.pbr
@@ -579,24 +572,21 @@ impl CanvasRenderer {
     }
 
     fn upload_inline_frame(&mut self, frame_id: Option<u32>) -> Result<bool, JsValue> {
-        let Some(frame_id) = frame_id else {
-            self.last_inline_frame_id = None;
+        let resolved = self
+            .inline_frames
+            .resolve(frame_id, self.input.frames())
+            .map_err(|error| js_error(error.to_string()))?;
+        let Some((image, changed)) = resolved else {
             return Ok(false);
         };
         self.external_frame_ready = false;
-        if self.last_inline_frame_id == Some(frame_id) {
-            return Ok(true);
+        if changed {
+            self.ensure_renderer()?.update_frame_texture_rgba(
+                &image.rgba,
+                image.width,
+                image.height,
+            );
         }
-        let image = self
-            .input
-            .frames()
-            .get(frame_id as usize)
-            .ok_or_else(|| js_error(format!("frame_id {frame_id} is out of range")))?
-            .decode()
-            .map_err(|error| js_error(format!("decode frame_id {frame_id}: {error}")))?;
-        self.ensure_renderer()?
-            .update_frame_texture_rgba(&image.rgba, image.width, image.height);
-        self.last_inline_frame_id = Some(frame_id);
         Ok(true)
     }
 

@@ -1,13 +1,18 @@
-use std::cell::RefCell;
-use std::io::{Read, Write};
-use std::rc::Rc;
+//! The **output** wire format: rendered RGBA frames -> the `r`/`g`/`b`/`a`
+//! planar `fixed_shape_tensor<u8>[H, W]` schema of protocol `0.0.6`.
+//!
+//! Pure encoding maths — the schema, the interleaved-to-planar channel split,
+//! the readback row-stride unpad — plus the reader that turns the result back
+//! into frames. No transport: writing the bytes somewhere is
+//! [`OutputStream`](crate::OutputStream)'s job.
+
+use std::io::Read;
 use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, FixedSizeListArray, RecordBatch, UInt8Array};
 use arrow::datatypes::{DataType, Field, Fields, Schema};
 use arrow::error::ArrowError;
 use arrow::ipc::reader::StreamReader;
-use arrow::ipc::writer::StreamWriter;
 use arrow_schema::extension::FixedShapeTensor;
 use thiserror::Error;
 
@@ -59,27 +64,6 @@ pub enum OutputError {
 
     #[error("output session previously failed")]
     OutputSessionFailed,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OutputState {
-    Open,
-    Finished,
-    Failed,
-}
-
-#[derive(Clone, Default)]
-struct OutputBytes(Rc<RefCell<Vec<u8>>>);
-
-impl Write for OutputBytes {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.borrow_mut().extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -212,95 +196,9 @@ pub fn output_batch(
     Ok(RecordBatch::try_new(schema, columns)?)
 }
 
-pub struct OutputSession {
-    schema: Arc<Schema>,
-    sink: OutputBytes,
-    writer: StreamWriter<OutputBytes>,
-    state: OutputState,
-    width: u32,
-    height: u32,
-}
-
-impl OutputSession {
-    pub fn new(width: u32, height: u32) -> Result<Self, OutputError> {
-        Self::with_frame_rate(width, height, None)
-    }
-
-    /// Builds an output session whose schema also carries the stream playback
-    /// rate (`trd.stream.frame_rate`) when `frame_rate` is `Some`.
-    pub fn with_frame_rate(
-        width: u32,
-        height: u32,
-        frame_rate: Option<f64>,
-    ) -> Result<Self, OutputError> {
-        let schema = Arc::new(output_schema_with_frame_rate(width, height, frame_rate)?);
-        let sink = OutputBytes::default();
-        let writer = StreamWriter::try_new(sink.clone(), &schema)?;
-
-        Ok(Self {
-            schema,
-            sink,
-            writer,
-            state: OutputState::Open,
-            width,
-            height,
-        })
-    }
-
-    fn ensure_open(&self) -> Result<(), OutputError> {
-        match self.state {
-            OutputState::Open => Ok(()),
-            OutputState::Finished => Err(OutputError::OutputSessionFinished),
-            OutputState::Failed => Err(OutputError::OutputSessionFailed),
-        }
-    }
-
-    fn fail<T>(&mut self, error: OutputError) -> Result<T, OutputError> {
-        self.state = OutputState::Failed;
-        Err(error)
-    }
-
-    pub fn write_rgba_batch(&mut self, frames: &[Vec<u8>]) -> Result<(), OutputError> {
-        self.ensure_open()?;
-
-        let batch = match output_batch(self.schema.clone(), frames, self.width, self.height) {
-            Ok(batch) => batch,
-            Err(error) => return self.fail(error),
-        };
-
-        if let Err(error) = self.writer.write(&batch) {
-            return self.fail(OutputError::Arrow(error));
-        }
-
-        Ok(())
-    }
-
-    pub fn finish(&mut self) -> Result<(), OutputError> {
-        self.ensure_open()?;
-
-        if let Err(error) = self.writer.finish() {
-            return self.fail(OutputError::Arrow(error));
-        }
-
-        self.state = OutputState::Finished;
-        Ok(())
-    }
-
-    /// Removes and returns all output bytes produced since the last drain.
-    ///
-    /// The `StreamWriter` appends to an in-memory sink; each call hands back the
-    /// bytes accumulated so far (schema, record batches, or EOS) so the caller
-    /// can forward them incrementally. Fails if the session previously failed,
-    /// so a partially-written batch is never handed back as success-shaped bytes.
-    pub fn drain_new(&mut self) -> Result<Vec<u8>, OutputError> {
-        if self.state == OutputState::Failed {
-            return Err(OutputError::OutputSessionFailed);
-        }
-
-        Ok(std::mem::take(&mut *self.sink.0.borrow_mut()))
-    }
-}
-
+/// The **semantic** half of the output protocol: the schema, and RGBA frames →
+/// one [`RecordBatch`]. Owns no transport, so it is a plain non-generic type
+/// usable on any platform (its `*Stream` counterpart carries the `W`).
 pub(crate) fn tightly_pack_rgba(
     mapped: &[u8],
     width: u32,
@@ -401,9 +299,7 @@ pub fn read_image_stream<R: Read>(
 mod tests {
     use super::*;
 
-    use arrow::array::RecordBatch;
     use arrow::datatypes::DataType;
-    use arrow::ipc::reader::StreamReader;
 
     use crate::{PROTOCOL_VERSION, PROTOCOL_VERSION_KEY};
 
@@ -431,125 +327,6 @@ mod tests {
                 other => panic!("unexpected storage type: {other:?}"),
             }
         }
-    }
-
-    #[test]
-    fn output_session_drains_schema_batches_and_eos_once() {
-        let mut output = OutputSession::new(2, 1).unwrap();
-
-        let schema = output.drain_new().unwrap();
-        assert!(!schema.is_empty());
-        assert!(output.drain_new().unwrap().is_empty());
-
-        output
-            .write_rgba_batch(&[vec![1, 2, 3, 255, 4, 5, 6, 255]])
-            .unwrap();
-        let first = output.drain_new().unwrap();
-
-        output
-            .write_rgba_batch(&[vec![7, 8, 9, 255, 10, 11, 12, 255]])
-            .unwrap();
-        let second = output.drain_new().unwrap();
-
-        output.finish().unwrap();
-        let eos = output.drain_new().unwrap();
-
-        let bytes = [schema, first, second, eos].concat();
-        let reader = StreamReader::try_new(bytes.as_slice(), None).unwrap();
-
-        assert_eq!(
-            reader
-                .schema()
-                .metadata()
-                .get(PROTOCOL_VERSION_KEY)
-                .map(String::as_str),
-            Some(PROTOCOL_VERSION)
-        );
-
-        let batches = reader.collect::<Result<Vec<_>, _>>().unwrap();
-        assert_eq!(
-            batches
-                .iter()
-                .map(RecordBatch::num_rows)
-                .collect::<Vec<_>>(),
-            vec![1, 1]
-        );
-    }
-
-    #[test]
-    fn read_image_stream_roundtrips_written_frames() {
-        let (w, h) = (2u32, 2u32);
-        let frame0: Vec<u8> = (0..(w * h * 4) as u8).collect();
-        let frame1: Vec<u8> = (0..(w * h * 4) as u8).map(|b| 255 - b).collect();
-
-        let mut output = OutputSession::new(w, h).unwrap();
-        let mut bytes = output.drain_new().unwrap();
-        output
-            .write_rgba_batch(&[frame0.clone(), frame1.clone()])
-            .unwrap();
-        bytes.extend(output.drain_new().unwrap());
-        output.finish().unwrap();
-        bytes.extend(output.drain_new().unwrap());
-
-        let frames = read_image_stream(bytes.as_slice(), w, h).unwrap();
-        assert_eq!(frames, vec![frame0, frame1]);
-    }
-
-    #[test]
-    fn output_session_drain_releases_drained_bytes() {
-        let mut output = OutputSession::new(2, 1).unwrap();
-
-        assert!(!output.drain_new().unwrap().is_empty());
-        assert!(output.sink.0.borrow().is_empty());
-
-        output
-            .write_rgba_batch(&[vec![1, 2, 3, 255, 4, 5, 6, 255]])
-            .unwrap();
-        assert!(!output.drain_new().unwrap().is_empty());
-        assert!(output.sink.0.borrow().is_empty());
-    }
-
-    #[test]
-    fn output_session_finish_without_batches_emits_eos() {
-        let mut output = OutputSession::new(2, 1).unwrap();
-
-        let schema = output.drain_new().unwrap();
-        output.finish().unwrap();
-        let eos = output.drain_new().unwrap();
-
-        let bytes = [schema, eos].concat();
-        let reader = StreamReader::try_new(bytes.as_slice(), None).unwrap();
-        assert!(reader.collect::<Result<Vec<_>, _>>().unwrap().is_empty());
-
-        assert!(matches!(
-            output.write_rgba_batch(&[vec![0; 8]]),
-            Err(OutputError::OutputSessionFinished)
-        ));
-        assert!(matches!(
-            output.finish(),
-            Err(OutputError::OutputSessionFinished)
-        ));
-    }
-
-    #[test]
-    fn output_session_is_terminal_after_batch_failure() {
-        let mut output = OutputSession::new(2, 1).unwrap();
-
-        assert!(matches!(
-            output.write_rgba_batch(&[vec![0; 7]]),
-            Err(OutputError::InvalidRgbaFrameLength {
-                actual: 7,
-                expected: 8
-            })
-        ));
-        assert!(matches!(
-            output.drain_new(),
-            Err(OutputError::OutputSessionFailed)
-        ));
-        assert!(matches!(
-            output.finish(),
-            Err(OutputError::OutputSessionFailed)
-        ));
     }
 
     #[test]

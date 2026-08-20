@@ -1,6 +1,6 @@
 //! Decoder parity test (issue #88, guards #84).
 //!
-//! The native decoder ([`trd_core::read_scene_stream_with_meta`], `stream.rs`)
+//! The native decoder ([`trd_core::InputStream`], `io/input_stream.rs`)
 //! and the wasm push decoder ([`trd_core::InputSession`], `protocol.rs`)
 //! reimplement the same Arrow column decode + schema validation independently.
 //! Divergence causes "fix the bug in one decoder but not the other" regressions
@@ -16,7 +16,7 @@
 
 use std::path::{Path, PathBuf};
 
-use trd_core::{read_scene_stream_with_meta, Draw, FrameParams, ImageData, InputSession};
+use trd_core::{Draw, FrameParams, ImageData, InlineFrameCache, InputSession, InputStream};
 
 type Frame = (FrameParams, Vec<Draw>, Option<String>, Option<ImageData>);
 
@@ -29,17 +29,25 @@ fn fixture(name: &str) -> PathBuf {
 /// Drive the whole stream (leading mesh/texture tables + params) through the
 /// native decoder, collecting the resolved scene and inline image per frame.
 fn native_frames(bytes: &[u8]) -> Vec<Frame> {
+    let mut input = InputStream::new(bytes);
+    input.prologue().expect("native prologue");
+    let mut cache = InlineFrameCache::default();
     let mut frames = Vec::new();
-    read_scene_stream_with_meta(
-        bytes,
-        |_meshes| {},
-        |_texture| {},
-        |_rate| {},
-        |params, draws, frame_ref, inline| {
-            frames.push((params, draws, frame_ref, inline.as_deref().cloned()));
-        },
-    )
-    .expect("native decode");
+    while let Some(batch) = input.next_batch() {
+        for frame in batch.expect("native batch") {
+            let inline = cache
+                .resolve(frame.frame_id, input.frames())
+                .expect("native inline frame")
+                .map(|(image, _changed)| (*image).clone());
+            frames.push((
+                frame.params,
+                frame.resolved_draws(),
+                frame.frame_ref,
+                inline,
+            ));
+        }
+    }
+    input.finish().expect("native decode");
     frames
 }
 

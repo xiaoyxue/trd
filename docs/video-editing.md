@@ -392,7 +392,10 @@ duration before playback.
 
 | Path | Responsibility |
 |---|---|
-| `crates/trd-core/src/video_editing.rs` | versioned timeline decoder |
+| `crates/trd-core/src/media/video_document/` | versioned timeline decoder (`trd.video_edit 0.2.0`, Arrow or Parquet) |
+| `crates/trd-core/src/media/video.rs` | `VideoTiming` / `VideoInfo` — what a clip is, from either source |
+| `crates/trd-core/src/media/mp4_probe/` | `moov` walk for the container's own timeline (#264) |
+| `crates/trd-core/src/media/arrow_columns.rs` | Arrow column/metadata accessors for the document |
 | `crates/trd-placement/src/lib.rs` | K/quad frame and placement math |
 | `crates/trd-gui/src/video_editing/mod.rs` | editor state and typed scheduler |
 | `crates/trd-gui/src/video_editing/editing_ui.rs` | editor panels, quad/catalog wiring, player footer |

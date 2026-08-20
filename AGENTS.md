@@ -318,16 +318,67 @@ not complete until these tiers pass; **record the results on the PR.**
      ...`; verify source validation, streaming RGBA playback, play/pause/seek,
      timeline row identity, and the tracked/video-only transition. ffmpeg and
      ffprobe are the native media adapter; no temporary frame directory is used.
-4. **Native window e2e — Windows:** the live-surface paths that need a display —
-   `trd-app` playing a stream (`examples/render.ps1 -App`) and the interactive
-   `trd-gui` window (`cargo run -p trd-gui-app -- --mesh …`). Confirm the windows
-   render and interaction works.
-   This is a **Windows-only manual e2e gate**: mark it N/A/ignored on Linux, and
-   include the exact Windows commands in the PR and issue handoff whenever the
-   current platform cannot run it.
-   Include `cargo run -p trd-gui-video-editing -- --document
-   web\gui-video-editing\data\fiba-shot1.arrow --video <MP4>` for changes
-   touching the cross-platform editor.
+4. **Windows e2e (manual).** The Linux box is headless, so every path that needs
+   a **display**, a **window event loop**, or **Windows file/HTTP I/O** is verified
+   here and nowhere else. Mark N/A on Linux, and put the exact commands in the PR
+   and issue handoff whenever the current platform cannot run them. Run the ones
+   your change touches; a render-path or media-layer change runs all of them.
+
+   | # | Path | Command | What only Windows can catch |
+   |---|---|---|---|
+   | 4.1 | `trd-cli` | `examples\render.ps1 -CLI …` | MSVC toolchain, D3D12/Vulkan adapter choice |
+   | 4.2 | `trd-app` window | `examples\render.ps1 -Native …` | winit event loop, swapchain resize/occlusion/DPI |
+   | 4.3 | `trd-gui` window | `cargo run -p trd-gui-app -- --mesh …` | egui interaction on a real surface |
+   | 4.4 | web renderers | `examples\render.ps1 -Web -CanvasRenderer …` / `-OffscreenRenderer` | Chrome/Edge **on Windows** WebGPU backend (D3D12, not Vulkan) |
+   | 4.5 | native video editor | `cargo run -p trd-gui-video-editing -- --document … --video …` | ffmpeg/ffprobe **on Windows** — process spawn, path quoting |
+   | 4.6 | browser video editor | `bun run --cwd gui-video-editing dev` | WebCodecs on the Windows media stack |
+   | 4.7 | **large-file seek** | see below | 64-bit file offsets and ranged HTTP on Windows |
+
+   Use the [coca-cola can recipe](#cross-mode-e2e-recipe--coca-cola-can-pbr--aabb--axes)
+   for 4.1-4.4 so all four are driven by one scene and their colours can be
+   compared directly. For 4.2 also confirm playback runs at the stream's declared
+   rate and loops; for 4.5/4.6 run the editor checks listed under §3 — quad
+   selection, all three catalog assets, picking/editing, play/pause/seek, the
+   video-only 222-287 tail, and Details' frame identity under rapid seek.
+
+   **4.7 — large-file seek (Windows, required for any media-layer change).**
+   A multi-hundred-GiB MP4 is the only thing that exercises **64-bit offsets**;
+   a short local clip cannot fail the way a 218 GiB one does, and the classic
+   Windows-only failure is a `>4 GiB` offset truncated to 32 bits, which shows up
+   as a seek landing at the wrong place or an "unreadable" file rather than as a
+   crash. Linux coverage does **not** substitute: the file APIs, the process
+   spawn, and the browser's range-request stack are all different here.
+
+   Both delivery surfaces must be driven, because they use different readers —
+   ffmpeg natively, mediabunny in the browser:
+
+   ```powershell
+   # native — local path, then the same file over HTTP
+   cargo run -p trd-gui-video-editing -- --video <BIG.mp4> --probe-only
+   cargo run -p trd-gui-video-editing -- --video <BIG.mp4>
+   cargo run -p trd-gui-video-editing -- --video-url http://localhost:8092/<BIG.mp4>
+
+   # browser — serve with the CORS+range helper, then drive probe.html and the editor
+   bun web\gui-video-editing\serve-documents.ts <dir> --port 8092
+   #   probe.html?url=…&seek=<deep>&frames=8                 one deep seek
+   #   probe.html?url=…&reader=mediabunny&scrub=t1,t2,…&overlap=1   dragged scrubber
+   #   /?document=none&reader=mediabunny&video=<url>          the editor itself
+   ```
+
+   Expect, on **both** surfaces:
+   - **opening costs megabytes, not gigabytes** (~11 MiB / <2 s for 218 GiB) — a
+     full read means the ranged path was bypassed;
+   - a seek **past the 4 GiB mark** lands on its exact target, and so does one
+     near the very end (the offset-truncation trap);
+   - overlapping seeks coalesce to the last target, and the reader is still
+     usable afterwards;
+   - Details reports one consistent requested/presented/displayed/rendered frame,
+     with no pending or in-flight frame left over;
+   - with `?document=none` / no `--document`, the timeline is the **container's**
+     — real frame count and rational fps, not an invented 30 fps grid (#264).
+
+   The big MP4 stays **external and uncommitted**; name the file and its size in
+   the PR so a reviewer knows which one was used.
 
 The non-GPU gates (`nix flake check`: `cargo fmt`, clippy native + wasm32,
 `cargo test`, `tsc`, Biome) must pass on both platforms as well.
@@ -448,8 +499,10 @@ considered done:
   what is still owed. Use this on **every** PR (and mirror it in the issue); never
   report gates as bare prose. Keep to a fixed glyph set so the format stays
   consistent and greppable — **status:** ✅ passed · ❌ failed · ⏳ not yet run · 🤝
-  handed off; **platform:** 🪟 Windows · 🐧 Linux/Nix; **gate:** 🎨 fmt · 📎 clippy ·
-  🕸️ clippy-wasm · 🧪 tests · 🔀 decoder-parity · 🖼️ golden-render · 🌐 tsc/biome.
+  handed off · n/a not applicable; **platform:** 🪟 Windows · 🐧 Linux/Nix;
+  **gate:** 🎨 fmt · 📎 clippy · 🕸️ clippy-wasm · 🧪 tests · 🔀 decoder-parity ·
+  🖼️ golden-render · 🎮 gpu-tests · 🌐 tsc/biome · 🖥️ window e2e (§4.2/4.3) ·
+  🎬 video-editor e2e (§4.5/4.6) · 📼 large-file seek (§4.7).
   One matrix row per gate, one column per platform (cells are status icons, an
   optional count like `(173)`); the handoff list is a 🤝-headed checklist of the
   exact commands the *other* platform still owes, closed by a one-line expected
@@ -465,6 +518,8 @@ considered done:
   | 🧪 `cargo test --lib` (173)    | ✅ | 🤝 |
   | 🔀 `decoder_parity` (2)        | ✅ | 🤝 |
   | 🖼️ `golden_render` (6/6, GPU)  | ✅ | 🤝 |
+  | 🖥️ window e2e (§4.2/4.3)       | ✅ | n/a |
+  | 📼 large-file seek (§4.7)      | ✅ | n/a |
 
   ## 🤝 Handoff — 🐧 Linux/Nix
   - [ ] `nix flake check -L`
