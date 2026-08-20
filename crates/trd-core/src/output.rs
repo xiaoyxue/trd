@@ -12,6 +12,7 @@ use arrow_schema::extension::FixedShapeTensor;
 use thiserror::Error;
 
 use crate::protocol::{FRAME_RATE_KEY, PROTOCOL_VERSION, PROTOCOL_VERSION_KEY};
+use crate::session_state::SessionState;
 
 #[derive(Debug, Error)]
 pub enum OutputError {
@@ -59,13 +60,6 @@ pub enum OutputError {
 
     #[error("output session previously failed")]
     OutputSessionFailed,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OutputState {
-    Open,
-    Finished,
-    Failed,
 }
 
 #[derive(Clone, Copy)]
@@ -271,7 +265,7 @@ impl Write for SharedBuffer {
 pub struct OutputStream<W: Write> {
     session: OutputSession,
     writer: StreamWriter<W>,
-    state: OutputState,
+    state: SessionState,
 }
 
 impl<W: Write> OutputStream<W> {
@@ -287,21 +281,19 @@ impl<W: Write> OutputStream<W> {
         Ok(Self {
             session,
             writer,
-            state: OutputState::Open,
+            state: SessionState::default(),
         })
     }
 
     fn ensure_open(&self) -> Result<(), OutputError> {
-        match self.state {
-            OutputState::Open => Ok(()),
-            OutputState::Finished => Err(OutputError::OutputSessionFinished),
-            OutputState::Failed => Err(OutputError::OutputSessionFailed),
-        }
+        self.state.ensure_open(
+            OutputError::OutputSessionFinished,
+            OutputError::OutputSessionFailed,
+        )
     }
 
     fn fail<T>(&mut self, error: OutputError) -> Result<T, OutputError> {
-        self.state = OutputState::Failed;
-        Err(error)
+        self.state.fail(error)
     }
 
     /// Encodes and writes one batch of tightly packed RGBA frames.
@@ -324,12 +316,8 @@ impl<W: Write> OutputStream<W> {
     pub fn finish(&mut self) -> Result<(), OutputError> {
         self.ensure_open()?;
 
-        if let Err(error) = self.writer.finish() {
-            return self.fail(OutputError::Arrow(error));
-        }
-
-        self.state = OutputState::Finished;
-        Ok(())
+        let finished = self.writer.finish().map_err(OutputError::Arrow);
+        self.state.close(finished)
     }
 }
 
@@ -346,7 +334,7 @@ impl OutputStream<SharedBuffer> {
     /// has already received the bytes. Fails if the stream previously failed, so
     /// a partially-written batch is never handed back as success-shaped bytes.
     pub fn drain_new(&mut self) -> Result<Vec<u8>, OutputError> {
-        if self.state == OutputState::Failed {
+        if self.state == SessionState::Failed {
             return Err(OutputError::OutputSessionFailed);
         }
         Ok(self.writer.get_ref().take())

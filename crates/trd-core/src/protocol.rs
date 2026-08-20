@@ -8,6 +8,7 @@ use arrow::ipc::reader::StreamDecoder;
 
 use crate::frame::validate_schema as validate_frames_schema;
 use crate::render::{Draw, DrawSelection};
+use crate::session_state::SessionState;
 #[cfg(test)]
 use crate::texture::TEXTURE_COLUMN;
 use crate::texture::{ImageTexture, TextureError};
@@ -186,13 +187,6 @@ pub enum ProtocolError {
     InvalidDrawMode { value: u8 },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SessionState {
-    Open,
-    Finished,
-    Failed,
-}
-
 /// Which kind of concatenated IPC sub-stream the session is currently decoding.
 /// A `0.0.6` stream is `[mesh][texture?][frames?][params]`; the params stream is
 /// terminal.
@@ -251,17 +245,16 @@ impl InputSession {
             mesh_table_present: false,
             texture_table_present: false,
             params_schema_validated: false,
-            state: SessionState::Open,
+            state: SessionState::default(),
         }
     }
 
     pub fn push(&mut self, chunk: &[u8]) -> Result<Vec<FrameBatch>, ProtocolError> {
         self.require_open()?;
-        let result = self.push_open(chunk);
-        if result.is_err() {
-            self.state = SessionState::Failed;
+        match self.push_open(chunk) {
+            Ok(batches) => Ok(batches),
+            Err(error) => self.state.fail(error),
         }
-        result
     }
 
     pub fn finish(&mut self) -> Result<(), ProtocolError> {
@@ -276,16 +269,7 @@ impl InputSession {
             Ok(())
         })();
 
-        match result {
-            Ok(()) => {
-                self.state = SessionState::Finished;
-                Ok(())
-            }
-            Err(error) => {
-                self.state = SessionState::Failed;
-                Err(error)
-            }
-        }
+        self.state.close(result)
     }
 
     /// Whether a params schema has been decoded and validated (frames can be
@@ -339,11 +323,8 @@ impl InputSession {
     }
 
     fn require_open(&self) -> Result<(), ProtocolError> {
-        match self.state {
-            SessionState::Open => Ok(()),
-            SessionState::Finished => Err(ProtocolError::SessionFinished),
-            SessionState::Failed => Err(ProtocolError::SessionFailed),
-        }
+        self.state
+            .ensure_open(ProtocolError::SessionFinished, ProtocolError::SessionFailed)
     }
 
     fn push_open(&mut self, chunk: &[u8]) -> Result<Vec<FrameBatch>, ProtocolError> {

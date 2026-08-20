@@ -13,6 +13,7 @@ mod mesh;
 mod mp4_probe;
 mod output;
 mod protocol;
+mod session_state;
 mod render;
 mod texture;
 mod video_editing;
