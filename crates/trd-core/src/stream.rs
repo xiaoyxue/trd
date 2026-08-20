@@ -118,67 +118,31 @@ fn validated_draws(
 /// params-only stream with no leading mesh table is a
 /// [`StreamError::MissingMeshStream`].
 pub fn read_scene_stream_with_meta<R: Read>(
-    mut input: R,
+    input: R,
     on_meshes: impl FnOnce(Vec<Mesh>),
     on_texture: impl FnOnce(Option<ImageTexture>),
     on_meta: impl FnOnce(f64),
     mut on_frame: impl FnMut(FrameParams, Vec<Draw>, Option<String>, Option<Arc<crate::ImageData>>),
 ) -> Result<(), StreamError> {
-    let mut session = crate::InputSession::new();
-    // FnOnce callbacks fired exactly once, when the params schema is first
-    // reached (meshes + texture + fps complete); `Option::take` moves each out on
-    // that single iteration so the borrow checker accepts calling them in a loop.
-    let mut on_meshes = Some(on_meshes);
-    let mut on_texture = Some(on_texture);
-    let mut on_meta = Some(on_meta);
-    let mut mesh_count = 0usize;
-    let mut ready = false;
+    let mut input = crate::InputStream::new(input);
+    let prologue = input.prologue()?;
+    let mesh_count = prologue.meshes.len();
+    on_meshes(prologue.meshes.to_vec());
+    on_texture(prologue.texture.cloned());
+    on_meta(prologue.frame_rate);
+
     let mut inline_cache = crate::InlineFrameCache::default();
-
-    let mut buf = [0u8; 64 * 1024];
-    loop {
-        let n = input.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        let batches = session.push(&buf[..n])?;
-
-        if !ready && session.has_schema() {
-            if session.meshes().is_empty() {
-                // The protocol is mesh-first; a params-only stream is rejected.
-                return Err(StreamError::MissingMeshStream);
-            }
-            mesh_count = session.meshes().len();
-            if let Some(cb) = on_meshes.take() {
-                cb(session.meshes().to_vec());
-            }
-            if let Some(cb) = on_texture.take() {
-                cb(session.texture().cloned());
-            }
-            if let Some(cb) = on_meta.take() {
-                cb(session.frame_rate().unwrap_or(crate::DEFAULT_FRAME_RATE));
-            }
-            ready = true;
-        }
-
-        for batch in batches {
-            for frame in batch {
-                let draws = validated_draws(&frame, mesh_count)?;
-                let inline = inline_cache
-                    .resolve(frame.frame_id, session.frames())
-                    .map_err(ProtocolError::from)?
-                    .map(|(image, _changed)| image);
-                on_frame(frame.params, draws, frame.frame_ref, inline);
-            }
+    while let Some(batch) = input.next_batch() {
+        for frame in batch? {
+            let draws = validated_draws(&frame, mesh_count)?;
+            let inline = inline_cache
+                .resolve(frame.frame_id, input.frames())
+                .map_err(ProtocolError::from)?
+                .map(|(image, _changed)| image);
+            on_frame(frame.params, draws, frame.frame_ref, inline);
         }
     }
-    session.finish()?;
-
-    if !ready {
-        // No params schema was ever reached (empty input) — mesh-first unmet.
-        return Err(StreamError::MissingMeshStream);
-    }
-    Ok(())
+    input.finish()
 }
 
 /// A shell-provided closure that resolves a per-frame background frame reference
@@ -280,7 +244,7 @@ fn render_and_write_batch<W: Write>(
 /// lives in exactly one place. The only native-specific bit is the blocking
 /// [`Read`] byte source.
 pub fn run_stream<R: Read, W: Write>(
-    mut input: R,
+    input: R,
     output: W,
     width: u32,
     height: u32,
@@ -291,87 +255,55 @@ pub fn run_stream<R: Read, W: Write>(
     // width*height) can't overflow before Renderer's guard runs.
     check_dimensions(width, height)?;
 
-    let mut session = crate::InputSession::new();
-    // Built once the params schema is reached (meshes + texture + fps known).
-    // The renderer and its texture target are a matched pair (#203): the
-    // target is a call argument now, not a field the renderer owns, so the
-    // stream holds both and threads the target through each render call.
-    let mut renderer: Option<Renderer> = None;
-    let mut target: Option<TextureTarget> = None;
-    let mut output_stream: Option<OutputStream<W>> = None;
-    // The sink is moved into the stream once the params schema arrives (the
-    // header needs the stream's frame rate), so it waits here until then.
-    let mut sink = Some(output);
+    let mut input = crate::InputStream::new(input);
+    // The mesh-first prologue is complete here, so the renderer can be built
+    // from it eagerly rather than lazily inside the frame loop. The renderer and
+    // its texture target are a matched pair (#203): the target is a call
+    // argument, not a field, so both are held here.
+    let prologue = input.prologue()?;
+    let frame_rate = prologue.frame_rate;
+    let (mut renderer, target) = pollster::block_on(Renderer::with_meshes_sample_count(
+        width,
+        height,
+        prologue.meshes,
+        options.msaa.sample_count(),
+    ))?;
+    if let Some(pbr) = &options.pbr {
+        renderer.set_disney_material(pbr.material.clone());
+        renderer.set_image_based_lighting(pbr.ibl);
+        renderer.set_tone_mapping(pbr.tone_mapping);
+        if let Some(env) = &pbr.env_map {
+            renderer.set_env_map(env.clone());
+        }
+    }
+    if let Some(texture) = prologue.texture {
+        renderer.set_texture(texture);
+    }
+
+    // Opening the stream writes its IPC header straight into `output`.
+    let mut output = OutputStream::new(output, width, height, Some(frame_rate))?;
     // The background currently uploaded, so consecutive frames sharing it skip
     // the decode + re-upload.
     let mut background_state = FrameBackgroundState::default();
     let mut inline_cache = crate::InlineFrameCache::default();
 
-    let mut buf = [0u8; 64 * 1024];
-    loop {
-        let n = input.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        let batches = session.push(&buf[..n])?;
-
-        // The mesh-first protocol delivers meshes + optional texture before the
-        // params schema, so `has_schema()` flips true only once they're complete.
-        if renderer.is_none() && session.has_schema() {
-            if session.meshes().is_empty() {
-                return Err(StreamError::MissingMeshStream);
-            }
-            let (mut built, built_target) =
-                pollster::block_on(Renderer::with_meshes_sample_count(
-                    width,
-                    height,
-                    session.meshes(),
-                    options.msaa.sample_count(),
-                ))?;
-            if let Some(pbr) = &options.pbr {
-                built.set_disney_material(pbr.material.clone());
-                built.set_image_based_lighting(pbr.ibl);
-                built.set_tone_mapping(pbr.tone_mapping);
-                if let Some(env) = &pbr.env_map {
-                    built.set_env_map(env.clone());
-                }
-            }
-            if let Some(texture) = session.texture() {
-                built.set_texture(texture);
-            }
-            renderer = Some(built);
-            target = Some(built_target);
-
-            let frame_rate = session.frame_rate().unwrap_or(crate::DEFAULT_FRAME_RATE);
-            // Opening the stream writes its IPC header straight into `output`.
-            let sink = sink.take().expect("sink moved exactly once");
-            output_stream = Some(OutputStream::new(sink, width, height, Some(frame_rate))?);
-        }
-
-        if let (Some(renderer), Some(target), Some(output_stream)) =
-            (renderer.as_mut(), target.as_ref(), output_stream.as_mut())
-        {
-            for batch in &batches {
-                render_and_write_batch(
-                    renderer,
-                    target,
-                    &options,
-                    output_stream,
-                    batch,
-                    session.frames(),
-                    frame_resolver,
-                    &mut background_state,
-                    &mut inline_cache,
-                )?;
-            }
-        }
+    // `next_batch` rather than `for batch in &mut input`: the loop body needs
+    // `input.frames()` too, which a `for` loop's borrow would forbid.
+    while let Some(batch) = input.next_batch() {
+        render_and_write_batch(
+            &mut renderer,
+            &target,
+            &options,
+            &mut output,
+            &batch?,
+            input.frames(),
+            frame_resolver,
+            &mut background_state,
+            &mut inline_cache,
+        )?;
     }
-    session.finish()?;
-
-    // A stream that never reached a params schema (empty input) — the mesh-first
-    // contract wasn't satisfied.
-    let mut output_stream = output_stream.ok_or(StreamError::MissingMeshStream)?;
-    output_stream.finish()?;
+    input.finish()?;
+    output.finish()?;
     Ok(())
 }
 

@@ -677,3 +677,77 @@ fn run_stream_renders_mesh_first_stream() {
         .value(center);
     assert!(value > 0, "mesh quad should cover the center pixel");
 }
+
+/// A reader that hands out at most `chunk` bytes per `read`, so a test can force
+/// the transport to need several reads per decoded batch.
+struct Trickle<'a> {
+    bytes: &'a [u8],
+    chunk: usize,
+}
+
+impl std::io::Read for Trickle<'_> {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.bytes.len().min(self.chunk).min(out.len());
+        out[..n].copy_from_slice(&self.bytes[..n]);
+        self.bytes = &self.bytes[n..];
+        Ok(n)
+    }
+}
+
+#[test]
+fn input_stream_yields_the_same_frames_however_the_bytes_arrive() {
+    let mesh = Mesh::hello_triangle();
+    let frames = vec![
+        FrameParams {
+            model: Some(IDENTITY_MODEL),
+            ..FrameParams::IDENTITY
+        },
+        FrameParams {
+            model: Some([
+                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.3, 0.0, 0.0, 1.0,
+            ]),
+            ..FrameParams::IDENTITY
+        },
+    ];
+    let mut bytes = Vec::new();
+    write_mesh_stream(&mut bytes, &mesh);
+    write_params_stream(&mut bytes, &frames);
+
+    // One byte at a time is the worst case: most reads decode nothing, so the
+    // read loop must keep pumping rather than report end of stream.
+    for chunk in [1, 7, 4096, usize::MAX] {
+        let mut stream = crate::InputStream::new(Trickle {
+            bytes: &bytes,
+            chunk,
+        });
+        let prologue = stream.prologue().expect("prologue");
+        assert_eq!(prologue.meshes, std::slice::from_ref(&mesh));
+        assert!(prologue.texture.is_none());
+
+        let decoded: Vec<FrameParams> = stream
+            .by_ref()
+            .flat_map(|batch| batch.expect("batch"))
+            .map(|frame| frame.params)
+            .collect();
+        assert_eq!(decoded, frames, "chunk size {chunk}");
+        stream.finish().expect("finish");
+    }
+}
+
+#[test]
+fn input_stream_rejects_a_stream_that_is_not_mesh_first() {
+    // Params with no leading mesh table...
+    let mut params_only = Vec::new();
+    write_params_stream(&mut params_only, &[FrameParams::IDENTITY]);
+    assert!(matches!(
+        crate::InputStream::new(&params_only[..]).prologue(),
+        Err(StreamError::MissingMeshStream)
+    ));
+    // ...and a stream that ends before any schema arrives, which the session's
+    // own end-of-stream check catches first (unchanged from the pre-refactor
+    // path, where `session.finish()` also ran before the mesh-first check).
+    assert!(matches!(
+        crate::InputStream::new(&[][..]).prologue(),
+        Err(StreamError::Protocol(ProtocolError::MissingSchema))
+    ));
+}

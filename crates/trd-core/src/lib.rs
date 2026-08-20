@@ -74,6 +74,13 @@ pub use video_editing::{
     VIDEO_EDIT_VERSION, VIDEO_EDIT_VERSION_KEY,
 };
 
+// Byte transports live in `io/`; the sessions they drive stay with the format
+// they implement, in `protocol/` (see `io/mod.rs`).
+#[cfg(not(target_arch = "wasm32"))]
+mod io;
+#[cfg(not(target_arch = "wasm32"))]
+pub use io::{InputStream, Prologue};
+
 #[cfg(not(target_arch = "wasm32"))]
 mod stream;
 #[cfg(not(target_arch = "wasm32"))]
