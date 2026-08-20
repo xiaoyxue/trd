@@ -4,7 +4,7 @@ use crate::protocol::{
 };
 use crate::protocol::{MESH_TABLE_KIND, PARAMS_TABLE_KIND, PROTOCOL_VERSION_KEY, TABLE_KIND_KEY};
 use crate::render::{Draw, DrawSelection, RenderMode};
-use crate::stream::*;
+use crate::stream_filter::*;
 use crate::Mesh;
 use arrow::array::{
     Array, ArrayRef, FixedSizeListArray, FixedSizeListArray as U8List, Float32Array, ListArray,

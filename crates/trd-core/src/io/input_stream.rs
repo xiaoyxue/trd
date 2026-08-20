@@ -13,7 +13,7 @@ use std::collections::VecDeque;
 use std::io::Read;
 
 use crate::protocol::FrameBatch;
-use crate::stream::StreamError;
+use crate::stream_filter::StreamError;
 use crate::texture::ImageTexture;
 use crate::{InlineFrame, InputSession, Mesh};
 

@@ -18,6 +18,10 @@
 //! has just one execution model (push), and `Vec<u8>` already implements
 //! `Write`, so `OutputStream<W>` serves both platforms.
 
+#[cfg(not(target_arch = "wasm32"))]
 mod input_stream;
+mod output_stream;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub use input_stream::{InputStream, Prologue};
+pub use output_stream::{OutputStream, SharedBuffer};

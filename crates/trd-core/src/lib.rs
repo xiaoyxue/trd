@@ -11,10 +11,12 @@ mod material;
 mod math;
 mod mesh;
 mod mp4_probe;
-mod output;
+// Byte transports live in `io/`; the sessions they drive stay with the format
+// they implement, in `protocol/` (see `io/mod.rs`).
+mod io;
 mod protocol;
-mod session_state;
 mod render;
+mod session_state;
 mod texture;
 mod video_editing;
 
@@ -38,12 +40,14 @@ pub use mesh::{
     import_glb, import_gltf_materials, GltfAsset, GltfImportError, Mesh, MeshError, MeshShading,
     DEFAULT_PREVIEW_TARGET,
 };
-pub use output::{
-    output_schema, read_image_stream, OutputError, OutputSession, OutputStream, SharedBuffer,
-};
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use io::{InputStream, Prologue};
+pub use io::{OutputStream, SharedBuffer};
 pub use protocol::{
-    frame_rate_from_metadata, DecodedFrame, FrameBatch, InputSession, ProtocolError,
-    DEFAULT_FRAME_RATE, FRAME_RATE_KEY, PROTOCOL_VERSION, PROTOCOL_VERSION_KEY, TABLE_KIND_KEY,
+    frame_rate_from_metadata, output_schema, read_image_stream, DecodedFrame, FrameBatch,
+    InputSession, OutputError, OutputSession, ProtocolError, DEFAULT_FRAME_RATE, FRAME_RATE_KEY,
+    PROTOCOL_VERSION, PROTOCOL_VERSION_KEY, TABLE_KIND_KEY,
 };
 // Material models are plain data (no wgpu, no bytemuck), so they sit beside
 // `mesh`/`texture`/`camera` at the crate root rather than inside the render
@@ -75,17 +79,10 @@ pub use video_editing::{
     VIDEO_EDIT_VERSION, VIDEO_EDIT_VERSION_KEY,
 };
 
-// Byte transports live in `io/`; the sessions they drive stay with the format
-// they implement, in `protocol/` (see `io/mod.rs`).
 #[cfg(not(target_arch = "wasm32"))]
-mod io;
+mod stream_filter;
 #[cfg(not(target_arch = "wasm32"))]
-pub use io::{InputStream, Prologue};
-
-#[cfg(not(target_arch = "wasm32"))]
-mod stream;
-#[cfg(not(target_arch = "wasm32"))]
-pub use stream::{decode_frames, run_stream, FrameResolver, StreamError};
+pub use stream_filter::{decode_frames, run_stream, FrameResolver, StreamError};
 
 /// Returns the project greeting used by the CLI and web entry points.
 pub fn greeting() -> String {
