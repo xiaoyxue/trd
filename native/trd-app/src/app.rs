@@ -2,7 +2,7 @@
 //! surface and renders trd frame-params streamed from stdin.
 //!
 //! A background thread reads the Arrow IPC stream (the same `[mesh][params]`
-//! input `trd-cli` consumes) via [`trd_core::read_scene_stream_with_meta`],
+//! input `trd-cli` consumes) via [`trd_core::InputStream`],
 //! forwarding the decoded mesh table then each frame's params + instanced draw
 //! list over a channel. The window plays them at a fixed rate, encoding each
 //! frame's [`trd_core::Scene`] with the shared [`trd_core::Renderer`] — so

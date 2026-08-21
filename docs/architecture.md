@@ -103,26 +103,40 @@ Platform-agnostic wgpu logic, shared verbatim by every target:
   **device-free**: a mesh's GPU residency is its face in `render/mesh_store.rs`,
   and the `Vertex` layout it is written in stays with the other `repr(C)` + `Pod`
   types in `render/gpu_types.rs`.
-- **`protocol/` + `io/` + `stream_filter/`** — the Arrow input layer, split by
-  role (#296). `protocol/` is the **wire format**: `protocol/input_session.rs`'s
-  `InputSession` is the single framing driver (native + wasm), feeding byte
-  chunks through `arrow`'s `StreamDecoder`, validating explicit `0.0.6`
-  `trd.table.kind` metadata, decoding `[mesh][texture?][frames?][params]`, and
-  yielding one `FrameBatch` per params record batch. `io/` is the **byte
-  transport** — `io/input_stream.rs` and `io/output_stream.rs` adapt a blocking
-  `Read`/`Write` to those sessions, and are native-only. `stream_filter/`
-  (`run_stream` for the CLI, `read_scene_stream_with_meta` for the window) is the
-  filter that joins them. Params stay one batch in flight; optional indexed
-  frames resources are retained for playback/reuse (encoded Binary stays
-  compressed until selected).
-- **`protocol/image_encode.rs`** — the Arrow IPC *output* serialization.
-  `OutputSession` (`protocol/output_session.rs`) writes the `r,g,b,a`
-  `fixed_shape_tensor<u8>` stream incrementally; `tightly_pack_rgba` strips GPU
-  row padding. Shared by the CLI and the browser offscreen renderer.
-- **`media/`** — everything about a *video* rather than the render wire: one
-  `VideoTiming` shared by the container probe (`media/mp4_probe/`) and the
-  `0.2.0` authoring document (`media/video_document/`), plus the columnar
-  helpers in `media/arrow_columns.rs` (#296).
+- **`protocol/` + `io/`** — the Arrow input layer, split by #296 along one rule:
+  a type that **owns** a transport is a `*Stream` and lives in `io/`; one that
+  owns none is a `*Session` and stays with the format in `protocol/`.
+  `protocol/input_session.rs`'s `InputSession` is the **single framing driver**
+  (native + wasm) and is deliberately transport-free: it feeds byte chunks
+  through `arrow`'s `StreamDecoder`, validates explicit `0.0.6`
+  `trd.table.kind` metadata, decodes `[mesh][texture?][frames?][params]` via the
+  one column decoder in `protocol/arrow_decode.rs`, and yields one `FrameBatch`
+  per params record batch. `io/input_stream.rs`'s `InputStream<R: Read>` wraps it
+  for the blocking case — it owns the `Read`, exposes the prologue via inherent
+  methods and implements `Iterator<Item = Result<FrameBatch, StreamError>>`, so
+  the 64 KiB read loop exists once. `stream_filter/` drives that for the CLI
+  (`run_stream`) and `native/trd-app` for the window. Params stay one batch in
+  flight; optional indexed frames resources are retained for playback/reuse
+  (encoded Binary stays compressed until selected).
+- **`protocol/output_session.rs` + `io/output_stream.rs`** — the Arrow IPC
+  *output* serialization, split the same way: `OutputSession` writes the
+  `r,g,b,a` `fixed_shape_tensor<u8>` stream incrementally and owns no transport,
+  while `OutputStream<W: Write>` owns the `Write`. `tightly_pack_rgba`
+  (`protocol/image_encode.rs`) strips GPU row padding. Shared by the CLI and the
+  browser offscreen renderer.
+- **`media/`** — what trd knows about a *video*, as opposed to the render wire
+  (#296). One session needs the same handful of facts — size, exact frame rate,
+  frame count, duration — and there are **two** sources for them: the `0.2.0`
+  authoring document (`media/video_document/`, read from Arrow IPC or Parquet)
+  and the container itself (`media/mp4_probe/`, walked for its `moov` box). They
+  are alternative answers to one question rather than unrelated parsers, so they
+  share one `VideoTiming` (`media/video.rs`) and the columnar helpers in
+  `media/arrow_columns.rs`. The document is **optional** (#264): without one the
+  editor is a player whose timeline comes from the container. `trd-core` does no
+  codec work — demuxing and decoding belong to the delivery surfaces (mediabunny
+  in the browser, ffmpeg natively). Deliberately **not** under `protocol/`: the
+  editor document is independent of the render `PROTOCOL_VERSION` and must stay
+  that way.
 - **`math/`** — the typed homogeneous linear-algebra layer over glam
   (`Vector`/`Point`/`Normal`/`Matrix`/`Rotation`/`Transform`/`Aabb`): zero-cost
   `#[repr(transparent)]` newtypes with **private** fields enforcing affine rules
@@ -175,7 +189,7 @@ Each is a *thin shell* that only supplies a render target and calls the core:
 |---|---|
 | `crates/trd-core` | the unified render core (`render/` module tree, `shader/*.wgsl`, `protocol/`, `io/`, `media/`, `stream_filter/`) |
 | `crates/trd-cli` | headless CLI: Arrow stream in → Arrow image out |
-| `crates/trd-gui` | reusable egui UI, scene/interaction state, and render backends — a plain `rlib`, native + wasm, with no `wasm-bindgen` of its own |
+| `crates/trd-gui` | reusable egui UI, scene/interaction state, and native render backends (a plain `rlib`: every browser entry point moved to `trd-wasm` in #180) |
 | `crates/trd-placement` | GPU-free K + image-quad reconstruction and placement matrices |
 | `crates/trd-wasm` | the **only** `wasm-bindgen` crate: viewer bindings (`canvas_renderer`/`offscreen_renderer`) + the GUI entry points (`gui.rs`, `gui_web_app.rs`); the `trd-wasm` npm library |
 | `native/trd-app` | native stream-playback window (winit + live wgpu surface) |
