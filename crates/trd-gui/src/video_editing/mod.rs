@@ -430,10 +430,11 @@ pub struct VideoEditingShared {
     ///
     /// Owned here, and closed **when a newer frame replaces it** — not after the
     /// upload. A render can run more than once for the same frame, since any UI
-    /// change repaints, so the frame has to outlive its first use; `video_frame`
-    /// below borrows rather than takes for the same reason. Web-only: native
-    /// frames arrive from an ffmpeg pipe as CPU bytes and have nothing to keep
-    /// on the GPU (#229).
+    /// change repaints, so the frame has to outlive its first use: `video_frame`
+    /// below leaves it in this slot and hands out a *cloned wasm-bindgen handle
+    /// to the same frame* — not a copy, and not ownership — so a caller reads it
+    /// and drops it, never closes it. Web-only: native frames arrive from an
+    /// ffmpeg pipe as CPU bytes and have nothing to keep on the GPU (#229).
     #[cfg(target_arch = "wasm32")]
     video_frame: RefCell<Option<web_sys::VideoFrame>>,
     /// A timeline the shell probed from the container, waiting to be adopted.
@@ -573,11 +574,13 @@ impl VideoEditingShared {
     /// Hands over the decoded frame whose pixels are copied GPU→GPU, so the
     /// render task can present it without any crossing the wasm boundary.
     ///
-    /// Borrows rather than takes: a render can run more than once for the same
-    /// frame — any UI change repaints — and a taken frame would leave the second
-    /// pass with an empty RGBA buffer. The clone is another handle to the same
-    /// frame, not WebCodecs' `clone()`, so it costs no extra pool slot; the
-    /// frame is released when a newer one replaces it.
+    /// Leaves the frame in the slot rather than taking it: a render can run more
+    /// than once for the same frame — any UI change repaints — and a taken frame
+    /// would leave the second pass with an empty RGBA buffer. What comes back is
+    /// a cloned wasm-bindgen handle to the *same* frame, not WebCodecs'
+    /// `clone()`, so it costs no extra pool slot — and so closing it would close
+    /// the frame still sitting in the slot. Read it and drop it; the slot
+    /// releases the frame when a newer one replaces it.
     #[cfg(target_arch = "wasm32")]
     fn video_frame(&self) -> Option<web_sys::VideoFrame> {
         self.video_frame.borrow().clone()
