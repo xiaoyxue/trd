@@ -7,7 +7,8 @@
 //!
 //!   * [`ImageTexture`] — an **image map**: RGBA8 pixels, decoded from an Arrow
 //!     `fixed_shape_tensor<u8>[H, W, 4]` table (the bunny albedo). This is the
-//!     self-describing image tensor trd already *emits* on output (`output.rs`),
+//!     self-describing image tensor trd already *emits* on output
+//!     (`protocol/output_session.rs`),
 //!     so a texture input is symmetric with a rendered frame.
 //!   * [`ConstantTexture`] — a **constant map**: one uniform color (a 1x1 image);
 //!     the default when a mesh is drawn textured but no texture stream is bound.

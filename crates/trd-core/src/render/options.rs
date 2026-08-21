@@ -1,6 +1,7 @@
 //! Appearance options shared by every front-end (#180).
 //!
-//! These used to live in `stream.rs`, which is `#[cfg(not(target_arch =
+//! These used to live in `stream.rs` (since split into `io/` + `stream_filter/`
+//! by #296), which is `#[cfg(not(target_arch =
 //! "wasm32"))]`, so the browser renderers could not even *name* `RenderOptions`
 //! and each kept its own `show_aabb` / `show_axes` booleans — which is why
 //! native and web overlay assembly drifted apart. They are plain configuration

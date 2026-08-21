@@ -53,4 +53,4 @@ Earlier iterations were removed; the renderer hard-rejects any version other
 than `0.0.6`.
 
 The accepted input version and current output version are defined in
-`crates/trd-core/src/protocol.rs` (`SUPPORTED_INPUT_VERSIONS`, `PROTOCOL_VERSION`).
+`crates/trd-core/src/protocol/mod.rs` (`SUPPORTED_INPUT_VERSIONS`, `PROTOCOL_VERSION`).

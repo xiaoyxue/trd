@@ -1,15 +1,18 @@
 //! IO-free Arrow column decode + schema validation for the trd input protocol.
 //!
 //! The single source of truth for turning a params [`RecordBatch`] into
-//! [`FrameParams`] + per-frame [`Draw`] lists, shared verbatim by the native
-//! stream decoder (`stream.rs`) and the wasm push decoder ([`super::InputSession`],
-//! `protocol.rs`). It performs **no** I/O and holds **no** state machine: it only
+//! [`FrameParams`] + per-frame [`Draw`] lists, reached through the one framing
+//! driver ([`super::InputSession`], `protocol/input_session.rs`) that the native
+//! byte transport (`InputStream`, `io/input_stream.rs`) and the
+//! browser's `push` both run. It performs **no** I/O and holds **no** state
+//! machine: it only
 //! validates a schema ([`validate_schema`] / [`check_version`]) and decodes the
 //! columns of one already-materialized batch. Keeping this in one place is what
 //! prevents "fix the bug in one decoder but not the other" divergence (e.g. the
-//! nullable-`center` regression `08c113a`): both paths call these functions, so a
-//! decode fix lands once. All errors are surfaced as [`super::ProtocolError`]; the
-//! native path maps them onto its `StreamError` at the framing boundary.
+//! nullable-`center` regression `08c113a`): every path calls these functions, so
+//! a decode fix lands once. All errors are surfaced as [`super::ProtocolError`];
+//! the native drivers (`io/input_stream.rs`, `stream_filter/`) map them onto
+//! their `StreamError` at the framing boundary.
 
 use arrow::array::{
     Array, FixedSizeListArray, Float32Array, ListArray, RecordBatch, StringArray, UInt32Array,
@@ -352,12 +355,13 @@ fn static_name(name: &str) -> &'static str {
 /// Validates that `field` is a `FixedSizeList<Float32>[len]` column.
 ///
 /// The declared *nullability flags* of the field and its list child are
-/// intentionally not rejected here. The native decoder (`stream.rs`) only
-/// type-checks columns and rejects null *values* at decode time, and producers
+/// intentionally not rejected here. This decoder only type-checks columns and
+/// rejects null *values* at decode time, and producers
 /// (e.g. pyarrow) emit nullable-by-default fields carrying non-null values.
 /// Rejecting on the flag alone broke the "same stream renders natively and in
 /// the browser" invariant (a stream the CLI rendered failed to load in wasm),
-/// so this decoder matches native leniency; null *values* are still rejected in
+/// so the leniency the native path had before #104/#108 unified the decoders is
+/// kept; null *values* are still rejected in
 /// `decode_batch` / `optional_fixed_list`.
 fn validate_fixed_f32_list(
     field: &Field,

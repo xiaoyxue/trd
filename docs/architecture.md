@@ -103,18 +103,27 @@ Platform-agnostic wgpu logic, shared verbatim by every target:
   **device-free**: a mesh's GPU residency is its face in `render/mesh_store.rs`,
   and the `Vertex` layout it is written in stays with the other `repr(C)` + `Pod`
   types in `render/gpu_types.rs`.
-- **`stream.rs` + `protocol.rs`** — the Arrow input layer. `protocol.rs`'s
-  `InputSession` is the **single framing driver** (native + wasm): it feeds byte
-  chunks through `arrow`'s `StreamDecoder`, validates explicit `0.0.6`
-  `trd.table.kind` metadata, decodes `[mesh][texture?][frames?][params]`, and
-  yields one `FrameBatch` per params record batch. `stream.rs` (`run_stream` for
-  the CLI, `read_scene_stream_with_meta` for the window) drives it from a
-  blocking `Read`. Params stay one batch in flight; optional indexed frames
-  resources are retained for playback/reuse (encoded Binary stays compressed
-  until selected).
-- **`output.rs`** — the Arrow IPC *output* serialization. `OutputSession` writes
-  the `r,g,b,a` `fixed_shape_tensor<u8>` stream incrementally; `tightly_pack_rgba`
-  strips GPU row padding. Shared by the CLI and the browser offscreen renderer.
+- **`protocol/` + `io/`** — the Arrow input layer, split by #296 along one rule:
+  a type that **owns** a transport is a `*Stream` and lives in `io/`; one that
+  owns none is a `*Session` and stays with the format in `protocol/`.
+  `protocol/input_session.rs`'s `InputSession` is the **single framing driver**
+  (native + wasm) and is deliberately transport-free: it feeds byte chunks
+  through `arrow`'s `StreamDecoder`, validates explicit `0.0.6`
+  `trd.table.kind` metadata, decodes `[mesh][texture?][frames?][params]` via the
+  one column decoder in `protocol/arrow_decode.rs`, and yields one `FrameBatch`
+  per params record batch. `io/input_stream.rs`'s `InputStream<R: Read>` wraps it
+  for the blocking case — it owns the `Read`, exposes the prologue via inherent
+  methods and implements `Iterator<Item = Result<FrameBatch, StreamError>>`, so
+  the 64 KiB read loop exists once. `stream_filter/` drives that for the CLI
+  (`run_stream`) and `native/trd-app` for the window. Params stay one batch in
+  flight; optional indexed frames resources are retained for playback/reuse
+  (encoded Binary stays compressed until selected).
+- **`protocol/output_session.rs` + `io/output_stream.rs`** — the Arrow IPC
+  *output* serialization, split the same way: `OutputSession` writes the
+  `r,g,b,a` `fixed_shape_tensor<u8>` stream incrementally and owns no transport,
+  while `OutputStream<W: Write>` owns the `Write`. `tightly_pack_rgba`
+  (`protocol/image_encode.rs`) strips GPU row padding. Shared by the CLI and the
+  browser offscreen renderer.
 - **`math/`** — the typed homogeneous linear-algebra layer over glam
   (`Vector`/`Point`/`Normal`/`Matrix`/`Rotation`/`Transform`/`Aabb`): zero-cost
   `#[repr(transparent)]` newtypes with **private** fields enforcing affine rules
@@ -165,9 +174,9 @@ Each is a *thin shell* that only supplies a render target and calls the core:
 
 | Path | What it is |
 |---|---|
-| `crates/trd-core` | the unified render core (`render/` module tree, `shader/*.wgsl`, `stream.rs`, `protocol.rs`) |
+| `crates/trd-core` | the unified render core (`render/` module tree, `shader/*.wgsl`, `protocol/`, `io/`, `media/`, `stream_filter/`) |
 | `crates/trd-cli` | headless CLI: Arrow stream in → Arrow image out |
-| `crates/trd-gui` | reusable egui UI, scene/interaction state, native render backends, and browser wasm entry |
+| `crates/trd-gui` | reusable egui UI, scene/interaction state, and native render backends (a plain `rlib`: every browser entry point moved to `trd-wasm` in #180) |
 | `crates/trd-placement` | GPU-free K + image-quad reconstruction and placement matrices |
 | `crates/trd-wasm` | `wasm-bindgen` browser bindings (`canvas_renderer`/`offscreen_renderer`); the `trd-wasm` npm library |
 | `native/trd-app` | native stream-playback window (winit + live wgpu surface) |
