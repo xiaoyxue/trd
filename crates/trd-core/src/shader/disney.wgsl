@@ -6,7 +6,7 @@
 // direct transcription of the reference BRDF. If you change PBR shading, change
 // `pbr.wgsl`.
 //
-// A WGSL port of the reference `ref/DisneyPBR/shader.frag` Disney BRDF (Burley
+// A WGSL port of the reference `ref/disney_pbr/shader.frag` Disney BRDF (Burley
 // 2012), wired into trd's instanced mesh pipeline. Unlike `textured.wgsl` (which
 // just samples the albedo flat), this path lights the mesh with a small virtual
 // light rig plus an optional equirectangular HDR **environment map** reflection,
@@ -90,7 +90,7 @@ fn vs_main(in: VsIn) -> VsOut {
     return out;
 }
 
-// --- Disney BRDF (ported from ref/DisneyPBR/shader.frag) ----------------------
+// --- Disney BRDF (ported from ref/disney_pbr/shader.frag) ---------------------
 
 fn sqr(x: f32) -> f32 { return x * x; }
 
@@ -248,7 +248,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Exposure + tone map. `tonemap_mode` selects the curve: 0 = per-channel
     // Reinhard `x/(1+x)` (the default, byte-identical to trd's historical
     // pipeline), 1 = ACES filmic (Narkowicz RRT+ODT fit,
-    // ref/ToneMapping/tonemap.frag) — a softer highlight roll-off that retains
+    // ref/tone_mapping/tonemap.frag) — a softer highlight roll-off that retains
     // hue/saturation on bright albedo. `exposure` scales the linear radiance
     // first (the ACES adapted_lum); the result stays linear for the sRGB target.
     let exposed = color * exposure;
