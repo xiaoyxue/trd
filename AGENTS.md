@@ -568,10 +568,15 @@ These are the contents of the levels above: tiers 1–2 are **L2**, tiers 3–4 
      what a ranged reader is for and a local short clip cannot fail the way a
      218 GiB one does. Serve it with the CORS+range helper
      (`bun web/gui-video-editing/serve-documents.ts <dir> --port 8092`), then:
-     drive `probe.html` — `?url=…&seek=…&frames=…` for one deep seek and
+     drive the probe page — `?url=…&seek=…&frames=…` for one deep seek and
      `?reader=mediabunny&scrub=t1,t2,…` (plus `&overlap=1`, the dragged-scrubber
      shape) for repeated seeks on one reader — and open the editor itself at
-     `?document=none&reader=mediabunny&video=<url>`. Expect: **opening costs
+     `?document=none&reader=mediabunny&video=<url>`.
+     **The probe page is not served by `bun run dev`**, which passes only
+     `index.html`; start it explicitly with
+     `bun ./index.html ./probe.html`, and note that Bun serves that second
+     entrypoint at the extensionless route **`/probe`**, not `/probe.html`.
+     Expect: **opening costs
      megabytes, not gigabytes** (~11 MiB / <2 s for 218 GiB), every seek lands on
      its exact target, overlapping seeks coalesce to the last target, the reader
      is still usable after the run, and Details reports one consistent
@@ -631,10 +636,13 @@ These are the contents of the levels above: tiers 1–2 are **L2**, tiers 3–4 
    cargo run -p trd-gui-video-editing -- --video <BIG.mp4>
    cargo run -p trd-gui-video-editing -- --video-url http://localhost:8092/<BIG.mp4>
 
-   # browser — serve with the CORS+range helper, then drive probe.html and the editor
+   # browser — serve the media, then serve the app *including* the probe page.
+   # `bun run dev` passes only index.html, so name probe.html explicitly; Bun
+   # then routes it at /probe (no .html).
    bun web\gui-video-editing\serve-documents.ts <dir> --port 8092
-   #   probe.html?url=…&seek=<deep>&frames=8                 one deep seek
-   #   probe.html?url=…&reader=mediabunny&scrub=t1,t2,…&overlap=1   dragged scrubber
+   cd web\gui-video-editing; bun run build:wasm; $env:BUN_PORT='8085'; bun .\index.html .\probe.html
+   #   /probe?url=…&seek=<deep>&frames=8                      one deep seek
+   #   /probe?url=…&reader=mediabunny&scrub=t1,t2,…&overlap=1  dragged scrubber
    #   /?document=none&reader=mediabunny&video=<url>          the editor itself
    ```
 

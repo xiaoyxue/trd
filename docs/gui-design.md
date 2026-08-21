@@ -14,6 +14,34 @@
 Status: **in progress** (in-process interaction loop implemented; Arrow
 round-trip + wasm pending) · Owner: @xiaoyxue · Branch: `feat/trd-gui-design`
 
+## Contents
+
+- [0. Decisions (locked, 2026-07-24)](#0-decisions-locked-2026-07-24)
+- [Status](#status)
+  - [Implemented slice](#implemented-slice)
+- [1. Goal](#1-goal)
+- [2. Where it fits (current architecture)](#2-where-it-fits-current-architecture)
+- [3. Toolkit choice: egui vs imgui-rs](#3-toolkit-choice-egui-vs-imgui-rs)
+- [4. Key constraint — the wgpu version gap ⚠️](#4-key-constraint--the-wgpu-version-gap-️)
+  - [Strategy A — decoupled CPU-RGBA handoff  ✅ **chosen**](#strategy-a--decoupled-cpu-rgba-handoff---chosen)
+  - [Strategy B — shared-surface egui overlay](#strategy-b--shared-surface-egui-overlay---in-progress-229)
+- [5. The interaction loop (core of the request)](#5-the-interaction-loop-core-of-the-request)
+  - [5.1 `InteractionController` (events → matrix)](#51-interactioncontroller-events--matrix)
+  - [5.2 `GuiRenderer` — one renderer, both platforms](#52-guirenderer--one-renderer-both-platforms)
+  - [5.3 New piece of work: a Rust **input**-scene encoder](#53-new-piece-of-work-a-rust-input-scene-encoder)
+- [6. Reverse channel — the interaction/event protocol](#6-reverse-channel--the-interactionevent-protocol)
+- [7. Proposed crate layout](#7-proposed-crate-layout)
+  - [7.1 One shared library, platform-owned delivery shells](#71-one-shared-library-platform-owned-delivery-shells)
+  - [7.2 Files](#72-files)
+- [8. egui specifics](#8-egui-specifics)
+- [9. Toolchain / build integration](#9-toolchain--build-integration)
+- [10. Phasing (vertical slices — each end-to-end verifiable, one PR per slice)](#10-phasing-vertical-slices--each-end-to-end-verifiable-one-pr-per-slice)
+- [11. Open decisions](#11-open-decisions)
+- [12. Risks](#12-risks)
+- [13. Verified facts behind this design](#13-verified-facts-behind-this-design)
+
+<a id="section-0-decisions-locked-2026-07-24"></a>
+
 ## 0. Decisions (locked, 2026-07-24)
 
 1. **Toolkit = egui** (over imgui-rs) — §3.
@@ -29,21 +57,30 @@ round-trip + wasm pending) · Owner: @xiaoyxue · Branch: `feat/trd-gui-design`
 Work is split **one PR per slice** (§10). **PR #98 = the in-process viewer,
 Slices 0–3**; the Arrow round-trip and wasm land as their own follow-up PRs.
 
-- **In-process interaction loop implemented** (`crates/trd-gui`, Slices 0–3 of
-  §10): a native eframe/egui window that renders `trd-core`'s headless RGBA into
-  a central-panel egui texture and turns pointer/scroll gestures into an updated
-  camera/model matrix that is re-rendered — the full
-  "input → matrix → render → display" cycle. Modules mirror §7.2: `scene.rs`
-  (orbit camera + object transform → `FrameParams`/`Draw`s), `interaction.rs`
-  (`InteractionController`: events → scene, unit-tested, egui-free),
-  `renderer.rs` (`GuiRenderer` over
-  `trd_core::Renderer`, plus the shared `render_options`/`scene_for`/
-  `apply_materials` state→scene assembly), `app.rs` (egui panels), `cli.rs` (`--mesh` /
-  `--texture` / `--width` / `--height`, built-in default cube). Render modes
-  Filled / Wireframe / **Textured** (`--texture` binds an albedo, downscaled to
-  the renderer's 2048² limit). Deps: `eframe`/`egui` 0.36 (wgpu), `trd-core`,
-  `clap`, `thiserror`, `image`. Native-only (empty `main` on wasm, like
-  trd-app); the pure `scene`/`interaction` modules still compile on wasm.
+### Implemented slice
+
+**Rule: Slices 0–3 implement the full in-process interaction loop.** A native
+eframe/egui window renders `trd-core`'s headless RGBA into a central-panel egui
+texture and turns pointer/scroll gestures into an updated camera/model matrix
+that is re-rendered — the full "input → matrix → render → display" cycle.
+
+Modules mirror §7.2:
+
+| Module | Role |
+|---|---|
+| `scene.rs` | orbit camera + object transform → `FrameParams`/`Draw`s |
+| `interaction.rs` | `InteractionController`: events → scene, unit-tested, egui-free |
+| `renderer.rs` | `GuiRenderer` over `trd_core::Renderer`, plus shared `render_options`/`scene_for`/`apply_materials` state→scene assembly |
+| `app.rs` | egui panels |
+| `cli.rs` | `--mesh` / `--texture` / `--width` / `--height`, built-in default cube |
+
+Render modes are Filled / Wireframe / **Textured** (`--texture` binds an albedo,
+downscaled to the renderer's 2048² limit). Dependencies are `eframe`/`egui` 0.36
+(wgpu), `trd-core`, `clap`, `thiserror`, and `image`.
+
+Native is the only executable target (empty `main` on wasm, like trd-app); the
+pure `scene`/`interaction` modules still compile on wasm.
+
 - **Verification:** unit tests (scene/interaction/cli/renderer, no GPU)
   run in `nix flake check`; a GPU-gated `tests/gui_render.rs` (`#[ignore]`,
   4 tests) renders the real renderer and asserts a non-blank,
@@ -52,6 +89,8 @@ Slices 0–3**; the Arrow round-trip and wasm land as their own follow-up PRs.
 - **Next (own PRs, §10):** Slice 4 (wasm: egui-on-canvas + `trd-core`
   offscreen). See issue #97 for the per-slice checklists. Slice 3's
   `ArrowRoundTripRenderer` shipped and was later removed (#180).
+
+<a id="section-1-goal"></a>
 
 ## 1. Goal
 
@@ -69,6 +108,8 @@ The GUI toolkit is **egui** (not imgui-rs) — see §3.
 The in-process interaction loop (Slices 1–3) is implemented; the Arrow
 round-trip and wasm backends remain (§10). This document is the design of
 record — the locked decisions and the full plan live in issue #97.
+
+<a id="section-2-where-it-fits-current-architecture"></a>
 
 ## 2. Where it fits (current architecture)
 
@@ -99,6 +140,8 @@ value the interaction loop needs to recompute.
 and delegates *all* rendering to `trd-core`, honoring the AGENTS.md invariant
 "trd-core is the single unified rendering core; front-ends are thin".
 
+<a id="section-3-toolkit-choice-egui-vs-imgui-rs"></a>
+
 ## 3. Toolkit choice: egui vs imgui-rs
 
 **Decision: egui.** Rationale:
@@ -115,6 +158,8 @@ and delegates *all* rendering to `trd-core`, honoring the AGENTS.md invariant
 egui aligns with trd's pure-Rust, native+wasm, Nix-built stack; imgui-rs would
 drag a C++ toolchain into the flake and complicate the wasm target — the two
 platforms we must keep at parity.
+
+<a id="section-4-key-constraint-the-wgpu-version-gap"></a>
 
 ## 4. Key constraint — the wgpu version gap ⚠️
 
@@ -169,6 +214,8 @@ expressible: trd-gui adopts eframe's adapter/device/queue and binds the rendered
 texture straight into egui, dropping the readback and the UI re-upload. The §5
 design keeps the render backend behind a trait, so this is a drop-in.
 
+<a id="section-5-the-interaction-loop-core-of-the-request"></a>
+
 ## 5. The interaction loop (core of the request)
 
 ```
@@ -198,6 +245,8 @@ design keeps the render backend behind a trait, so this is a drop-in.
         └── side panel: mode (filled/wireframe/textured), aabb/axes, fps, play/pause, reset view
 ```
 
+<a id="section-51-interactioncontroller-events-matrix"></a>
+
 ### 5.1 `InteractionController` (events → matrix)
 
 A small state machine in `trd-gui` that owns the interaction state and maps egui
@@ -215,6 +264,8 @@ The controller is **UI-toolkit-agnostic** (takes a normalized
 `InteractionEvent`, returns an updated scene state) so it is unit-testable
 without egui and reusable by the wasm target.
 
+<a id="section-52-guirenderer-one-renderer-both-platforms"></a>
+
 ### 5.2 `GuiRenderer` — one renderer, both platforms
 
 ```rust
@@ -223,6 +274,11 @@ impl GuiRenderer {
     pub async fn render(&mut self, state: &SceneState) -> Result<ImageRgba, GuiError>;
 }
 ```
+
+**Rule: `GuiRenderer` is the only renderer abstraction left.**
+
+<details>
+<summary>Why the old renderer trait was removed</summary>
 
 This section originally specified a `SceneRenderer` **trait** over two backends
 (`InProcRenderer` + `ArrowRoundTripRenderer`), later joined by a browser
@@ -235,6 +291,7 @@ This section originally specified a `SceneRenderer` **trait** over two backends
   with byte-identical fields, only because `trd_core::Renderer` used to be
   native-only. Once it became async and platform-neutral they collapsed into
   `GuiRenderer`.
+</details>
 
 `GuiRenderer` builds `Draw`/`Scene` in memory and calls trd-core directly through
 `trd_core::Renderer` — no serialization, lowest latency, good for smooth drag. Its
@@ -243,6 +300,8 @@ free (the future is already complete when the map poll returns). The scene it
 renders comes from the shared `render_options` / `scene_for` / `apply_materials`
 helpers, so native and browser cannot disagree about overlays, materials, or the
 environment background.
+
+<a id="section-53-new-piece-of-work-a-rust-input-scene-encoder"></a>
 
 ### 5.3 New piece of work: a Rust **input**-scene encoder
 
@@ -257,6 +316,8 @@ code. An Arrow round-trip backend would need to author that input stream **in Ru
 wire format, beside `protocol::arrow_decode`), which keeps the protocol
 round-trip tests honest. Should the backend return, make that module public
 again rather than writing a second encoder. `GuiRenderer` avoids this entirely.
+
+<a id="section-6-reverse-channel-the-interactionevent-protocol"></a>
 
 ## 6. Reverse channel — the interaction/event protocol
 
@@ -274,7 +335,11 @@ adds a **reverse** flow (events GUI → producer). Design:
 Recommendation: ship the in-proc enum first; standardize an Arrow event schema
 only when an external producer is actually wired in.
 
+<a id="section-7-proposed-crate-layout"></a>
+
 ## 7. Proposed crate layout
+
+<a id="section-71-one-shared-library-platform-owned-delivery-shells"></a>
 
 ### 7.1 One shared library, platform-owned delivery shells
 
@@ -304,6 +369,8 @@ thin, non-interactive player/renderer peers.
 | Bootstrap / runner | | `native/trd-gui-app/src/main.rs` | `crates/trd-wasm/src/gui.rs` (JS ABI) + `web/gui-viewer` |
 | Renderer | ✅ `renderer::GuiRenderer` | (blocks on its async API) | |
 | State → `Scene` assembly | ✅ `renderer::{render_options, scene_for, apply_materials}` | | |
+
+<a id="section-72-files"></a>
 
 ### 7.2 Files
 
@@ -348,6 +415,8 @@ free). wasm: `egui`, `eframe`(web) or `egui-wgpu` on canvas, `trd-core`,
 **Invariant:** trd-gui contains **no rendering logic** — only UI, interaction,
 scene authoring, and the image-display texture. All pixels come from trd-core.
 
+<a id="section-8-egui-specifics"></a>
+
 ## 8. egui specifics
 
 * **Central panel**: `egui::Image` fed by an `egui::TextureHandle` that is
@@ -364,6 +433,8 @@ scene authoring, and the image-display texture. All pixels come from trd-core.
   fallback); trd-core (wasm) `arrow_renderer` renders offscreen → RGBA → egui
   texture. Same decoupled model as native (Strategy A).
 
+<a id="section-9-toolchain-build-integration"></a>
+
 ## 9. Toolchain / build integration
 
 * Add `crates/trd-gui` and `native/trd-gui-app` to workspace `members`.
@@ -377,6 +448,8 @@ scene authoring, and the image-display texture. All pixels come from trd-core.
   git-tracked files).
 * GPU-dependent behavior stays `#[ignore]`d / run locally via nixGL on Linux and
   the MSVC path on Windows (dual-platform verification per AGENTS.md).
+
+<a id="section-10-phasing-vertical-slices-each-end-to-end-verifiable-one-pr-per-slice"></a>
 
 ## 10. Phasing (vertical slices — each end-to-end verifiable, one PR per slice)
 
@@ -402,6 +475,8 @@ scene authoring, and the image-display texture. All pixels come from trd-core.
    handoff (WebGPU browser required).
 5. ⏳ **(later)** Strategy B live shared-surface overlay once egui ships wgpu 30.
 
+<a id="section-11-open-decisions"></a>
+
 ## 11. Open decisions
 
 * Default backend: `InProc` (recommended) vs Arrow round-trip.
@@ -412,6 +487,8 @@ scene authoring, and the image-display texture. All pixels come from trd-core.
 * eframe (batteries-included) vs raw `egui-winit` + `egui-wgpu` (more control
   over the two-device setup). Lean raw for the explicit CPU-RGBA handoff.
 
+<a id="section-12-risks"></a>
+
 ## 12. Risks
 
 * **wgpu version gap** (primary) — mitigated by Strategy A; removed later by B.
@@ -421,6 +498,8 @@ scene authoring, and the image-display texture. All pixels come from trd-core.
 * Rust input-scene encoder is new surface — kept small and parity-tested.
 * Dual-platform (Windows MSVC + Linux/Nix + wasm) verification burden — follow
   the existing trd-app/trd-wasm cfg-gating pattern.
+
+<a id="section-13-verified-facts-behind-this-design"></a>
 
 ## 13. Verified facts behind this design
 
