@@ -172,7 +172,7 @@ fn render_and_write_batch<W: Write>(
 /// input batches (one batch in flight).
 ///
 /// The protocol is `[mesh][texture?][frames?][params]`: the **required**
-/// leading mesh table is decoded once (via [`Mesh::from_arrow_all`]) and
+/// leading mesh table is decoded once (via [`Mesh::from_arrow_all`](crate::Mesh::from_arrow_all)) and
 /// uploaded, then an optional texture table is uploaded as the bound albedo,
 /// then the following params stream drives per-frame rendering. A params-only
 /// stream with no leading mesh table is a [`StreamError::MissingMeshStream`].

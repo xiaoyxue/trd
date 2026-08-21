@@ -4,7 +4,7 @@
 //! The controller is **UI-toolkit-agnostic**: it consumes a normalized
 //! [`InteractionEvent`] (drag/pan/zoom fractions, not egui types) and mutates the
 //! scene, so it is unit-testable without egui and reusable by the wasm target.
-//! egui specifics (which mouse button, the image rect) live in [`crate::app`],
+//! egui specifics (which mouse button, the image rect) live in the shells that own the egui surface,
 //! which translates raw input into these events.
 //!
 //! The [`InteractionTarget`] decides what a primary drag means: orbit the

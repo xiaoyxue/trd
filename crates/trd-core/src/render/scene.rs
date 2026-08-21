@@ -86,7 +86,7 @@ pub struct Background {
 /// A struct rather than a `Vec` alias (#203) so assembly can live on it:
 /// [`Scene::from_draws`] is the one entry point every front-end uses, which is
 /// what keeps them all rendering the same scene from the same inputs. It
-/// [`Deref`]s to `[DrawableObject]`, so it reads like the slice it wraps — the
+/// [`Deref`](std::ops::Deref)s to `[DrawableObject]`, so it reads like the slice it wraps — the
 /// background is reached through [`background`](Self::background) instead of
 /// hiding among the primitives (#204).
 #[derive(Debug, Clone, Default, PartialEq)]

@@ -42,7 +42,7 @@ pub struct Draw {
 /// on its ground plane instead"*. As a mode it forced every consumer to special-
 /// case it back out — six `continue`s across scene assembly, the batcher and the
 /// picker — because none of them can act on a draw that has no mesh geometry.
-/// As a selection it is resolved **once**, in [`build_scene`](super::build_scene),
+/// As a selection it is resolved **once**, in `render::scene`'s private `build_scene`,
 /// and nothing downstream needs to know a shadow ever existed (#203).
 ///
 /// The wire is unchanged: byte `3` still means shadow.

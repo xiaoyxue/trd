@@ -4,7 +4,7 @@
 //! an **orbit camera** (the CG `eye`/`target`/`fovy` form) plus a single
 //! **object transform** (the per-draw model matrix), together with the render
 //! mode and overlay flags. It carries no GPU or egui state — it only produces
-//! the two values `trd-core` consumes each frame: a [`FrameParams`] camera and a
+//! the two values `trd-core` consumes each frame: a [`FrameParams`](trd_core::FrameParams) camera and a
 //! list of [`Draw`]s. The render backend ([`crate::renderer`]) turns those
 //! into pixels; the interaction controller ([`crate::interaction`]) mutates this
 //! state from user gestures.
@@ -37,7 +37,7 @@ const OBJECT_SPACING: f32 = 2.6;
 
 /// A camera that orbits a target point on a sphere: `yaw`/`pitch` place the eye,
 /// `distance` sets the radius, `fovy` the vertical field of view. This is the
-/// CG (`eye`/`target`/`fovy`) half of [`FrameParams`], the natural form for an
+/// CG (`eye`/`target`/`fovy`) half of [`FrameParams`](trd_core::FrameParams), the natural form for an
 /// orbit interaction (the object stays put; the camera moves around it).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OrbitCamera {
@@ -188,7 +188,7 @@ impl ObjectTransform {
 }
 
 /// The full interactive scene: the orbit camera, the object placement, the mesh
-/// render mode, and the overlay toggles. Rebuilt into a [`FrameParams`] + `draws`
+/// render mode, and the overlay toggles. Rebuilt into a [`FrameParams`](trd_core::FrameParams) + `draws`
 /// each frame the state changes, with **no per-primitive branching** — a single
 /// mesh is the degenerate one-draw scene.
 #[derive(Debug, Clone, PartialEq)]

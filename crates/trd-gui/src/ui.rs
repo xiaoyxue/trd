@@ -1,6 +1,6 @@
 //! Shared egui UI for the interactive viewer (#97) — the side control panel and
 //! the central image surface, written **once** and used by both the native
-//! window ([`crate::app`]) and the wasm/browser app ([`crate::web_app`]).
+//! window (`trd-gui-app`) and the wasm/browser app (`trd-wasm`'s `gui_web_app`).
 //!
 //! It is rendering-backend-agnostic: it only reads the current display texture
 //! and render size and mutates the [`InteractionController`] from pointer/scroll

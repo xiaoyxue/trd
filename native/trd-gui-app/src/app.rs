@@ -3,7 +3,7 @@
 //!
 //! The central panel shows the latest RGBA frame (a `trd-core` render uploaded
 //! as an egui texture) and is itself the interaction surface: pointer drags and
-//! the scroll wheel become normalized [`InteractionEvent`]s, the
+//! the scroll wheel become normalized [`InteractionEvent`](trd_gui::interaction::InteractionEvent)s, the
 //! [`InteractionController`] turns them into a new camera / model matrix, and the
 //! scene is re-rendered — the "input → matrix → render → display" cycle. The side
 //! panel exposes the render mode, overlay toggles, the primary-drag target, and a
