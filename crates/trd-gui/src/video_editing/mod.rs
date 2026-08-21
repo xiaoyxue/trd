@@ -421,16 +421,23 @@ pub struct VideoEditingShared {
     /// instead of quietly opening another, which would make the bound texture
     /// come from a device egui knows nothing about.
     shared_gpu: RefCell<Option<std::sync::Arc<trd_core::GpuContext>>>,
-    /// The browser `<video>` element whose decoded frames are copied GPU→GPU.
+    /// The decoded frame waiting to be drawn, whose pixels are still on the GPU.
     ///
-    /// Handed over once by the JS bootstrap; its presence is what selects the
-    /// zero-upload path. Web-only: native frames arrive from an ffmpeg pipe as
-    /// CPU bytes and have nothing to keep on the GPU (#229).
+    /// Handed over **per frame** by `presentVideoFrame`, not once at startup:
+    /// #282 replaced the `HtmlVideoElement` of #276 with the WebCodecs
+    /// `VideoFrame` the decoder actually produces, and there is no element left
+    /// to hold. Its presence is what selects the zero-upload path.
+    ///
+    /// Owned here, and closed **when a newer frame replaces it** — not after the
+    /// upload. A render can run more than once for the same frame, since any UI
+    /// change repaints, so the frame has to outlive its first use; `video_frame`
+    /// below borrows rather than takes for the same reason. Web-only: native
+    /// frames arrive from an ffmpeg pipe as CPU bytes and have nothing to keep
+    /// on the GPU (#229).
     #[cfg(target_arch = "wasm32")]
-    /// The decoded frame waiting to be drawn. Owned here: it is closed after
-    /// the upload, or when a newer frame replaces it.
     video_frame: RefCell<Option<web_sys::VideoFrame>>,
-    /// A timeline the shell probed from the container, waiting to be adopted.    ///
+    /// A timeline the shell probed from the container, waiting to be adopted.
+    ///
     /// The browser learns the real frame rate only after `moov` has been read,
     /// which happens *after* the editor starts — so this arrives late by
     /// construction and the app consumes it on its next frame (#264).
@@ -581,9 +588,10 @@ impl VideoEditingShared {
     /// is on screen and nothing else.
     ///
     /// **Takes ownership of the frame.** A `VideoFrame` holds a slot in a small
-    /// decoder-side pool, so it is closed once uploaded — and any frame still
-    /// pending here is closed when this one replaces it, since the newer one is
-    /// what will be drawn.
+    /// decoder-side pool, so exactly two things close it: a newer frame
+    /// replacing it, and this call rejecting it for a degenerate size. It is
+    /// deliberately *not* closed after the upload — a render can run more than
+    /// once for the same frame, so it is held until superseded.
     ///
     /// A separate entry point from
     /// [`update_video_frame_rgba`](Self::update_video_frame_rgba) rather than a
