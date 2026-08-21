@@ -52,6 +52,22 @@ pub struct NativeVideo {
     pub height: u32,
 }
 
+/// The preview size a `--preview-width` implies for a source.
+///
+/// **The one derivation.** Both the decode size ffmpeg is asked to scale to and
+/// the render-target size the shell allocates come from here, so they cannot
+/// disagree — the divergence #170 reports was two call sites computing this
+/// separately and a third not computing it at all.
+///
+/// Clamped to the source width, so `--preview-width` only ever scales *down*;
+/// the height follows the source aspect.
+pub(crate) fn preview_size(info: &trd_core::VideoInfo, preview_width: u32) -> (u32, u32) {
+    let width = preview_width.min(info.width.max(1)).max(1);
+    let height = ((u64::from(width) * u64::from(info.height.max(1)))
+        .div_ceil(u64::from(info.width.max(1)))) as u32;
+    (width, height.max(1))
+}
+
 impl NativeVideo {
     pub fn open(
         source: NativeVideoSource,
@@ -86,9 +102,7 @@ impl NativeVideo {
         info: &trd_core::VideoInfo,
         preview_width: u32,
     ) -> Self {
-        let width = preview_width.min(info.width.max(1)).max(1);
-        let height = ((u64::from(width) * u64::from(info.height.max(1)))
-            .div_ceil(u64::from(info.width.max(1)))) as u32;
+        let (width, height) = preview_size(info, preview_width);
         Self {
             source,
             fps_num: info.fps_num,
@@ -506,4 +520,61 @@ fn validate_probe(
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn info(width: u32, height: u32) -> trd_core::VideoInfo {
+        trd_core::VideoInfo {
+            source_name: String::new(),
+            mime: String::new(),
+            codec: String::new(),
+            sha256: String::new(),
+            byte_length: 0,
+            width,
+            height,
+            fps_num: 30,
+            fps_den: 1,
+            frame_count: 1,
+            duration_us: 0,
+        }
+    }
+
+    #[test]
+    fn preview_width_only_ever_scales_down() {
+        // Clamped to the source, so asking for more than the video has is a
+        // no-op rather than an upscale.
+        assert_eq!(preview_size(&info(1920, 1080), 960), (960, 540));
+        assert_eq!(preview_size(&info(1920, 1080), 1920), (1920, 1080));
+        assert_eq!(preview_size(&info(640, 360), 1920), (640, 360));
+    }
+
+    #[test]
+    fn height_follows_the_source_aspect() {
+        assert_eq!(preview_size(&info(1440, 1080), 720), (720, 540));
+        // Rounds up rather than to zero, so a preview is never degenerate.
+        assert_eq!(preview_size(&info(1000, 3), 100), (100, 1));
+    }
+
+    #[test]
+    fn degenerate_sources_still_yield_a_usable_target() {
+        assert_eq!(preview_size(&info(0, 0), 960), (1, 1));
+        assert_eq!(preview_size(&info(1920, 1080), 0), (1, 1));
+    }
+
+    #[test]
+    fn the_decoded_size_and_the_derived_preview_size_are_the_same_number() {
+        // The #170 divergence: the shell sized its render target from one
+        // derivation while ffmpeg decoded to another. Both now come from
+        // `preview_size`, so this can only fail if a caller stops using it.
+        let info = info(1920, 1080);
+        let video = NativeVideo::with_timeline(
+            NativeVideoSource::Local(PathBuf::from("unused.mp4")),
+            &info,
+            960,
+        );
+        assert_eq!((video.width, video.height), preview_size(&info, 960));
+    }
 }
