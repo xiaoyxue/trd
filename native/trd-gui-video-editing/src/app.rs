@@ -4,7 +4,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crate::error::NativeVideoEditingError;
-use crate::media::{DecodedFrame, NativeVideo, NativeVideoSource};
+use crate::media::{preview_size, DecodedFrame, NativeVideo, NativeVideoSource};
 use trd_gui::video_editing::{
     CatalogAsset, VideoEditingApp, VideoEditingCommand, VideoEditingShared, VideoSourceKind,
 };
@@ -71,14 +71,6 @@ fn fetch_document(url: &str) -> Result<Vec<u8>, String> {
         .read_to_end(&mut bytes)
         .map_err(|error| format!("{url}: {error}"))?;
     Ok(bytes)
-}
-
-/// The render-target size a preview uses before any frame has been decoded.
-fn preview_size(info: &trd_core::VideoInfo, preview_width: u32) -> (u32, u32) {
-    let width = preview_width.min(info.width.max(1)).max(1);
-    let height = ((u64::from(width) * u64::from(info.height.max(1)))
-        .div_ceil(u64::from(info.width.max(1)))) as u32;
-    (width, height.max(1))
 }
 
 /// The timeline before anything is open: one frame of nothing, replaced as soon
@@ -498,7 +490,7 @@ impl NativeVideoEditingApp {
             .video
             .as_ref()
             .map(|video| (video.width, video.height))
-            .unwrap_or((self.video_info.width, self.video_info.height));
+            .unwrap_or_else(|| preview_size(&self.video_info, self.preview_width));
         // A catalog swap rebuilds the renderer, so it has to land on the *same*
         // device egui samples — otherwise the re-registered texture belongs to a
         // device the toolkit knows nothing about.
