@@ -4,24 +4,13 @@ The **trd stream protocol** defines the columnar wire format the rendering core
 consumes and produces. It is an **Apache Arrow IPC stream**: one schema message
 followed by N record-batch messages, on stdin (input) and stdout (output).
 
-- **Semantics:** one **params** row = one rendered frame. Mesh/texture/frames
-  rows are indexed resources. Output is 1:1 with params, and output batch
-  boundaries mirror params batches.
-- **Versioning:** the protocol version is carried in schema-level metadata under
-  the key `trd.protocol.version` and follows `MAJOR.MINOR.PATCH`. **The renderer
-  supports exactly one version — currently `0.0.6` — and hard-rejects any other
-  or missing version.** The protocol is deliberately not backward compatible
-  (see the [policy](../../AGENTS.md)).
-- **Table identity:** every input sub-stream declares `trd.table.kind`; schemas
-  are not guessed from column names.
-- **Playback rate:** an optional schema-metadata key `trd.stream.frame_rate`
-  (float, frames/sec, default **30**) declares the stream's intended playback
-  frame rate — like a video file's fps. Front-ends play at this rate (speed =
-  fps); `trd-cli`'s rendered image stream copies it through so `scripts/encode.py`
-  encodes the GIF/WebP at the same rate.
-- **Global conventions:** matrices are **column-major** and right-handed;
-  projections target **wgpu clip space** (`z ∈ [0, 1]`); the vertex transform is
-  the MVP chain `clip = P · V · M · (position, 1)`.
+| Topic | Rule |
+|---|---|
+| **Semantics** | one **params** row = one rendered frame. Mesh/texture/frames rows are indexed resources. Output is 1:1 with params, and output batch boundaries mirror params batches. |
+| **Versioning** | the protocol version is carried in schema-level metadata under the key `trd.protocol.version` and follows `MAJOR.MINOR.PATCH`. **The renderer supports exactly one version — currently `0.0.6` — and hard-rejects any other or missing version.** The protocol is deliberately not backward compatible (see the [policy](../../AGENTS.md)). |
+| **Table identity** | every input sub-stream declares `trd.table.kind`; schemas are not guessed from column names. |
+| **Playback rate** | an optional schema-metadata key `trd.stream.frame_rate` (float, frames/sec, default **30**) declares the stream's intended playback frame rate — like a video file's fps. Front-ends play at this rate (speed = fps); `trd-cli`'s rendered image stream copies it through so `scripts/encode.py` encodes the GIF/WebP at the same rate. |
+| **Global conventions** | matrices are **column-major** and right-handed; projections target **wgpu clip space** (`z ∈ [0, 1]`); the vertex transform is the MVP chain `clip = P · V · M · (position, 1)`. |
 
 ## Timing model
 

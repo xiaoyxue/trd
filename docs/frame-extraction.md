@@ -5,6 +5,15 @@ turns video into zero-padded stills plus metadata. Video/container decoding
 stays at the boundary (`ffmpeg`); the rendering protocol consumes either
 external image references or a self-contained inline frames table.
 
+## Contents
+
+- [Extract frames](#extract-frames)
+- [External-reference mode (default)](#external-reference-mode-default)
+- [Inline mode](#inline-mode)
+  - [Standard full-clip tensor e2e](#standard-full-clip-tensor-e2e)
+- [Pack existing images](#pack-existing-images)
+- [Determinism](#determinism)
+
 ## Extract frames
 
 ```sh
@@ -37,6 +46,7 @@ Run the script without arguments for all flags. Important options:
 
 ## External-reference mode (default)
 
+**Rule: external-reference mode keeps image payloads outside the Arrow input.**
 `frames.arrow` is a small mapping manifest:
 
 | Column | Type | Meaning |
@@ -55,6 +65,10 @@ front-ends resolve `frame_path` under `--frames-base`; the browser resolves
 are not retained in the Arrow input.
 
 ## Inline mode
+
+**Rule: inline mode makes `frames.arrow` a protocol resource table.** Use it for
+self-contained streams, choosing compressed bytes for clips and raw pixels for
+small fixtures or zero-codec producers.
 
 ```sh
 # Recommended: preserve compressed PNG/JPEG bytes.
@@ -92,8 +106,9 @@ retain the full uncompressed resource table in memory.
 
 ### Standard full-clip tensor e2e
 
-The repository's inline protocol e2e uses every annotated frame from the
-Cornell-box source (250 frames at 25 fps) at its native 1920×1080 resolution.
+**Rule: this e2e intentionally exercises the raw tensor wire path.** The
+repository's inline protocol e2e uses every annotated frame from the Cornell-box
+source (250 frames at 25 fps) at its native 1920×1080 resolution.
 The params are produced by the same perception and placement stages
 as the external `frame_path` demo, but emit `frame_id`; the scene contains only
 the textured bunny.

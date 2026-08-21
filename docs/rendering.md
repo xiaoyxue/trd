@@ -5,6 +5,22 @@ wrappers **and** the equivalent direct `cargo run` invocations. The wrappers are
 just conveniences that build the `producers → renderer → encoder` pipeline for you;
 anything they do, you can run by hand with `cargo run`.
 
+## Contents
+
+- [Wrappers ⇄ `cargo run`](#wrappers--cargo-run)
+- [Native CLI (headless)](#native-cli-headless)
+  - [Content & appearance flags](#content--appearance-flags)
+  - [Rendering appearance](#rendering-appearance)
+  - [Camera forms & AR demos](#camera-forms--ar-demos)
+- [Native window — `trd-app`](#native-window--trd-app)
+- [Interactive viewer — `trd-gui`](#interactive-viewer--trd-gui)
+  - [Controls & operations](#controls--operations)
+  - [Multi-object scenes & URL params (browser)](#multi-object-scenes--url-params-browser)
+- [Video editor — `web/gui-video-editing`](#video-editor--webgui-video-editing)
+- [Web (wasm)](#web-wasm)
+- [Windows setup (without Nix)](#windows-setup-without-nix)
+- [GPU notes](#gpu-notes)
+
 ## Wrappers ⇄ `cargo run`
 
 | Wrapper | Direct `cargo run` equivalent |
@@ -96,16 +112,27 @@ The same stream renders four ways — pick one per render:
 - **`--wireframe`** — edges as a line list; reveals topology.
 - **`--texture <img>`** — samples a bound UV-mapped albedo (`Rgba8UnormSrgb`, linear
   clamp-to-edge). Requires UV-mapped geometry.
-- **`--pbr`** — the physically-based **Disney principled BRDF** path with smooth
-  shading normals: `--metallic` (0 dielectric → 1 metal), `--roughness` (0 mirror →
-  1 rough), `--specular`, `--clearcoat`, plus an optional HDR **environment probe**
-  `--env <file.hdr>` (equirectangular Radiance map) reflected by metallic surfaces
-  (`--env-intensity`), which `--env-background` (blurred by
-  `--env-background-blur`) also draws as the **background sky** behind the scene.
-  HDR output is tone-mapped by `--tonemap reinhard|aces`
-  (default `reinhard`; `aces` is the filmic curve), with `--exposure` / `--ambient`
-  controls. Requires a texture stream for the albedo. **Full parameter reference +
-  material model: [`docs/pbr.md`](pbr.md).**
+- **`--pbr`** — physically-based **Disney principled BRDF** shading. Requires a
+  texture stream for the albedo. **Full parameter reference + material model:
+  [`docs/pbr.md`](pbr.md).**
+
+#### PBR path
+
+**Rule: `--pbr` is a mesh render mode, not a separate primitive.** It uses smooth
+shading normals and these controls:
+
+| Control | Meaning |
+|---|---|
+| `--metallic` | 0 dielectric → 1 metal |
+| `--roughness` | 0 mirror → 1 rough |
+| `--specular` | dielectric specular strength |
+| `--clearcoat` | colorless secondary specular layer |
+| `--env <file.hdr>` | optional equirectangular Radiance HDR probe reflected by metallic surfaces |
+| `--env-intensity` | environment-reflection gain |
+| `--env-background` | also draw the probe as the **background sky** behind the scene |
+| `--env-background-blur` | blur for that background sky |
+| `--tonemap reinhard|aces` | HDR output curve; default `reinhard`, `aces` is the filmic curve |
+| `--exposure` / `--ambient` | tone-map exposure and ambient fill controls |
 
 ```sh
 # Shiny metal bunny under an HDR environment probe, ACES tone-map:
@@ -121,18 +148,27 @@ read-back); `--no-msaa` renders single-sampled.
 
 ### Camera forms & AR demos
 
-- **Dolly-camera capstone** — [`examples/bunny_dolly.py`](../examples/bunny_dolly.py)
-  authors the *same* camera **twice**, once **CG** (`eye`/`target`/`up` + `fovy`)
-  and once **CV** (pinhole `K` + `pose`), as two JSONL streams. Both decode to the
-  same `P·V` and render identically (verified to differ by ≤ 0.0054 % of pixels) —
-  a proof that the CV and CG paths agree. The CV `K` is in pixel units, so render
-  the CV stream at the resolution it was authored for.
-- **Background compositing** —
-  [`examples/bunny_frameplane.py`](../examples/bunny_frameplane.py) authors a folder
-  of animated stills + a turntable JSONL whose `frame_path` names each one;
-  `--frames-base <dir>` composites them beneath the spinning bunny. The standard
-  self-contained protocol e2e uses all 250 annotated Cornell-box frames as raw
-  native 1920×1080 RGBA tensors and the same placement pipeline as the path-backed demo:
+#### Dolly-camera capstone
+
+**Rule: CG and CV camera forms must render the same view.**
+[`examples/bunny_dolly.py`](../examples/bunny_dolly.py) authors the *same* camera
+**twice**, once **CG** (`eye`/`target`/`up` + `fovy`) and once **CV** (pinhole
+`K` + `pose`), as two JSONL streams.
+
+Both decode to the same `P·V` and render identically (verified to differ by
+≤ 0.0054 % of pixels) — a proof that the CV and CG paths agree. The CV `K` is
+in pixel units, so render the CV stream at the resolution it was authored for.
+
+#### Background compositing
+
+**Rule: background frames are selected by params rows.**
+[`examples/bunny_frameplane.py`](../examples/bunny_frameplane.py) authors a
+folder of animated stills + a turntable JSONL whose `frame_path` names each one;
+`--frames-base <dir>` composites them beneath the spinning bunny.
+
+The standard self-contained protocol e2e uses all 250 annotated Cornell-box
+frames as raw native 1920×1080 RGBA tensors and the same placement pipeline as
+the path-backed demo:
 
   ```sh
   uv run --with pyarrow --with pillow --with numpy scripts/extract_frames.py \
@@ -146,27 +182,32 @@ read-back); `--no-msaa` renders single-sampled.
     output/cornellbox-inline-tensor-bunny.gif 1920 1080 25
   ```
 
-  This draws only the textured bunny. Its 250 `frame_id` rows preserve the
-  external `frame_path` demo's camera and placement transforms exactly. See
-  [frame extraction](frame-extraction.md) for the complete generation recipe.
-- **Single-view AR placement (real broadcast clips)** — the perception pipeline
-  (`scripts/{nba,fiba}_perception_to_arrow.py` →
-  [`examples/placement_quad_by_local_coord.py`](../examples/placement_quad_by_local_coord.py))
-  anchors a mesh to a tracked planar court quad (Pose-free reconstruction) so it
-  **stays glued to the same floor spot as the camera pans and zooms**. Only the
-  image-free per-frame calibration is vendored (`assets/videos/{nba,fiba}/…`, see
-  each `DATASET.md`); the copyrighted broadcast video stays external. The packaged
-  **FIBA / Paris-2024 Olympic** demo (Disney PBR + ACES, native 1080p) is one
-  command (`--source` points at the external broadcast clip):
+This draws only the textured bunny. Its 250 `frame_id` rows preserve the external
+`frame_path` demo's camera and placement transforms exactly. See
+[frame extraction](frame-extraction.md) for the complete generation recipe.
+
+#### Single-view AR placement
+
+**Rule: the perception pipeline anchors meshes to tracked planar court quads.**
+The pipeline (`scripts/{nba,fiba}_perception_to_arrow.py` →
+[`examples/placement_quad_by_local_coord.py`](../examples/placement_quad_by_local_coord.py))
+uses Pose-free reconstruction so the mesh **stays glued to the same floor spot as
+the camera pans and zooms**.
+
+Only the image-free per-frame calibration is vendored
+(`assets/videos/{nba,fiba}/…`, see each `DATASET.md`); the copyrighted broadcast
+video stays external. The packaged **FIBA / Paris-2024 Olympic** demo (Disney PBR
++ ACES, native 1080p) is one command (`--source` points at the external broadcast
+clip):
 
   ```sh
   examples/olympic-basketball-demo.sh --source ~/Asset/fiba-shot1/shot_0001.mp4
   ```
 
-  Run it with no arguments to print its options (drink-can preset, shot, overlays).
-  See the script header and `render.sh` with no args for the individual stages and
-  the `--placement-quad` / `--axes-local` / `--grid-local` overlays.
-  Background-frame tooling: [`docs/frame-extraction.md`](frame-extraction.md).
+Run it with no arguments to print its options (drink-can preset, shot, overlays).
+See the script header and `render.sh` with no args for the individual stages and
+the `--placement-quad` / `--axes-local` / `--grid-local` overlays.
+Background-frame tooling: [`docs/frame-extraction.md`](frame-extraction.md).
 
 ## Native window — `trd-app`
 

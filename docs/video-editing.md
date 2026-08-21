@@ -5,6 +5,34 @@ objects on a tracked court quad while the external FIBA MP4 plays. Rust owns
 Arrow, placement, state, picking, materials, and all WebGPU rendering;
 TypeScript only opens/fetches browser resources and copies decoded video pixels.
 
+## Contents
+
+- [Data set](#data-set)
+- [Editing timeline](#editing-timeline)
+  - [Container sniffing](#container-sniffing)
+  - [Sparse rows](#sparse-rows)
+  - [Selection and placement state](#selection-and-placement-state)
+- [Generate the document](#generate-the-document)
+  - [The Parquet twin, and the parity test](#the-parquet-twin-and-the-parity-test)
+- [Browser/media boundary](#browsermedia-boundary)
+  - [Reader boundary](#reader-boundary)
+  - [Ranged bytes](#ranged-bytes)
+  - [Playback clock](#playback-clock)
+  - [Probe page](#probe-page)
+- [Placement](#placement)
+- [Catalog and lighting](#catalog-and-lighting)
+- [Rendering and visibility](#rendering-and-visibility)
+  - [Layer order](#layer-order)
+  - [Selection overlays](#selection-overlays)
+- [Details and diagnostics](#details-and-diagnostics)
+  - [Inspector sections](#inspector-sections)
+  - [Frame-path traffic](#frame-path-traffic)
+  - [Stable displayed facts](#stable-displayed-facts)
+- [Build and run](#build-and-run)
+  - [Native editor](#native-editor)
+- [Source map](#source-map)
+- [Remaining work](#remaining-work)
+
 ## Data set
 
 - video: local `shot_0001.mp4` (1920x1080, 24 fps, 288 frames); the
@@ -33,18 +61,21 @@ trd.video_edit.table.kind = timeline
 Schema metadata records source name, MIME/codec, SHA-256, byte length,
 dimensions, frame rate, frame count, and duration.
 
-It is read from **Arrow IPC streams or Parquet**, whichever the bytes turn out to
-be. The container is sniffed (`PAR1` at both ends versus the Arrow IPC
-continuation marker), never taken from the file name — a URL need not carry a
-useful suffix, and a mislabelled file is read for what it is. Parquet carries
-schema key-value metadata, so the version and table-kind contract above is
-identical either way, and both readers feed one decoder: the same rows in either
-container produce the same document.
+### Container sniffing
 
-The single timeline table is
-**sparse** — it holds a row only for the frames that carry an ad-placement quad,
-because those are the only frames the editor can act on. Everything else is
-ordinary video and is played as such:
+**Rule: read Arrow IPC streams or Parquet from the bytes, not from the file
+name.** The container is sniffed (`PAR1` at both ends versus the Arrow IPC
+continuation marker), never taken from the file name — a URL need not carry a
+useful suffix, and a mislabelled file is read for what it is.
+
+Parquet carries schema key-value metadata, so the version and table-kind contract
+above is identical either way. Both readers feed one decoder: the same rows in
+either container produce the same document.
+
+### Sparse rows
+
+**Rule: the timeline table stores only frames with ad-placement quads.**
+Everything else is ordinary video and is played as such:
 
 | Column | Type | Meaning |
 |---|---|---|
@@ -63,9 +94,13 @@ outside the video, out-of-order or duplicated indices, and a misplaced poster.
 What it deliberately **allows** is a document that annotates almost nothing: a
 frame with no row is looked up as `None` and rendered as plain video (#264).
 
-**Shots** are derived, not stored: a shot is a maximal run of consecutive
+**Shots are derived, not stored.** A shot is a maximal run of consecutive
 annotated frames, so the run boundaries can never disagree with the rows. The
-editor lists them in the left pane and jumps to a shot's first frame. Two
+editor lists them in the left pane and jumps to a shot's first frame.
+
+### Selection and placement state
+
+**Rule: placement overlays are visible state, not hidden editor state.** Two
 independent toggles govern what is drawn over an annotated frame, including
 *during playback* — an annotated frame shows its quad as it plays past, and the
 toggles are how that is turned off:
@@ -90,9 +125,9 @@ the quad stays selected and its gizmos stay up, and clicks go to the object's id
 pass. Editing an object whose basis had silently disappeared would be editing
 blind. **Reset all** is what unbinds them.
 
-The document is optional. Without one the editor is a plain player: the timeline
-comes from the container (ffprobe natively, the `moov` box in the browser) and
-the placement UI stays inert.
+**The document is optional.** Without one the editor is a plain player: the
+timeline comes from the container (ffprobe natively, the `moov` box in the
+browser) and the placement UI stays inert.
 
 The initial timeline embeds no mesh/material/edit resources. The fixed catalog
 is fetched from repository assets at runtime. Exporting edited state as a normal
@@ -160,41 +195,56 @@ and are left out so the crate keeps cross-compiling to wasm32.
 
 ## Browser/media boundary
 
-The browser owns no `<video>` element. [mediabunny] demuxes and decodes the MP4
-behind the `FrameReader` seam (`src/media/frame-reader.ts`), and
-`MediabunnyReader` is **the** browser media adapter: range reads, locating
-`moov`, feeding the demuxer, decoder configuration/reset, key-frame catch-up and
-the end-of-stream drain are the library's job, not ours. Do not extend the
-hand-written mp4box + `VideoDecoder` reader (`src/media/mp4-video.ts`) — fix the
-mediabunny path instead. The one part deliberately kept ours is the raw `moov`
-box walk (`locateMoov`), because Rust reads the frame rate from it as a
-**rational**, which mediabunny does not surface.
+### Reader boundary
 
-Bytes arrive through a `ByteSource` (`src/media/byte-source.ts`) that reads
-**ranges**, so cost is set by what is watched, not by file size: a local file and
-an HTTP(S) URL behave identically, and opening a 218 GiB / 694,840-frame 4K MP4
-over HTTP costs ~11 MiB and under two seconds, with each deep seek a further few
-tens of MiB. A URL source therefore needs `Accept-Ranges` **and**
-`Access-Control-Allow-Origin`; `serve-documents.ts` is the local helper that
-sends both and streams its responses.
+**Rule: the browser owns no `<video>` element.** [mediabunny] demuxes and decodes
+the MP4 behind the `FrameReader` seam (`src/media/frame-reader.ts`), and
+`MediabunnyReader` is **the** browser media adapter.
 
-`VideoPlayer` (`src/media/player.ts`) drives play/pause/seek over that reader and
-is the media clock. Each decoded `VideoFrame` is handed to Rust as-is
-(`presentVideoFrame`) and copied **GPU→GPU**, never downloaded to RGBA — the
-pixels are already in GPU memory, and at source resolution the round trip would
-cost ~99 MB a frame for 4K (#229). Details reports it as `frame upload: 0 B`.
-Overlapping seeks — what dragging the scrubber produces — coalesce to the last
-target rather than queueing.
+Range reads, locating `moov`, feeding the demuxer, decoder configuration/reset,
+key-frame catch-up and the end-of-stream drain are the library's job, not ours.
+Do not extend the hand-written mp4box + `VideoDecoder` reader
+(`src/media/mp4-video.ts`) — fix the mediabunny path instead.
 
-Rust validates the local filename/byte length and decoded
-dimensions/duration, maps media time to `video_frame_index`, selects the Arrow
-row, recomputes placement, and returns a composed RGBA image. HTTP(S) sources
-use decoded dimensions/duration validation. There is no independent Arrow timer,
-so video pixels and calibration rows do not drift.
+The one part deliberately kept ours is the raw `moov` box walk (`locateMoov`),
+because Rust reads the frame rate from it as a **rational**, which mediabunny
+does not surface.
 
-`probe.html` (`?url=&seek=&frames=`, `?scrub=t1,t2,…`, `?overlap=1`,
-`?reader=mediabunny`) exercises that layer alone, reporting bytes read and where
-each seek landed — the cheapest way to tell a media fault from an editor fault.
+### Ranged bytes
+
+**Rule: media cost is set by what is watched, not by file size.** Bytes arrive
+through a `ByteSource` (`src/media/byte-source.ts`) that reads **ranges**, so a
+local file and an HTTP(S) URL behave identically.
+
+Opening a 218 GiB / 694,840-frame 4K MP4 over HTTP costs ~11 MiB and under two
+seconds, with each deep seek a further few tens of MiB. A URL source therefore
+needs `Accept-Ranges` **and** `Access-Control-Allow-Origin`; `serve-documents.ts`
+is the local helper that sends both and streams its responses.
+
+### Playback clock
+
+**Rule: `VideoPlayer` is the media clock.** `VideoPlayer`
+(`src/media/player.ts`) drives play/pause/seek over that reader. Each decoded
+`VideoFrame` is handed to Rust as-is (`presentVideoFrame`) and copied
+**GPU→GPU**, never downloaded to RGBA.
+
+The pixels are already in GPU memory, and at source resolution the round trip
+would cost ~99 MB a frame for 4K (#229). Details reports it as
+`frame upload: 0 B`. Overlapping seeks — what dragging the scrubber produces —
+coalesce to the last target rather than queueing.
+
+Rust validates the local filename/byte length and decoded dimensions/duration,
+maps media time to `video_frame_index`, selects the Arrow row, recomputes
+placement, and returns a composed RGBA image. HTTP(S) sources use decoded
+dimensions/duration validation. There is no independent Arrow timer, so video
+pixels and calibration rows do not drift.
+
+### Probe page
+
+**Rule: use `probe.html` to isolate media faults.** `probe.html`
+(`?url=&seek=&frames=`, `?scrub=t1,t2,…`, `?overlap=1`, `?reader=mediabunny`)
+exercises that layer alone, reporting bytes read and where each seek landed — the
+cheapest way to tell a media fault from an editor fault.
 
 The canvas starts blank until a local file or HTTP(S) URL is opened. Playback
 then pauses on frame 0. Completing the embedded-poster/digest UX before video
@@ -258,7 +308,10 @@ Dragon. The material is not reloaded per frame; pose smoothing is pending.
 
 ## Rendering and visibility
 
-The editor uses `trd-core` `DrawableObject`s and isolated GPU submissions:
+### Layer order
+
+**Rule: the editor renders as isolated `trd-core` submissions.** The layer order
+is:
 
 1. the video background frame plane (`Scene::background().frame`) plus the paused
    quad/grid/axes;
@@ -273,26 +326,36 @@ overlay toggles to their opening state while keeping the video and document.
 The basis arms are labelled `e1`/`e2`/`e3` at their tips. Those labels are the
 one overlay drawn as **egui text over the image** rather than as scene geometry:
 `trd-core` draws lines and triangles and has no glyphs, so labelling in the
-render pass would mean adding a font atlas. The positions are still Rust's —
-each tip is projected through the same `K` the pass uses — so the text tracks the
-arm instead of being placed by eye.
+render pass would mean adding a font atlas.
 
-The quad outline and the gizmos follow their own **Show placement quads** /**Show gizmos** toggles, which apply during playback too. Hovering a quad and
-selecting it both add a `QuadFill` — a translucent green wash over the quad's
-face — and selection additionally turns the outline yellow and switches
-**Show gizmos** on; clicking off the quad deselects it and switches them back
-off — unless an object is placed, which binds the two: its quad stays selected
-and its basis stays visible while it is edited. The placed object does
-not depend on that selection and remains visible on tracked rows. Rows 222–287
-have no annotation, so quad, gizmos and object are all absent while the original
-video continues.
+The positions are still Rust's — each tip is projected through the same `K` the
+pass uses — so the text tracks the arm instead of being placed by eye.
+
+### Selection overlays
+
+**Rule: quad overlays follow their own toggles during playback too.** The quad
+outline and the gizmos follow their own **Show placement quads** /**Show gizmos**
+toggles.
+
+Hovering a quad and selecting it both add a `QuadFill` — a translucent green wash
+over the quad's face — and selection additionally turns the outline yellow and
+switches **Show gizmos** on. Clicking off the quad deselects it and switches them
+back off — unless an object is placed, which binds the two: its quad stays
+selected and its basis stays visible while it is edited.
+
+The placed object does not depend on that selection and remains visible on
+tracked rows. Rows 222–287 have no annotation, so quad, gizmos and object are all
+absent while the original video continues.
 
 ## Details and diagnostics
 
-The left pane's collapsed **Details** inspector is shared by browser and native
-delivery surfaces. UI code reads one immutable `VideoEditingDiagnostics`
-snapshot; tracking and scene facts are calculated in Rust rather than
-reconstructed in TypeScript or directly in egui widgets.
+**Rule: Details reports one immutable Rust-calculated snapshot.** The left pane's
+collapsed **Details** inspector is shared by browser and native delivery
+surfaces. UI code reads one immutable `VideoEditingDiagnostics` snapshot;
+tracking and scene facts are calculated in Rust rather than reconstructed in
+TypeScript or directly in egui widgets.
+
+### Inspector sections
 
 The six sections cover:
 
@@ -309,25 +372,37 @@ The six sections cover:
 - adapter/backend, render/pick targets, MSAA, layer drawable counts, upload
   size, latest pick, and explicit render/pick errors.
 
-The renderer section also reports the frame's **frame-path CPU↔GPU traffic** —
-`frame-path crossings` plus the bytes for `frame upload`, `readback`,
-`ui upload`, and their total. The copy count is therefore *observed*, not
-asserted: each figure is written at the transfer site itself, and the crossing
-count is derived from the bytes, so a path that stops copying reports `0 B` and
-one crossing fewer because that code did not run. The scope is deliberately
-narrow — full-resolution image data only. Per-frame uniforms and egui's own
-tessellated geometry and font atlas still cross the boundary every frame and are
-not counted, so a `0` reads as *no frame-sized buffer crossed*, not as *nothing
-crossed*. Today's shared path is 3 crossings; binding the rendered texture
-directly into egui is what drives `readback`/`ui upload` to `0 B` (#229).
+### Frame-path traffic
 
-Completed renders retain the exact scene/material/asset/renderer facts used to
-produce their pixels. While a newer frame or scene revision is in flight,
-Details continues to describe the image on screen and separately reports the
-new pending/presented identities. Diagnostics JSON is serialized only when
-**Copy diagnostics JSON** is pressed. The Dragon view makes its metallic factor,
-metallic-roughness and normal maps, zero direct/ambient light, Uffizi IBL, and
-unsmoothed tracking inputs visible without log inspection.
+**Rule: frame-path traffic counts only full-resolution image data.** The renderer
+section reports the frame's **frame-path CPU↔GPU traffic** — `frame-path
+crossings` plus the bytes for `frame upload`, `readback`, `ui upload`, and their
+total.
+
+The copy count is therefore *observed*, not asserted: each figure is written at
+the transfer site itself, and the crossing count is derived from the bytes, so a
+path that stops copying reports `0 B` and one crossing fewer because that code
+did not run.
+
+The scope is deliberately narrow — full-resolution image data only. Per-frame
+uniforms and egui's own tessellated geometry and font atlas still cross the
+boundary every frame and are not counted, so a `0` reads as *no frame-sized
+buffer crossed*, not as *nothing crossed*. Today's shared path is 3 crossings;
+binding the rendered texture directly into egui is what drives `readback`/
+`ui upload` to `0 B` (#229).
+
+### Stable displayed facts
+
+**Rule: Details describes the image on screen, even while newer work is in
+flight.** Completed renders retain the exact scene/material/asset/renderer facts
+used to produce their pixels. While a newer frame or scene revision is in flight,
+Details continues to describe the image on screen and separately reports the new
+pending/presented identities.
+
+Diagnostics JSON is serialized only when **Copy diagnostics JSON** is pressed.
+The Dragon view makes its metallic factor, metallic-roughness and normal maps,
+zero direct/ambient light, Uffizi IBL, and unsmoothed tracking inputs visible
+without log inspection.
 
 ## Build and run
 
