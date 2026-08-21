@@ -57,6 +57,11 @@ pollster = "0.4"
 
 [dev-dependencies]
 proptest = "1"
+# `tests/shader_bind_group_budget.rs` compares the shaders' declared `@group`
+# indices against `wgpu::Limits::downlevel_defaults().max_bind_groups` rather
+# than a hardcoded 4, so the guard tracks the baseline if wgpu ever restates it.
+# Same version as the normal dependency above: no extra build.
+wgpu = "30"
 approx = "0.5"
 # The environment-light golden builds a `Renderer` directly (no fixture can draw
 # a sky), and its constructor + readback are async.
