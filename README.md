@@ -233,7 +233,8 @@ params: **[`docs/rendering.md`](docs/rendering.md#interactive-viewer--trd-gui)**
 
 `web/gui-video-editing` is a Rust-owned WebGPU editor for placing catalog objects on
 the tracked FIBA court quad while an external MP4 plays. The browser owns media
-decode and copies each presented `VideoFrame` to RGBA; Rust owns the separate
+decode and hands each presented `VideoFrame` to Rust untouched — the pixels stay
+on the GPU (`frame upload: 0 B`); Rust owns the separate
 `trd.video_edit.version = 0.2.0` Arrow timeline, quad reconstruction,
 quad/object-local transforms, GPU picking, PBR/IBL, final composition, and a
 collapsed **Details** inspector. Its typed snapshot follows the displayed render

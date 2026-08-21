@@ -55,14 +55,6 @@ image = { version = "0.25", default-features = false, features = [
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 pollster = "0.4"
 
-# Browser-only: the frame plane copies a decoded `<video>` frame GPU→GPU with
-# `Queue::copy_external_image_to_texture`, which names `web_sys::HtmlVideoElement`
-# (#229). `VideoFrame` needs only the web-sys feature: the type itself is not
-# behind `web_sys_unstable_apis` (only `rotation`/`flip`/`metadata` are), so the
-# build-wide rustflag #276 avoided is not needed after all (#282).
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-web-sys = { version = "0.3", features = ["VideoFrame"] }
-
 [dev-dependencies]
 proptest = "1"
 approx = "0.5"

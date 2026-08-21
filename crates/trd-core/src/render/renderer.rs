@@ -587,27 +587,20 @@ impl Renderer {
         self.frame_plane.upload_rgba(&self.gpu, rgba, width, height);
     }
 
-    /// Copies a browser `<video>` element's current frame into the **background
-    /// frame texture** without it entering CPU memory (#229).
+    /// Copies a frame the delivery surface kept on the GPU into the **background
+    /// frame texture**, without its pixels entering CPU memory (#229).
     ///
-    /// The browser-only counterpart of
-    /// [`update_frame_texture_rgba`](Self::update_frame_texture_rgba): the frame
-    /// is already decoded in GPU memory, so `copy_external_image_to_texture`
-    /// keeps it there instead of paying `copyTo` + the wasm boundary +
-    /// `write_texture` at source resolution. See
-    /// [`FramePlane::copy_video_element`] for why this takes the element rather
-    /// than a `VideoFrame`.
+    /// The counterpart of
+    /// [`update_frame_texture_rgba`](Self::update_frame_texture_rgba) for an
+    /// already-decoded source: the browser's `VideoDecoder` puts the frame in
+    /// GPU memory, so downloading it only to re-upload costs a whole frame of
+    /// traffic at source resolution. The `frame` supplies both its size and the
+    /// copy — see [`ExternalFrame`](crate::ExternalFrame) for why the copy
+    /// cannot live in this crate.
     ///
-    /// Panics if either dimension is zero.
-    #[cfg(target_arch = "wasm32")]
-    pub fn update_frame_texture_from_video(
-        &mut self,
-        frame: &web_sys::VideoFrame,
-        width: u32,
-        height: u32,
-    ) {
-        self.frame_plane
-            .copy_video_frame(&self.gpu, frame, width, height);
+    /// Panics if the frame reports a zero dimension.
+    pub fn update_frame_texture_external(&mut self, frame: &dyn crate::ExternalFrame) {
+        self.frame_plane.copy_external(&self.gpu, frame);
     }
 
     /// Uploads `image` as the **background frame texture** (#63) sampled by a

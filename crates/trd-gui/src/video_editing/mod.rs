@@ -421,22 +421,22 @@ pub struct VideoEditingShared {
     /// instead of quietly opening another, which would make the bound texture
     /// come from a device egui knows nothing about.
     shared_gpu: RefCell<Option<std::sync::Arc<trd_core::GpuContext>>>,
-    /// The decoded frame waiting to be drawn, whose pixels are still on the GPU.
+    /// A decoded frame the delivery surface kept on the GPU, waiting to be
+    /// drawn. Set by the browser, always `None` natively — ffmpeg hands over CPU
+    /// bytes, which have nothing to keep on the GPU (#229).
     ///
-    /// Handed over **per frame** by `presentVideoFrame`, not once at startup:
-    /// #282 replaced the `HtmlVideoElement` of #276 with the WebCodecs
-    /// `VideoFrame` the decoder actually produces, and there is no element left
-    /// to hold. Its presence is what selects the zero-upload path.
+    /// A trait object rather than a `web_sys::VideoFrame`, so this crate builds
+    /// for every platform without naming a browser type (#302); the browser's
+    /// implementation, and the `close()` that releases its decoder-pool slot,
+    /// live in `trd-wasm`.
     ///
-    /// Owned here, and closed **when a newer frame replaces it** — not after the
-    /// upload. A render can run more than once for the same frame, since any UI
-    /// change repaints, so the frame has to outlive its first use: `video_frame`
-    /// below leaves it in this slot and hands out a *cloned wasm-bindgen handle
-    /// to the same frame* — not a copy, and not ownership — so a caller reads it
-    /// and drops it, never closes it. Web-only: native frames arrive from an
-    /// ffmpeg pipe as CPU bytes and have nothing to keep on the GPU (#229).
-    #[cfg(target_arch = "wasm32")]
-    video_frame: RefCell<Option<web_sys::VideoFrame>>,
+    /// `Rc`, and read by cloning it rather than taking it: a render can run more
+    /// than once for the same frame, since any UI change repaints, so a taken
+    /// frame would leave the repaint with nothing to draw. The frame is released
+    /// when the last handle drops — which is when a newer frame replaces it —
+    /// so unlike the raw handle this replaces, there is no way for a reader to
+    /// release it early.
+    external_frame: RefCell<Option<Rc<dyn trd_core::ExternalFrame>>>,
     /// A timeline the shell probed from the container, waiting to be adopted.
     ///
     /// The browser learns the real frame rate only after `moov` has been read,
@@ -495,8 +495,7 @@ impl Default for VideoEditingShared {
             context: RefCell::new(None),
             skip_readback: Cell::new(false),
             shared_gpu: RefCell::new(None),
-            #[cfg(target_arch = "wasm32")]
-            video_frame: RefCell::new(None),
+            external_frame: RefCell::new(None),
             pending_video_info: RefCell::new(None),
             incoming_document: RefCell::new(None),
             command: Cell::new(COMMAND_NONE),
@@ -577,23 +576,22 @@ impl VideoEditingShared {
     /// Leaves the frame in the slot rather than taking it: a render can run more
     /// than once for the same frame — any UI change repaints — and a taken frame
     /// would leave the second pass with an empty RGBA buffer. What comes back is
-    /// a cloned wasm-bindgen handle to the *same* frame, not WebCodecs'
-    /// `clone()`, so it costs no extra pool slot — and so closing it would close
-    /// the frame still sitting in the slot. Read it and drop it; the slot
-    /// releases the frame when a newer one replaces it.
-    #[cfg(target_arch = "wasm32")]
-    fn video_frame(&self) -> Option<web_sys::VideoFrame> {
-        self.video_frame.borrow().clone()
+    /// another `Rc` to the *same* frame, so it costs no extra decoder-pool slot,
+    /// and the frame is released only when the last handle drops.
+    fn external_frame(&self) -> Option<Rc<dyn trd_core::ExternalFrame>> {
+        self.external_frame.borrow().clone()
     }
 
-    /// Publishes a decoded frame that lives **only on the GPU**: the
-    /// `VideoFrame` holds the pixels, so the editor is told which timeline row
-    /// is on screen and nothing else.
+    /// Publishes a decoded frame that lives **only on the GPU**: the frame holds
+    /// the pixels, so the editor is told which timeline row is on screen and
+    /// nothing else.
     ///
-    /// **Takes ownership of the frame.** A `VideoFrame` holds a slot in a small
-    /// decoder-side pool, so exactly two things close it: a newer frame
-    /// replacing it, and this call rejecting it for a degenerate size. It is
-    /// deliberately *not* closed after the upload — a render can run more than
+    /// **Takes ownership of the frame**, as an `Rc` whose last drop releases it.
+    /// That is the whole lifetime rule now: a browser `VideoFrame` holds a slot
+    /// in a small decoder-side pool, and the three hand-written `close()` calls
+    /// this replaces — superseded, rejected-degenerate, rejected-out-of-range,
+    /// spread across two crates — are one `Drop` in `trd-wasm` (#302). It is
+    /// deliberately *not* released after the upload: a render can run more than
     /// once for the same frame, so it is held until superseded.
     ///
     /// A separate entry point from
@@ -601,22 +599,17 @@ impl VideoEditingShared {
     /// flag on it, because the two have genuinely different preconditions — this
     /// one *requires* an empty buffer, and that buffer reaching `epaint` would
     /// panic if the display path had not been taught to skip it.
-    #[cfg(target_arch = "wasm32")]
-    pub fn present_video_frame(
+    pub fn present_external_frame(
         &self,
-        frame: web_sys::VideoFrame,
+        frame: Rc<dyn trd_core::ExternalFrame>,
         frame_index: u32,
         media_time_seconds: f64,
     ) -> Result<(), String> {
-        let width = frame.display_width();
-        let height = frame.display_height();
+        let (width, height) = frame.size();
         if width == 0 || height == 0 {
-            frame.close();
             return Err(format!("video frame size {width}x{height} is degenerate"));
         }
-        if let Some(dropped) = self.video_frame.replace(Some(frame)) {
-            dropped.close();
-        }
+        self.external_frame.replace(Some(frame));
         self.frame.replace(Some(IncomingVideoFrame {
             rgba: Vec::new(),
             width,
@@ -1449,19 +1442,17 @@ impl VideoEditingApp {
         let background_frame_index = video.frame_index;
         let background_media_time = video.media_time_seconds;
         let render_started = Instant::now();
-        // A frame published by `present_video_frame` carries no pixels: the
-        // decoded `VideoFrame` still holds them on the GPU, so the source is the
-        // frame itself and nothing crosses the wasm boundary.
-        #[cfg(target_arch = "wasm32")]
-        let video_frame = shared.video_frame().filter(|_| video.rgba.is_empty());
+        // A frame published by `present_external_frame` carries no pixels: the
+        // decoded frame still holds them on the GPU, so the source is the frame
+        // itself and nothing crosses the wasm boundary. Natively the slot is
+        // always empty — nothing implements `ExternalFrame` there — so this
+        // needs no `cfg` to fall through to the RGBA arm (#302).
+        let external_frame = shared.external_frame().filter(|_| video.rgba.is_empty());
         let render = async move {
-            #[cfg(target_arch = "wasm32")]
-            let source = match video_frame.as_ref() {
-                Some(frame) => crate::video_editing_renderer::FrameSource::VideoFrame(frame),
+            let source = match external_frame.as_deref() {
+                Some(frame) => crate::video_editing_renderer::FrameSource::External(frame),
                 None => crate::video_editing_renderer::FrameSource::Rgba(&video.rgba),
             };
-            #[cfg(not(target_arch = "wasm32"))]
-            let source = crate::video_editing_renderer::FrameSource::Rgba(&video.rgba);
             let result = if shared.skip_readback.get() {
                 // Shared-device path: the rendered texture is bound straight into
                 // egui, so there is nothing to read back. The empty `Vec` is the
@@ -1553,10 +1544,7 @@ impl VideoEditingApp {
                 context.request_repaint();
             }
         };
-        #[cfg(target_arch = "wasm32")]
-        wasm_bindgen_futures::spawn_local(render);
-        #[cfg(not(target_arch = "wasm32"))]
-        pollster::block_on(render);
+        crate::platform::drive(render);
     }
 
     fn schedule_pick(&self) {
@@ -1626,10 +1614,7 @@ impl VideoEditingApp {
                 context.request_repaint();
             }
         };
-        #[cfg(target_arch = "wasm32")]
-        wasm_bindgen_futures::spawn_local(pick);
-        #[cfg(not(target_arch = "wasm32"))]
-        pollster::block_on(pick);
+        crate::platform::drive(pick);
     }
 
     fn quad_frame_at(&self, frame_index: u32) -> Option<trd_placement::QuadFrame> {

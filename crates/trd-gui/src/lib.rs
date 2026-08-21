@@ -30,6 +30,7 @@
 pub mod assets;
 pub mod error;
 pub mod interaction;
+mod platform;
 pub mod renderer;
 pub mod scene;
 pub mod ui;

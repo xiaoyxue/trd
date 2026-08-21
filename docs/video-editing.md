@@ -179,9 +179,12 @@ tens of MiB. A URL source therefore needs `Accept-Ranges` **and**
 sends both and streams its responses.
 
 `VideoPlayer` (`src/media/player.ts`) drives play/pause/seek over that reader and
-is the media clock. Each decoded `VideoFrame` has its RGBA copied and sent to
-Rust; overlapping seeks — what dragging the scrubber produces — coalesce to the
-last target rather than queueing.
+is the media clock. Each decoded `VideoFrame` is handed to Rust as-is
+(`presentVideoFrame`) and copied **GPU→GPU**, never downloaded to RGBA — the
+pixels are already in GPU memory, and at source resolution the round trip would
+cost ~99 MB a frame for 4K (#229). Details reports it as `frame upload: 0 B`.
+Overlapping seeks — what dragging the scrubber produces — coalesce to the last
+target rather than queueing.
 
 Rust validates the local filename/byte length and decoded
 dimensions/duration, maps media time to `video_frame_index`, selects the Arrow

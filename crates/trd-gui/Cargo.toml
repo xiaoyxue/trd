@@ -73,14 +73,11 @@ eframe = { version = "0.36.1", default-features = false, features = [
     "wgpu",
     "default_fonts",
 ] }
+# Only `platform::drive` needs this: `spawn_local` is the browser arm of the
+# executor policy this front-end owns (#302). No `web-sys` — the browser frame
+# path went behind `trd_core::ExternalFrame`, so no shared crate names a browser
+# type any more.
 wasm-bindgen-futures = "0.4"
-web-sys = { version = "0.3", features = [
-    "HtmlCanvasElement",
-    # The browser frame path copies a decoded `VideoFrame` GPU→GPU (#229, #282).
-    "VideoFrame",
-    "Element",
-    "Window",
-] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 eframe = "0.36.1"
