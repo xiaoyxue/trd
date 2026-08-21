@@ -2,260 +2,404 @@
 
 Guidance for agents working in this repository.
 
+> **In one minute.** `trd` is **one** Rust + wgpu rendering core (`crates/trd-core`)
+> that draws natively, headlessly and in the browser; JS/TS is only a bootstrap.
+> Work in a **git worktree** off an up-to-date `main`, open a **draft PR early**,
+> and before calling it done pick a **[test level](#test-levels--l1--l2--l3-chosen-by-what-the-diff-touches)**
+> from what your diff touches — **L1** (no GPU) / **L2** (+ goldens) / **L3**
+> (+ end-to-end) — run it on **both Windows and Linux**, and post the
+> [verification matrix](#pr-presentation--verification-matrix--handoff-list-required).
+> The one rule that catches people out: **any change that reaches pixels must
+> land the golden render suite green on a real GPU.**
+
+## Contents
+
+- [Architecture](#architecture) — [rendering core](#one-rendering-core-rust--wgpu) ·
+  [typed math](#typed-math) · [drawables](#everything-drawn-is-a-drawableobject) ·
+  [render harness](#one-render-harness-targets-are-pure-data) ·
+  [video editing](#video-editing-uses-a-separate-authoring-document) ·
+  [browser media](#browser-demuxingdecoding-is-mediabunny-always) ·
+  [input protocol](#the-input-protocol-is-not-backward-compatible)
+- [Toolchain](#toolchain) — [dev shell & flake](#the-flake-is-the-build-system-not-just-a-dev-shell) ·
+  [layout](#delivery-surfaces-are-grouped-by-platform) ·
+  [wasm containment](#cratestrd-wasm-is-the-only-browser-delivery-surface) ·
+  [web workspace](#web-is-a-bun-workspace) · [GPU](#gpu) ·
+  [golden render test](#golden-render-test-88--the-render-regression-gate)
+- [PR Workflow](#pr-workflow) — [issue tags](#issue-titles) ·
+  [**test levels**](#test-levels--l1--l2--l3-chosen-by-what-the-diff-touches) ·
+  [where a test lives](#where-a-test-lives--by-kind-not-by-size-305) ·
+  [the tiers](#the-tiers-in-full) ·
+  [cross-mode e2e recipe](#cross-mode-e2e-recipe--coca-cola-can-pbr--aabb--axes) ·
+  [platforms & handoff](#multiple-platform-verification-and-handoff) ·
+  [documentation](#documentation) · [worktrees](#worktrees)
+
 ## Architecture
 
-- **One rendering core: Rust + wgpu** (`crates/trd-core`). The same code renders
-  natively (headless CLI + interactive window) and in the browser (wasm).
-  **JS/TS is a thin bootstrap only** — never call the WebGPU API from JS; all
-  rendering logic lives in Rust.
-- **Typed math** (`crates/trd-core/src/math/`): homogeneous linear algebra
-  (`Vector`/`Point`/`Normal`/`Matrix`/`Rotation`/`Transform`/`Aabb`) as zero-cost
-  `#[repr(transparent)]` newtypes over glam with **private** fields that enforce
-  affine rules glam can't (`point − point → vector`, no `point + point`).
-  Conventions live in `math/mod.rs`: column-major, right-handed, clip
-  `z ∈ [0, 1]`, `a.then(b) == b * a`, f32 radians. The `render/` MVP transforms
-  build on it — keep the GPU `Uniform` byte-identical when touching them. SIMD:
-  native SSE2/NEON is automatic; wasm needs `-C target-feature=+simd128`
-  (`.cargo/config.toml`).
-- **Vertical slicing.** Each increment threads the whole stack and is
-  independently end-to-end verifiable.
-- **Everything drawn is a `DrawableObject`** (`render/drawable.rs`, #41): a small
-  `Copy` struct pairing a `Primitive` — *what* to draw — with the `model` that
-  places it (`Primitive::Mesh { mesh_id, mode }` | `AabbBox { mesh_id }` |
-  `CoordinateAxes` | `PlaneGrid { plane }` | `QuadOutline { selected }` |
-  `QuadFill` | `BlobShadow`) — the single base
-  interface for every primitive. **Every drawable is a placed primitive**: it
-  names geometry and carries the model that places it, so it can be instanced.
-  What a frame draws *behind* them — the HDR environment probe and the
-  background frame plane — is not a primitive but a per-frame setting on
-  `Scene::background()` (`Background { environment, frame }`, two **independent**
-  `Option`s, since both are drawn: environment first, frame plane over it — #204).
-  Geometry is owned once (decode-once mesh store + shared
-  gizmo buffers); a drawable is a light handle naming *which* primitive + its
-  per-frame model. Every front-end hands the same `Scene`
-  (objects + background, rebuilt per frame) to `Renderer::render` without
-  per-type branching; the render core batches its objects by primitive — a batch
-  key *is* a drawable minus its model, so there is one taxonomy, not two (#204),
-  and `Primitive::sort_key` spells out the submission order that every
-  depth-disabled overlay depends on. A single-object
-  frame is the degenerate one-element scene. Add a primitive by adding a variant,
-  not by bolting flags onto the renderer. Wireframe (and PBR) is a *mode* of
-  `Mesh`, not a separate variant.
-- **One render harness; targets are pure data, behaviour is on the renderer.**
-  `trd_core::Renderer` (`render/renderer.rs`) owns *GPU context +
-  pipelines/materials/mesh store* for **every** front-end, and owns **all** the
-  render behaviour too. `render/render_target.rs` is data only — `TextureTarget`
-  (texture + padded staging buffer), `SurfaceTarget` (surface + config + sRGB view
-  format), and the closed enum `RenderTarget` over the two, which holds *only* the
-  discriminant so each variant stays the single source of truth for its own size.
-  A target carries **no** `render`/`present`/`acquire`/`read_back` method (#203):
-  a swapchain handle knows nothing about pipelines or the mesh store, so
-  `Renderer::render(camera, scene, &mut RenderTarget)` is the **one** public entry
-  — a single match over private `render_surface` (acquire → encode → submit →
-  present) and `render_texture` (encode → submit) — returning
-  `Result<Option<SurfaceRepair>, RenderError>` **synchronously** (no `async fn`
-  may cross the `wasm_bindgen` boundary). The asymmetric tail is typed, not
-  branched: `read_pixels` and the multi-camera
-  `draw_layers`/`render_layers`/`render_params` take the concrete
-  `&TextureTarget`, so asking a *surface* for pixels is a compile error. Target
-  lifecycle lives on the renderer for the same reason (`create_texture_target`,
-  `create_surface_target`, `resize_texture_target`, and the *associated*
-  `resize_surface`/`reconfigure_surface`/`replace_surface`, which take a
-  `&wgpu::Device` because a window is resized and repaired before a mesh has
-  arrived to build a `Renderer` from). Texture targets serve `trd-cli`, `trd-gui`
-  and the browser `OffscreenRenderer`; surface targets serve `trd-app` and
-  `trd-wasm`'s `CanvasRenderer`. Front-ends are **shells, not renderers** — they
-  create the surface, own their target, and apply their own
-  **surface-recovery policy** to the reported
-  `Ok(Some(SurfaceRepair))` / `Err(RenderError::Surface(_))` (native defers to
-  the next redraw; the browser repairs in-call and retries once).
-- Major input data is columnar (Apache Arrow tables) with simple glue logic.
-- **Video editing uses a separate authoring document.**
-  `web/gui-video-editing` reads `trd.video_edit.version = 0.2.0` timeline rows
-  (video metadata/optional poster + per-frame K/quad/tracked state), from
-  **Arrow IPC or Parquet** — the container is sniffed from the bytes, not the
-  file name, and both feed one decoder so either produces the same document.
-  The table is
-  **sparse**: a row exists only for a frame carrying an ad-placement quad, and a
-  frame with no row is plain video — so the document is also **optional**, and
-  without one the editor is a player whose timeline comes from the container
-  (#264). It is deliberately
-  independent of render `PROTOCOL_VERSION`; do not add editor-only columns to
-  `0.0.6` or bump the render protocol for editor state. Rust maps each presented
-  browser `VideoFrame` or native ffmpeg frame to a timeline row, reconstructs
-  the quad through `crates/trd-placement`, and derives ordinary
-  `DrawableObject`s. Browser and native delivery surfaces host the same
-  `VideoEditingApp`, renderer, catalog, placement, picking, and egui panels;
-  only their media adapters differ. Current catalog resources are loaded at
-  runtime; protocol export remains a separate later slice.
-- **Browser demuxing/decoding is [mediabunny](https://mediabunny.dev/), always —
-  never a hand-rolled reader.** `MediabunnyReader`
-  (`web/gui-video-editing/src/media/mediabunny-reader.ts`) is *the* browser media
-  adapter, behind the `FrameReader` seam (#290). Range reads, locating `moov`,
-  feeding the demuxer, decoder configuration/reset, key-frame catch-up and the
-  end-of-stream drain are the library's job — that layer is where every playback
-  fault this package has hit lives (a `flush()` deadlocking on its own output
-  pool, a seek offset misread as end of stream, samples arriving after a drain,
-  a decoder left `closed` by an overlapping seek), and re-implementing it is how
-  they come back. So: **do not extend the hand-written mp4box + `VideoDecoder`
-  reader** (`media/mp4-video.ts`, and `VideoPlayer.open`, which still defaults to
-  it while `?reader=mediabunny` opts in) — fix things in the mediabunny path,
-  make it the default, and delete rather than grow the self-implemented one. The
-  only part deliberately kept ours is the raw `moov` box walk (`locateMoov`),
-  because Rust needs the frame rate as a **rational**, which mediabunny does not
-  surface. New media work goes through `FrameReader` so both delivery surfaces
-  and the `?reader=` probe keep measuring the same seam.
-- **The input protocol is NOT backward compatible.** Wire format is **mesh-first**
-  `[mesh][texture?][frames?][params]`; only the current `PROTOCOL_VERSION`
-  (`trd_core::protocol::PROTOCOL_VERSION`, currently `0.0.6`) is accepted — every
-  table's `trd.protocol.version` and `trd.table.kind` are checked and any other
-  version is
-  **hard-rejected** (`UnsupportedVersion`), never silently upgraded. To evolve it,
-  **bump `PROTOCOL_VERSION` and migrate all producers + fixtures in the same
-  change** (`scripts/{jsonl,obj,texture}_to_arrow.py` stamp the version;
-  regenerate the golden `stage{1,2}.arrow` fixtures). Do **not** re-add branches
-  for retired versions or params-only (hello-triangle) streams — dropping that
-  legacy is deliberate (#82/#90). Every input must begin with a mesh table.
+### One rendering core: Rust + wgpu
+
+**All rendering logic lives in Rust** (`crates/trd-core`). The same code renders
+natively (headless CLI + interactive window) and in the browser (wasm).
+
+**JS/TS is a thin bootstrap only** — never call the WebGPU API from JS.
+
+### Typed math
+
+`crates/trd-core/src/math/` is homogeneous linear algebra
+(`Vector`/`Point`/`Normal`/`Matrix`/`Rotation`/`Transform`/`Aabb`) as zero-cost
+`#[repr(transparent)]` newtypes over glam, with **private** fields that enforce
+affine rules glam can't (`point − point → vector`, no `point + point`).
+
+- **Conventions** (in `math/mod.rs`): column-major, right-handed, clip
+  `z ∈ [0, 1]`, `a.then(b) == b * a`, f32 radians.
+- The `render/` MVP transforms build on it — **keep the GPU `Uniform`
+  byte-identical** when touching them.
+- **SIMD:** native SSE2/NEON is automatic; wasm needs
+  `-C target-feature=+simd128` (`.cargo/config.toml`).
+
+### Vertical slicing
+
+Each increment threads the whole stack and is independently end-to-end
+verifiable.
+
+### Everything drawn is a `DrawableObject`
+
+`render/drawable.rs` (#41). A small `Copy` struct pairing a `Primitive` — *what*
+to draw — with the `model` that places it. It is the single base interface for
+every primitive:
+
+| `Primitive` variants |
+|---|
+| `Mesh { mesh_id, mode }` · `AabbBox { mesh_id }` · `CoordinateAxes` · `PlaneGrid { plane }` · `QuadOutline { selected }` · `QuadFill` · `BlobShadow` |
+
+- **Every drawable is a placed primitive:** it names geometry and carries the
+  model that places it, so it can be instanced.
+- **Geometry is owned once** (decode-once mesh store + shared gizmo buffers); a
+  drawable is a light handle naming *which* primitive + its per-frame model.
+- **Add a primitive by adding a variant**, not by bolting flags onto the
+  renderer. Wireframe (and PBR) is a *mode* of `Mesh`, not a separate variant.
+
+What a frame draws *behind* them is **not** a primitive but a per-frame setting
+on `Scene::background()` — `Background { environment, frame }`, two
+**independent** `Option`s, since both are drawn: environment first, frame plane
+over it (#204).
+
+Every front-end hands the same `Scene` (objects + background, rebuilt per frame)
+to `Renderer::render` without per-type branching. A single-object frame is the
+degenerate one-element scene.
+
+<details>
+<summary>Why one taxonomy, not two</summary>
+
+The render core batches its objects by primitive — a batch key *is* a drawable
+minus its model, so there is one taxonomy, not two (#204), and
+`Primitive::sort_key` spells out the submission order that every depth-disabled
+overlay depends on.
+</details>
+
+### One render harness; targets are pure data
+
+`trd_core::Renderer` (`render/renderer.rs`) owns *GPU context +
+pipelines/materials/mesh store* for **every** front-end, and owns **all** the
+render behaviour too.
+
+**`render/render_target.rs` is data only:**
+
+| Type | What it holds |
+|---|---|
+| `TextureTarget` | texture + padded staging buffer |
+| `SurfaceTarget` | surface + config + sRGB view format |
+| `RenderTarget` | closed enum over the two — **only** the discriminant, so each variant stays the single source of truth for its own size |
+
+**`Renderer::render(camera, scene, &mut RenderTarget)` is the one public entry** —
+a single match over private `render_surface` (acquire → encode → submit →
+present) and `render_texture` (encode → submit) — returning
+`Result<Option<SurfaceRepair>, RenderError>` **synchronously** (no `async fn` may
+cross the `wasm_bindgen` boundary).
+
+- A target carries **no** `render`/`present`/`acquire`/`read_back` method (#203):
+  a swapchain handle knows nothing about pipelines or the mesh store.
+- **The asymmetric tail is typed, not branched:** `read_pixels` and the
+  multi-camera `draw_layers`/`render_layers`/`render_params` take the concrete
+  `&TextureTarget`, so asking a *surface* for pixels is a compile error.
+- **Target lifecycle lives on the renderer** for the same reason
+  (`create_texture_target`, `create_surface_target`, `resize_texture_target`, and
+  the *associated* `resize_surface`/`reconfigure_surface`/`replace_surface`,
+  which take a `&wgpu::Device` because a window is resized and repaired before a
+  mesh has arrived to build a `Renderer` from).
+
+Texture targets serve `trd-cli`, `trd-gui` and the browser `OffscreenRenderer`;
+surface targets serve `trd-app` and `trd-wasm`'s `CanvasRenderer`.
+
+**Front-ends are shells, not renderers** — they create the surface, own their
+target, and apply their own **surface-recovery policy** to the reported
+`Ok(Some(SurfaceRepair))` / `Err(RenderError::Surface(_))` (native defers to the
+next redraw; the browser repairs in-call and retries once).
+
+### Columnar input
+
+Major input data is columnar (Apache Arrow tables) with simple glue logic.
+
+### Video editing uses a separate authoring document
+
+`web/gui-video-editing` reads `trd.video_edit.version = 0.2.0` timeline rows
+(video metadata/optional poster + per-frame K/quad/tracked state), from **Arrow
+IPC or Parquet** — the container is sniffed from the bytes, not the file name,
+and both feed one decoder so either produces the same document.
+
+- **The table is sparse:** a row exists only for a frame carrying an
+  ad-placement quad, and a frame with no row is plain video — so the document is
+  also **optional**, and without one the editor is a player whose timeline comes
+  from the container (#264).
+- **It is deliberately independent of render `PROTOCOL_VERSION`.** Do not add
+  editor-only columns to `0.0.6` or bump the render protocol for editor state.
+- Rust maps each presented browser `VideoFrame` or native ffmpeg frame to a
+  timeline row, reconstructs the quad through `crates/trd-placement`, and derives
+  ordinary `DrawableObject`s.
+- Browser and native delivery surfaces host the same `VideoEditingApp`, renderer,
+  catalog, placement, picking, and egui panels; **only their media adapters
+  differ.**
+- Current catalog resources are loaded at runtime; protocol export remains a
+  separate later slice.
+
+### Browser demuxing/decoding is mediabunny, always
+
+Never a hand-rolled reader. [mediabunny](https://mediabunny.dev/) does the
+demuxing and decoding; `MediabunnyReader`
+(`web/gui-video-editing/src/media/mediabunny-reader.ts`) is *the* browser media
+adapter, behind the `FrameReader` seam (#290).
+
+**Do not extend the hand-written mp4box + `VideoDecoder` reader**
+(`media/mp4-video.ts`, and `VideoPlayer.open`, which still defaults to it while
+`?reader=mediabunny` opts in) — fix things in the mediabunny path, make it the
+default, and **delete rather than grow** the self-implemented one.
+
+New media work goes through `FrameReader` so both delivery surfaces and the
+`?reader=` probe keep measuring the same seam.
+
+**The one deliberate exception** is the raw `moov` box walk (`locateMoov`),
+because Rust needs the frame rate as a **rational**, which mediabunny does not
+surface.
+
+<details>
+<summary>Why — the faults this layer keeps producing</summary>
+
+Range reads, locating `moov`, feeding the demuxer, decoder configuration/reset,
+key-frame catch-up and the end-of-stream drain are the library's job — that layer
+is where every playback fault this package has hit lives (a `flush()` deadlocking
+on its own output pool, a seek offset misread as end of stream, samples arriving
+after a drain, a decoder left `closed` by an overlapping seek), and
+re-implementing it is how they come back.
+</details>
+
+### The input protocol is NOT backward compatible
+
+Wire format is **mesh-first** `[mesh][texture?][frames?][params]`. Every input
+must begin with a mesh table.
+
+- Only the current `PROTOCOL_VERSION` (`trd_core::protocol::PROTOCOL_VERSION`,
+  currently `0.0.6`) is accepted — every table's `trd.protocol.version` and
+  `trd.table.kind` are checked, and any other version is **hard-rejected**
+  (`UnsupportedVersion`), never silently upgraded.
+- **To evolve it, bump `PROTOCOL_VERSION` and migrate all producers + fixtures in
+  the same change** (`scripts/{jsonl,obj,texture}_to_arrow.py` stamp the version;
+  regenerate the golden `stage{1,2}.arrow` fixtures).
+- Do **not** re-add branches for retired versions or params-only
+  (hello-triangle) streams — dropping that legacy is deliberate (#82/#90).
+
 
 ## Toolchain
 
-- **Dev shell:** `nix develop` (pinned Rust via rust-overlay, `bun`,
-  `wasm-bindgen-cli`, `biome`, `typescript`, Vulkan). Local `cargo` inside it
-  works for fast iteration.
-- **The flake is the build system, not just a dev shell.** Prefer the real outputs:
-  - `nix build .#trd-cli` — native CLI (`trd-cli`), wrapped with Vulkan/GL libs.
-    `nix run .#trd-cli -- --width 256 --height 256` runs the Arrow stream filter
-    (frames on stdin → images on stdout).
-  - `nix build .#trd-wasm` — the `wasm-bindgen` JS/TS library (built with
-    `wasm-bindgen-cli` + `wasm-opt`, replacing `wasm-pack`).
-  - `nix build .#web` (also `.#`) — the bun-bundled, HTTP-servable `dist/`.
-    `nix run .#web` serves it (`PORT` overridable, defaults to 8080).
-  - `nix flake check` — every non-GPU gate: `cargo fmt`, clippy (native +
-    wasm32), `cargo test`, `tsc --noEmit`, Biome.
-  - `nix fmt` — formats nix files (`nixfmt`).
-- **Delivery surfaces are grouped by platform.** Native binaries live in
-  `native/{trd-app,trd-gui-app,trd-gui-video-editing}`; reusable Rust stays in `crates/`. Browser apps
-  live as sibling packages in `web/{viewer,gui-viewer,gui-video-editing}`.
-- **`crates/trd-wasm` is the *only* browser delivery surface.** **Every**
-  `#[wasm_bindgen]` export in the repo lives there — the viewer's
-  `CanvasRenderer`/`OffscreenRenderer` *and* the GUI's `start` /
-  `startVideoEditing` / `VideoEditingHandle` (`src/gui.rs`, `src/gui_web_app.rs`).
-  Every other crate, `trd-gui` included, is a plain `rlib` free of
-  `wasm-bindgen`, so there is one wasm build and one generated JS package
-  (`trd_wasm`) that all three web packages stage into their own `pkg/` (#180).
-  Do **not** add a `cdylib` crate-type or a `#[wasm_bindgen]` item anywhere else.
-  It is also the only crate that may name **`web-sys`** (#302). A browser type in
-  a shared crate has to be hidden behind a `cfg` a native build never compiles,
-  which is how eleven of them accumulated unnoticed; the browser frame copy now
-  reaches the render core through `trd_core::ExternalFrame` (`trd-core` owns the
-  trait and the destination texture, `trd-wasm`'s `BrowserVideoFrame` owns the
-  `copy_external_image_to_texture` call wgpu marks `#[cfg(web)]`). All three
-  rules are scanned by `crates/trd-wasm/tests/wasm_bindgen_containment.rs`, so
-  reach for `#[cfg(target_arch = "wasm32")]` only when **both arms are real** —
-  as in the two `platform.rs` shims — never to hide a browser-only type.
-- **`web/` is a Bun workspace** with sibling `viewer/`, `gui-viewer/`, and
-  `gui-video-editing/` packages. Each package's lint/format gate is Biome; run all
-  packages' checks from the workspace root
-  with `bun run check`.
-  Each package owns a generated `trd_wasm` package under its own `pkg/` (all
-  three stage the same `crates/trd-wasm` build); no delivery surface imports
-  another's build output.
-  Run `bun run check` / `format` / `typecheck` from `nix develop`, or directly on
-  Windows — `@biomejs/biome` + `apache-arrow` are in
-  `web/viewer/package.json`. On a clean non-Nix checkout, first run
-  `bun run --cwd viewer build:wasm` and
-  `bun run --cwd gui-viewer build:wasm` and
-  `bun run --cwd gui-video-editing build:wasm` from `web/` to stage all local
-  wasm packages, then `bun install --frozen-lockfile`; the workspace
-  `check`/`typecheck`/build scripts work without Nix.
-- **Nix web deps are installed offline via
-  [bun2nix](https://github.com/nix-community/bun2nix).** `web/bun.nix`
-  (generated from `web/bun.lock`, hash-pinned) lets
-  `nix build .#web` and the `tsc` gate `bun install` reproducibly. **Regenerate
-  `web/bun.nix` whenever `web/bun.lock` changes** (add/upgrade an
-  npm dep): from `nix develop`, `cd web && bun install` (updates
-  `bun.lock`) then
-  `nix run github:nix-community/bun2nix -- -l web/bun.lock -o web/bun.nix`, and
-  **delete the autogenerated `"trd-wasm" = copyPathToStore ...;` line** — that
-  `file:` dep is supplied by the nix-built `trd-wasm`, not fetched. The Biome gate
-  runs from nixpkgs' `biome` (version-matched to `package.json`), since bun can't
-  materialize biome's large optional platform binary in the sandbox.
-- **`nix build`/`nix flake check` only see git-tracked files.** `git add` new
-  files before building, or the sandbox won't include them.
+**Dev shell:** `nix develop` (pinned Rust via rust-overlay, `bun`,
+`wasm-bindgen-cli`, `biome`, `typescript`, Vulkan). Local `cargo` inside it works
+for fast iteration.
+
+### The flake is the build system, not just a dev shell
+
+Prefer the real outputs:
+
+| Command | What it produces |
+|---|---|
+| `nix build .#trd-cli` | native CLI (`trd-cli`), wrapped with Vulkan/GL libs. `nix run .#trd-cli -- --width 256 --height 256` runs the Arrow stream filter (frames on stdin → images on stdout) |
+| `nix build .#trd-wasm` | the `wasm-bindgen` JS/TS library (built with `wasm-bindgen-cli` + `wasm-opt`, replacing `wasm-pack`) |
+| `nix build .#web` (also `.#`) | the bun-bundled, HTTP-servable `dist/`. `nix run .#web` serves it (`PORT` overridable, defaults to 8080) |
+| `nix flake check` | every non-GPU gate: `cargo fmt`, clippy (native + wasm32), `cargo test`, `tsc --noEmit`, Biome |
+| `nix fmt` | formats nix files (`nixfmt`) |
+
+**`nix build`/`nix flake check` only see git-tracked files.** `git add` new files
+before building, or the sandbox won't include them.
+
+### Delivery surfaces are grouped by platform
+
+- Native binaries live in `native/{trd-app,trd-gui-app,trd-gui-video-editing}`.
+- Reusable Rust stays in `crates/`.
+- Browser apps live as sibling packages in
+  `web/{viewer,gui-viewer,gui-video-editing}`.
+
+### `crates/trd-wasm` is the *only* browser delivery surface
+
+Three rules, all scanned by `crates/trd-wasm/tests/wasm_bindgen_containment.rs`:
+
+1. **Every `#[wasm_bindgen]` export in the repo lives there** — the viewer's
+   `CanvasRenderer`/`OffscreenRenderer` *and* the GUI's `start` /
+   `startVideoEditing` / `VideoEditingHandle` (`src/gui.rs`,
+   `src/gui_web_app.rs`). Do **not** add a `cdylib` crate-type or a
+   `#[wasm_bindgen]` item anywhere else.
+2. **It is the only crate that may name `web-sys`** (#302).
+3. **Reach for `#[cfg(target_arch = "wasm32")]` only when both arms are real** —
+   as in the two `platform.rs` shims — never to hide a browser-only type.
+
+Every other crate, `trd-gui` included, is a plain `rlib` free of `wasm-bindgen`,
+so there is one wasm build and one generated JS package (`trd_wasm`) that all
+three web packages stage into their own `pkg/` (#180).
+
+<details>
+<summary>Why — how eleven browser types accumulated unnoticed</summary>
+
+A browser type in a shared crate has to be hidden behind a `cfg` a native build
+never compiles, which is how eleven of them accumulated unnoticed; the browser
+frame copy now reaches the render core through `trd_core::ExternalFrame`
+(`trd-core` owns the trait and the destination texture, `trd-wasm`'s
+`BrowserVideoFrame` owns the `copy_external_image_to_texture` call wgpu marks
+`#[cfg(web)]`).
+</details>
+
+### `web/` is a Bun workspace
+
+Sibling `viewer/`, `gui-viewer/`, and `gui-video-editing/` packages. Each
+package's lint/format gate is Biome; run all packages' checks from the workspace
+root with `bun run check`.
+
+- Each package owns a generated `trd_wasm` package under its own `pkg/` (all
+  three stage the same `crates/trd-wasm` build); **no delivery surface imports
+  another's build output.**
+- Run `bun run check` / `format` / `typecheck` from `nix develop`, or directly on
+  Windows — `@biomejs/biome` + `apache-arrow` are in `web/viewer/package.json`.
+
+**On a clean non-Nix checkout**, first stage all local wasm packages from `web/`:
+
+```sh
+bun run --cwd viewer build:wasm
+bun run --cwd gui-viewer build:wasm
+bun run --cwd gui-video-editing build:wasm
+bun install --frozen-lockfile
+```
+
+The workspace `check`/`typecheck`/build scripts then work without Nix.
+
+### Nix web deps are installed offline via bun2nix
+
+[bun2nix](https://github.com/nix-community/bun2nix) generates `web/bun.nix` from
+`web/bun.lock` (hash-pinned), which lets `nix build .#web` and the `tsc` gate
+`bun install` reproducibly.
+
+**Regenerate `web/bun.nix` whenever `web/bun.lock` changes** (add/upgrade an npm
+dep). From `nix develop`:
+
+```sh
+cd web && bun install                                          # updates bun.lock
+nix run github:nix-community/bun2nix -- -l web/bun.lock -o web/bun.nix
+```
+
+Then **delete the autogenerated `"trd-wasm" = copyPathToStore ...;` line** — that
+`file:` dep is supplied by the nix-built `trd-wasm`, not fetched.
+
+The Biome gate runs from nixpkgs' `biome` (version-matched to `package.json`),
+since bun can't materialize biome's large optional platform binary in the sandbox.
 
 ### GPU
 
-- We always work on GPU machines. GPU-dependent tests are marked `#[ignore]` and
-  run locally; CI skips them.
-- **Always render on the most powerful GPU available.** With multiple adapters,
-  pick the strongest discrete card; never fall back to a weak display/iGPU (e.g. a
-  Quadro P620) or software (llvmpipe). Preference (strongest first):
-  `RTX PRO 6000 > RTX 5090 > RTX 6000 Ada > RTX 4090 > RTX A6000 > RTX 3090 > others`.
-  List adapters with `nvidia-smi --query-gpu=index,name,memory.total --format=csv`;
-  confirm trd's choice from its `trd_core=info` log line
-  `using Vulkan adapter "…" (DiscreteGpu)`. Adapter selection lives in
-  `render/gpu_context.rs`, whose `GpuRequest` defaults to
+We always work on GPU machines. GPU-dependent tests are marked `#[ignore]` and
+run locally; CI skips them.
+
+**Always render on the most powerful GPU available.** With multiple adapters,
+pick the strongest discrete card; never fall back to a weak display/iGPU (e.g. a
+Quadro P620) or software (llvmpipe). Preference, strongest first:
+
+```
+RTX PRO 6000 > RTX 5090 > RTX 6000 Ada > RTX 4090 > RTX A6000 > RTX 3090 > others
+```
+
+- **List adapters:** `nvidia-smi --query-gpu=index,name,memory.total --format=csv`
+- **Confirm trd's choice** from its `trd_core=info` log line
+  `using Vulkan adapter "…" (DiscreteGpu)`.
+- Selection lives in `render/gpu_context.rs`, whose `GpuRequest` defaults to
   `PowerPreference::HighPerformance`, so Vulkan prefers the discrete card
-  (verified: picks the RTX 3090 over a P620). To force one: Mesa
-  `MESA_VK_DEVICE_SELECT=<vendorId>:<deviceId>`; multi-GPU NVIDIA
-  `__NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia` (GL) — plain
-  `CUDA_VISIBLE_DEVICES` does **not** filter Vulkan physical devices.
-- **Linux non-NixOS (e.g. Ubuntu): use nixGL.** The `nix develop` Vulkan loader
-  can't `dlopen` the host NVIDIA/Mesa driver (fails with *"No suitable graphics
-  adapter found"*). Wrap GPU commands to inject a matching host driver:
-  ```sh
-  # inside `nix develop`; --impure lets nixGL detect the host driver version
-  NIXPKGS_ALLOW_UNFREE=1 nix run --impure github:nix-community/nixGL#nixGLNvidia -- \
-    cargo test -p trd-core -- --ignored          # or: ./result/bin/trd-cli …, render.sh, etc.
-  ```
-  `NIXPKGS_ALLOW_UNFREE=1` is required for NVIDIA; use `#nixGLIntel` for
-  Intel/Mesa. NixOS doesn't need this (driver on `/run/opengl-driver`); WSL uses
-  `WGPU_BACKEND=gl` (below).
-- **WSL2:** NVIDIA ships no native Linux Vulkan ICD, so Vulkan falls back to
-  software (llvmpipe) and Mesa's `dzn` (Vulkan-on-D3D12) crashes at device
-  creation. Use `WGPU_BACKEND=gl` for real GPU rendering via Mesa's D3D12 GL
-  driver; the dev shell auto-configures this on WSL.
+  (verified: picks the RTX 3090 over a P620).
+- **To force one:** Mesa `MESA_VK_DEVICE_SELECT=<vendorId>:<deviceId>`;
+  multi-GPU NVIDIA `__NV_PRIME_RENDER_OFFLOAD=1
+  __GLX_VENDOR_LIBRARY_NAME=nvidia` (GL). Plain `CUDA_VISIBLE_DEVICES` does
+  **not** filter Vulkan physical devices.
+
+**Linux non-NixOS (e.g. Ubuntu): use nixGL.** The `nix develop` Vulkan loader
+can't `dlopen` the host NVIDIA/Mesa driver (fails with *"No suitable graphics
+adapter found"*). Wrap GPU commands to inject a matching host driver:
+
+```sh
+# inside `nix develop`; --impure lets nixGL detect the host driver version
+NIXPKGS_ALLOW_UNFREE=1 nix run --impure github:nix-community/nixGL#nixGLNvidia -- \
+  cargo test -p trd-core -- --ignored          # or: ./result/bin/trd-cli …, render.sh, etc.
+```
+
+`NIXPKGS_ALLOW_UNFREE=1` is required for NVIDIA; use `#nixGLIntel` for
+Intel/Mesa. NixOS doesn't need this (driver on `/run/opengl-driver`).
+
+**WSL2:** NVIDIA ships no native Linux Vulkan ICD, so Vulkan falls back to
+software (llvmpipe) and Mesa's `dzn` (Vulkan-on-D3D12) crashes at device
+creation. Use `WGPU_BACKEND=gl` for real GPU rendering via Mesa's D3D12 GL
+driver; the dev shell auto-configures this on WSL.
 
 ### Golden render test (#88) — the render-regression gate
 
-`crates/trd-core/tests/golden_render.rs` feeds committed Arrow fixtures
-(`crates/trd-core/tests/golden/stage{1,2}.arrow`, the reduced two-stage
-cornellbox placement demo) through the real `run_stream` pipeline and pixel-diffs
-the frames against committed golden PNGs (same dir). Each params row selects an
-inline `0.0.6` frames-table resource by `frame_id` (stage 1 encoded Binary,
-stage 2 raw tensor), composited **under** the scene.
+**This is the primary pixel-level regression net.** `crates/trd-core/tests/golden_render.rs`
+feeds committed Arrow fixtures through the real `run_stream` pipeline and
+pixel-diffs the frames against committed golden PNGs.
 
-Each fixture is rendered **twice — 4× MSAA (`Msaa::X4`, the default anti-aliased
-mesh pass) and MSAA-off (`Msaa::Off`, single-sample)** — each pinned to its own
-goldens (`stageN_*` vs `stageN_noaa_*`), so both the multisample+resolve path and
-the raw single-sample path are covered; plus PBR tone-map variants
-(`golden_stage2_pbr_{aces,reinhard}`), plus
-`golden_environment_light_syncs_sky_and_reflection` — a hand-built scene (no
-fixture can draw a sky) pinning that the scene's one `EnvironmentLight.rotation`
-drives the visible sky **and** the reflections on a near-mirror ball in front of
-it (#182). It is GPU-gated (`#[ignore]`); run it via
-the nixGL wrapper (Linux) or directly on a Windows box with a discrete GPU.
+**Mandatory:** any change touching the render path (`crates/trd-core` render
+code, PBR/tone-map, shaders, or the golden fixtures) MUST run the golden suite on
+a real GPU and land green — on **every** platform where a GPU is available —
+before the task is done.
 
-**Mandatory:** any change touching the render path (`crates/trd-core` render code,
-PBR/tone-map, shaders, or the golden fixtures) MUST run the golden suite on a real
-GPU and land green — on **every** platform where a GPU is available — before the
-task is done. After an *intended* visual change or a fixture change, regenerate:
+**What it covers.** Fixtures are `crates/trd-core/tests/golden/stage{1,2}.arrow`
+(the reduced two-stage cornellbox placement demo), with goldens in the same dir.
+Each params row selects an inline `0.0.6` frames-table resource by `frame_id`
+(stage 1 encoded Binary, stage 2 raw tensor), composited **under** the scene.
+
+| Variant | Why it exists |
+|---|---|
+| `stageN_*` — 4× MSAA (`Msaa::X4`, the default anti-aliased mesh pass) | the multisample + resolve path |
+| `stageN_noaa_*` — MSAA off (`Msaa::Off`, single-sample) | the raw single-sample path |
+| `golden_stage2_pbr_{aces,reinhard}` | PBR tone-map variants |
+| `golden_environment_light_syncs_sky_and_reflection` | a hand-built scene (no fixture can draw a sky) pinning that the scene's one `EnvironmentLight.rotation` drives the visible sky **and** the reflections on a near-mirror ball in front of it (#182) |
+
+It is GPU-gated (`#[ignore]`); run it via the nixGL wrapper (Linux) or directly
+on a Windows box with a discrete GPU.
+
+**Regenerating** — only after an *intended* visual change or a fixture change:
+
 ```sh
 # 1. rebuild the .arrow fixtures + stills (needs uv + ffmpeg on PATH)
 python3 scripts/golden_fixtures.py
 # 2. refresh the golden PNGs from the current renderer (GPU box)
 TRD_UPDATE_GOLDENS=1 cargo test -p trd-core --test golden_render -- --ignored
 ```
-The companion **non-GPU** `tests/decoder_parity.rs` decodes the same fixtures
-through both **public API surfaces** — the native `InputStream`
-(`io/input_stream.rs`, a byte transport owning a `Read`) and the browser's push
-`InputSession` — and asserts identical *assembled frames*. Neither the column
-decode nor the framing is duplicated: both run the one decoder in
-`protocol/arrow_decode.rs` through the one `InputSession`. What this guards is
+
+#### The companion non-GPU gate — `tests/decoder_parity.rs`
+
+It decodes the same fixtures through both **public API surfaces** — the native
+`InputStream` (`io/input_stream.rs`, a byte transport owning a `Read`) and the
+browser's push `InputSession` — and asserts identical *assembled frames*. It runs
+in `nix flake check`.
+
+<details>
+<summary>What it actually guards, and what it does not duplicate</summary>
+
+Neither the column decode nor the framing is duplicated: both run the one decoder
+in `protocol/arrow_decode.rs` through the one `InputSession`. What this guards is
 that the two surfaces a caller assembles a frame through agree —
 `prologue`/`next_batch`/`finish` versus a bare `push`, and `InlineFrameCache`
 versus `InlineFrame::decode` — the shape of failure the `center` non-nullable bug
-had. It runs in `nix flake check`.
+had.
+</details>
 
 ## PR Workflow
 
@@ -265,30 +409,99 @@ had. It runs in `nix flake check`.
   green. Risky PRs (public API, schemas, migrations, auth, infra) require human
   review.
 - **branch naming:** `feat/<topic>`, `fix/<topic>`, `docs/<topic>`, etc.
-  **merge strategy:** squash. PRs that resolve an issue include a `Closes #nn`
+- **merge strategy:** squash. PRs that resolve an issue include a `Closes #nn`
   keyword.
-- **issue titles:** every issue title **starts with a bracketed category tag**
-  naming the kind of work — it is the first token of the title, before the short
-  description (`[Tag] <concise summary>`). Use the canonical set:
-  - `[Epic]` — umbrella / tracking issue spanning multiple slices.
-  - `[Feature]` — a shippable user-facing capability grouping several slices
-    (narrower than an `[Epic]`, broader than one `[Slice]`); tracks its slices.
-  - `[Design]` — a spec/design settled *before* implementation.
-  - `[Plan]` — a roadmap / sequencing plan across issues.
-  - `[Slice]` — one vertical slice increment (independently end-to-end verifiable).
-  - `[Investigation]` — a research spike / open question to resolve.
-  - `[Refactoring]` — a behaviour-preserving restructure (regression net must stay green).
-  - `[Risk]` — a risk-register item or hardening task (things likely to break/slip).
-  - `[Eval]` — an evaluation / benchmark / quality-measurement task.
-  - `[Test]` — a test-only slice (fixtures, goldens, regression nets; no product behaviour change).
 
-  Others in use as needed: `[Ops]`, `[Demo]`, `[Prep]`, `[Integration]`, `[Docs]`.
-  Pick the single tag that best fits the issue's primary intent.
+### Issue titles
+
+Every issue title **starts with a bracketed category tag** naming the kind of
+work — the first token of the title, before the short description:
+`[Tag] <concise summary>`.
+
+| Tag | Meaning |
+|---|---|
+| `[Epic]` | umbrella / tracking issue spanning multiple slices |
+| `[Feature]` | a shippable user-facing capability grouping several slices (narrower than an `[Epic]`, broader than one `[Slice]`); tracks its slices |
+| `[Design]` | a spec/design settled *before* implementation |
+| `[Plan]` | a roadmap / sequencing plan across issues |
+| `[Slice]` | one vertical slice increment (independently end-to-end verifiable) |
+| `[Investigation]` | a research spike / open question to resolve |
+| `[Refactoring]` | a behaviour-preserving restructure (regression net must stay green) |
+| `[Risk]` | a risk-register item or hardening task (things likely to break/slip) |
+| `[Eval]` | an evaluation / benchmark / quality-measurement task |
+| `[Test]` | a test-only slice (fixtures, goldens, regression nets; no product behaviour change) |
+
+Others in use as needed: `[Ops]`, `[Demo]`, `[Prep]`, `[Integration]`, `[Docs]`.
+Pick the single tag that best fits the issue's primary intent.
 
 ### Testing — required before a task is "done"
 
 Run the smallest command that covers the change during iteration, but a task is
-not complete until these tiers pass; **record the results on the PR.**
+not complete until every gate its **test level** requires has passed; **record
+the results on the PR.**
+
+#### Test levels — L1 / L2 / L3, chosen by what the diff touches
+
+Not every change needs a GPU, and not every change is safe without one. So each
+PR declares a level, and **the level is derived from the diff, not from how
+risky the change feels**: run `git diff --name-only origin/main`, find the
+highest-floor row below that any changed path matches, and that is the level.
+Stating it makes the scope reviewable — a reviewer can disagree with the *level*
+in one line instead of re-deriving which gates should have run.
+
+| Level | What it is | Adds over the level below |
+|---|---|---|
+| **L1** | **UT + IT** — everything that needs no GPU and no display. Exactly `nix flake check`. | `cargo fmt --all --check`; clippy native `--workspace --all-targets -- -D warnings`; clippy wasm32 `-p trd-wasm --target wasm32-unknown-unknown --lib`; `cargo test --workspace` (inline unit tests + `crates/*/tests/`: `decoder_parity`, `shader_bind_group_budget`, `wasm_bindgen_containment`); `rustdoc` with `-D rustdoc::broken_intra_doc_links`; `tsc --noEmit` + Biome (`bun run check`) |
+| **L2** | **normal** — L1 plus the pixel-level regression net. Needs a real GPU. | `cargo test -p trd-core --test golden_render -- --ignored` (MSAA on **and** off, plus the PBR tone-map variants); `cargo test -p trd-core -- --ignored` (`render::gpu_tests`); `cargo test -p trd-gui --test gui_render -- --ignored` |
+| **L3** | **full** — L2 plus end-to-end on a real device. | The §3 e2e list and the §4 Windows matrix (4.1 `trd-cli` · 4.2 `trd-app` window · 4.3 `trd-gui` window · 4.4 both web renderers · 4.5 native video editor · 4.6 browser video editor · 4.7 large-file seek) |
+
+**Choosing the level — the floor table.** Take the *highest* floor any changed
+path matches:
+
+| The diff touches | Floor |
+|---|---|
+| `*.md`, `docs/**`, doc comments, or `flake.nix` **gates** | **L1** |
+| test-only files (a `#[cfg(test)] mod tests`, a file under `crates/*/tests/`) | **L1** |
+| Rust/TS that changes behaviour but cannot reach pixels, a window or media — `crates/trd-placement`, `protocol/` decode, CLI arg parsing, `math/` helpers | **L2** |
+| `crates/trd-core/src/render/**`, `src/shader/*.wgsl`, PBR/tone-map, `math/` transforms feeding the GPU `Uniform`, or the golden fixtures | **L3** |
+| a delivery surface or shell — `native/**`, `crates/trd-wasm/**`, `crates/trd-gui/**`, `web/**` | **L3** |
+| `web/gui-video-editing/src/media/**`, or anything else that demuxes, decodes or seeks | **L3, and §4.7 is required** |
+| `PROTOCOL_VERSION` / `VIDEO_EDIT_VERSION` bump, or regenerated fixtures | **L3** |
+
+**The level is a floor, not a ceiling.**
+
+- **Escalate freely, never silently downgrade.** When two rows apply, the higher
+  one wins — a PR that is "mostly docs" but edits one line of `render/` is L3.
+- **When in doubt, go up one.** The cost of an unnecessary golden run is minutes;
+  the cost of a missed one is a pixel regression that lands.
+- **A failure that surprises you is an escalation signal.** If an L1 gate fails
+  in a way that suggests the change reaches further than the floor table
+  predicted, raise the level rather than just fixing the gate.
+- **Rebasing onto a new base re-runs the level**, because the union of two
+  independently-green changes is not itself proven green (that is exactly what
+  #311 checked by hand).
+- **A level you cannot run is handed off, not dropped.** The headless Linux box
+  cannot do L3's window/browser steps and the Linux column marks them `n/a`; if
+  *your* platform cannot run part of your declared level, it stays 🤝 in the
+  matrix with the exact commands, and the PR still says L3.
+- **§4.7 needs a large MP4.** If the media layer changed, run it against the
+  largest file the device has: **> 4 GiB** exercises the offset-truncation trap,
+  a **multi-hundred-GiB** file additionally proves the ranged-read economics.
+  Name the file and size in the PR. If no file over 4 GiB exists, that row is 🤝 —
+  never ✅ and never quietly `n/a`. If the media layer did *not* change, it is
+  `n/a` with that reason.
+
+**Declare it on the PR**, one line above the verification matrix, with the reason
+drawn from the floor table:
+
+```markdown
+**Test level: L3** — touches `crates/trd-gui/src/video_editing/` (a delivery
+surface), so L2's goldens plus §4.5/§4.6 editor e2e.
+```
+
+Then the matrix carries exactly that level's gates; anything above it is `n/a`
+with the level named (e.g. `n/a (L1)`), so a skipped gate always reads as a
+decision rather than an omission.
 
 #### Where a test lives — by kind, not by size (#305)
 
@@ -319,15 +532,20 @@ When a module does get too long to read, the fix is to split the *module* — by
 responsibility, tests following their code — not to hide its tests in another
 file.
 
-1. **Golden test — MSAA enabled *and* disabled (must).**
+#### The tiers in full
+
+These are the contents of the levels above: tiers 1–2 are **L2**, tiers 3–4 are
+**L3**.
+
+1. **Golden test — MSAA enabled *and* disabled (must — L2).**
    `cargo test -p trd-core --test golden_render -- --ignored` runs both the 4×
    MSAA (`stageN_*`) and single-sample (`stageN_noaa_*`) goldens plus the PBR
    tone-map variants. GPU-gated — see [Golden render test](#golden-render-test-88--the-render-regression-gate).
    Mandatory for any render-path change, on every platform with a GPU.
-2. **GPU-gated tests (must).** Every `#[ignore]` test, on a real GPU:
+2. **GPU-gated tests (must — L2).** Every `#[ignore]` test, on a real GPU:
    `cargo test -p trd-core -- --ignored` (golden + `render::gpu_tests`) and
    `cargo test -p trd-gui --test gui_render -- --ignored`
-3. **End-to-end — Linux *and* Windows:**
+3. **End-to-end — Linux *and* Windows (L3):**
    - **trd-core / trd-cli:** stream a real Arrow input through the CLI and read an
      image stream back — `nix run .#trd-cli -- …` / `examples/render.sh` (Linux),
      `examples/render.ps1` (Windows).
@@ -363,7 +581,7 @@ file.
      ...`; verify source validation, streaming RGBA playback, play/pause/seek,
      timeline row identity, and the tracked/video-only transition. ffmpeg and
      ffprobe are the native media adapter; no temporary frame directory is used.
-4. **Windows e2e (manual).** The Linux box is headless, so every path that needs
+4. **Windows e2e (manual — L3).** The Linux box is headless, so every path that needs
    a **display**, a **window event loop**, or **Windows file/HTTP I/O** is verified
    here and nowhere else. Mark N/A on Linux, and put the exact commands in the PR
    and issue handoff whenever the current platform cannot run them. Run the ones
@@ -387,12 +605,22 @@ file.
    video-only 222-287 tail, and Details' frame identity under rapid seek.
 
    **4.7 — large-file seek (Windows, required for any media-layer change).**
-   A multi-hundred-GiB MP4 is the only thing that exercises **64-bit offsets**;
-   a short local clip cannot fail the way a 218 GiB one does, and the classic
-   Windows-only failure is a `>4 GiB` offset truncated to 32 bits, which shows up
-   as a seek landing at the wrong place or an "unreadable" file rather than as a
-   crash. Linux coverage does **not** substitute: the file APIs, the process
-   spawn, and the browser's range-request stack are all different here.
+   Linux coverage does **not** substitute: the file APIs, the process spawn, and
+   the browser's range-request stack are all different here.
+
+   This step tests **two separable properties**, and they need different files:
+
+   | Property | What proves it | Minimum file |
+   |---|---|---|
+   | **64-bit offsets** — the classic Windows failure is a `>4 GiB` offset truncated to 32 bits, showing up as a seek landing in the wrong place or an "unreadable" file rather than a crash | a seek past the 4 GiB mark landing on its exact target | **any MP4 > 4 GiB** |
+   | **Ranged-read economics** — that opening reads megabytes, not the whole file | `~11 MiB / <2 s` to open | a **multi-hundred-GiB** MP4, where a full read is unmistakable |
+
+   A short local clip cannot fail the way a 218 GiB one does, so the
+   multi-hundred-GiB file remains the standard. But **do not skip the step for
+   want of one**: a file merely over 4 GiB still exercises the offset-truncation
+   trap, which is the failure mode most likely to be Windows-only. Run what the
+   device has, and **name the file and its size in the PR** so a reviewer knows
+   which of the two properties was actually covered.
 
    Both delivery surfaces must be driven, because they use different readers —
    ffmpeg natively, mediabunny in the browser:
@@ -426,7 +654,8 @@ file.
    the PR so a reviewer knows which one was used.
 
 The non-GPU gates (`nix flake check`: `cargo fmt`, clippy native + wasm32,
-`cargo test`, `tsc`, Biome) must pass on both platforms as well.
+`cargo test`, `tsc`, Biome) are **L1** and must pass on both platforms at every
+level.
 
 #### Cross-mode e2e recipe — coca-cola can (PBR + AABB + axes)
 
@@ -520,90 +749,113 @@ across trd-cli, trd-app, and both web renderers.
 trd ships a **native Windows** path (`trd-cli`/`trd-app`/`trd-gui`,
 `examples/render.ps1`) **and** a **Linux/Nix** path (`nix flake check`, GPU-gated
 `#[ignore]` tests on the RTX box, `render.sh`), plus a **browser/wasm** path
-shared by both. Every task must be verified on **both** OS platforms before it is
-considered done:
+shared by both. **Every task must be verified on both OS platforms** before it is
+considered done, to the depth its [test level](#test-levels--l1--l2--l3-chosen-by-what-the-diff-touches)
+requires.
 
-- **Linux:** `nix flake check` (fmt, clippy native + wasm32, tests, tsc, biome)
-  plus the GPU-gated tests (via nixGL / `WGPU_BACKEND=gl`, see [GPU](#gpu)).
-- **Windows (MSVC):** build/run the affected native path (`trd-cli`/`trd-app`/
-  `trd-gui`; `examples/render.ps1` for the demo) and confirm it renders. On a box
-  with a discrete GPU the golden test is **runnable on Windows too** (wgpu Vulkan
-  — verified on a GTX 1080 Ti), so also run
-  `cargo test -p trd-core --test golden_render -- --ignored` there; don't defer it
-  entirely to Linux.
-- **Required render gate:** for any render-path change, the golden suite (MSAA
-  on/off + PBR `{aces,reinhard}` variants) MUST pass on a real GPU — or the
-  goldens be regenerated for an *intended* visual change — and the result recorded
-  on the PR. It is the primary pixel-level regression net.
-- **Handoff:** for whichever platform you cannot run yourself, leave an explicit
-  note (exact commands + expected result) in **both** the issue and the PR, so the
-  other platform's verification can be completed and recorded there.
-- **PR presentation — verification matrix & handoff list (required).** Present the
-  dual-platform results as a scannable, icon-led **verification matrix** plus an
-  explicit **handoff list**, so a reviewer sees at a glance what passed, where, and
-  what is still owed. Use this on **every** PR (and mirror it in the issue); never
-  report gates as bare prose. Keep to a fixed glyph set so the format stays
-  consistent and greppable — **status:** ✅ passed · ❌ failed · ⏳ not yet run · 🤝
-  handed off · n/a not applicable; **platform:** 🪟 Windows · 🐧 Linux/Nix;
-  **gate:** 🎨 fmt · 📎 clippy · 🕸️ clippy-wasm · 🧪 tests · 🔀 decoder-parity ·
-  🖼️ golden-render · 🎮 gpu-tests · 🌐 tsc/biome · 🖥️ window e2e (§4.2/4.3) ·
-  🎬 video-editor e2e (§4.5/4.6) · 📼 large-file seek (§4.7).
-  One matrix row per gate, one column per platform (cells are status icons, an
-  optional count like `(173)`); the handoff list is a 🤝-headed checklist of the
-  exact commands the *other* platform still owes, closed by a one-line expected
-  result:
-  ```markdown
-  ## ✅ Verification
+| Platform | What to run |
+|---|---|
+| 🐧 **Linux** | `nix flake check` (fmt, clippy native + wasm32, tests, tsc, biome) plus the GPU-gated tests (via nixGL / `WGPU_BACKEND=gl`, see [GPU](#gpu)) |
+| 🪟 **Windows (MSVC)** | build/run the affected native path (`trd-cli`/`trd-app`/`trd-gui`; `examples/render.ps1` for the demo) and confirm it renders |
 
-  | Gate | 🪟 Windows | 🐧 Linux/Nix |
-  |------|:---:|:---:|
-  | 🎨 `cargo fmt --check`         | ✅ | 🤝 |
-  | 📎 clippy native `-D warnings` | ✅ | 🤝 |
-  | 🕸️ clippy wasm32 (lib)         | ✅ | 🤝 |
-  | 🧪 `cargo test --lib` (173)    | ✅ | 🤝 |
-  | 🔀 `decoder_parity` (2)        | ✅ | 🤝 |
-  | 🖼️ `golden_render` (6/6, GPU)  | ✅ | 🤝 |
-  | 🖥️ window e2e (§4.2/4.3)       | ✅ | n/a |
-  | 📼 large-file seek (§4.7)      | ✅ | n/a |
+**The golden suite runs on Windows too.** On a box with a discrete GPU it works
+(wgpu Vulkan — verified on a GTX 1080 Ti), so run
+`cargo test -p trd-core --test golden_render -- --ignored` there as well; don't
+defer it entirely to Linux.
 
-  ## 🤝 Handoff — 🐧 Linux/Nix
-  - [ ] `nix flake check -L`
-  - [ ] nixGL-wrapped `cargo test -p trd-core --test golden_render -- --ignored`
+**Required render gate.** For any render-path change, the golden suite (MSAA
+on/off + PBR `{aces,reinhard}` variants) MUST pass on a real GPU — or the goldens
+be regenerated for an *intended* visual change — and the result recorded on the
+PR.
 
-  > Expected: all green — behaviour-preserving change.
-  ```
-- **Re-post the completed matrix after a handoff.** When you finish the
-  verification a PR handed off to your platform, don't report it as bare prose —
-  **re-post the full verification matrix as a new comment** on the PR (and mirror
-  it on the issue) with that platform's column flipped from 🤝 to ✅ (with counts),
-  and tick the corresponding items in the 🤝 handoff checklist. The completed
-  matrix must be visible as a comment, not only described.
+**Handoff.** For whichever platform you cannot run yourself, leave an explicit
+note (exact commands + expected result) in **both** the issue and the PR, so the
+other platform's verification can be completed and recorded there.
+
+#### PR presentation — verification matrix & handoff list (required)
+
+Present the dual-platform results as a scannable, icon-led **verification
+matrix** plus an explicit **handoff list**, so a reviewer sees at a glance what
+passed, where, and what is still owed. Use this on **every** PR (and mirror it in
+the issue); **never report gates as bare prose.**
+
+Keep to a fixed glyph set so the format stays consistent and greppable:
+
+| Kind | Glyphs |
+|---|---|
+| **status** | ✅ passed · ❌ failed · ⏳ not yet run · 🤝 handed off · n/a not applicable |
+| **platform** | 🪟 Windows · 🐧 Linux/Nix |
+| **gate** | 🎨 fmt · 📎 clippy · 🕸️ clippy-wasm · 🧪 tests · 🔀 decoder-parity · 🖼️ golden-render · 🎮 gpu-tests · 🌐 tsc/biome · 🖥️ window e2e (§4.2/4.3) · 🎬 video-editor e2e (§4.5/4.6) · 📼 large-file seek (§4.7) |
+
+One matrix row per gate, one column per platform (cells are status icons, an
+optional count like `(173)`); the handoff list is a 🤝-headed checklist of the
+exact commands the *other* platform still owes, closed by a one-line expected
+result:
+
+```markdown
+**Test level: L2** — touches `crates/trd-core/src/render/` (render path).
+
+## ✅ Verification
+
+| Gate | 🪟 Windows | 🐧 Linux/Nix |
+|------|:---:|:---:|
+| 🎨 `cargo fmt --check`         | ✅ | 🤝 |
+| 📎 clippy native `-D warnings` | ✅ | 🤝 |
+| 🕸️ clippy wasm32 (lib)         | ✅ | 🤝 |
+| 🧪 `cargo test --lib` (173)    | ✅ | 🤝 |
+| 🔀 `decoder_parity` (2)        | ✅ | 🤝 |
+| 🖼️ `golden_render` (6/6, GPU)  | ✅ | 🤝 |
+| 🖥️ window e2e (§4.2/4.3)       | n/a (L2) | n/a (L2) |
+| 📼 large-file seek (§4.7)      | n/a (L2) | n/a (L2) |
+
+## 🤝 Handoff — 🐧 Linux/Nix
+- [ ] `nix flake check -L`
+- [ ] nixGL-wrapped `cargo test -p trd-core --test golden_render -- --ignored`
+
+> Expected: all green — behaviour-preserving change.
+```
+
+**Re-post the completed matrix after a handoff.** When you finish the
+verification a PR handed off to your platform, don't report it as bare prose —
+**re-post the full verification matrix as a new comment** on the PR (and mirror
+it on the issue) with that platform's column flipped from 🤝 to ✅ (with counts),
+and tick the corresponding items in the 🤝 handoff checklist. The completed
+matrix must be visible as a comment, not only described.
 
 ### Documentation
 
-- **`README.md` is a lean entry point; the detail lives in `docs/`.** Keep them in
-  sync: whenever a change updates `README.md`, update the affected `docs/` page(s)
-  in the **same** PR — and vice-versa. In particular, `docs/architecture.md`
-  (crates/render core), `docs/rendering.md` (CLI flags, wrappers ⇄ `cargo run`,
-  demos), `docs/pbr.md` (PBR params), `docs/video-editing.md` (editor timeline,
-  playback, placement, and catalog), and `docs/protocol/0.0.6.md` (wire format)
-  mirror the README's summaries, so a behavior/flag/layout change must be
-  reflected in both. Don't let the README and `docs/` drift.
+**`README.md` is a lean entry point; the detail lives in `docs/`.** Keep them in
+sync: whenever a change updates `README.md`, update the affected `docs/` page(s)
+in the **same** PR — and vice-versa. Don't let the README and `docs/` drift.
+
+These pages mirror the README's summaries, so a behaviour/flag/layout change must
+be reflected in both:
+
+| Page | Covers |
+|---|---|
+| [`docs/architecture.md`](docs/architecture.md) | crates / render core |
+| [`docs/rendering.md`](docs/rendering.md) | CLI flags, wrappers ⇄ `cargo run`, demos |
+| [`docs/pbr.md`](docs/pbr.md) | PBR params |
+| [`docs/video-editing.md`](docs/video-editing.md) | editor timeline, playback, placement, catalog |
+| [`docs/protocol/0.0.6.md`](docs/protocol/0.0.6.md) | wire format |
 
 ### Worktrees
 
-Keep the git root checkout on `main` at all times, and **update local `main`
+**Keep the git root checkout on `main` at all times**, and **update local `main`
 before creating a new worktree** so the branch starts from an up-to-date base.
+
 Do all branch/PR work in a git worktree under the root's `.worktree/` folder
 (gitignored):
+
 ```sh
 git switch main && git pull            # refresh local main first
 git worktree add .worktree/<topic> -b feat/<topic>
 cd .worktree/<topic>
 ```
-Never check out a feature branch in the root itself. Remove the worktree after the
-PR merges (`git worktree remove .worktree/<topic>`).
 
-There is only **one** tracked `AGENTS.md` (repo root); a worktree's `AGENTS.md` is
-just that file checked out on its branch, not a separate copy to reconcile — edit
-it here and it lands with the branch.
+- **Never check out a feature branch in the root itself.**
+- Remove the worktree after the PR merges
+  (`git worktree remove .worktree/<topic>`).
+- There is only **one** tracked `AGENTS.md` (repo root); a worktree's `AGENTS.md`
+  is just that file checked out on its branch, not a separate copy to reconcile —
+  edit it here and it lands with the branch.
