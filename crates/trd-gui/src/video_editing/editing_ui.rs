@@ -32,7 +32,7 @@ impl eframe::App for VideoEditingApp {
             self.displayed_frame_ready = false;
             self.last_rendered_frame_index = None;
             self.displayed_diagnostics = None;
-            self.pending_seek_target = None;
+            self.pending_seek = None;
             self.last_pick_result = None;
         }
         if self.shared.latest_video_frame.borrow().is_some() {
@@ -473,7 +473,18 @@ impl VideoEditingApp {
             return;
         }
         self.current_frame_index = frame_index;
-        self.pending_seek_target = Some(frame_index);
+        // Remember the *time* the shell will be given, not just the index it
+        // came from: that time is what the delivered frame gets compared
+        // against once the container's timestamps drift off the grid (#317).
+        self.pending_seek = Some(super::PendingSeek {
+            frame_index,
+            media_time_seconds: super::media_time_at_frame(
+                frame_index,
+                self.video.fps_num,
+                self.video.fps_den,
+                self.video.frame_count,
+            ),
+        });
         self.shared.seek_frame.set(frame_index as i32);
     }
 

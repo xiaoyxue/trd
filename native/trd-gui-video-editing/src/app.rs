@@ -196,6 +196,10 @@ impl NativeVideoEditingApp {
             height,
             frame.index,
             media_time_seconds,
+            // ffmpeg is asked for a frame by index and the decoded frame is
+            // labelled with that index, so this clock has no timestamps of its
+            // own to report; the nominal interval is the honest answer.
+            0.0,
         ) {
             Ok(()) => {
                 self.shared.clear_error();
