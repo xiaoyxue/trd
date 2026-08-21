@@ -281,6 +281,35 @@ had. It runs in `nix flake check`.
 Run the smallest command that covers the change during iteration, but a task is
 not complete until these tiers pass; **record the results on the PR.**
 
+#### Where a test lives — by kind, not by size (#305)
+
+Two kinds of test, and the compiler already tells them apart:
+
+- **Unit test → inline**, in the module it tests: `#[cfg(test)] mod tests { … }`
+  at the bottom of that `.rs` file. A unit test reaches into the module's own
+  internals (`use super::*`, private fields and functions), so it belongs beside
+  the code it pins. **Length is irrelevant** — a 1,200-line unit-test module
+  still lives in its module. Do **not** split it out to a sibling `tests.rs`.
+- **Integration test → its own file** under `crates/<crate>/tests/`
+  (`golden_render.rs`, `decoder_parity.rs`, `gui_render.rs`,
+  `wasm_bindgen_containment.rs`). These compile as separate crates and may only
+  touch the public API, which is what makes them worth isolating.
+
+There is deliberately **no third form**: a `src/**/tests.rs` is compiled into the
+crate exactly like an inline `mod tests`, so it is a unit test wearing an
+integration test's clothes. A size threshold was tried and dropped (#299 §1,
+#305) — it made the location of a test say nothing about what the test *is*, and
+forced file moves whenever a module crossed a line count.
+
+Test-only **support** modules are a different thing and stay as they are:
+`render/gpu_tests.rs`, `render/triangle_renderer.rs` and
+`protocol/scene_encode.rs` are not `mod tests` blocks but helper modules that
+happen to be test-gated.
+
+When a module does get too long to read, the fix is to split the *module* — by
+responsibility, tests following their code — not to hide its tests in another
+file.
+
 1. **Golden test — MSAA enabled *and* disabled (must).**
    `cargo test -p trd-core --test golden_render -- --ignored` runs both the 4×
    MSAA (`stageN_*`) and single-sample (`stageN_noaa_*`) goldens plus the PBR
