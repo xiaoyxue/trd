@@ -271,6 +271,12 @@ cargo run -p trd-gui-video-editing -- \
 `--video-url https://example.com/shot_0001.mp4` launches the same native editor
 from an HTTP(S) source.
 
+`--preview-width` (default 960, max 1920) sets the width ffmpeg scales the
+native preview to, trading fidelity against decode cost. It is native-only —
+the browser always decodes at full source resolution — so raise it toward the
+source width when comparing the two surfaces. See
+[`docs/video-editing.md`](docs/video-editing.md).
+
 The native and browser surfaces share the same panels, timeline, quad selection,
 catalog, object transforms, GPU picking, PBR/IBL controls, and three-layer
 composition. Only the media adapter differs: [mediabunny] demux/decode behind the
