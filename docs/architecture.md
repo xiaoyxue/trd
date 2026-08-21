@@ -203,5 +203,9 @@ Each is a *thin shell* that only supplies a render target and calls the core:
 | `examples/` | demo streams + `render.sh` / `render.ps1` wrappers + producer scripts |
 | `scripts/` | pyarrow producers (`obj`/`texture`/`jsonl`/perception `_to_arrow.py`), `encode.py`, `extract_frames.py`, `dev-env.ps1` |
 
-Contributor/agent conventions (build system, GPU-adapter selection, testing
-policy, PR workflow) live in [`AGENTS.md`](../AGENTS.md).
+Tests are placed by **kind, not size**: a unit test sits inline in the module it
+pins, as `#[cfg(test)] mod tests`, however long it grows; an integration test
+gets its own file in `crates/*/tests/`. There is no `src/**/tests.rs` middle
+form — it compiles into the crate like an inline module, so it would only blur
+the distinction. Contributor/agent conventions (build system, GPU-adapter
+selection, testing policy, PR workflow) live in [`AGENTS.md`](../AGENTS.md).

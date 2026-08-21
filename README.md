@@ -311,7 +311,10 @@ cargo test  --workspace -- --ignored    # GPU-gated render tests (need a real GP
 The **golden / snapshot render test** (`crates/trd-core/tests/golden_render.rs`) is
 the pixel-level regression net: it runs committed Arrow fixtures through the real
 `run_stream` pipeline and pixel-diffs each frame against committed golden PNGs, at
-**both** 4× MSAA and MSAA-off, plus PBR tone-map variants (GPU-gated). The full
+**both** 4× MSAA and MSAA-off, plus PBR tone-map variants (GPU-gated). Tests are
+placed by kind: **unit tests inline** in the module they pin
+(`#[cfg(test)] mod tests`, however long), **integration tests** in
+`crates/*/tests/`. The full
 testing policy (required tiers, per-crate e2e, multi-platform verification +
 handoff, golden regeneration) lives in
 **[`AGENTS.md`](AGENTS.md#testing--required-before-a-task-is-done)**.
