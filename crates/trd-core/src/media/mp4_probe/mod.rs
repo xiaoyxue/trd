@@ -79,7 +79,10 @@ fn probe_trak(trak: &[u8]) -> Option<VideoTiming> {
     let (fps_num, fps_den) = if sample_count > 0 && total_delta > 0 {
         reduce(u64::from(timescale) * u64::from(sample_count), total_delta)
     } else if track_duration > 0 {
-        reduce(u64::from(timescale) * u64::from(frame_count), track_duration)
+        reduce(
+            u64::from(timescale) * u64::from(frame_count),
+            track_duration,
+        )
     } else {
         (25, 1)
     };
