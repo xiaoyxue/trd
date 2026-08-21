@@ -191,7 +191,7 @@ Each is a *thin shell* that only supplies a render target and calls the core:
 | `crates/trd-cli` | headless CLI: Arrow stream in → Arrow image out |
 | `crates/trd-gui` | reusable egui UI, scene/interaction state, and native render backends (a plain `rlib`: every browser entry point moved to `trd-wasm` in #180) |
 | `crates/trd-placement` | GPU-free K + image-quad reconstruction and placement matrices |
-| `crates/trd-wasm` | the **only** `wasm-bindgen` crate: viewer bindings (`canvas_renderer`/`offscreen_renderer`) + the GUI entry points (`gui.rs`, `gui_web_app.rs`); the `trd-wasm` npm library |
+| `crates/trd-wasm` | the **only** `wasm-bindgen` crate and the only `cdylib` (guarded by `tests/wasm_bindgen_containment.rs`): viewer bindings (`canvas_renderer`/`offscreen_renderer`) + the GUI entry points (`gui.rs`, `gui_web_app.rs`); the `trd-wasm` npm library |
 | `native/trd-app` | native stream-playback window (winit + live wgpu surface) |
 | `native/trd-gui-app` | native eframe shell around the reusable `trd-gui` library |
 | `native/trd-gui-video-editing` | native ffmpeg-backed video timeline/player shell |
