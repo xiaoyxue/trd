@@ -138,7 +138,7 @@ impl InputSession {
     }
 
     /// The stream's declared playback rate (fps) once a schema has been decoded,
-    /// or `None` if none has arrived yet. Falls back to [`DEFAULT_FRAME_RATE`]
+    /// or `None` if none has arrived yet. Falls back to [`DEFAULT_FRAME_RATE`](super::DEFAULT_FRAME_RATE)
     /// when the metadata key is absent.
     pub fn frame_rate(&self) -> Option<f64> {
         self.decoder

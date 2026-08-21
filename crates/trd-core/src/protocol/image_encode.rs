@@ -243,7 +243,7 @@ pub(crate) fn tightly_pack_rgba(
 }
 
 /// Decodes a rendered **image** Arrow IPC stream (the bytes written by
-/// [`OutputSession`] / [`crate::run_stream`]) back into one tightly-packed
+/// [`OutputSession`](super::OutputSession) / [`crate::run_stream`]) back into one tightly-packed
 /// row-major RGBA frame per row (`width * height * 4` bytes each). The inverse of
 /// [`output_batch`]: it reads the four `r`/`g`/`b`/`a`
 /// `FixedSizeList<UInt8>[width*height]` channel columns and interleaves them.

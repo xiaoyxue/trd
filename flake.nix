@@ -369,6 +369,21 @@
             }
           );
 
+          # Doc links are documentation, and they rot silently: renaming an item
+          # turns every `[`Item`]` naming it into plain text, with no warning at
+          # any normal gate. Nineteen had accumulated across four crates before
+          # this check existed — `RenderMode`, `FrameParams`, `OutputSession`,
+          # `crate::app` and the rest — so the fix is only worth as much as the
+          # gate that keeps it fixed.
+          rustdoc = craneLib.cargoDoc (
+            commonArgs
+            // {
+              inherit cargoArtifacts;
+              cargoDocExtraArgs = "--workspace --no-deps";
+              RUSTDOCFLAGS = "-D rustdoc::broken_intra_doc_links";
+            }
+          );
+
           # TS type-check using the project's own typescript (installed offline
           # via bun2nix); the nix-built wasm package supplies the trd-wasm types.
           tsc = mkWebDerivation {

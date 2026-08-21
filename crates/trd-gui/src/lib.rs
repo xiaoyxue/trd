@@ -24,7 +24,7 @@
 //! **platform-agnostic** (the scene + controller are unit-tested without egui or
 //! a GPU; `ui` is the shared egui layout). There is **one** renderer,
 //! [`GuiRenderer`](renderer::GuiRenderer): native `trd-gui-app` and the browser
-//! `web_app` (started via [`start`]) drive the same type, the former blocking on
+//! `web_app` (started via `trd_wasm`'s `start`) drive the same type, the former blocking on
 //! its async API. Only the delivery surfaces are target-split (#180).
 
 pub mod assets;

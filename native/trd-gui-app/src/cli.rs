@@ -119,8 +119,8 @@ impl Cli {
         }
     }
 
-    /// Loads and decodes the `--texture` image (if any) into an [`ImageTexture`]
-    /// via [`crate::assets::decode_texture`]. Returns `None` when no texture was
+    /// Loads and decodes the `--texture` image (if any) into an [`ImageTexture`](trd_core::ImageTexture)
+    /// via [`trd_gui::assets::decode_texture`]. Returns `None` when no texture was
     /// requested.
     pub fn load_texture(&self) -> Result<Option<trd_core::ImageTexture>, GuiError> {
         let Some(path) = &self.texture else {
@@ -134,7 +134,7 @@ impl Cli {
     }
 
     /// Loads and decodes the `--env` HDR probe (if any) into an [`EnvMapData`] via
-    /// [`crate::assets::decode_env_hdr`]. Returns `None` when no env was requested.
+    /// [`trd_gui::assets::decode_env_hdr`]. Returns `None` when no env was requested.
     /// The probe is bound once on the renderer and reflected by PBR metals.
     pub fn load_env(&self) -> Result<Option<EnvMapData>, GuiError> {
         let Some(path) = &self.env else {

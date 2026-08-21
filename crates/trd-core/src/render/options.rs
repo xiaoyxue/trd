@@ -51,7 +51,7 @@ impl Msaa {
     }
 }
 
-/// Appearance options for [`run_stream`]: the mesh draw [`RenderMode`] plus the
+/// Appearance options for [`run_stream`](crate::run_stream): the mesh draw [`RenderMode`] plus the
 /// optional AABB / coordinate-axes gizmo overlays. Bundled into one value so the
 /// entry point threads a single struct instead of many positional flags (and
 /// stays within clippy's argument budget). [`Default`] is filled, no overlays,

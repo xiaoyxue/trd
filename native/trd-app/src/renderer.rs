@@ -134,7 +134,7 @@ impl WindowRenderer {
         Ok(())
     }
 
-    /// Binds `texture` as the albedo sampled by [`RenderMode::Textured`] meshes
+    /// Binds `texture` as the albedo sampled by [`RenderMode::Textured`](trd_core::RenderMode::Textured) meshes
     /// (`0.0.4`). No-op until the renderer is built; re-uploaded lazily on the
     /// next `render`.
     pub(crate) fn set_texture(&mut self, texture: &ImageTexture) {
@@ -143,7 +143,7 @@ impl WindowRenderer {
         }
     }
 
-    /// Sets the Disney PBR material applied to [`RenderMode::Shaded`] meshes. No-op
+    /// Sets the Disney PBR material applied to [`RenderMode::Shaded`](trd_core::RenderMode::Shaded) meshes. No-op
     /// until the renderer is built.
     pub(crate) fn set_disney_material(&mut self, material: DisneyMaterial) {
         if let Some(renderer) = self.renderer.as_mut() {
