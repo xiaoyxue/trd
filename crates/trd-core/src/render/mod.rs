@@ -56,10 +56,14 @@ mod render_target;
 mod renderer;
 mod scene;
 mod tonemap;
-#[cfg(test)]
+// Both are the GPU test harness, which drives wgpu under `pollster::block_on`
+// and so is native-only. Gating them here — rather than repeating
+// `#[cfg(not(target_arch = "wasm32"))]` on every item inside — keeps the
+// platform rule in one place (#299).
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod triangle_renderer;
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod gpu_tests;
 
 // Public API surface (re-exported unchanged by `crate::lib`).
@@ -86,8 +90,8 @@ pub use scene::{Background, EnvironmentBackground, Scene, SceneError};
 pub use tonemap::{ToneMapping, Tonemap};
 /// Reference + test scaffolding only (#202): the minimal canonical wgpu
 /// renderer, kept to be *read* and exercised by `render::gpu_tests`. It has no
-/// production consumer, so it is compiled for tests only.
-#[cfg(test)]
+/// production consumer, so it is compiled for native tests only.
+#[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) use triangle_renderer::TriangleRenderer;
 
 // Crate-internal items shared across render submodules and sibling modules.

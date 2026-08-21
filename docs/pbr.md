@@ -3,7 +3,7 @@
 `--pbr` shades meshes with the **Disney principled BRDF** (Burley 2012) instead of
 flat per-vertex color or a plain textured lookup. The BRDF lives in
 [`crates/trd-core/src/shader/pbr.wgsl`](../crates/trd-core/src/shader/pbr.wgsl) (reference:
-[`ref/DisneyPBR/shader.frag`](../ref/DisneyPBR/shader.frag)); it lights the bound
+[`ref/disney_pbr/shader.frag`](../ref/disney_pbr/shader.frag)); it lights the bound
 albedo with a fixed **virtual light rig** (three directional lights — key, fill,
 rim, in world space, so a spinning object is lit from changing angles) plus an
 optional **HDR environment probe**, derives smooth per-vertex shading normals, and
@@ -112,7 +112,7 @@ color target:
 - **`reinhard`** (default) — per-channel `x / (1 + x)`; trd's historical curve,
   byte-identical to the pre-PBR pipeline.
 - **`aces`** — the filmic ACES fit (Narkowicz RRT+ODT, reference
-  [`ref/ToneMapping/tonemap.frag`](../ref/ToneMapping/tonemap.frag)); its S-curve
+  [`ref/tone_mapping/tonemap.frag`](../ref/tone_mapping/tonemap.frag)); its S-curve
   gives a softer highlight roll-off and retains hue/saturation on bright, strongly
   lit albedo, where per-channel Reinhard desaturates toward grey.
 

@@ -124,6 +124,19 @@ Platform-agnostic wgpu logic, shared verbatim by every target:
   while `OutputStream<W: Write>` owns the `Write`. `tightly_pack_rgba`
   (`protocol/image_encode.rs`) strips GPU row padding. Shared by the CLI and the
   browser offscreen renderer.
+- **`media/`** — what trd knows about a *video*, as opposed to the render wire
+  (#296). One session needs the same handful of facts — size, exact frame rate,
+  frame count, duration — and there are **two** sources for them: the `0.2.0`
+  authoring document (`media/video_document/`, read from Arrow IPC or Parquet)
+  and the container itself (`media/mp4_probe/`, walked for its `moov` box). They
+  are alternative answers to one question rather than unrelated parsers, so they
+  share one `VideoTiming` (`media/video.rs`) and the columnar helpers in
+  `media/arrow_columns.rs`. The document is **optional** (#264): without one the
+  editor is a player whose timeline comes from the container. `trd-core` does no
+  codec work — demuxing and decoding belong to the delivery surfaces (mediabunny
+  in the browser, ffmpeg natively). Deliberately **not** under `protocol/`: the
+  editor document is independent of the render `PROTOCOL_VERSION` and must stay
+  that way.
 - **`math/`** — the typed homogeneous linear-algebra layer over glam
   (`Vector`/`Point`/`Normal`/`Matrix`/`Rotation`/`Transform`/`Aabb`): zero-cost
   `#[repr(transparent)]` newtypes with **private** fields enforcing affine rules
@@ -178,7 +191,7 @@ Each is a *thin shell* that only supplies a render target and calls the core:
 | `crates/trd-cli` | headless CLI: Arrow stream in → Arrow image out |
 | `crates/trd-gui` | reusable egui UI, scene/interaction state, and native render backends (a plain `rlib`: every browser entry point moved to `trd-wasm` in #180) |
 | `crates/trd-placement` | GPU-free K + image-quad reconstruction and placement matrices |
-| `crates/trd-wasm` | `wasm-bindgen` browser bindings (`canvas_renderer`/`offscreen_renderer`); the `trd-wasm` npm library |
+| `crates/trd-wasm` | the **only** `wasm-bindgen` crate and the only `cdylib` (guarded by `tests/wasm_bindgen_containment.rs`): viewer bindings (`canvas_renderer`/`offscreen_renderer`) + the GUI entry points (`gui.rs`, `gui_web_app.rs`); the `trd-wasm` npm library |
 | `native/trd-app` | native stream-playback window (winit + live wgpu surface) |
 | `native/trd-gui-app` | native eframe shell around the reusable `trd-gui` library |
 | `native/trd-gui-video-editing` | native ffmpeg-backed video timeline/player shell |
