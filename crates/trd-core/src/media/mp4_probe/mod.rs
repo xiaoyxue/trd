@@ -71,15 +71,17 @@ fn probe_trak(trak: &[u8]) -> Option<VideoTiming> {
     // Frame rate as an exact rational rather than a rounded float: `stts` deltas
     // are in timescale units, so `timescale / mean_delta` recovers rates like
     // 30000/1001 exactly. Falls back to the track duration when `stts` is empty.
+    //
+    // Both products are formed in `u64`: `timescale * sample_count` leaves `u32`
+    // after only ~75 minutes of 60 fps at a 16 kHz timescale, and ~13 at 90 kHz,
+    // and a saturating multiply there reports a plausible but wrong rate rather
+    // than failing (#314).
     let (fps_num, fps_den) = if sample_count > 0 && total_delta > 0 {
-        reduce(
-            timescale.saturating_mul(sample_count),
-            u32::try_from(total_delta).unwrap_or(u32::MAX),
-        )
+        reduce(u64::from(timescale) * u64::from(sample_count), total_delta)
     } else if track_duration > 0 {
         reduce(
-            timescale.saturating_mul(frame_count),
-            u32::try_from(track_duration).unwrap_or(u32::MAX),
+            u64::from(timescale) * u64::from(frame_count),
+            track_duration,
         )
     } else {
         (25, 1)
@@ -207,7 +209,12 @@ fn tkhd_size(tkhd: &[u8]) -> Option<(u32, u32)> {
 
 /// Reduces a rational by its greatest common divisor, so a rate reads as
 /// `30000/1001` rather than an unreduced multiple of it.
-fn reduce(num: u32, den: u32) -> (u32, u32) {
+///
+/// Takes `u64` because the numerator is `timescale * sample_count`, which is
+/// routinely larger than `u32` holds — see the call site. Should the reduced
+/// pair still not fit, both sides are scaled by the same divisor rather than
+/// clamped: an approximate rate stays usable, a truncated one silently is not.
+fn reduce(num: u64, den: u64) -> (u32, u32) {
     let mut a = num;
     let mut b = den;
     while b != 0 {
@@ -216,7 +223,9 @@ fn reduce(num: u32, den: u32) -> (u32, u32) {
         a = t;
     }
     let g = a.max(1);
-    (num / g, den / g)
+    let (num, den) = (num / g, den / g);
+    let scale = num.max(den).div_ceil(u64::from(u32::MAX)).max(1);
+    ((num / scale).max(1) as u32, (den / scale).max(1) as u32)
 }
 
 #[cfg(test)]
@@ -429,5 +438,82 @@ mod tests {
         // 100 samples over 76 800 units at 12 800/s = 6 s ⇒ 100/6 fps, reduced.
         assert_eq!((info.fps_num, info.fps_den), (50, 3));
         assert_eq!(info.frame_count, 100);
+    }
+
+    /// `timescale * sample_count` leaves `u32` long before the *video* is
+    /// unusual: at a 16 kHz timescale it overflows after ~75 minutes of 60 fps,
+    /// and at the equally common 90 kHz after ~13 (#314).
+    ///
+    /// A saturating multiply there does not fail loudly — it reports a plausible
+    /// but wrong rate, which mis-scales the whole timeline. 60000/1000 over
+    /// 100 000 frames is 60 fps exactly, and `60000 * 100000 = 6e9` is past
+    /// `u32::MAX`; saturating gave 42.95 fps.
+    #[test]
+    fn a_long_track_keeps_its_exact_rate_instead_of_saturating() {
+        let info = probe_moov(&moov(60_000, 1_000, 100_000, b"vide")).expect("probe");
+
+        assert!(
+            u64::from(60_000u32) * u64::from(100_000u32) > u64::from(u32::MAX),
+            "the fixture must actually overflow u32, or it proves nothing"
+        );
+        assert_eq!((info.fps_num, info.fps_den), (60, 1));
+        assert_eq!(info.frame_count, 100_000);
+    }
+
+    /// The same overflow sits in the `track_duration` fallback arm, which an
+    /// empty `stts` selects — so it needs its own fixture rather than trusting
+    /// that fixing one arm fixed both.
+    #[test]
+    fn the_duration_fallback_keeps_its_exact_rate_too() {
+        let mut stts = vec![0u8; 4];
+        stts.extend_from_slice(&0u32.to_be_bytes()); // no entries at all
+        let mut stbl = stsz(100_000);
+        stbl.extend(atom(b"stts", &stts));
+        let minf = atom(b"minf", &atom(b"stbl", &stbl));
+        let mut mdia = mdhd_v0(60_000, 100_000_000); // 100 000 frames x 1 000
+        mdia.extend(hdlr(b"vide"));
+        mdia.extend(minf);
+        let mut trak = tkhd_v0(3840, 2160);
+        trak.extend(atom(b"mdia", &mdia));
+
+        let info = probe_moov(&atom(b"moov", &atom(b"trak", &trak))).expect("probe");
+
+        assert_eq!((info.fps_num, info.fps_den), (60, 1));
+        assert_eq!(info.frame_count, 100_000);
+    }
+
+    /// What the wrong rate actually broke: the browser derives the timeline
+    /// length from the rational, and validates the container's duration against
+    /// it. Any error in the rate scales straight into seconds, so this pins the
+    /// derived duration rather than only the rational it came from.
+    #[test]
+    fn a_long_tracks_derived_duration_matches_its_real_one() {
+        let info = probe_moov(&moov(60_000, 1_000, 100_000, b"vide")).expect("probe");
+
+        let derived =
+            f64::from(info.frame_count) * f64::from(info.fps_den) / f64::from(info.fps_num);
+        let real = info.duration_us as f64 / 1e6;
+
+        // 100 000 frames at 60 fps is 1 666.667 s; saturating reported 2 328.3 s.
+        assert!(
+            (derived - real).abs() < 0.001,
+            "derived {derived:.3}s vs real {real:.3}s"
+        );
+    }
+
+    /// Reducing in `u64` must not reintroduce the truncation one level up: a
+    /// rational that cannot be narrowed is scaled, keeping the *rate* right,
+    /// because an approximate rate is recoverable and a truncated one is not.
+    #[test]
+    fn an_unreducible_oversized_rational_is_scaled_not_clamped() {
+        let num = u64::from(u32::MAX) * 4 + 2; // even, so it survives halving
+        let (n, d) = reduce(num, num / 2);
+
+        assert!(n > 0 && d > 0, "neither side may collapse to zero");
+        assert_eq!(
+            f64::from(n) / f64::from(d),
+            2.0,
+            "the ratio must survive narrowing"
+        );
     }
 }
