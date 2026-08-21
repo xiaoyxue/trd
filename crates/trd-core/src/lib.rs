@@ -53,10 +53,11 @@ pub use protocol::{
 // backend (#180). The public paths (`trd_core::DisneyMaterial`, ...) are unchanged.
 pub use material::{AlphaMode, Auxiliary, DisneyMaterial, Material, MaterialTextures};
 pub use render::{
-    create_instance, AdapterFacts, CameraFormError, EnvMapData, FrameParams, GpuContext,
-    GpuInitError, GpuRequest, ImageBasedLighting, Msaa, PbrConfig, PbrDebugView, RenderOptions,
-    RenderTarget, RenderTargetType, SceneLayer, SurfaceError, SurfaceRepair, SurfaceTarget,
-    TargetError, TextureTarget, ToneMapping, Tonemap, Vertex, Viewport, TEXTURE_TARGET_FORMAT,
+    create_instance, AdapterFacts, CameraFormError, EnvMapData, ExternalFrame, FrameParams,
+    GpuContext, GpuInitError, GpuRequest, ImageBasedLighting, Msaa, PbrConfig, PbrDebugView,
+    RenderOptions, RenderTarget, RenderTargetType, SceneLayer, SurfaceError, SurfaceRepair,
+    SurfaceTarget, TargetError, TextureTarget, ToneMapping, Tonemap, Vertex, Viewport,
+    TEXTURE_TARGET_FORMAT,
 };
 // The frame description (scene + primitives) is this rasterizer's own taxonomy
 // — `Primitive` *is* the batch key (#204) — so it lives in `render/` beside the

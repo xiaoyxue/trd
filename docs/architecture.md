@@ -58,6 +58,21 @@ Platform-agnostic wgpu logic, shared verbatim by every target:
   configurable pixel-width quad and the fragment stage feathers its rectangle
   distance, so axes/AABBs/grids remain anti-aliased without MSAA. Axis cone tips
   reuse the unlit triangle path.
+- **`render/external_frame.rs` — the one seam a delivery surface reaches
+  through** (#302). The background frame plane normally takes bytes
+  (`update_frame_texture_rgba`), and bytes are bytes on every platform. A browser
+  frame is the exception: `Queue::copy_external_image_to_texture` is `#[cfg(web)]`
+  in wgpu, so the *copy* cannot be compiled into a crate that also builds
+  natively. Only the copy moves. `trd-core` owns the trait, allocates the
+  destination texture and keeps its format/usage invariants
+  (`Renderer::update_frame_texture_external` → `FramePlane::copy_external`); the
+  delivery surface that decoded the frame implements two methods —
+  `ExternalFrame::{size, copy_into}`. `crates/trd-wasm`'s `BrowserVideoFrame` is
+  the only implementor, over a WebCodecs `VideoFrame`, and closes it on `Drop`.
+  So **no shared crate names a browser type**: `trd-core` and `trd-gui` have no
+  `web-sys` dependency, `FrameSource::External` is a plain enum variant that
+  native simply cannot construct, and the rule is asserted by
+  `crates/trd-wasm/tests/wasm_bindgen_containment.rs` rather than remembered.
 - **`DrawableObject` + `Primitive` + `Scene` (`render/`)** — the base interface
   for every primitive (#41). A `DrawableObject` is a small `Copy` struct pairing
   a `Primitive` — *what* to draw: `Mesh { mesh_id, mode }`, `AabbBox { mesh_id }`,
@@ -168,7 +183,11 @@ Each is a *thin shell* that only supplies a render target and calls the core:
   `startVideoEditing` / `VideoEditingHandle` (`src/gui.rs`, `src/gui_web_app.rs`).
   Every other crate — `trd-gui` included — is a plain `rlib` free of
   `wasm-bindgen`, so one wasm build produces one JS package (`trd_wasm`) that all
-  three `web/` packages stage into their own `pkg/` (#180).
+  three `web/` packages stage into their own `pkg/` (#180). It is also the only
+  crate that may name **`web-sys`** (#302): the browser frame copy reaches
+  `trd-core` through `ExternalFrame`, so the shared crates carry no browser type
+  and no `cfg` hiding one. Both rules are scanned by
+  `tests/wasm_bindgen_containment.rs`.
   `CanvasRenderer.create(canvas)` holds a
   persistent `Renderer` + `InputSession` and renders the **same** `Scene` as
   the CLI. There is **one** config-driven front-end: `render.sh --web` writes the
@@ -191,7 +210,7 @@ Each is a *thin shell* that only supplies a render target and calls the core:
 | `crates/trd-cli` | headless CLI: Arrow stream in → Arrow image out |
 | `crates/trd-gui` | reusable egui UI, scene/interaction state, and native render backends (a plain `rlib`: every browser entry point moved to `trd-wasm` in #180) |
 | `crates/trd-placement` | GPU-free K + image-quad reconstruction and placement matrices |
-| `crates/trd-wasm` | the **only** `wasm-bindgen` crate and the only `cdylib` (guarded by `tests/wasm_bindgen_containment.rs`): viewer bindings (`canvas_renderer`/`offscreen_renderer`) + the GUI entry points (`gui.rs`, `gui_web_app.rs`); the `trd-wasm` npm library |
+| `crates/trd-wasm` | the **only** `wasm-bindgen` crate, the only `cdylib`, and the only crate naming `web-sys` (all three guarded by `tests/wasm_bindgen_containment.rs`): viewer bindings (`canvas_renderer`/`offscreen_renderer`) + the GUI entry points (`gui.rs`, `gui_web_app.rs`) + the browser `ExternalFrame` impl (`browser_frame.rs`); the `trd-wasm` npm library |
 | `native/trd-app` | native stream-playback window (winit + live wgpu surface) |
 | `native/trd-gui-app` | native eframe shell around the reusable `trd-gui` library |
 | `native/trd-gui-video-editing` | native ffmpeg-backed video timeline/player shell |

@@ -4119,7 +4119,6 @@ dependencies = [
  "proptest",
  "thiserror 2.0.18",
  "tobj",
- "web-sys",
  "wgpu",
 ]
 
@@ -4139,7 +4138,6 @@ dependencies = [
  "trd-core",
  "trd-placement",
  "wasm-bindgen-futures",
- "web-sys",
  "web-time",
  "wgpu",
 ]

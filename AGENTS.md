@@ -144,6 +144,15 @@ Guidance for agents working in this repository.
   `wasm-bindgen`, so there is one wasm build and one generated JS package
   (`trd_wasm`) that all three web packages stage into their own `pkg/` (#180).
   Do **not** add a `cdylib` crate-type or a `#[wasm_bindgen]` item anywhere else.
+  It is also the only crate that may name **`web-sys`** (#302). A browser type in
+  a shared crate has to be hidden behind a `cfg` a native build never compiles,
+  which is how eleven of them accumulated unnoticed; the browser frame copy now
+  reaches the render core through `trd_core::ExternalFrame` (`trd-core` owns the
+  trait and the destination texture, `trd-wasm`'s `BrowserVideoFrame` owns the
+  `copy_external_image_to_texture` call wgpu marks `#[cfg(web)]`). All three
+  rules are scanned by `crates/trd-wasm/tests/wasm_bindgen_containment.rs`, so
+  reach for `#[cfg(target_arch = "wasm32")]` only when **both arms are real** —
+  as in the two `platform.rs` shims — never to hide a browser-only type.
 - **`web/` is a Bun workspace** with sibling `viewer/`, `gui-viewer/`, and
   `gui-video-editing/` packages. Each package's lint/format gate is Biome; run all
   packages' checks from the workspace root

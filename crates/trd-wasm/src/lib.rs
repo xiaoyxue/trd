@@ -13,6 +13,9 @@
 //! * [`gui`] holds the `trd-gui` entry points — the interactive viewer (`start`)
 //!   and the video editor (`startVideoEditing`) — plus the browser shell they run
 //!   in (`gui_web_app`).
+//! * [`browser_frame`] implements [`trd_core::ExternalFrame`] over a WebCodecs
+//!   `VideoFrame`, so the GPU→GPU frame copy lives on the delivery surface and
+//!   the shared crates never name a browser type (#302).
 //!
 //! **Every** `#[wasm_bindgen]` export in the repo lives here (#180): one browser
 //! delivery surface, one generated JS package. `trd-gui` is a plain rlib.
@@ -22,11 +25,13 @@ use std::fmt::Display;
 use trd_core::{DisneyMaterial, EnvMapData, ImageBasedLighting, Lighting, ToneMapping};
 use wasm_bindgen::prelude::*;
 
+mod browser_frame;
 mod canvas_renderer;
 pub mod gui;
 mod gui_web_app;
 mod offscreen_renderer;
 
+pub use browser_frame::BrowserVideoFrame;
 pub use canvas_renderer::CanvasRenderer;
 pub use offscreen_renderer::OffscreenRenderer;
 

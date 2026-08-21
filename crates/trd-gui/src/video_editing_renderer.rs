@@ -92,12 +92,17 @@ pub struct VideoRendererDiagnostics {
 /// naming the frame lets the copy stay on the GPU — the difference is a whole
 /// frame of traffic at source resolution, ~99 MB for 4K (#229). One `draw`
 /// serves both, so the scene assembly cannot drift between them.
+///
+/// Neither variant is `cfg`'d (#302). `External` is unconstructible natively —
+/// nothing there implements [`ExternalFrame`](trd_core::ExternalFrame) — which
+/// is the same fact expressed by the type system instead of by the
+/// preprocessor, and unlike a `cfg` it is compiled, linted and understood by a
+/// native build.
 pub enum FrameSource<'a> {
     /// Tightly-packed row-major RGBA8, `width * height * 4` bytes.
     Rgba(&'a [u8]),
-    /// A decoded browser frame, copied GPU→GPU.
-    #[cfg(target_arch = "wasm32")]
-    VideoFrame(&'a web_sys::VideoFrame),
+    /// A frame the delivery surface kept on the GPU, copied GPU→GPU.
+    External(&'a dyn trd_core::ExternalFrame),
 }
 
 impl FrameSource<'_> {
@@ -106,8 +111,7 @@ impl FrameSource<'_> {
     fn upload_bytes(&self) -> usize {
         match self {
             Self::Rgba(rgba) => rgba.len(),
-            #[cfg(target_arch = "wasm32")]
-            Self::VideoFrame(_) => 0,
+            Self::External(_) => 0,
         }
     }
 }
@@ -379,9 +383,9 @@ impl VideoPlacementRenderer {
         state: &crate::scene::SceneState,
     ) -> Result<(), String> {
         // Counted at the transfer site, not inferred from the call: the frame
-        // genuinely crosses CPU→GPU here — or, for a `<video>` element, does not.
-        // `render` adds the readback pair afterwards, so a `draw`-only frame is
-        // left with exactly what it moved.
+        // genuinely crosses CPU→GPU here — or, for a GPU-resident frame, does
+        // not. `render` adds the readback pair afterwards, so a `draw`-only
+        // frame is left with exactly what it moved.
         self.transfers = TransferCounts {
             frame_upload: source.upload_bytes(),
             readback: 0,
@@ -392,11 +396,7 @@ impl VideoPlacementRenderer {
                 self.renderer
                     .update_frame_texture_rgba(rgba, frame_width, frame_height)
             }
-            #[cfg(target_arch = "wasm32")]
-            FrameSource::VideoFrame(frame) => {
-                self.renderer
-                    .update_frame_texture_from_video(frame, frame_width, frame_height)
-            }
+            FrameSource::External(frame) => self.renderer.update_frame_texture_external(frame),
         }
         let identity_camera = trd_core::FrameParams::IDENTITY
             .to_camera(self.viewport())

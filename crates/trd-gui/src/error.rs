@@ -59,9 +59,4 @@ pub enum GuiError {
         #[source]
         source: std::io::Error,
     },
-
-    /// A browser offscreen render (wasm) failed (adapter/device/readback).
-    #[cfg(target_arch = "wasm32")]
-    #[error("wasm render failed: {0}")]
-    WasmRender(String),
 }

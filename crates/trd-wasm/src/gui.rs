@@ -497,8 +497,11 @@ impl VideoEditingHandle {
     /// decoded it into GPU memory and it stays there (#229, #282).
     ///
     /// **Takes ownership of the frame** — do not `close()` it in JS. It holds a
-    /// slot in a small decoder-side pool, and Rust releases that slot once the
-    /// GPU copy is done.
+    /// slot in a small decoder-side pool, and Rust releases that slot when a
+    /// newer frame supersedes this one, *not* once the GPU copy is done: a
+    /// render can run more than once for the same frame, since any UI change
+    /// repaints, so a frame released after its first upload would leave the
+    /// repaint with nothing to draw.
     ///
     /// A separate entry point from
     /// [`update_video_frame_rgba`](Self::update_video_frame_rgba) rather than a
@@ -511,14 +514,18 @@ impl VideoEditingHandle {
         frame_index: u32,
         media_time_seconds: f64,
     ) -> Result<(), wasm_bindgen::JsValue> {
+        // Wrapped before the first early return, so from here on *every* path
+        // releases the decoder-pool slot by dropping — including the rejection
+        // below, which used to be one of three hand-written `close()` calls
+        // (#302).
+        let frame = std::rc::Rc::new(crate::BrowserVideoFrame::new(frame));
         if frame_index >= self.timeline.get().frame_count {
-            frame.close();
             return Err(wasm_bindgen::JsValue::from_str(
                 "video frame index out of range",
             ));
         }
         self.shared
-            .present_video_frame(frame, frame_index, media_time_seconds)
+            .present_external_frame(frame, frame_index, media_time_seconds)
             .map_err(|error| wasm_bindgen::JsValue::from_str(&error))
     }
 
