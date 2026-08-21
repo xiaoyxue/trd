@@ -5,11 +5,17 @@ use clap::Parser;
 #[derive(Debug, Parser)]
 #[command(name = "trd-gui-video-editing", version, about)]
 pub struct Cli {
-    /// Versioned `trd.video_edit.version = 0.1.0` Arrow timeline.
+    /// Versioned `trd.video_edit.version = 0.2.0` Arrow IPC or Parquet timeline.
+    ///
+    /// The version is matched exactly, not as a minimum: `trd-core`'s
+    /// `VIDEO_EDIT_VERSION` is the only accepted value and any other is
+    /// rejected, so this text and that constant must not drift apart. The
+    /// container is sniffed from the bytes rather than the file name, so either
+    /// format may be passed here.
     ///
     /// **Optional**: without one the editor is a plain player — the timeline
     /// comes from the video container and the placement UI stays inert (#264).
-    #[arg(long, value_name = "ARROW")]
+    #[arg(long, value_name = "TIMELINE")]
     pub document: Option<PathBuf>,
 
     /// Local MP4 matching the timeline metadata. Without a source, the editor

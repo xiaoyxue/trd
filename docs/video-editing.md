@@ -375,6 +375,26 @@ launch directly from HTTP(S); the two options are mutually exclusive.
 Add `--probe-only` to validate metadata and decode frame 0 without opening a
 native window.
 
+`--preview-width` (default **960**, accepted range **1–1920**) is the width
+ffmpeg scales the streamed preview frames to; the height follows from the
+source aspect ratio. It is clamped to the source width, so it only ever scales
+*down* — passing a value larger than the video does nothing.
+
+This flag is **native-only, and it is a decode-cost lever rather than a
+rendering setting.** The browser surface has no equivalent: mediabunny hands
+back full-resolution `VideoFrame`s that never leave the GPU, so the two
+delivery surfaces show the same scene at different effective video resolutions
+unless `--preview-width` is set to the source width. Lower it to make native
+playback and seeking cheaper, raise it toward the source width to match what
+the browser displays:
+
+```sh
+cargo run -p trd-gui-video-editing -- \
+  --document web/gui-video-editing/data/fiba-shot1.arrow \
+  --video /path/to/shot_0001.mp4 \
+  --preview-width 1920
+```
+
 ```powershell
 cargo run -p trd-gui-video-editing -- `
   --document web\gui-video-editing\data\fiba-shot1.arrow `

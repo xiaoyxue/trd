@@ -51,7 +51,8 @@ impl From<TonemapArg> for trd_core::Tonemap {
 /// Reads the Arrow IPC `[mesh][texture?][frames?][params]` stream on stdin — a leading
 /// mesh table (then an optional texture table) followed by per-frame params +
 /// instanced draw lists — and plays it live in a window, e.g.
-/// `trd-render.sh --mesh bunny.obj … | trd-app`.
+/// `examples/render.sh --native --mesh assets/meshes/bunny.obj`, which builds
+/// the stream and runs this binary for you.
 #[derive(Parser)]
 #[command(name = "trd-app", version, about)]
 pub(crate) struct Cli {
