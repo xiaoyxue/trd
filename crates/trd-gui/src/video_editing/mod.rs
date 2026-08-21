@@ -1396,13 +1396,27 @@ impl VideoEditingApp {
         let Some(mut renderer) = self.shared.renderer.borrow_mut().take() else {
             return;
         };
-        let source_size = (self.video.width, self.video.height);
+        // The **decoded** frame, not the document. `--preview-width` lets the
+        // native shell decode below source resolution, and a target larger than
+        // the frame it uploads just upscales a smaller decode at full GPU cost —
+        // under `OriginalResolution`, unconditionally (#170).
+        //
+        // Browser-neutral by construction: `present_external_frame` sizes the
+        // frame from `ExternalFrame::size()`, which for a WebCodecs `VideoFrame`
+        // is the full source, so this is the same number the document carries
+        // and nothing changes there.
+        //
+        // Calibration is deliberately *not* read from here — it stays the
+        // document size, taken separately below — because the document's `K` is
+        // expressed in source pixels and `frame_camera` rescales it to whatever
+        // target this picks (#168).
+        let decoded_size = (video.width.max(1), video.height.max(1));
         let requested_size = match self.image_sizing {
             crate::ui::ImageSizing::FitCanvas => (
-                self.fitted_render_size.0.min(source_size.0).max(1),
-                self.fitted_render_size.1.min(source_size.1).max(1),
+                self.fitted_render_size.0.min(decoded_size.0).max(1),
+                self.fitted_render_size.1.min(decoded_size.1).max(1),
             ),
-            crate::ui::ImageSizing::OriginalResolution => source_size,
+            crate::ui::ImageSizing::OriginalResolution => decoded_size,
         };
         if let Err(error) = renderer.resize(requested_size.0, requested_size.1) {
             self.shared.renderer.replace(Some(renderer));
