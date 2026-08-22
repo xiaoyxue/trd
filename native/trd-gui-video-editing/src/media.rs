@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::ffi::OsStr;
-use std::io::Read;
+use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -10,8 +10,48 @@ use std::sync::Arc;
 use crate::error::NativeVideoEditingError;
 
 pub struct DecodedFrame {
+    /// The frame this picture actually is, recovered from the timestamp ffmpeg
+    /// reported for it — **not** the index that was asked for.
+    ///
+    /// The two differ on a variable-rate source: the seek time is computed from
+    /// the timeline's nominal grid, which such a container does not sit on, so
+    /// ffmpeg's at-or-after seek can hand back the neighbouring picture. Taking
+    /// the request on trust is how that became a silent one-frame placement
+    /// error rather than a visible one (#319).
     pub index: u32,
+    /// The presentation timestamp ffmpeg reported, in seconds. Falls back to the
+    /// requested instant when the report could not be read.
+    pub media_time_seconds: f64,
+    /// How long this frame is shown, as the container declares it; `0.0` when
+    /// unknown, which leaves the timeline's nominal interval to stand in.
+    pub duration_seconds: f64,
     pub rgba: Vec<u8>,
+}
+
+/// Pulls `(presentation timestamp, duration)` out of one `showinfo` line.
+///
+/// This is ffmpeg stating what it actually decoded, which is the only way to
+/// know: a raw video pipe carries pixels and no timing at all.
+///
+/// ```text
+/// [Parsed_showinfo_1 @ …] n:0 pts:69120 pts_time:5.625 duration:512 duration_time:0.0416667 fmt:rgba …
+/// ```
+///
+/// The duration is optional — a stream that does not declare one still yields a
+/// usable timestamp, and `0.0` tells the caller to fall back rather than trust a
+/// fabricated interval.
+fn parse_showinfo(line: &str) -> Option<(f64, f64)> {
+    let pts = showinfo_field(line, "pts_time:")?;
+    Some((pts, showinfo_field(line, "duration_time:").unwrap_or(0.0)))
+}
+
+fn showinfo_field(line: &str, key: &str) -> Option<f64> {
+    line.split_once(key)?
+        .1
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
 }
 
 #[derive(Debug, Clone)]
@@ -118,13 +158,25 @@ impl NativeVideo {
     pub fn decode_one(&self, index: u32) -> Result<DecodedFrame, NativeVideoEditingError> {
         let index = index.min(self.frame_count.saturating_sub(1));
         let output = Command::new("ffmpeg")
-            .args(["-v", "error", "-ss", &self.timestamp(index), "-i"])
+            // `-copyts` is load-bearing: without it `-ss` rebases the output
+            // clock to zero and `showinfo` reports an offset from the seek point
+            // rather than the source timestamp, which is exactly the number that
+            // must not be guessed.
+            .args([
+                "-hide_banner",
+                "-v",
+                "info",
+                "-copyts",
+                "-ss",
+                &self.timestamp(index),
+                "-i",
+            ])
             .arg(self.source.as_os_str())
             .args([
                 "-frames:v",
                 "1",
                 "-vf",
-                &self.scale_filter(),
+                &self.reporting_filter(),
                 "-pix_fmt",
                 "rgba",
                 "-f",
@@ -150,8 +202,15 @@ impl NativeVideo {
                 expected,
             });
         }
+        let reported = String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .find_map(parse_showinfo);
+        let (media_time_seconds, duration_seconds) =
+            reported.unwrap_or((self.timestamp_seconds(index), 0.0));
         Ok(DecodedFrame {
-            index,
+            index: self.index_at(media_time_seconds),
+            media_time_seconds,
+            duration_seconds,
             rgba: output.stdout,
         })
     }
@@ -163,9 +222,11 @@ impl NativeVideo {
         let generation_counter = self.generation.clone();
         let source = self.source.clone();
         let timestamp = self.timestamp(index);
-        let scale = self.scale_filter();
+        let scale = self.reporting_filter();
         let frame_bytes = self.frame_bytes();
         let frame_count = self.frame_count;
+        let fps_num = self.fps_num;
+        let fps_den = self.fps_den;
         let (sender, receiver) = mpsc::sync_channel(2);
         std::thread::Builder::new()
             .name("trd-native-video-decoder".to_owned())
@@ -177,6 +238,8 @@ impl NativeVideo {
                     index,
                     frame_count,
                     frame_bytes,
+                    fps_num,
+                    fps_den,
                     generation,
                     generation_counter,
                     sender,
@@ -212,12 +275,34 @@ impl NativeVideo {
     }
 
     fn timestamp(&self, index: u32) -> String {
-        let seconds = f64::from(index) * f64::from(self.fps_den) / f64::from(self.fps_num);
-        format!("{seconds:.9}")
+        format!("{:.9}", self.timestamp_seconds(index))
+    }
+
+    /// Where the nominal grid says frame `index` sits. Only ever a *request* —
+    /// what came back is read from the frame itself (#319).
+    fn timestamp_seconds(&self, index: u32) -> f64 {
+        f64::from(index) * f64::from(self.fps_den) / f64::from(self.fps_num)
+    }
+
+    /// The frame a reported timestamp belongs to, mapped exactly as the browser
+    /// maps its own, so both surfaces number frames the same way.
+    fn index_at(&self, media_time_seconds: f64) -> u32 {
+        trd_gui::video_editing::frame_index_at_media_time(
+            media_time_seconds,
+            self.fps_num,
+            self.fps_den,
+            self.frame_count,
+        )
     }
 
     fn scale_filter(&self) -> String {
         format!("scale={}:{}", self.width, self.height)
+    }
+
+    /// The scale filter with `showinfo` behind it, so every frame ffmpeg emits
+    /// is accompanied by the timestamp it was emitted for.
+    fn reporting_filter(&self) -> String {
+        format!("{},showinfo", self.scale_filter())
     }
 
     fn frame_bytes(&self) -> usize {
@@ -239,12 +324,24 @@ fn stream_frames(
     start_index: u32,
     frame_count: u32,
     frame_bytes: usize,
+    fps_num: u32,
+    fps_den: u32,
     generation: u64,
     generation_counter: Arc<AtomicU64>,
     sender: SyncSender<Result<DecodedFrame, String>>,
 ) {
     let spawned = Command::new("ffmpeg")
-        .args(["-v", "error", "-ss", &timestamp, "-i"])
+        // See `decode_one`: `-copyts` keeps `showinfo` reporting source
+        // timestamps rather than an offset from the seek point.
+        .args([
+            "-hide_banner",
+            "-v",
+            "info",
+            "-copyts",
+            "-ss",
+            &timestamp,
+            "-i",
+        ])
         .arg(source.as_os_str())
         .args(["-vf", &scale, "-pix_fmt", "rgba", "-f", "rawvideo", "-"])
         .stdin(Stdio::null())
@@ -265,7 +362,18 @@ fn stream_frames(
         return;
     };
 
-    for index in start_index..frame_count {
+    // stderr must be drained *while* stdout is read, not after the process
+    // exits. `showinfo` emits a line per frame, so leaving it in the pipe would
+    // fill the buffer and wedge ffmpeg part-way through a long playback — a
+    // deadlock the old `-v error` invocation never produced only because it had
+    // almost nothing to say.
+    let (timings, captured) = spawn_stderr_reader(child.stderr.take());
+
+    for offset in 0.. {
+        let counted = start_index.saturating_add(offset);
+        if counted >= frame_count {
+            break;
+        }
         let mut rgba = vec![0; frame_bytes];
         if let Err(error) = stdout.read_exact(&mut rgba) {
             if generation_counter.load(Ordering::SeqCst) == generation
@@ -275,8 +383,29 @@ fn stream_frames(
             }
             break;
         }
+        // One `showinfo` line per emitted frame, in order, so the timings are
+        // consumed one-for-one. A frame that arrives without one still plays;
+        // it just falls back to counting, which is what this used to do always.
+        let reported = timings
+            .as_ref()
+            .and_then(|rx| rx.recv_timeout(TIMING_WAIT).ok());
+        let (index, media_time_seconds, duration_seconds) = match reported {
+            Some((pts, duration)) => (index_at(pts, fps_num, fps_den, frame_count), pts, duration),
+            None => (
+                counted,
+                f64::from(counted) * f64::from(fps_den) / f64::from(fps_num.max(1)),
+                0.0,
+            ),
+        };
         if generation_counter.load(Ordering::SeqCst) != generation
-            || sender.send(Ok(DecodedFrame { index, rgba })).is_err()
+            || sender
+                .send(Ok(DecodedFrame {
+                    index,
+                    media_time_seconds,
+                    duration_seconds,
+                    rgba,
+                }))
+                .is_err()
         {
             break;
         }
@@ -289,10 +418,9 @@ fn stream_frames(
     if generation_counter.load(Ordering::SeqCst) == generation {
         match status {
             Ok(status) if !status.success() => {
-                let mut stderr = String::new();
-                if let Some(mut pipe) = child.stderr.take() {
-                    let _ = pipe.read_to_string(&mut stderr);
-                }
+                let stderr = captured
+                    .and_then(|handle| handle.join().ok())
+                    .unwrap_or_default();
                 let _ = sender.send(Err(format!("ffmpeg exited with {status}: {stderr}")));
             }
             Err(error) => {
@@ -301,6 +429,58 @@ fn stream_frames(
             _ => {}
         }
     }
+}
+
+/// How long a frame waits for its `showinfo` line before falling back to
+/// counting. Generous, because it only elapses when ffmpeg is not reporting at
+/// all — a frame's line is written before the frame itself reaches stdout.
+const TIMING_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Drains ffmpeg's stderr on its own thread, splitting it into per-frame timings
+/// and everything else — the latter kept for the error message.
+#[allow(clippy::type_complexity)]
+fn spawn_stderr_reader(
+    stderr: Option<std::process::ChildStderr>,
+) -> (
+    Option<Receiver<(f64, f64)>>,
+    Option<std::thread::JoinHandle<String>>,
+) {
+    let Some(pipe) = stderr else {
+        return (None, None);
+    };
+    let (sender, receiver) = mpsc::channel();
+    let handle = std::thread::Builder::new()
+        .name("trd-native-video-stderr".to_owned())
+        .spawn(move || {
+            let mut rest = String::new();
+            for line in std::io::BufReader::new(pipe).lines().map_while(Result::ok) {
+                match parse_showinfo(&line) {
+                    // Ignore a closed receiver rather than stopping: the pipe
+                    // still has to be drained or ffmpeg blocks on it.
+                    Some(timing) => {
+                        let _ = sender.send(timing);
+                    }
+                    None => {
+                        rest.push_str(&line);
+                        rest.push('\n');
+                    }
+                }
+            }
+            rest
+        })
+        .ok();
+    (Some(receiver), handle)
+}
+
+/// The free twin of [`NativeVideo::index_at`], for the decoder thread, which
+/// owns copies of the timing rather than the video.
+fn index_at(media_time_seconds: f64, fps_num: u32, fps_den: u32, frame_count: u32) -> u32 {
+    trd_gui::video_editing::frame_index_at_media_time(
+        media_time_seconds,
+        fps_num,
+        fps_den,
+        frame_count,
+    )
 }
 
 fn validate_file(path: &Path, info: &trd_core::VideoInfo) -> Result<(), NativeVideoEditingError> {
@@ -549,6 +729,52 @@ mod tests {
         assert_eq!(preview_size(&info(1920, 1080), 960), (960, 540));
         assert_eq!(preview_size(&info(1920, 1080), 1920), (1920, 1080));
         assert_eq!(preview_size(&info(640, 360), 1920), (640, 360));
+    }
+
+    /// A real `showinfo` line, verbatim, including the ragged column padding
+    /// ffmpeg emits — the parser has to read fields, not offsets.
+    const SHOWINFO: &str = "[Parsed_showinfo_1 @ 000002236ab332c0] n:   0 pts:  69120 \
+        pts_time:5.625   duration:    512 duration_time:0.0416667 fmt:rgba cl:unspecified \
+        sar:1/1 s:960x540 i:P iskey:0 type:B checksum:7D68F5B2";
+
+    #[test]
+    fn a_showinfo_line_yields_the_timestamp_and_duration() {
+        assert_eq!(parse_showinfo(SHOWINFO), Some((5.625, 0.0416667)));
+    }
+
+    /// `pts_time:` has to win over the `pts:` that precedes it on the same line;
+    /// matching the shorter key first would read the raw timescale value as
+    /// seconds and put the frame hours away.
+    #[test]
+    fn the_raw_pts_field_is_not_mistaken_for_the_timestamp() {
+        let (pts, _) = parse_showinfo(SHOWINFO).expect("parsed");
+        assert!(
+            (pts - 5.625).abs() < 1e-9,
+            "read {pts}, which looks like the raw pts field"
+        );
+    }
+
+    #[test]
+    fn a_line_without_a_duration_still_yields_its_timestamp() {
+        assert_eq!(
+            parse_showinfo("[Parsed_showinfo_1 @ 0x0] n:1 pts:512 pts_time:1.5 fmt:rgba"),
+            Some((1.5, 0.0)),
+            "a missing duration must fall back, not discard the timestamp"
+        );
+    }
+
+    #[test]
+    fn other_ffmpeg_output_is_not_a_timing_line() {
+        assert_eq!(
+            parse_showinfo("frame=   72 fps= 42 q=-0.0 Lsize=8315KiB"),
+            None
+        );
+        assert_eq!(parse_showinfo(""), None);
+        assert_eq!(
+            parse_showinfo("[Parsed_showinfo_1 @ 0x0] n:1 pts_time:N/A"),
+            None,
+            "an unparseable timestamp is not a timing line"
+        );
     }
 
     #[test]

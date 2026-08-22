@@ -189,17 +189,15 @@ impl NativeVideoEditingApp {
             return;
         };
         self.frame_index = frame.index;
-        let media_time_seconds = self.media_time_at(frame.index);
         match self.shared.update_video_frame_rgba(
             frame.rgba,
             width,
             height,
             frame.index,
-            media_time_seconds,
-            // ffmpeg is asked for a frame by index and the decoded frame is
-            // labelled with that index, so this clock has no timestamps of its
-            // own to report; the nominal interval is the honest answer.
-            0.0,
+            // Both read off the frame ffmpeg handed back, rather than computed
+            // from the index that was asked for (#319).
+            frame.media_time_seconds,
+            frame.duration_seconds,
         ) {
             Ok(()) => {
                 self.shared.clear_error();
@@ -529,17 +527,6 @@ impl NativeVideoEditingApp {
             if self.video.is_some() { 4 } else { 0 },
             self.video.is_some() && self.playback.is_none() && self.frame_index >= last_frame,
         );
-    }
-
-    /// Native media clock: the shell has no HTML media element, so a frame's
-    /// media time is its declared position in the document timeline.
-    fn media_time_at(&self, frame_index: u32) -> f64 {
-        trd_gui::video_editing::media_time_at_frame(
-            frame_index,
-            self.video_info.fps_num,
-            self.video_info.fps_den,
-            self.video_info.frame_count,
-        )
     }
 
     fn sync_source_observation(&self) {

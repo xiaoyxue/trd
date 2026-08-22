@@ -36,9 +36,21 @@ pub struct Cli {
     #[arg(long, default_value_t = 960, value_parser = clap::value_parser!(u32).range(1..=1920))]
     pub preview_width: u32,
 
-    /// Validate the document/video and decode frame 0 without opening a window.
+    /// Validate the document/video and decode one frame without opening a
+    /// window, reporting the frame that actually came back.
     #[arg(long)]
     pub probe_only: bool,
+
+    /// Which frame `--probe-only` asks for. Defaults to the first.
+    ///
+    /// The answer is worth having because it is not always the frame requested:
+    /// a seek time is computed from the timeline's nominal grid, and a
+    /// variable-rate container does not sit on it, so ffmpeg can return the
+    /// neighbouring picture (#319). This is the native counterpart of the
+    /// browser's probe page — it reports the timestamp the frame carries, not
+    /// the one that was asked for.
+    #[arg(long, value_name = "N", default_value_t = 0)]
+    pub probe_frame: u32,
 }
 
 fn parse_http_url(value: &str) -> Result<String, String> {
