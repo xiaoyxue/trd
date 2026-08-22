@@ -225,6 +225,10 @@ fn timeline_rows(video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut dy
     let frame = facts.timeline_frame.as_ref();
 
     r.row("media time", &option_f64(facts.media_time_seconds, "s"));
+    r.row(
+        "frame duration",
+        &option_f64(facts.frame_duration_seconds, "s"),
+    );
     r.row("requested frame", &facts.requested_frame_index.to_string());
     r.row("presented frame", &option_u32(facts.presented_frame_index));
     r.row("displayed frame", &option_u32(facts.frame_index));
