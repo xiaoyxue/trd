@@ -340,6 +340,11 @@ fn decode_video_info(schema: &Schema) -> Result<VideoInfo, VideoEditingError> {
         fps_den: metadata_parse(schema, "trd.video.fps_den")?,
         frame_count: metadata_parse(schema, "trd.video.frame_count")?,
         duration_us: metadata_parse(schema, "trd.video.duration_us")?,
+        // Not carried by the document, and deliberately not added to it: this is
+        // a property of the *container*, discovered by probing the file, while
+        // the document describes the authoring intent. Bumping
+        // `VIDEO_EDIT_VERSION` for a diagnostic would be the wrong trade.
+        unpresented_tail_samples: None,
     })
 }
 

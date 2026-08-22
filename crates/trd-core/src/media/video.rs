@@ -20,6 +20,22 @@ pub struct VideoTiming {
     /// Total samples in the video track — the real frame count.
     pub frame_count: u32,
     pub duration_us: i64,
+    /// Trailing samples the container stores but **never presents**.
+    ///
+    /// `frame_count` counts what the track *stores*, and a container can store a
+    /// sample that is not a picture: a recorder stopping mid-interval writes a
+    /// final sample outside the presentation window, which ffmpeg surfaces as
+    /// `AV_PKT_FLAG_DISCARD` and no decoder ever outputs (#324).
+    ///
+    /// Reported rather than subtracted. The count is not wrong — the file really
+    /// does store that sample — so the honest thing is to say that one of them
+    /// is not a picture, instead of silently shortening the timeline and leaving
+    /// the number unexplained.
+    ///
+    /// `None` when the shell did not determine it, which is **not** the same as
+    /// `Some(0)`: one means "not checked", the other "checked, there are none".
+    /// Collapsing the two is the ambiguity this field exists to avoid.
+    pub unpresented_tail_samples: Option<u32>,
 }
 
 /// A clip as an authoring document describes it: the same timing a container
@@ -44,6 +60,8 @@ pub struct VideoInfo {
     pub fps_den: u32,
     pub frame_count: u32,
     pub duration_us: i64,
+    /// See [`VideoTiming::unpresented_tail_samples`].
+    pub unpresented_tail_samples: Option<u32>,
 }
 
 impl VideoInfo {
@@ -65,6 +83,7 @@ impl VideoInfo {
             fps_den: timing.fps_den,
             frame_count: timing.frame_count,
             duration_us: timing.duration_us,
+            unpresented_tail_samples: timing.unpresented_tail_samples,
         }
     }
 
@@ -78,6 +97,7 @@ impl VideoInfo {
             fps_den: self.fps_den,
             frame_count: self.frame_count,
             duration_us: self.duration_us,
+            unpresented_tail_samples: self.unpresented_tail_samples,
         }
     }
 }
@@ -95,6 +115,7 @@ mod tests {
             fps_den: 1001,
             frame_count: 250,
             duration_us: 8_341_667,
+            unpresented_tail_samples: Some(1),
         };
         // A probed container carries real timing and no provenance...
         let probed = VideoInfo::from_probe(timing, "shot.mp4".to_owned());

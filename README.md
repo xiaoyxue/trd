@@ -241,6 +241,12 @@ collapsed **Details** inspector. Its typed snapshot follows the displayed render
 and exposes source/synchronization, raw tracking pose deltas, placement,
 material/lighting, and renderer facts.
 
+**Every Details field is documented**, section by section, in
+[`docs/video-editing.md#inspector-sections`](docs/video-editing.md#inspector-sections)
+— what each row means, why the four frame identities (`requested` / `presented` /
+`displayed` / `rendered`) are reported separately, and how to read the
+`expected … / observed …` `[MATCH]` comparisons.
+
 Generate the ignored local timeline first using
 [`docs/video-editing.md`](docs/video-editing.md#generate-the-document), then:
 

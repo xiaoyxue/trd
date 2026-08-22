@@ -88,6 +88,7 @@ fn empty_video_info() -> trd_core::VideoInfo {
         fps_den: 1,
         frame_count: 1,
         duration_us: 0,
+        unpresented_tail_samples: None,
     }
 }
 

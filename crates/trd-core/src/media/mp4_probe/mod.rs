@@ -100,6 +100,7 @@ fn probe_trak(trak: &[u8]) -> Option<VideoTiming> {
         fps_den: fps_den.max(1),
         frame_count,
         duration_us,
+        unpresented_tail_samples: unpresented_tail(stbl, track_duration),
     })
 }
 
@@ -189,6 +190,99 @@ fn stts_totals(stts: &[u8]) -> Option<(u32, u64)> {
         total = total.saturating_add(u64::from(count) * u64::from(delta));
     }
     Some((samples, total))
+}
+
+/// Trailing samples whose presentation time is at or past the track's declared
+/// duration — stored by the container, but never shown.
+///
+/// A recorder that stops mid-interval writes a final sample outside the
+/// presentation window; ffmpeg surfaces the same thing natively as
+/// `AV_PKT_FLAG_DISCARD`, and no decoder outputs it (#324). Counting it as a
+/// frame is what leaves a final timeline index with no picture behind it.
+///
+/// **`stts` alone is not enough.** It accumulates to *decode* timestamps, and
+/// B-frame content reorders: the sample that sits past the end does so in
+/// **presentation** order, which is `stts` plus the composition offset `ctts`
+/// carries. Reading only `stts` finds nothing on exactly the files this exists
+/// for.
+///
+/// Both tables are run-length encoded and walked together, one sample at a time
+/// but with no allocation — the moov is already in memory, and the arithmetic is
+/// two additions per sample.
+fn unpresented_tail(stbl: &[u8], track_duration: u64) -> Option<u32> {
+    if track_duration == 0 {
+        return Some(0);
+    }
+    let stts = find_box(stbl, b"stts")?;
+    let deltas = RunTable::new(stts)?;
+    // Absent on constant-order content, and that is not an error: no `ctts`
+    // means presentation order *is* decode order.
+    let mut offsets = find_box(stbl, b"ctts").and_then(RunTable::new);
+
+    let mut dts = 0i64;
+    let mut unpresented = 0u32;
+    for (count, delta) in deltas.runs() {
+        for _ in 0..count {
+            let offset = offsets.as_mut().and_then(RunTable::next_value).unwrap_or(0);
+            if dts + i64::from(offset) >= track_duration as i64 {
+                unpresented = unpresented.saturating_add(1);
+            }
+            dts += i64::from(delta);
+        }
+    }
+    Some(unpresented)
+}
+
+/// A `stts`/`ctts` style run-length table: `[version+flags][entry_count]` then
+/// `(count, value)` pairs. `ctts` version 1 stores signed offsets, which is why
+/// the value is read as `i32`.
+struct RunTable<'a> {
+    body: &'a [u8],
+    entries: usize,
+    entry: usize,
+    left: u32,
+}
+
+impl<'a> RunTable<'a> {
+    fn new(body: &'a [u8]) -> Option<Self> {
+        let entries = u32::from_be_bytes(body.get(4..8)?.try_into().ok()?) as usize;
+        Some(Self {
+            body,
+            entries,
+            entry: 0,
+            left: 0,
+        })
+    }
+
+    fn pair(&self, index: usize) -> Option<(u32, i32)> {
+        let at = 8 + index * 8;
+        let count = u32::from_be_bytes(self.body.get(at..at + 4)?.try_into().ok()?);
+        let value = i32::from_be_bytes(self.body.get(at + 4..at + 8)?.try_into().ok()?);
+        Some((count, value))
+    }
+
+    /// Every `(count, value)` run in order.
+    fn runs(&self) -> impl Iterator<Item = (u32, i32)> + '_ {
+        (0..self.entries).filter_map(|index| self.pair(index))
+    }
+
+    /// The next sample's value, unrolling runs as it goes.
+    fn next_value(&mut self) -> Option<i32> {
+        while self.left == 0 {
+            let (count, _) = self.pair(self.entry)?;
+            if self.entry >= self.entries {
+                return None;
+            }
+            self.entry += 1;
+            self.left = count;
+            if count == 0 {
+                continue;
+            }
+        }
+        let (_, value) = self.pair(self.entry - 1)?;
+        self.left -= 1;
+        Some(value)
+    }
 }
 
 /// `tkhd` track dimensions, stored as 16.16 fixed point at the end of the box.
@@ -359,6 +453,72 @@ mod tests {
         let moov = atom(b"moov", &atom(b"trak", &trak));
         let info = probe_moov(&moov).expect("probe");
         assert_eq!((info.width, info.height), (3840, 2160));
+    }
+
+    /// Builds an `stts`/`ctts` payload from `(count, value)` runs.
+    fn run_table(runs: &[(u32, i32)]) -> Vec<u8> {
+        let mut p = vec![0u8; 4]; // version + flags
+        p.extend_from_slice(&(runs.len() as u32).to_be_bytes());
+        for (count, value) in runs {
+            p.extend_from_slice(&count.to_be_bytes());
+            p.extend_from_slice(&value.to_be_bytes());
+        }
+        p
+    }
+
+    /// An `stbl` carrying just the tables this reads.
+    fn timing_stbl(stts: &[(u32, i32)], ctts: Option<&[(u32, i32)]>) -> Vec<u8> {
+        let mut body = atom(b"stts", &run_table(stts));
+        if let Some(ctts) = ctts {
+            body.extend(atom(b"ctts", &run_table(ctts)));
+        }
+        body
+    }
+
+    /// #324, with the shape measured on a 217.77 GiB recording: 694 839 pictures
+    /// one timescale unit apart, then a sample the container stores but never
+    /// presents — its *presentation* time is the declared duration itself, so it
+    /// starts exactly where the track ends.
+    ///
+    /// ffmpeg reports that sample as `AV_PKT_FLAG_DISCARD`; here it is found from
+    /// the boxes alone, which is all the browser has.
+    #[test]
+    fn a_sample_starting_at_the_declared_end_is_never_presented() {
+        let stbl = timing_stbl(&[(694_840, 1)], Some(&[(694_839, 0), (1, 1)]));
+
+        assert_eq!(unpresented_tail(&stbl, 694_840), Some(1));
+    }
+
+    /// The trap this walked into first: `stts` accumulates to **decode** time, so
+    /// on B-frame content the trailing sample looks in-range until `ctts` is
+    /// applied. Same table without the composition offset — and the answer is
+    /// wrong.
+    #[test]
+    fn decode_order_alone_cannot_see_the_unpresented_sample() {
+        let stbl = timing_stbl(&[(694_840, 1)], None);
+
+        assert_eq!(
+            unpresented_tail(&stbl, 694_840),
+            Some(0),
+            "without ctts every sample's dts is inside the track, which is exactly why ctts is read"
+        );
+    }
+
+    /// The ordinary case must stay zero, or every file would grow a footnote.
+    #[test]
+    fn a_track_that_ends_with_its_last_picture_has_no_unpresented_tail() {
+        let stbl = timing_stbl(&[(250, 1)], None);
+
+        assert_eq!(unpresented_tail(&stbl, 250), Some(0));
+    }
+
+    /// A container that declares no duration says nothing about what it presents,
+    /// and guessing would invent a warning out of missing metadata.
+    #[test]
+    fn an_unknown_duration_reports_no_unpresented_tail() {
+        let stbl = timing_stbl(&[(250, 1)], None);
+
+        assert_eq!(unpresented_tail(&stbl, 0), Some(0));
     }
 
     #[test]

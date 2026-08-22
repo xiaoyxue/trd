@@ -552,6 +552,64 @@ fn validate_file(path: &Path, info: &trd_core::VideoInfo) -> Result<(), NativeVi
     Ok(())
 }
 
+/// How many trailing samples the container stores but never presents.
+///
+/// Asks the **demuxer**, not the decoder. A tail-only `-show_packets` reports
+/// ffmpeg's own `AV_PKT_FLAG_DISCARD` on each packet, so the answer needs no
+/// decoding and reads only the last second: measured at **0.05 s** on top of a
+/// 217.77 GiB recording's 1.34 s open, against 9.35 s for the same answer via
+/// `-show_frames`.
+///
+/// **Local sources only.** This is a diagnostic, and a second remote probe would
+/// double the cost of opening a URL — on a path that is already the slow one
+/// (#326). A URL therefore reports `None`, "not checked", rather than a `0` that
+/// would read as "there are none".
+///
+/// `None` too when the probe fails or says nothing: not knowing is not a reason
+/// to refuse to open, and `decode_one`'s step-back keeps the timeline usable
+/// either way (#324).
+fn probe_unpresented_tail(source: &NativeVideoSource, duration_seconds: f64) -> Option<u32> {
+    let NativeVideoSource::Local(_) = source else {
+        return None;
+    };
+    // A one-second window: long enough to contain a trailing sample and the key
+    // frame ffprobe backs up to, short enough that the read stays negligible.
+    let from = (duration_seconds - 1.0).max(0.0);
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-read_intervals",
+            &format!("{from:.3}%"),
+            "-show_packets",
+            "-show_entries",
+            "packet=flags",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(source.as_os_str())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    // ffprobe renders packet flags as a fixed field — `K__`, `___`, `_D_` — where
+    // the middle position is `AV_PKT_FLAG_DISCARD`.
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut lines = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .peekable();
+    lines.peek()?;
+    lines
+        .filter(|line| line.contains('D'))
+        .count()
+        .try_into()
+        .ok()
+}
+
 /// Reads a video's own timeline with `ffprobe` — the native counterpart of the
 /// browser's `mp4_probe`, and the source of truth when no document exists.
 ///
@@ -642,6 +700,7 @@ fn probe_video_info(
         fps_den,
         frame_count: frame_count.max(1),
         duration_us: (duration_seconds * 1_000_000.0) as i64,
+        unpresented_tail_samples: probe_unpresented_tail(source, duration_seconds),
     })
 }
 
@@ -763,6 +822,7 @@ mod tests {
             fps_den: 1,
             frame_count: 1,
             duration_us: 0,
+            unpresented_tail_samples: None,
         }
     }
 
