@@ -10,6 +10,27 @@ fn main() {
     }
 }
 
+/// What `--probe-only` reports: the frame asked for, the frame that came back,
+/// and the timestamp it carries.
+///
+/// The two indices are printed even when they agree, because agreement is the
+/// finding — a variable-rate container can hand back the neighbouring picture,
+/// and the old message asserted "decoded frame 0" without ever checking (#319).
+fn describe(wanted: u32, frame: &media::DecodedFrame) -> String {
+    let landed = if frame.index == wanted {
+        format!("decoded frame {wanted}")
+    } else {
+        format!(
+            "asked for frame {wanted}, decoded frame {} instead",
+            frame.index
+        )
+    };
+    format!(
+        "{landed} at {:.6}s (duration {:.6}s)",
+        frame.media_time_seconds, frame.duration_seconds
+    )
+}
+
 fn run() -> Result<(), error::NativeVideoEditingError> {
     use clap::Parser;
 
@@ -40,18 +61,27 @@ fn run() -> Result<(), error::NativeVideoEditingError> {
         .map(media::NativeVideoSource::Local)
         .or_else(|| cli.video_url.map(media::NativeVideoSource::Url));
     if cli.probe_only {
+        let wanted = cli.probe_frame;
         match (video_source, document.as_ref()) {
             (Some(source), Some(document)) => {
                 let video = media::NativeVideo::open(source, &document.video, cli.preview_width)?;
-                video.decode_one(0)?;
-                println!("native video-editing source validated; decoded frame 0");
+                let frame = video.decode_one(wanted)?;
+                println!(
+                    "native video-editing source validated; {}",
+                    describe(wanted, &frame)
+                );
             }
             (Some(source), None) => {
                 let (video, info) = media::NativeVideo::probe(source, cli.preview_width)?;
-                video.decode_one(0)?;
+                let frame = video.decode_one(wanted)?;
                 println!(
-                    "native video probed: {}x{} · {}/{} fps · {} frames; decoded frame 0",
-                    info.width, info.height, info.fps_num, info.fps_den, info.frame_count
+                    "native video probed: {}x{} · {}/{} fps · {} frames; {}",
+                    info.width,
+                    info.height,
+                    info.fps_num,
+                    info.fps_den,
+                    info.frame_count,
+                    describe(wanted, &frame)
                 );
             }
             (None, Some(_)) => {
