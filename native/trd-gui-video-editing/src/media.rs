@@ -560,6 +560,12 @@ fn validate_file(path: &Path, info: &trd_core::VideoInfo) -> Result<(), NativeVi
 /// 217.77 GiB recording's 1.34 s open, against 9.35 s for the same answer via
 /// `-show_frames`.
 ///
+/// This is *not* how the browser reaches the same number — there it is a walk of
+/// the container's own `stts`/`ctts` against the track duration. The answer
+/// therefore carries [`UnpresentedTailEvidence`] saying which one produced it,
+/// so a reader is never sent looking for a packet flag in a path that reads
+/// sample tables (#331).
+///
 /// **Local sources only.** This is a diagnostic, and a second remote probe would
 /// double the cost of opening a URL — on a path that is already the slow one
 /// (#326). A URL therefore reports `None`, "not checked", rather than a `0` that
@@ -568,7 +574,10 @@ fn validate_file(path: &Path, info: &trd_core::VideoInfo) -> Result<(), NativeVi
 /// `None` too when the probe fails or says nothing: not knowing is not a reason
 /// to refuse to open, and `decode_one`'s step-back keeps the timeline usable
 /// either way (#324).
-fn probe_unpresented_tail(source: &NativeVideoSource, duration_seconds: f64) -> Option<u32> {
+fn probe_unpresented_tail(
+    source: &NativeVideoSource,
+    duration_seconds: f64,
+) -> Option<trd_core::UnpresentedTail> {
     let NativeVideoSource::Local(_) = source else {
         return None;
     };
@@ -595,16 +604,29 @@ fn probe_unpresented_tail(source: &NativeVideoSource, duration_seconds: f64) -> 
     if !output.status.success() {
         return None;
     }
-    // ffprobe renders packet flags as a fixed field — `K__`, `___`, `_D_` — where
-    // the middle position is `AV_PKT_FLAG_DISCARD`.
-    let text = String::from_utf8_lossy(&output.stdout);
-    let mut lines = text
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .peekable();
-    lines.peek()?;
-    lines
-        .filter(|line| line.contains('D'))
+    let samples = count_discarded_packets(&String::from_utf8_lossy(&output.stdout))?;
+    Some(trd_core::UnpresentedTail {
+        samples,
+        evidence: trd_core::UnpresentedTailEvidence::PacketFlags,
+    })
+}
+
+/// Counts `AV_PKT_FLAG_DISCARD` in `ffprobe -show_entries packet=flags -of
+/// csv=p=0` output.
+///
+/// ffprobe renders the flags as a **fixed three-character field** — `K__`,
+/// `___`, `_D_` — whose middle position is the discard flag. Matching that
+/// position rather than searching the line for a `D` is what keeps the answer
+/// right if the selected entries ever grow a second field (#331).
+///
+/// `None` when there is nothing to read at all, which is "not checked" rather
+/// than "checked, there are none".
+fn count_discarded_packets(text: &str) -> Option<u32> {
+    let mut flags = text.lines().map(str::trim).filter(|line| !line.is_empty());
+    let first = flags.next()?;
+    std::iter::once(first)
+        .chain(flags)
+        .filter(|field| field.as_bytes().get(1) == Some(&b'D'))
         .count()
         .try_into()
         .ok()
@@ -700,7 +722,7 @@ fn probe_video_info(
         fps_den,
         frame_count: frame_count.max(1),
         duration_us: (duration_seconds * 1_000_000.0) as i64,
-        unpresented_tail_samples: probe_unpresented_tail(source, duration_seconds),
+        unpresented_tail: probe_unpresented_tail(source, duration_seconds),
     })
 }
 
@@ -822,7 +844,7 @@ mod tests {
             fps_den: 1,
             frame_count: 1,
             duration_us: 0,
-            unpresented_tail_samples: None,
+            unpresented_tail: None,
         }
     }
 
@@ -1059,5 +1081,109 @@ mod tests {
             960,
         );
         assert_eq!((video.width, video.height), preview_size(&info, 960));
+    }
+
+    #[test]
+    fn the_discard_flag_is_read_from_its_own_position() {
+        // ffprobe's flags field is `K__` / `___` / `_D_`: key, discard, corrupt.
+        assert_eq!(count_discarded_packets("K__\n___\n___\n_D_\n"), Some(1));
+        assert_eq!(count_discarded_packets("K__\n___\n"), Some(0));
+        assert_eq!(count_discarded_packets("_D_\n_D_\n"), Some(2));
+    }
+
+    #[test]
+    fn a_d_outside_the_flag_position_is_not_a_discard() {
+        // The reason this is a field test and not a substring search: a second
+        // selected entry, or a codec/side-data column, puts `D`s on the line
+        // that are not `AV_PKT_FLAG_DISCARD` (#331).
+        assert_eq!(count_discarded_packets("K__,DTS\n___,DTS\n"), Some(0));
+        assert_eq!(count_discarded_packets("K__,side_data\n"), Some(0));
+        assert_eq!(count_discarded_packets("_D_,DTS\n___,DTS\n"), Some(1));
+    }
+
+    #[test]
+    fn nothing_to_read_is_not_the_same_as_no_discarded_packets() {
+        assert_eq!(count_discarded_packets(""), None);
+        assert_eq!(count_discarded_packets("  \n\n"), None);
+    }
+
+    /// The two derivations of the same fact, on the same file, must agree.
+    ///
+    /// Natively the count comes from `AV_PKT_FLAG_DISCARD` on the trailing
+    /// packets; in the browser it comes from walking the container's own
+    /// `stts`/`ctts` against the track duration. Nothing else compares them, and
+    /// a local file is answerable both ways (#331).
+    ///
+    /// Ignored because it needs a real MP4 and `ffprobe` on `PATH`. Name the
+    /// file with `TRD_TAIL_PARITY_MP4` and run:
+    ///
+    /// ```text
+    /// cargo test -p trd-gui-video-editing -- --ignored unpresented_tail
+    /// ```
+    #[test]
+    #[ignore = "needs TRD_TAIL_PARITY_MP4 and ffprobe on PATH"]
+    fn both_derivations_agree_on_the_unpresented_tail() {
+        let path = PathBuf::from(
+            std::env::var("TRD_TAIL_PARITY_MP4")
+                .expect("set TRD_TAIL_PARITY_MP4 to a local .mp4 path"),
+        );
+        let moov = read_moov_box(&path).expect("no moov box in the file");
+        let from_sample_table = trd_core::probe_moov(&moov)
+            .expect("probe_moov could not read the moov")
+            .unpresented_tail
+            .expect("the sample-table walk always answers");
+        let from_packet_flags = probe_video_info(&NativeVideoSource::Local(path))
+            .expect("ffprobe could not read the file")
+            .unpresented_tail
+            .expect("a local source is always probed");
+
+        assert_eq!(
+            from_sample_table.evidence,
+            trd_core::UnpresentedTailEvidence::SampleTable
+        );
+        assert_eq!(
+            from_packet_flags.evidence,
+            trd_core::UnpresentedTailEvidence::PacketFlags
+        );
+        assert_eq!(
+            from_sample_table.samples, from_packet_flags.samples,
+            "the sample-table walk and ffprobe's packet flags disagree"
+        );
+    }
+
+    /// The complete `moov` box, header included, which is what `probe_moov`
+    /// takes. Walks top-level boxes rather than reading the file, because the
+    /// files this is run against are hundreds of gigabytes.
+    fn read_moov_box(path: &Path) -> Option<Vec<u8>> {
+        use std::io::{Read, Seek, SeekFrom};
+
+        let mut file = std::fs::File::open(path).ok()?;
+        let end = file.seek(SeekFrom::End(0)).ok()?;
+        let mut offset = 0u64;
+        while offset + 8 <= end {
+            file.seek(SeekFrom::Start(offset)).ok()?;
+            let mut header = [0u8; 16];
+            file.read_exact(&mut header[..8]).ok()?;
+            let declared = u32::from_be_bytes(header[..4].try_into().ok()?);
+            let size = match declared {
+                0 => end - offset,
+                1 => {
+                    file.read_exact(&mut header[8..]).ok()?;
+                    u64::from_be_bytes(header[8..].try_into().ok()?)
+                }
+                declared => u64::from(declared),
+            };
+            if size < 8 || offset + size > end {
+                return None;
+            }
+            if &header[4..8] == b"moov" {
+                let mut moov = vec![0u8; usize::try_from(size).ok()?];
+                file.seek(SeekFrom::Start(offset)).ok()?;
+                file.read_exact(&mut moov).ok()?;
+                return Some(moov);
+            }
+            offset += size;
+        }
+        None
     }
 }

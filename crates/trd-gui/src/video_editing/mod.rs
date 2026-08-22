@@ -2116,7 +2116,7 @@ pub(super) mod tests {
                 fps_den: 1,
                 frame_count: 288,
                 duration_us: 12_000_000,
-                unpresented_tail_samples: None,
+                unpresented_tail: None,
             },
             poster_bytes: vec![1, 2, 3],
             frames: vec![trd_core::VideoEditingFrame {
@@ -2279,7 +2279,7 @@ pub(super) mod tests {
             fps_den: 1,
             frame_count: 288,
             duration_us: 12_000_000,
-            unpresented_tail_samples: None,
+            unpresented_tail: None,
         };
         let document = trd_core::VideoEditingDocument {
             video: authored.clone(),

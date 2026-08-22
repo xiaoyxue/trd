@@ -24,8 +24,8 @@ pub struct VideoTiming {
     ///
     /// `frame_count` counts what the track *stores*, and a container can store a
     /// sample that is not a picture: a recorder stopping mid-interval writes a
-    /// final sample outside the presentation window, which ffmpeg surfaces as
-    /// `AV_PKT_FLAG_DISCARD` and no decoder ever outputs (#324).
+    /// final sample outside the presentation window, which no decoder ever
+    /// outputs (#324).
     ///
     /// Reported rather than subtracted. The count is not wrong — the file really
     /// does store that sample — so the honest thing is to say that one of them
@@ -35,7 +35,47 @@ pub struct VideoTiming {
     /// `None` when the shell did not determine it, which is **not** the same as
     /// `Some(0)`: one means "not checked", the other "checked, there are none".
     /// Collapsing the two is the ambiguity this field exists to avoid.
-    pub unpresented_tail_samples: Option<u32>,
+    pub unpresented_tail: Option<UnpresentedTail>,
+}
+
+/// Trailing samples a container stores but never presents, **and the evidence
+/// they were counted from**.
+///
+/// The two delivery surfaces answer this question about the same container by
+/// different means, so a bare count does not say what was actually consulted —
+/// and naming the wrong mechanism sends the next investigation looking for a
+/// flag its code path never reads (#331).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnpresentedTail {
+    pub samples: u32,
+    pub evidence: UnpresentedTailEvidence,
+}
+
+/// What an [`UnpresentedTail`] was established from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnpresentedTailEvidence {
+    /// The container's own sample tables (`stts` + `ctts`) walked against the
+    /// track duration — [`probe_moov`](super::probe_moov), which is what the
+    /// browser reaches.
+    SampleTable,
+    /// `AV_PKT_FLAG_DISCARD` on the trailing packets, as ffprobe reports it —
+    /// the native adapter.
+    PacketFlags,
+}
+
+impl UnpresentedTailEvidence {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::SampleTable => "stts",
+            Self::PacketFlags => "AV_PKT_FLAG_DISCARD",
+        }
+    }
+}
+
+impl std::fmt::Display for UnpresentedTailEvidence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
 }
 
 /// A clip as an authoring document describes it: the same timing a container
@@ -60,8 +100,8 @@ pub struct VideoInfo {
     pub fps_den: u32,
     pub frame_count: u32,
     pub duration_us: i64,
-    /// See [`VideoTiming::unpresented_tail_samples`].
-    pub unpresented_tail_samples: Option<u32>,
+    /// See [`VideoTiming::unpresented_tail`].
+    pub unpresented_tail: Option<UnpresentedTail>,
 }
 
 impl VideoInfo {
@@ -83,7 +123,7 @@ impl VideoInfo {
             fps_den: timing.fps_den,
             frame_count: timing.frame_count,
             duration_us: timing.duration_us,
-            unpresented_tail_samples: timing.unpresented_tail_samples,
+            unpresented_tail: timing.unpresented_tail,
         }
     }
 
@@ -97,7 +137,7 @@ impl VideoInfo {
             fps_den: self.fps_den,
             frame_count: self.frame_count,
             duration_us: self.duration_us,
-            unpresented_tail_samples: self.unpresented_tail_samples,
+            unpresented_tail: self.unpresented_tail,
         }
     }
 }
@@ -115,7 +155,10 @@ mod tests {
             fps_den: 1001,
             frame_count: 250,
             duration_us: 8_341_667,
-            unpresented_tail_samples: Some(1),
+            unpresented_tail: Some(UnpresentedTail {
+                samples: 1,
+                evidence: UnpresentedTailEvidence::SampleTable,
+            }),
         };
         // A probed container carries real timing and no provenance...
         let probed = VideoInfo::from_probe(timing, "shot.mp4".to_owned());

@@ -28,7 +28,7 @@ pub mod video;
 pub mod video_document;
 
 pub use mp4_probe::probe_moov;
-pub use video::{VideoInfo, VideoTiming};
+pub use video::{UnpresentedTail, UnpresentedTailEvidence, VideoInfo, VideoTiming};
 pub use video_document::{
     decode_video_editing_document, Shot, VideoEditingDocument, VideoEditingError,
     VideoEditingFrame, VIDEO_EDIT_TABLE_KIND_KEY, VIDEO_EDIT_TIMELINE_KIND, VIDEO_EDIT_VERSION,
