@@ -473,19 +473,13 @@ impl VideoEditingApp {
             return;
         }
         self.current_frame_index = frame_index;
-        // Remember the *time* the shell will be given, not just the index it
-        // came from: that time is what the delivered frame gets compared
-        // against once the container's timestamps drift off the grid (#317).
+        // The id is what retires this seek: the shell stamps every frame it
+        // hands over with the seek it was servicing, so the answer identifies
+        // itself instead of having to be recognised from its timestamp (#322).
         self.pending_seek = Some(super::PendingSeek {
             frame_index,
-            media_time_seconds: super::media_time_at_frame(
-                frame_index,
-                self.video.fps_num,
-                self.video.fps_den,
-                self.video.frame_count,
-            ),
+            id: self.shared.request_seek(frame_index),
         });
-        self.shared.seek_frame.set(frame_index as i32);
     }
 
     fn select_catalog_asset(&mut self, asset: CatalogAsset) {
