@@ -377,7 +377,7 @@ appears.
 | `dimensions` | the coded size, checked against the document |
 | `FPS` | frame rate as an exact **rational** (`24/1`, `30000/1001`) — never a rounded float, because the timeline numbers frames with it |
 | `frame count` | samples the video track **stores** |
-| `unpresented tail` | samples stored but **never shown** — `none`, or `N sample(s) (AV_PKT_FLAG_DISCARD)`. A recorder stopping mid-interval writes a final sample outside the presentation window; it is counted in `frame count` but no decoder outputs it, so the last timeline index has no picture behind it (#324) |
+| `unpresented tail` | samples stored but **never shown** — `none`, `N sample(s) (AV_PKT_FLAG_DISCARD)`, or `unknown`. A recorder stopping mid-interval writes a final sample outside the presentation window; it is counted in `frame count` but no decoder outputs it, so the last timeline index has no picture behind it (#324). `unknown` means *not checked*, which is deliberately distinct from `none` — natively it is not probed for URL sources, because a second remote probe would double the cost of opening one (#326) |
 | `duration` | container duration, checked against the document |
 | `SHA-256` | the document's digest of the file it was authored against |
 | `digest` | whether that digest has been verified here — `not browser-verified yet` is the normal state, not an error |

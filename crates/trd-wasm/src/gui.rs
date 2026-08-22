@@ -302,11 +302,12 @@ fn player_timeline(width: u32, height: u32) -> trd_core::VideoInfo {
         fps_den: 1,
         frame_count: 1,
         duration_us: 0,
-        unpresented_tail_samples: 0,
+        unpresented_tail_samples: None,
     }
 }
 
-/// The timeline facts the browser bridge needs for frame↔time mapping.///
+/// The timeline facts the browser bridge needs for frame↔time mapping.
+///
 /// `Copy` in a `Cell` because they are **replaced** when the container is
 /// probed: the document's numbers are a starting point, not the truth, and with
 /// no document there is nothing but the container (#264).

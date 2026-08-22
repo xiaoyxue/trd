@@ -556,17 +556,26 @@ fn validate_file(path: &Path, info: &trd_core::VideoInfo) -> Result<(), NativeVi
 ///
 /// Asks the **demuxer**, not the decoder. A tail-only `-show_packets` reports
 /// ffmpeg's own `AV_PKT_FLAG_DISCARD` on each packet, so the answer needs no
-/// decoding and reads only the last second: measured at **0.43 s** on a
-/// 217.77 GiB recording, against 9.35 s for the same answer via `-show_frames`.
+/// decoding and reads only the last second: measured at **0.05 s** on top of a
+/// 217.77 GiB recording's 1.34 s open, against 9.35 s for the same answer via
+/// `-show_frames`.
 ///
-/// `0` when the probe fails or says nothing. Not knowing is not a reason to
-/// refuse to open — this is a *diagnostic*, and `decode_one`'s step-back keeps
-/// the timeline usable either way (#324).
-fn probe_unpresented_tail(source: &NativeVideoSource, duration_seconds: f64) -> u32 {
+/// **Local sources only.** This is a diagnostic, and a second remote probe would
+/// double the cost of opening a URL — on a path that is already the slow one
+/// (#326). A URL therefore reports `None`, "not checked", rather than a `0` that
+/// would read as "there are none".
+///
+/// `None` too when the probe fails or says nothing: not knowing is not a reason
+/// to refuse to open, and `decode_one`'s step-back keeps the timeline usable
+/// either way (#324).
+fn probe_unpresented_tail(source: &NativeVideoSource, duration_seconds: f64) -> Option<u32> {
+    let NativeVideoSource::Local(_) = source else {
+        return None;
+    };
     // A one-second window: long enough to contain a trailing sample and the key
     // frame ffprobe backs up to, short enough that the read stays negligible.
     let from = (duration_seconds - 1.0).max(0.0);
-    let Ok(output) = Command::new("ffprobe")
+    let output = Command::new("ffprobe")
         .args([
             "-v",
             "error",
@@ -582,20 +591,23 @@ fn probe_unpresented_tail(source: &NativeVideoSource, duration_seconds: f64) -> 
         ])
         .arg(source.as_os_str())
         .output()
-    else {
-        return 0;
-    };
+        .ok()?;
     if !output.status.success() {
-        return 0;
+        return None;
     }
     // ffprobe renders packet flags as a fixed field — `K__`, `___`, `_D_` — where
     // the middle position is `AV_PKT_FLAG_DISCARD`.
-    String::from_utf8_lossy(&output.stdout)
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut lines = text
         .lines()
-        .filter(|line| line.trim().contains('D'))
+        .filter(|line| !line.trim().is_empty())
+        .peekable();
+    lines.peek()?;
+    lines
+        .filter(|line| line.contains('D'))
         .count()
         .try_into()
-        .unwrap_or(0)
+        .ok()
 }
 
 /// Reads a video's own timeline with `ffprobe` — the native counterpart of the
@@ -810,7 +822,7 @@ mod tests {
             fps_den: 1,
             frame_count: 1,
             duration_us: 0,
-            unpresented_tail_samples: 0,
+            unpresented_tail_samples: None,
         }
     }
 

@@ -32,8 +32,10 @@ pub struct VideoTiming {
     /// is not a picture, instead of silently shortening the timeline and leaving
     /// the number unexplained.
     ///
-    /// `0` both when there is no such sample and when the shell could not tell.
-    pub unpresented_tail_samples: u32,
+    /// `None` when the shell did not determine it, which is **not** the same as
+    /// `Some(0)`: one means "not checked", the other "checked, there are none".
+    /// Collapsing the two is the ambiguity this field exists to avoid.
+    pub unpresented_tail_samples: Option<u32>,
 }
 
 /// A clip as an authoring document describes it: the same timing a container
@@ -59,7 +61,7 @@ pub struct VideoInfo {
     pub frame_count: u32,
     pub duration_us: i64,
     /// See [`VideoTiming::unpresented_tail_samples`].
-    pub unpresented_tail_samples: u32,
+    pub unpresented_tail_samples: Option<u32>,
 }
 
 impl VideoInfo {
@@ -113,7 +115,7 @@ mod tests {
             fps_den: 1001,
             frame_count: 250,
             duration_us: 8_341_667,
-            unpresented_tail_samples: 1,
+            unpresented_tail_samples: Some(1),
         };
         // A probed container carries real timing and no provenance...
         let probed = VideoInfo::from_probe(timing, "shot.mp4".to_owned());

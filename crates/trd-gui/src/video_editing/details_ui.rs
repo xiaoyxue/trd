@@ -207,9 +207,10 @@ fn source_rows(video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut dyn 
     r.row(
         "unpresented tail",
         &match video.unpresented_tail_samples {
-            0 => "none".to_owned(),
-            1 => "1 sample (AV_PKT_FLAG_DISCARD)".to_owned(),
-            n => format!("{n} samples (AV_PKT_FLAG_DISCARD)"),
+            None => "unknown".to_owned(),
+            Some(0) => "none".to_owned(),
+            Some(1) => "1 sample (AV_PKT_FLAG_DISCARD)".to_owned(),
+            Some(n) => format!("{n} samples (AV_PKT_FLAG_DISCARD)"),
         },
     );
     r.match_float(

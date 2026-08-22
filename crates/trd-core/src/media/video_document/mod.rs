@@ -344,7 +344,7 @@ fn decode_video_info(schema: &Schema) -> Result<VideoInfo, VideoEditingError> {
         // a property of the *container*, discovered by probing the file, while
         // the document describes the authoring intent. Bumping
         // `VIDEO_EDIT_VERSION` for a diagnostic would be the wrong trade.
-        unpresented_tail_samples: 0,
+        unpresented_tail_samples: None,
     })
 }
 
