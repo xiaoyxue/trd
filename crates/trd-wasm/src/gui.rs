@@ -482,6 +482,7 @@ impl VideoEditingHandle {
         height: u32,
         frame_index: u32,
         media_time_seconds: f64,
+        duration_seconds: f64,
     ) -> Result<(), wasm_bindgen::JsValue> {
         if frame_index >= self.timeline.get().frame_count {
             return Err(wasm_bindgen::JsValue::from_str(
@@ -489,7 +490,14 @@ impl VideoEditingHandle {
             ));
         }
         self.shared
-            .update_video_frame_rgba(rgba, width, height, frame_index, media_time_seconds)
+            .update_video_frame_rgba(
+                rgba,
+                width,
+                height,
+                frame_index,
+                media_time_seconds,
+                duration_seconds,
+            )
             .map_err(|error| wasm_bindgen::JsValue::from_str(&error))
     }
 
@@ -513,6 +521,7 @@ impl VideoEditingHandle {
         frame: web_sys::VideoFrame,
         frame_index: u32,
         media_time_seconds: f64,
+        duration_seconds: f64,
     ) -> Result<(), wasm_bindgen::JsValue> {
         // Wrapped before the first early return, so from here on *every* path
         // releases the decoder-pool slot by dropping — including the rejection
@@ -525,7 +534,7 @@ impl VideoEditingHandle {
             ));
         }
         self.shared
-            .present_external_frame(frame, frame_index, media_time_seconds)
+            .present_external_frame(frame, frame_index, media_time_seconds, duration_seconds)
             .map_err(|error| wasm_bindgen::JsValue::from_str(&error))
     }
 

@@ -124,7 +124,16 @@ async function main(): Promise<void> {
           return;
         }
         try {
-          editor.presentVideoFrame(frame, editor.frameIndexAtMediaTime(mediaSeconds), mediaSeconds);
+          editor.presentVideoFrame(
+            frame,
+            editor.frameIndexAtMediaTime(mediaSeconds),
+            mediaSeconds,
+            // The container's own duration for this frame. It is what decides
+            // whether a seek landed, because a nominal interval derived from the
+            // mean rate is not an upper bound on a variable-rate recording
+            // (#317). `null` when the decoder dropped it; Rust falls back.
+            (frame.duration ?? 0) / 1_000_000,
+          );
         } catch (error) {
           reportError(String(error));
         }

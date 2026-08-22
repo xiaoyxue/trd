@@ -364,6 +364,10 @@ struct IncomingVideoFrame {
     height: u32,
     frame_index: u32,
     media_time_seconds: f64,
+    /// How long this frame is on screen, as the container declares it. Zero
+    /// when the shell cannot say — a derived clock, or a decoder that dropped
+    /// the field — in which case the timeline's nominal interval stands in.
+    duration_seconds: f64,
     source_generation: u64,
 }
 
@@ -604,6 +608,7 @@ impl VideoEditingShared {
         frame: Rc<dyn trd_core::ExternalFrame>,
         frame_index: u32,
         media_time_seconds: f64,
+        duration_seconds: f64,
     ) -> Result<(), String> {
         let (width, height) = frame.size();
         if width == 0 || height == 0 {
@@ -616,6 +621,7 @@ impl VideoEditingShared {
             height,
             frame_index,
             media_time_seconds,
+            duration_seconds,
             source_generation: self.source_generation.get(),
         }));
         self.request_repaint();
@@ -629,6 +635,7 @@ impl VideoEditingShared {
         height: u32,
         frame_index: u32,
         media_time_seconds: f64,
+        duration_seconds: f64,
     ) -> Result<(), String> {
         let expected = width as usize * height as usize * 4;
         if rgba.len() != expected {
@@ -643,6 +650,7 @@ impl VideoEditingShared {
             height,
             frame_index,
             media_time_seconds,
+            duration_seconds,
             source_generation: self.source_generation.get(),
         }));
         self.request_repaint();
@@ -923,7 +931,7 @@ pub struct VideoEditingApp {
     video_status: Option<Result<String, String>>,
     document_url: String,
     document_status: Option<Result<String, String>>,
-    pending_seek_target: Option<u32>,
+    pending_seek: Option<PendingSeek>,
     last_pick_result: Option<Option<u32>>,
     /// The rendered texture bound directly into egui, when the shell shares
     /// trd's `wgpu::Device`. `None` means the portable readback path.
@@ -993,7 +1001,7 @@ impl VideoEditingApp {
             video_status: None,
             document_url: String::new(),
             document_status: None,
-            pending_seek_target: None,
+            pending_seek: None,
             last_pick_result: None,
             native_texture: None,
             native_texture_key: None,
@@ -1081,7 +1089,13 @@ impl VideoEditingApp {
         self.video = video;
         self.current_frame_index = self.current_frame_index.min(last);
         self.displayed_frame_index = self.displayed_frame_index.min(last);
-        self.pending_seek_target = None;
+        self.pending_seek = None;
+    }
+
+    /// One frame's worth of media time on the timeline's nominal grid — the
+    /// stand-in for a frame that arrived without a declared duration.
+    fn nominal_frame_duration_seconds(&self) -> f64 {
+        f64::from(self.video.fps_den) / f64::from(self.video.fps_num.max(1))
     }
 
     /// Binds trd's render texture straight into egui when both share a device.
@@ -1282,8 +1296,17 @@ impl VideoEditingApp {
         self.displayed_frame_ready = true;
         self.last_rendered_frame_index = Some(frame.frame_index);
         self.displayed_diagnostics = Some(rendered.diagnostics);
-        if self.pending_seek_target == Some(frame.frame_index) {
-            self.pending_seek_target = None;
+        if let Some(pending) = self.pending_seek {
+            // The frame's own duration when the container supplied one; the
+            // timeline's nominal interval only as a fallback (#317).
+            let window = if frame.duration_seconds > 0.0 {
+                frame.duration_seconds
+            } else {
+                self.nominal_frame_duration_seconds()
+            };
+            if pending.settled_by(frame.frame_index, frame.media_time_seconds, window) {
+                self.pending_seek = None;
+            }
         }
         // On the shared-device path the pixels were never read back — the
         // rendered texture is bound directly — so there is nothing to upload.
@@ -1455,6 +1478,7 @@ impl VideoEditingApp {
         let rendered_model = model;
         let background_frame_index = video.frame_index;
         let background_media_time = video.media_time_seconds;
+        let background_duration = video.duration_seconds;
         let render_started = Instant::now();
         // A frame published by `present_external_frame` carries no pixels: the
         // decoded frame still holds them on the GPU, so the source is the frame
@@ -1524,6 +1548,7 @@ impl VideoEditingApp {
                             height: render_size.1,
                             frame_index: background_frame_index,
                             media_time_seconds: background_media_time,
+                            duration_seconds: background_duration,
                             source_generation,
                         },
                         render_revision,
@@ -1826,7 +1851,7 @@ impl VideoEditingApp {
             renderer,
             requested_frame_index: self.current_frame_index,
             rendered_frame_index: self.last_rendered_frame_index,
-            seek_target: self.pending_seek_target,
+            seek_target: self.pending_seek.map(|pending| pending.frame_index),
             latest_pick_result: self.last_pick_result,
             shared: self.shared.clone(),
         }
@@ -1887,6 +1912,59 @@ pub fn frame_index_at_media_time(
 pub fn media_time_at_frame(frame_index: u32, fps_num: u32, fps_den: u32, frame_count: u32) -> f64 {
     let frame = frame_index.min(frame_count.saturating_sub(1));
     f64::from(frame) * f64::from(fps_den) / f64::from(fps_num.max(1))
+}
+
+/// A seek the timeline has asked for whose frame has not arrived yet.
+///
+/// It carries the media time the index was turned into as well as the index,
+/// because that *time* — not the index — is what the reader was actually given,
+/// and it is the only thing a delivered frame can be compared against without
+/// assuming the container's timestamps sit exactly on the derived grid.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PendingSeek {
+    frame_index: u32,
+    media_time_seconds: f64,
+}
+
+impl PendingSeek {
+    /// Whether the frame that just arrived answers this seek.
+    ///
+    /// The index is checked first, because it is the exact answer whenever the
+    /// container's frame rate really is the rational the timeline's grid is
+    /// built from.
+    ///
+    /// When it is not, that grid is a fiction the media never agreed to. The
+    /// editor asks the reader for `media_time_at_frame(target)`, the reader
+    /// answers with the frame **on screen at that instant**, and its index —
+    /// recovered by rounding its timestamp back onto the grid — can be one
+    /// lower. Demanding exact equality then leaves the seek pending for good
+    /// (#317).
+    ///
+    /// So the fallback asks the only question that is actually well posed: does
+    /// the requested instant fall inside the window this frame is displayed
+    /// for? `window` is the frame's **own** duration, which mediabunny carries
+    /// on every sample — not a nominal interval derived from the mean rate.
+    /// That distinction is the whole fix: the recording this was found on is
+    /// nominally 60 fps but alternates 272/256 timescale units per frame, so a
+    /// real frame is routinely *longer* than the mean and a mean-sized
+    /// tolerance rejects it.
+    ///
+    /// The bound is therefore exact rather than generous: a reader that answers
+    /// with the frame covering the requested instant always lands inside it, and
+    /// a frame that does not cover that instant is a genuine miss that must stay
+    /// pending.
+    ///
+    /// Where a shell has no container timestamps and derives a frame's media
+    /// time from its index — the native editor does, having no media element —
+    /// `window` falls back to the nominal interval and every distance is a whole
+    /// number of those, so this degenerates to the index comparison that path
+    /// already had.
+    fn settled_by(self, frame_index: u32, media_time_seconds: f64, window: f64) -> bool {
+        if frame_index == self.frame_index {
+            return true;
+        }
+        window > 0.0 && (media_time_seconds - self.media_time_seconds).abs() < window
+    }
 }
 
 pub(super) fn point_in_quad(point: [f32; 2], quad: [[f32; 2]; 4]) -> bool {
@@ -1950,10 +2028,10 @@ pub(super) mod tests {
     fn newest_incoming_frame_replaces_the_pending_frame() {
         let shared = VideoEditingShared::default();
         shared
-            .update_video_frame_rgba(vec![1, 2, 3, 4], 1, 1, 7, 0.25)
+            .update_video_frame_rgba(vec![1, 2, 3, 4], 1, 1, 7, 0.25, 0.0)
             .unwrap();
         shared
-            .update_video_frame_rgba(vec![5, 6, 7, 8], 1, 1, 9, 0.5)
+            .update_video_frame_rgba(vec![5, 6, 7, 8], 1, 1, 9, 0.5, 0.0)
             .unwrap();
 
         let frame = shared.frame.borrow_mut().take().unwrap();
@@ -1965,10 +2043,10 @@ pub(super) mod tests {
     fn invalid_incoming_frame_does_not_replace_the_pending_frame() {
         let shared = VideoEditingShared::default();
         shared
-            .update_video_frame_rgba(vec![1, 2, 3, 4], 1, 1, 7, 0.25)
+            .update_video_frame_rgba(vec![1, 2, 3, 4], 1, 1, 7, 0.25, 0.0)
             .unwrap();
         assert!(shared
-            .update_video_frame_rgba(vec![5, 6, 7], 1, 1, 9, 0.5)
+            .update_video_frame_rgba(vec![5, 6, 7], 1, 1, 9, 0.5, 0.0)
             .is_err());
 
         assert_eq!(
@@ -2229,12 +2307,121 @@ pub(super) mod tests {
         assert_eq!(media_time_at_frame(288, 24, 1, 288), 287.0 / 24.0);
     }
 
+    /// The rate the 11.79 GiB recording in #317 declares: 60 fps to seven
+    /// digits, but *not* `60/1`. Its `stts` alternates 272/256 timescale units
+    /// at a 16 kHz timescale, so the mean interval is 266⅔ and a real frame is
+    /// routinely **longer** than the mean.
+    const DRIFTING_NUM: f64 = 141_839_000.0;
+    const DRIFTING_DEN: f64 = 2_363_983.0;
+    const TIMESCALE: f64 = 16_000.0;
+
+    #[test]
+    fn an_exact_rate_settles_a_seek_on_the_index_alone() {
+        let frame_duration = 1.0 / 24.0;
+        let pending = PendingSeek {
+            frame_index: 135,
+            media_time_seconds: 135.0 * frame_duration,
+        };
+
+        assert!(
+            pending.settled_by(135, 135.0 * frame_duration, frame_duration),
+            "an exact rate must still settle the way it always did"
+        );
+    }
+
+    /// #317, with the numbers measured in the browser: the timeline asked for
+    /// frame 95838, and the reader answered with the frame displayed at that
+    /// instant — index 95837, presented at 1597.283 s for 272 timescale units.
+    ///
+    /// The requested instant sits inside *that frame's* window but outside a
+    /// mean-sized one, which is precisely why the frame's own duration is what
+    /// the decision has to be made on. Asserting both directions here is the
+    /// point of the test: the mean is not merely less precise, it is wrong.
+    #[test]
+    fn a_frames_own_duration_settles_a_seek_the_mean_interval_rejects() {
+        let mean_interval = DRIFTING_DEN / DRIFTING_NUM;
+        let pending = PendingSeek {
+            frame_index: 95_838,
+            media_time_seconds: 95_838.0 * mean_interval,
+        };
+        let delivered_pts = 1597.283;
+        let delivered_duration = 272.0 / TIMESCALE;
+
+        let distance = (delivered_pts - pending.media_time_seconds).abs();
+        assert!(
+            distance > mean_interval && distance < delivered_duration,
+            "fixture must straddle the two windows ({distance} vs mean {mean_interval}, own {delivered_duration})"
+        );
+        assert!(
+            !pending.settled_by(95_837, delivered_pts, mean_interval),
+            "a mean-sized window is what left this seek pending for good"
+        );
+        assert!(
+            pending.settled_by(95_837, delivered_pts, delivered_duration),
+            "the requested instant falls inside the frame's own presentation window"
+        );
+    }
+
+    /// The window is a bound, not a fudge factor: a frame whose presentation
+    /// window does not cover the requested instant is a genuine miss and must
+    /// stay pending rather than be quietly accepted.
+    #[test]
+    fn a_frame_that_does_not_cover_the_request_leaves_the_seek_pending() {
+        let mean_interval = DRIFTING_DEN / DRIFTING_NUM;
+        let pending = PendingSeek {
+            frame_index: 95_838,
+            media_time_seconds: 95_838.0 * mean_interval,
+        };
+
+        assert!(
+            !pending.settled_by(
+                95_833,
+                pending.media_time_seconds - 5.0 * mean_interval,
+                272.0 / TIMESCALE
+            ),
+            "a five-frame miss is not covered by any one frame's window"
+        );
+    }
+
+    /// The native editor has no media element, so it derives a frame's media
+    /// time from its index and declares no duration. The fallback window is then
+    /// the nominal interval, every distance is a whole number of those, and none
+    /// is *strictly* inside one — so that path keeps exactly the index
+    /// comparison it had before.
+    #[test]
+    fn a_derived_media_time_degenerates_to_the_index_comparison() {
+        let frame_duration = 1.0 / 24.0;
+        let pending = PendingSeek {
+            frame_index: 135,
+            media_time_seconds: 135.0 * frame_duration,
+        };
+
+        assert!(
+            !pending.settled_by(134, 134.0 * frame_duration, frame_duration),
+            "a derived time exactly one interval away is the neighbouring frame, not this one"
+        );
+    }
+
+    /// A timeline with no usable rate must not make every frame settle every
+    /// seek — a zero window would otherwise be compared against, and the index
+    /// still has to decide.
+    #[test]
+    fn a_zero_window_falls_back_to_the_index() {
+        let pending = PendingSeek {
+            frame_index: 7,
+            media_time_seconds: 0.0,
+        };
+
+        assert!(pending.settled_by(7, 0.0, 0.0));
+        assert!(!pending.settled_by(6, 0.0, 0.0));
+    }
+
     #[test]
     fn source_reset_invalidates_frames_renders_and_picks() {
         let shared = VideoEditingShared::default();
         shared.set_video_status(true, false);
         shared
-            .update_video_frame_rgba(vec![1, 2, 3, 4], 1, 1, 7, 0.25)
+            .update_video_frame_rgba(vec![1, 2, 3, 4], 1, 1, 7, 0.25, 0.0)
             .unwrap();
         let source_generation = shared.source_generation.get();
         shared.request_overlay();
@@ -2248,6 +2435,7 @@ pub(super) mod tests {
                 height: 1,
                 frame_index: 7,
                 media_time_seconds: 0.25,
+                duration_seconds: 0.0,
                 source_generation,
             },
             render_revision,
@@ -2284,6 +2472,7 @@ pub(super) mod tests {
                 height: 1,
                 frame_index: 7,
                 media_time_seconds: 0.25,
+                duration_seconds: 0.0,
                 source_generation: shared.source_generation.get(),
             },
             render_revision: revision,
@@ -2512,7 +2701,7 @@ pub(super) mod tests {
         // A newer frame arrives but has not reached the screen: the timeline
         // block must still describe frame 0, delta included.
         shared
-            .update_video_frame_rgba(vec![1, 2, 3, 4], 1, 1, 5, 5.0 / 24.0)
+            .update_video_frame_rgba(vec![1, 2, 3, 4], 1, 1, 5, 5.0 / 24.0, 0.0)
             .unwrap();
         shared.set_video_media_observation(4, false);
 
