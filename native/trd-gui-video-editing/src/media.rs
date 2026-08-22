@@ -28,6 +28,39 @@ pub struct DecodedFrame {
     pub rgba: Vec<u8>,
 }
 
+/// The flags that make ffmpeg describe what it emits, in the source clock.
+///
+/// **`-copyts` is load-bearing.** Without it `-ss` rebases the output clock to
+/// zero, so `showinfo` reports an offset from the seek point instead of the
+/// source timestamp — a number that looks perfectly reasonable and is wrong by
+/// however far the seek went. Both call sites share this list so neither can
+/// drift from the other.
+const REPORTING_FLAGS: [&str; 4] = ["-hide_banner", "-v", "info", "-copyts"];
+
+/// What a decoded frame should report, given what ffmpeg said about it.
+///
+/// Split out from the two decode paths because this is the decision the bug was
+/// in: a requested index used to be taken on trust, and here it is only a
+/// fallback for when ffmpeg said nothing (#319).
+fn resolve_timing(
+    reported: Option<(f64, f64)>,
+    requested_index: u32,
+    fps_num: u32,
+    fps_den: u32,
+    frame_count: u32,
+) -> (u32, f64, f64) {
+    match reported {
+        Some((pts, duration)) => (index_at(pts, fps_num, fps_den, frame_count), pts, duration),
+        // No report: keep doing what this always did, and say the duration is
+        // unknown rather than inventing the nominal one.
+        None => (
+            requested_index,
+            f64::from(requested_index) * f64::from(fps_den) / f64::from(fps_num.max(1)),
+            0.0,
+        ),
+    }
+}
+
 /// Pulls `(presentation timestamp, duration)` out of one `showinfo` line.
 ///
 /// This is ffmpeg stating what it actually decoded, which is the only way to
@@ -158,19 +191,8 @@ impl NativeVideo {
     pub fn decode_one(&self, index: u32) -> Result<DecodedFrame, NativeVideoEditingError> {
         let index = index.min(self.frame_count.saturating_sub(1));
         let output = Command::new("ffmpeg")
-            // `-copyts` is load-bearing: without it `-ss` rebases the output
-            // clock to zero and `showinfo` reports an offset from the seek point
-            // rather than the source timestamp, which is exactly the number that
-            // must not be guessed.
-            .args([
-                "-hide_banner",
-                "-v",
-                "info",
-                "-copyts",
-                "-ss",
-                &self.timestamp(index),
-                "-i",
-            ])
+            .args(REPORTING_FLAGS)
+            .args(["-ss", &self.timestamp(index), "-i"])
             .arg(self.source.as_os_str())
             .args([
                 "-frames:v",
@@ -205,10 +227,15 @@ impl NativeVideo {
         let reported = String::from_utf8_lossy(&output.stderr)
             .lines()
             .find_map(parse_showinfo);
-        let (media_time_seconds, duration_seconds) =
-            reported.unwrap_or((self.timestamp_seconds(index), 0.0));
+        let (index, media_time_seconds, duration_seconds) = resolve_timing(
+            reported,
+            index,
+            self.fps_num,
+            self.fps_den,
+            self.frame_count,
+        );
         Ok(DecodedFrame {
-            index: self.index_at(media_time_seconds),
+            index,
             media_time_seconds,
             duration_seconds,
             rgba: output.stdout,
@@ -284,17 +311,6 @@ impl NativeVideo {
         f64::from(index) * f64::from(self.fps_den) / f64::from(self.fps_num)
     }
 
-    /// The frame a reported timestamp belongs to, mapped exactly as the browser
-    /// maps its own, so both surfaces number frames the same way.
-    fn index_at(&self, media_time_seconds: f64) -> u32 {
-        trd_gui::video_editing::frame_index_at_media_time(
-            media_time_seconds,
-            self.fps_num,
-            self.fps_den,
-            self.frame_count,
-        )
-    }
-
     fn scale_filter(&self) -> String {
         format!("scale={}:{}", self.width, self.height)
     }
@@ -333,15 +349,8 @@ fn stream_frames(
     let spawned = Command::new("ffmpeg")
         // See `decode_one`: `-copyts` keeps `showinfo` reporting source
         // timestamps rather than an offset from the seek point.
-        .args([
-            "-hide_banner",
-            "-v",
-            "info",
-            "-copyts",
-            "-ss",
-            &timestamp,
-            "-i",
-        ])
+        .args(REPORTING_FLAGS)
+        .args(["-ss", &timestamp, "-i"])
         .arg(source.as_os_str())
         .args(["-vf", &scale, "-pix_fmt", "rgba", "-f", "rawvideo", "-"])
         .stdin(Stdio::null())
@@ -389,14 +398,8 @@ fn stream_frames(
         let reported = timings
             .as_ref()
             .and_then(|rx| rx.recv_timeout(TIMING_WAIT).ok());
-        let (index, media_time_seconds, duration_seconds) = match reported {
-            Some((pts, duration)) => (index_at(pts, fps_num, fps_den, frame_count), pts, duration),
-            None => (
-                counted,
-                f64::from(counted) * f64::from(fps_den) / f64::from(fps_num.max(1)),
-                0.0,
-            ),
-        };
+        let (index, media_time_seconds, duration_seconds) =
+            resolve_timing(reported, counted, fps_num, fps_den, frame_count);
         if generation_counter.load(Ordering::SeqCst) != generation
             || sender
                 .send(Ok(DecodedFrame {
@@ -472,8 +475,8 @@ fn spawn_stderr_reader(
     (Some(receiver), handle)
 }
 
-/// The free twin of [`NativeVideo::index_at`], for the decoder thread, which
-/// owns copies of the timing rather than the video.
+/// The frame a reported timestamp belongs to, mapped exactly as the browser maps
+/// its own, so both surfaces number frames the same way.
 fn index_at(media_time_seconds: f64, fps_num: u32, fps_den: u32, frame_count: u32) -> u32 {
     trd_gui::video_editing::frame_index_at_media_time(
         media_time_seconds,
@@ -775,6 +778,121 @@ mod tests {
             None,
             "an unparseable timestamp is not a timing line"
         );
+    }
+
+    /// The timing of the variable-rate recording #319 was found on: 60 fps
+    /// nominal, 283 678 frames, `stts` alternating 272/256 units at 16 kHz.
+    const VFR: (u32, u32, u32) = (60, 1, 283_678);
+
+    /// The heart of the fix. Asking for frame 200000 puts the request at
+    /// `200000/60 = 3333.333333 s`, a third of a millisecond after the real
+    /// timestamp `3333.333`, so ffmpeg answers with the *next* picture at
+    /// `3333.350`. That picture is frame 200001 and must be reported as such —
+    /// filing it under the requested index is the silent placement error.
+    #[test]
+    fn a_reported_timestamp_decides_the_index_not_the_request() {
+        let (num, den, count) = VFR;
+
+        let (index, media_time, duration) =
+            resolve_timing(Some((3333.350, 0.017)), 200_000, num, den, count);
+
+        assert_eq!(
+            index, 200_001,
+            "the frame reported must be the one received"
+        );
+        assert_eq!(
+            media_time, 3333.350,
+            "the timestamp must be ffmpeg's verbatim"
+        );
+        assert_eq!(
+            duration, 0.017,
+            "the frame's own window, not the nominal one"
+        );
+    }
+
+    /// The second measured mislabel, at the far end of the same file — one
+    /// sample could be a coincidence of where that seek happened to land.
+    #[test]
+    fn the_same_holds_at_the_far_end_of_a_long_timeline() {
+        let (num, den, count) = VFR;
+
+        let (index, media_time, _) =
+            resolve_timing(Some((4575.350, 0.017)), 274_520, num, den, count);
+
+        assert_eq!(index, 274_521);
+        assert_eq!(media_time, 4575.350);
+    }
+
+    /// A request that *does* land keeps its index, so this is not a blanket
+    /// off-by-one: two of the four measured probes on that file were exact.
+    #[test]
+    fn a_request_that_lands_keeps_its_index() {
+        let (num, den, count) = VFR;
+
+        let (index, ..) = resolve_timing(Some((1597.300, 0.017)), 95_838, num, den, count);
+
+        assert_eq!(index, 95_838);
+    }
+
+    /// A constant-rate source has no divergence to resolve — the nominal grid
+    /// *is* the timestamps — which is why every existing fixture passed while
+    /// this bug was live.
+    #[test]
+    fn a_constant_rate_source_reports_exactly_what_was_asked_for() {
+        let (index, media_time, duration) =
+            resolve_timing(Some((5.625, 1.0 / 24.0)), 135, 24, 1, 288);
+
+        assert_eq!(index, 135);
+        assert_eq!(media_time, 5.625);
+        assert!((duration - 1.0 / 24.0).abs() < 1e-9);
+    }
+
+    /// ffmpeg saying nothing must not break playback: the frame still arrives,
+    /// falling back to the request — which is what this did unconditionally
+    /// before — and declares its duration unknown rather than inventing one.
+    #[test]
+    fn without_a_report_the_request_stands_and_the_duration_is_unknown() {
+        let (index, media_time, duration) = resolve_timing(None, 135, 24, 1, 288);
+
+        assert_eq!(index, 135);
+        assert!((media_time - 5.625).abs() < 1e-9);
+        assert_eq!(
+            duration, 0.0,
+            "an unknown duration must be reported as unknown, so the caller falls back"
+        );
+    }
+
+    /// `-copyts` is the difference between a source timestamp and an offset from
+    /// the seek point, and dropping it fails *silently* — every reported time
+    /// would simply be shifted. Worth pinning by name.
+    #[test]
+    fn the_reporting_flags_keep_timestamps_in_the_source_clock() {
+        assert!(
+            REPORTING_FLAGS.contains(&"-copyts"),
+            "without -copyts, showinfo reports an offset from the seek point"
+        );
+        assert!(
+            REPORTING_FLAGS.contains(&"info"),
+            "showinfo logs at info level; a quieter level emits no timings at all"
+        );
+    }
+
+    /// The reporter has to sit *behind* the scaler in one chain, or there is
+    /// nothing to pair frames with.
+    #[test]
+    fn the_filter_chain_carries_the_reporter() {
+        let video = NativeVideo {
+            source: NativeVideoSource::Local(PathBuf::new()),
+            fps_num: 24,
+            fps_den: 1,
+            frame_count: 288,
+            generation: Arc::new(AtomicU64::new(0)),
+            receiver: None,
+            width: 960,
+            height: 540,
+        };
+
+        assert_eq!(video.reporting_filter(), "scale=960:540,showinfo");
     }
 
     #[test]
