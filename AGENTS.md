@@ -263,6 +263,38 @@ frame copy now reaches the render core through `trd_core::ExternalFrame`
 `#[cfg(web)]`).
 </details>
 
+#### Prefer moving a `cfg` into `trd-wasm` over living with one
+
+Rule 3 says when a `cfg` is *permitted*. This says what to try first, because the
+cheapest `cfg` to review is the one that was never written.
+
+**The two directions are not the same problem.**
+
+| Written as | Means | Standing |
+|---|---|---|
+| `#[cfg(target_arch = "wasm32")]` | "this exists **only** in the browser" | Almost always belongs in `trd-wasm` instead. A native build never compiles it, so nothing native checks it — the failure rule 2 exists to prevent. |
+| `#[cfg(not(target_arch = "wasm32"))]` | "this has **no browser meaning at all**" | Legitimate. A browser has no `R: Read` and no blocking executor; `io/mod.rs` and the GPU test harness say so honestly. |
+
+**Work down this order and stop at the first that fits.**
+
+| | Resolution | Precedent |
+|---|---|---|
+| 1 | **Name a seam in the shared crate; implement it in `trd-wasm`.** The shared crate keeps the type and its invariants; the browser supplies only the part that cannot compile natively. | `ExternalFrame` (#302) — replaced eleven `cfg`s and a `web-sys` dependency across two shared crates |
+| 2 | **Two real arms behind one shim**, so no caller sees a `cfg` at all. | the two `platform.rs` files |
+| 3 | **Gate the module, not its items** — one `cfg` on the `mod`, none inside. | `render/mod.rs` gating the GPU test harness (#299) |
+| 4 | **Last resort: a `cfg` in place**, for something with genuinely no browser meaning. | `cfg(not(target_arch = "wasm32"))` on `InputStream`, the native byte transport |
+
+**A seam must not cost more than the `cfg` it removes.** If option 1 only
+relocates the complexity — spreading one call across three crates, or adding a
+trait with exactly one implementor and one caller that no third party could ever
+use — take a lower row and write the honest `cfg`. The goal is code a reader can
+follow **on one platform without mentally compiling the other**, not the smallest
+possible `cfg` count.
+
+The one thing that is never a trade-off: option 4 must not hide a **browser-only**
+type in a shared crate. That is rule 3's line, and the case a native build cannot
+check for you.
+
 ### `web/` is a Bun workspace
 
 Sibling `viewer/`, `gui-viewer/`, and `gui-video-editing/` packages. Each
