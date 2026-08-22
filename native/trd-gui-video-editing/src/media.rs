@@ -562,9 +562,9 @@ fn validate_file(path: &Path, info: &trd_core::VideoInfo) -> Result<(), NativeVi
 ///
 /// This is *not* how the browser reaches the same number — there it is a walk of
 /// the container's own `stts`/`ctts` against the track duration. The answer
-/// therefore carries [`UnpresentedTailEvidence`] saying which one produced it,
-/// so a reader is never sent looking for a packet flag in a path that reads
-/// sample tables (#331).
+/// therefore carries [`trd_core::UnpresentedTailEvidence`] saying which one
+/// produced it, so a reader is never sent looking for a packet flag in a path
+/// that reads sample tables (#331).
 ///
 /// **Local sources only.** This is a diagnostic, and a second remote probe would
 /// double the cost of opening a URL — on a path that is already the slow one

@@ -830,7 +830,10 @@ Keep to a fixed glyph set so the format stays consistent and greppable:
 |---|---|
 | **status** | ✅ passed · ❌ failed · ⏳ not yet run · 🤝 handed off · n/a not applicable |
 | **platform** | 🪟 Windows · 🐧 Linux/Nix |
-| **gate** | 🎨 fmt · 📎 clippy · 🕸️ clippy-wasm · 🧪 tests · 🔀 decoder-parity · 🖼️ golden-render · 🎮 gpu-tests · 🌐 tsc/biome · 🖥️ window e2e (§4.2/4.3) · 🎬 video-editor e2e (§4.5/4.6) · 📼 large-file seek (§4.7) |
+| **gate** | 🎨 fmt · 📎 clippy · 🕸️ clippy-wasm · 🧪 tests · 🔀 decoder-parity · 📚 rustdoc · 🌐 tsc/biome · 🖼️ golden-render · 🎮 gpu-tests · 🖥️ window e2e (§4.2/4.3) · 🎬 video-editor e2e (§4.5/4.6) · 📼 large-file seek (§4.7) |
+
+The glyphs are listed **in the order the rows go in**, L1 first, so a matrix can
+be read against the level table above it.
 
 One matrix row per gate, one column per platform (cells are status icons, an
 optional count like `(173)`); the handoff list is a 🤝-headed checklist of the
@@ -849,8 +852,12 @@ result:
 | 🕸️ clippy wasm32 (lib)         | ✅ | 🤝 |
 | 🧪 `cargo test --lib` (173)    | ✅ | 🤝 |
 | 🔀 `decoder_parity` (2)        | ✅ | 🤝 |
+| 📚 rustdoc (0 broken links)    | ✅ | 🤝 |
+| 🌐 `tsc --noEmit` + Biome      | ✅ | 🤝 |
 | 🖼️ `golden_render` (6/6, GPU)  | ✅ | 🤝 |
+| 🎮 `gpu_tests` + `gui_render`  | ✅ | 🤝 |
 | 🖥️ window e2e (§4.2/4.3)       | n/a (L2) | n/a (L2) |
+| 🎬 video-editor e2e (§4.5/4.6) | n/a (L2) | n/a (L2) |
 | 📼 large-file seek (§4.7)      | n/a (L2) | n/a (L2) |
 
 ## 🤝 Handoff — 🐧 Linux/Nix
