@@ -276,8 +276,19 @@ impl NativeVideoEditingApp {
             self.seek(index);
         }
         if let Some(asset) = self.shared.take_asset_request() {
-            if let Err(error) = self.load_catalog_asset(asset) {
-                self.shared.set_error(error);
+            // Logged, not merely surfaced in the UI. A catalog load reads and
+            // decodes up to tens of megabytes and rebuilds the renderer, so it
+            // is worth being able to see that it was asked for and that it
+            // finished — and a failure has to reach somewhere that cannot be
+            // overwritten, since `set_error` writes to a single shared cell that
+            // the next submitted frame clears.
+            log::info!("loading catalog asset {asset:?}");
+            match self.load_catalog_asset(asset) {
+                Ok(()) => log::info!("catalog asset {asset:?} loaded"),
+                Err(error) => {
+                    log::error!("catalog asset {asset:?} failed to load: {error}");
+                    self.shared.set_error(error);
+                }
             }
         }
     }
