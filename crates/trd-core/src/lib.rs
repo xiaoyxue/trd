@@ -73,7 +73,7 @@ pub use media::{
     VideoEditingFrame, VIDEO_EDIT_TABLE_KIND_KEY, VIDEO_EDIT_TIMELINE_KIND, VIDEO_EDIT_VERSION,
     VIDEO_EDIT_VERSION_KEY,
 };
-pub use media::{probe_moov, VideoInfo, VideoTiming};
+pub use media::{probe_moov, UnpresentedTail, UnpresentedTailEvidence, VideoInfo, VideoTiming};
 pub use render::{RenderError, Renderer};
 pub use texture::{
     ConstantTexture, ImageData, ImageTexture, Texture, TextureError, TEXTURE_COLUMN,

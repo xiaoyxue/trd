@@ -206,11 +206,17 @@ fn source_rows(video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut dyn 
     r.row("frame count", &video.frame_count.to_string());
     r.row(
         "unpresented tail",
-        &match video.unpresented_tail_samples {
+        &match video.unpresented_tail {
             None => "unknown".to_owned(),
-            Some(0) => "none".to_owned(),
-            Some(1) => "1 sample (AV_PKT_FLAG_DISCARD)".to_owned(),
-            Some(n) => format!("{n} samples (AV_PKT_FLAG_DISCARD)"),
+            // Name the observation, then the evidence it rests on. The two
+            // delivery surfaces establish this differently, so stating one
+            // surface's mechanism for both sends the next investigation looking
+            // for a flag its path never reads (#331).
+            Some(tail) => match tail.samples {
+                0 => format!("none ({})", tail.evidence),
+                1 => format!("1 sample not presented ({})", tail.evidence),
+                n => format!("{n} samples not presented ({})", tail.evidence),
+            },
         },
     );
     r.match_float(

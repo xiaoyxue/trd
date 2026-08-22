@@ -35,7 +35,7 @@
 //!     └── tkhd                track dimensions
 //! ```
 
-use super::video::VideoTiming;
+use super::video::{UnpresentedTail, UnpresentedTailEvidence, VideoTiming};
 
 /// Reads the video track's metadata from a `moov` box.
 ///
@@ -60,6 +60,12 @@ fn probe_trak(trak: &[u8]) -> Option<VideoTiming> {
 
     let (timescale, track_duration) = find_box(mdia, b"mdhd").and_then(mdhd)?;
     let stbl = find_box(mdia, b"minf").and_then(|minf| find_box(minf, b"stbl"))?;
+    // The edit list is on the track, not the media: it says where in the media
+    // the presented timeline begins (#331).
+    let composition_start = find_box(trak, b"edts")
+        .and_then(|edts| find_box(edts, b"elst"))
+        .and_then(elst_media_time)
+        .unwrap_or(0);
     let frame_count = find_box(stbl, b"stsz").and_then(stsz_count)?;
     let (sample_count, total_delta) = find_box(stbl, b"stts").and_then(stts_totals)?;
     let (width, height) = find_box(trak, b"tkhd").and_then(tkhd_size)?;
@@ -100,7 +106,12 @@ fn probe_trak(trak: &[u8]) -> Option<VideoTiming> {
         fps_den: fps_den.max(1),
         frame_count,
         duration_us,
-        unpresented_tail_samples: unpresented_tail(stbl, track_duration),
+        unpresented_tail: unpresented_tail(stbl, track_duration, composition_start).map(
+            |samples| UnpresentedTail {
+                samples,
+                evidence: UnpresentedTailEvidence::SampleTable,
+            },
+        ),
     })
 }
 
@@ -206,10 +217,16 @@ fn stts_totals(stts: &[u8]) -> Option<(u32, u64)> {
 /// carries. Reading only `stts` finds nothing on exactly the files this exists
 /// for.
 ///
+/// **Nor is `ctts` alone.** A composition offset shifts *every* presentation
+/// time forward, and `composition_start` — the edit list's media time — is what
+/// shifts the presented timeline back to zero. Measuring from the wrong origin
+/// reports the last frames of an ordinary B-frame file as unpresented: it
+/// claimed 2 on this repo's own demo clip, whose `elst` starts at 1024 (#331).
+///
 /// Both tables are run-length encoded and walked together, one sample at a time
 /// but with no allocation — the moov is already in memory, and the arithmetic is
 /// two additions per sample.
-fn unpresented_tail(stbl: &[u8], track_duration: u64) -> Option<u32> {
+fn unpresented_tail(stbl: &[u8], track_duration: u64, composition_start: i64) -> Option<u32> {
     if track_duration == 0 {
         return Some(0);
     }
@@ -224,13 +241,37 @@ fn unpresented_tail(stbl: &[u8], track_duration: u64) -> Option<u32> {
     for (count, delta) in deltas.runs() {
         for _ in 0..count {
             let offset = offsets.as_mut().and_then(RunTable::next_value).unwrap_or(0);
-            if dts + i64::from(offset) >= track_duration as i64 {
+            if dts + i64::from(offset) - composition_start >= track_duration as i64 {
                 unpresented = unpresented.saturating_add(1);
             }
             dts += i64::from(delta);
         }
     }
     Some(unpresented)
+}
+
+/// The media time the edit list starts presenting from — the origin every
+/// presentation time is measured against.
+///
+/// Entries with a negative `media_time` are **empty edits**: a gap inserted
+/// before the media, not a selection within it, so the first non-negative entry
+/// is the origin. No edit list means the media's own timeline is presented as
+/// is, which is an origin of zero.
+fn elst_media_time(elst: &[u8]) -> Option<i64> {
+    let version = *elst.first()?;
+    let entries = u32::from_be_bytes(elst.get(4..8)?.try_into().ok()?) as usize;
+    let (stride, offset) = if version == 1 { (20, 8) } else { (12, 4) };
+    (0..entries).find_map(|index| {
+        let entry = elst.get(8 + index * stride..8 + (index + 1) * stride)?;
+        let media_time = if version == 1 {
+            i64::from_be_bytes(entry.get(offset..offset + 8)?.try_into().ok()?)
+        } else {
+            i64::from(i32::from_be_bytes(
+                entry.get(offset..offset + 4)?.try_into().ok()?,
+            ))
+        };
+        (media_time >= 0).then_some(media_time)
+    })
 }
 
 /// A `stts`/`ctts` style run-length table: `[version+flags][entry_count]` then
@@ -486,7 +527,7 @@ mod tests {
     fn a_sample_starting_at_the_declared_end_is_never_presented() {
         let stbl = timing_stbl(&[(694_840, 1)], Some(&[(694_839, 0), (1, 1)]));
 
-        assert_eq!(unpresented_tail(&stbl, 694_840), Some(1));
+        assert_eq!(unpresented_tail(&stbl, 694_840, 0), Some(1));
     }
 
     /// The trap this walked into first: `stts` accumulates to **decode** time, so
@@ -498,7 +539,7 @@ mod tests {
         let stbl = timing_stbl(&[(694_840, 1)], None);
 
         assert_eq!(
-            unpresented_tail(&stbl, 694_840),
+            unpresented_tail(&stbl, 694_840, 0),
             Some(0),
             "without ctts every sample's dts is inside the track, which is exactly why ctts is read"
         );
@@ -509,7 +550,7 @@ mod tests {
     fn a_track_that_ends_with_its_last_picture_has_no_unpresented_tail() {
         let stbl = timing_stbl(&[(250, 1)], None);
 
-        assert_eq!(unpresented_tail(&stbl, 250), Some(0));
+        assert_eq!(unpresented_tail(&stbl, 250, 0), Some(0));
     }
 
     /// A container that declares no duration says nothing about what it presents,
@@ -518,7 +559,60 @@ mod tests {
     fn an_unknown_duration_reports_no_unpresented_tail() {
         let stbl = timing_stbl(&[(250, 1)], None);
 
-        assert_eq!(unpresented_tail(&stbl, 0), Some(0));
+        assert_eq!(unpresented_tail(&stbl, 0, 0), Some(0));
+    }
+
+    /// The #331 false positive, in the shape measured on this repo's own demo
+    /// clip (`shot_0001.mp4`): 288 samples 512 apart, composition offsets up to
+    /// 2560, and an `elst` starting at 1024. Raw presentation times run
+    /// 1024..=147 968 against a declared 147 456, so two samples look past the
+    /// end — until the edit list says where the timeline actually starts.
+    ///
+    /// ffprobe reports no discarded packet on that file, and this is what makes
+    /// the two derivations agree.
+    #[test]
+    fn the_edit_list_is_the_origin_presentation_time_is_measured_from() {
+        // 288 samples 512 apart; the first and the last two carry a composition
+        // offset of 1024, which is where the `elst` starts. Raw presentation
+        // times therefore reach 147 968 against a declared 147 456.
+        let stbl = timing_stbl(&[(288, 512)], Some(&[(1, 1024), (285, 0), (2, 1024)]));
+
+        assert_eq!(
+            unpresented_tail(&stbl, 147_456, 0),
+            Some(2),
+            "measured from zero, the composition offset pushes the tail past the end"
+        );
+        assert_eq!(
+            unpresented_tail(&stbl, 147_456, 1024),
+            Some(0),
+            "measured from the edit list's media time, every sample is inside the track"
+        );
+    }
+
+    #[test]
+    fn an_empty_edit_is_a_gap_not_an_origin() {
+        // version 0, one empty edit (media_time -1) then the real one at 512.
+        let mut elst = vec![0u8; 4];
+        elst.extend_from_slice(&2u32.to_be_bytes());
+        elst.extend_from_slice(&1000u32.to_be_bytes());
+        elst.extend_from_slice(&(-1i32).to_be_bytes());
+        elst.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+        elst.extend_from_slice(&1000u32.to_be_bytes());
+        elst.extend_from_slice(&512i32.to_be_bytes());
+        elst.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+
+        assert_eq!(elst_media_time(&elst), Some(512));
+    }
+
+    #[test]
+    fn a_64_bit_edit_list_is_read_at_its_own_stride() {
+        let mut elst = vec![1u8, 0, 0, 0];
+        elst.extend_from_slice(&1u32.to_be_bytes());
+        elst.extend_from_slice(&12_000u64.to_be_bytes());
+        elst.extend_from_slice(&1024i64.to_be_bytes());
+        elst.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+
+        assert_eq!(elst_media_time(&elst), Some(1024));
     }
 
     #[test]
