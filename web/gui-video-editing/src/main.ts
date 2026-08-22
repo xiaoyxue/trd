@@ -16,6 +16,11 @@ import wasmUrl from "../pkg/trd_wasm_bg.wasm" with { type: "file" };
 import { byteSourceFor, MediabunnyReader, type MediaInput } from "./media/mediabunny-reader.ts";
 import { VideoPlayer } from "./media/player.ts";
 
+/// Which path an error came from. Mirrors Rust's `ErrorScope` codes, which the
+/// editor uses to keep one path's success from clearing another's failure.
+type ErrorScope = "media" | "catalog" | "document";
+const errorScopes: Record<ErrorScope, number> = { media: 1, catalog: 2, document: 3 };
+
 async function main(): Promise<void> {
   await init({ module_or_path: wasmUrl });
   const canvas = document.getElementById("video-editing-canvas");
@@ -42,9 +47,12 @@ async function main(): Promise<void> {
   /// Surfaces a failure. The editor's UI is a canvas, so an error drawn there
   /// can be read but not selected, copied or scrolled back to — logging it as
   /// well is what makes a failure reportable and reproducible.
-  function reportError(message: string): void {
-    console.error(`video editing: ${message}`);
-    editor.setVideoError(message);
+  ///
+  /// `scope` names the path that failed, so a recovered decode cannot clear a
+  /// catalog or document failure (#329).
+  function reportError(scope: ErrorScope, message: string): void {
+    console.error(`video editing (${scope}): ${message}`);
+    editor.setError(errorScopes[scope], message);
   }
 
   const catalog = new Map<number, { modelUrl: string; textureUrl?: string }>([
@@ -135,7 +143,7 @@ async function main(): Promise<void> {
             (frame.duration ?? 0) / 1_000_000,
           );
         } catch (error) {
-          reportError(String(error));
+          reportError("media", String(error));
         }
       },
       ended(): void {
@@ -145,7 +153,7 @@ async function main(): Promise<void> {
       },
       failed(message: string): void {
         if (generation === sourceGeneration) {
-          reportError(message);
+          reportError("media", message);
         }
       },
     };
@@ -212,7 +220,7 @@ async function main(): Promise<void> {
       if (generation === sourceGeneration) {
         sourceReady = false;
         editor.setVideoStatus(false, false);
-        reportError(String(error));
+        reportError("media", String(error));
       }
     }
   }
@@ -225,7 +233,7 @@ async function main(): Promise<void> {
     try {
       editor.validateVideoFile(file.name, file.size);
     } catch (error) {
-      reportError(String(error));
+      reportError("media", String(error));
       input.value = "";
       return;
     }
@@ -262,7 +270,7 @@ async function main(): Promise<void> {
           }
           void loadVideoSource({ kind: "url", url: url.href });
         } catch (error) {
-          reportError(String(error));
+          reportError("media", String(error));
         }
       } else if (pendingVideoFile) {
         const file = pendingVideoFile;
@@ -273,16 +281,14 @@ async function main(): Promise<void> {
       }
       // The document is part of the same commit, and it applies whether or not a
       // video was loaded above.
-      void loadSelectedDocument().catch((error: unknown) =>
-        reportError(`annotation document: ${String(error)}`),
-      );
+      void loadSelectedDocument().catch((error: unknown) => reportError("document", String(error)));
     }
 
     const seekFrame = editor.takeSeekFrame();
     if (seekFrame >= 0 && player) {
       void player
         .seekToSeconds(editor.mediaTimeAtFrame(seekFrame))
-        .catch((error: unknown) => reportError(String(error)));
+        .catch((error: unknown) => reportError("media", String(error)));
     }
     const assetCode = loadingAsset ? 0 : editor.takeAssetRequest();
     const entry = catalog.get(assetCode);
@@ -314,7 +320,7 @@ async function main(): Promise<void> {
         .then(([modelBytes, textureBytes, envBytes]) =>
           editor.loadCatalogAsset(assetCode, modelBytes, textureBytes, envBytes),
         )
-        .catch((error: unknown) => reportError(String(error)))
+        .catch((error: unknown) => reportError("catalog", String(error)))
         .finally(() => {
           loadingAsset = false;
         });

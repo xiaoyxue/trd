@@ -6,7 +6,8 @@ use std::time::{Duration, Instant};
 use crate::error::NativeVideoEditingError;
 use crate::media::{preview_size, DecodedFrame, NativeVideo, NativeVideoSource};
 use trd_gui::video_editing::{
-    CatalogAsset, VideoEditingApp, VideoEditingCommand, VideoEditingShared, VideoSourceKind,
+    CatalogAsset, ErrorScope, VideoEditingApp, VideoEditingCommand, VideoEditingShared,
+    VideoSourceKind,
 };
 use trd_gui::video_editing_renderer::VideoPlacementRenderer;
 
@@ -201,11 +202,11 @@ impl NativeVideoEditingApp {
             frame.duration_seconds,
         ) {
             Ok(()) => {
-                self.shared.clear_error();
+                self.shared.clear_error(ErrorScope::Media);
                 self.shared.set_video_media_observation(4, false);
             }
             Err(error) => {
-                self.shared.set_error(error);
+                self.shared.set_error(ErrorScope::Media, error);
                 self.stop_playback();
             }
         }
@@ -228,7 +229,7 @@ impl NativeVideoEditingApp {
                 match self.video.as_mut().and_then(NativeVideo::try_frame) {
                     Some(Ok(frame)) => self.pending_frame = Some(frame),
                     Some(Err(error)) => {
-                        self.shared.set_error(error);
+                        self.shared.set_error(ErrorScope::Media, error);
                         self.stop_playback();
                         return;
                     }
@@ -254,10 +255,13 @@ impl NativeVideoEditingApp {
                 .as_ref()
                 .is_some_and(|video| !video.is_streaming())
         {
-            self.shared.set_error(format!(
-                "decoder ended at frame {} before final frame {last_frame}",
-                self.frame_index
-            ));
+            self.shared.set_error(
+                ErrorScope::Media,
+                format!(
+                    "decoder ended at frame {} before final frame {last_frame}",
+                    self.frame_index
+                ),
+            );
             self.stop_playback();
         }
     }
@@ -280,15 +284,16 @@ impl NativeVideoEditingApp {
             // Logged, not merely surfaced in the UI. A catalog load reads and
             // decodes up to tens of megabytes and rebuilds the renderer, so it
             // is worth being able to see that it was asked for and that it
-            // finished — and a failure has to reach somewhere that cannot be
-            // overwritten, since `set_error` writes to a single shared cell that
-            // the next submitted frame clears.
+            // finished.
             log::info!("loading catalog asset {asset:?}");
             match self.load_catalog_asset(asset) {
-                Ok(()) => log::info!("catalog asset {asset:?} loaded"),
+                Ok(()) => {
+                    log::info!("catalog asset {asset:?} loaded");
+                    self.shared.clear_error(ErrorScope::Catalog);
+                }
                 Err(error) => {
                     log::error!("catalog asset {asset:?} failed to load: {error}");
-                    self.shared.set_error(error);
+                    self.shared.set_error(ErrorScope::Catalog, error);
                 }
             }
         }
@@ -381,10 +386,11 @@ impl NativeVideoEditingApp {
         };
         let result = bytes.and_then(|bytes| self.shared.load_document_bytes(&bytes));
         match result {
-            Ok(()) => log::info!("annotation document loaded from {}", pending.name),
-            Err(error) => self
-                .shared
-                .set_error(format!("annotation document: {error}")),
+            Ok(()) => {
+                log::info!("annotation document loaded from {}", pending.name);
+                self.shared.clear_error(ErrorScope::Document);
+            }
+            Err(error) => self.shared.set_error(ErrorScope::Document, error),
         }
     }
 
@@ -402,14 +408,14 @@ impl NativeVideoEditingApp {
         let (video, info) = match opened {
             Ok(opened) => opened,
             Err(error) => {
-                self.shared.set_error(error.to_string());
+                self.shared.set_error(ErrorScope::Media, error.to_string());
                 return;
             }
         };
         let frame = match video.decode_one(0) {
             Ok(frame) => frame,
             Err(error) => {
-                self.shared.set_error(error.to_string());
+                self.shared.set_error(ErrorScope::Media, error.to_string());
                 return;
             }
         };
@@ -432,8 +438,10 @@ impl NativeVideoEditingApp {
 
     fn play(&mut self) {
         if self.video.is_none() {
-            self.shared
-                .set_error("native playback requires a source passed with --video");
+            self.shared.set_error(
+                ErrorScope::Media,
+                "native playback requires a source passed with --video",
+            );
             return;
         }
         let last_frame = self.video_info.frame_count.saturating_sub(1);
@@ -450,10 +458,10 @@ impl NativeVideoEditingApp {
             Ok(()) => {
                 self.playback = Some(PlaybackClock::new(start_frame));
                 self.pending_frame = None;
-                self.shared.clear_error();
+                self.shared.clear_error(ErrorScope::Media);
                 self.sync_video_status();
             }
-            Err(error) => self.shared.set_error(error.to_string()),
+            Err(error) => self.shared.set_error(ErrorScope::Media, error.to_string()),
         }
     }
 
@@ -473,8 +481,10 @@ impl NativeVideoEditingApp {
     fn seek(&mut self, index: u32) {
         let Some(video) = &mut self.video else {
             self.frame_index = index.min(self.video_info.frame_count.saturating_sub(1));
-            self.shared
-                .set_error("native seeking requires a source passed with --video");
+            self.shared.set_error(
+                ErrorScope::Media,
+                "native seeking requires a source passed with --video",
+            );
             return;
         };
         video.stop();
@@ -482,7 +492,7 @@ impl NativeVideoEditingApp {
         self.pending_frame = None;
         match video.decode_one(index) {
             Ok(frame) => self.submit_frame(frame),
-            Err(error) => self.shared.set_error(error.to_string()),
+            Err(error) => self.shared.set_error(ErrorScope::Media, error.to_string()),
         }
         self.sync_video_status();
     }

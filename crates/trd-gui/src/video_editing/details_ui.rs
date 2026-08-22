@@ -226,7 +226,7 @@ fn source_rows(video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut dyn 
     r.row("loaded", &shared.video_loaded.get().to_string());
     r.row("playing", &shared.video_playing.get().to_string());
     r.row("ended", &media.ended.to_string());
-    r.optional_error("error", shared.error.borrow().as_deref());
+    r.optional_error("error", shared.error_text().as_deref());
 }
 
 fn timeline_rows(video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut dyn Rows) {
