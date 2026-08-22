@@ -219,7 +219,14 @@ local file and an HTTP(S) URL behave identically.
 Opening a 218 GiB / 694,840-frame 4K MP4 over HTTP costs ~11 MiB and under two
 seconds, with each deep seek a further few tens of MiB. A URL source therefore
 needs `Accept-Ranges` **and** `Access-Control-Allow-Origin`; `serve-documents.ts`
-is the local helper that sends both and streams its responses.
+is the local helper that sends both and streams its responses. Run it with
+`--log` to read those numbers off the server rather than out of devtools — one
+line per request, and the delivered bytes when each body ends.
+
+The native side reads the same URLs through ffmpeg rather than `fetch`, and it
+is stricter about HTTP framing: a server that ends the connection must send
+`Connection: close`, or ffmpeg writes its `moov` seek onto the socket the server
+already closed and never recovers (#326).
 
 ### Playback clock
 

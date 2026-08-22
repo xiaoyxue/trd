@@ -599,7 +599,9 @@ These are the contents of the levels above: tiers 1–2 are **L2**, tiers 3–4 
      *multi-hundred-GiB* MP4 **served over HTTP**, because file size is exactly
      what a ranged reader is for and a local short clip cannot fail the way a
      218 GiB one does. Serve it with the CORS+range helper
-     (`bun web/gui-video-editing/serve-documents.ts <dir> --port 8092`), then:
+     (`bun web/gui-video-editing/serve-documents.ts <dir> --port 8092 --log`;
+     `--log` prints the delivered bytes per request, which is the claim below),
+     then:
      drive the probe page — `?url=…&seek=…&frames=…` for one deep seek and
      `?reader=mediabunny&scrub=t1,t2,…` (plus `&overlap=1`, the dragged-scrubber
      shape) for repeated seeks on one reader — and open the editor itself at
@@ -663,15 +665,18 @@ These are the contents of the levels above: tiers 1–2 are **L2**, tiers 3–4 
    ffmpeg natively, mediabunny in the browser:
 
    ```powershell
-   # native — local path, then the same file over HTTP
+   # native — local path, then the same file over HTTP. `--probe-frame N` is how
+   # a deep seek is asserted without a window: it reports the frame that came
+   # back, not the one asked for.
    cargo run -p trd-gui-video-editing -- --video <BIG.mp4> --probe-only
    cargo run -p trd-gui-video-editing -- --video <BIG.mp4>
+   cargo run -p trd-gui-video-editing -- --video-url http://localhost:8092/<BIG.mp4> --probe-only --probe-frame <deep>
    cargo run -p trd-gui-video-editing -- --video-url http://localhost:8092/<BIG.mp4>
 
    # browser — serve the media, then serve the app *including* the probe page.
    # `bun run dev` passes only index.html, so name probe.html explicitly; Bun
    # then routes it at /probe (no .html).
-   bun web\gui-video-editing\serve-documents.ts <dir> --port 8092
+   bun web\gui-video-editing\serve-documents.ts <dir> --port 8092 --log
    cd web\gui-video-editing; bun run build:wasm; $env:BUN_PORT='8085'; bun .\index.html .\probe.html
    #   /probe?url=…&seek=<deep>&frames=8                      one deep seek
    #   /probe?url=…&reader=mediabunny&scrub=t1,t2,…&overlap=1  dragged scrubber

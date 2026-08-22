@@ -169,11 +169,16 @@ bun probe.html
 Pick a local MP4, or decode one from a URL. `?url=…&seek=…` runs it without a
 click, so a result is a command rather than a click-through.
 `serve-documents.ts` serves a directory with the CORS and `Range` headers a
-naive static server omits:
+naive static server omits — and, since #326, the `Connection: close` that
+ffmpeg's HTTP client needs to see before it will re-seek:
 
 ```sh
-bun web/gui-video-editing/serve-documents.ts /path/to/videos --port 8090
+bun web/gui-video-editing/serve-documents.ts /path/to/videos --port 8090 --log
 ```
+
+`--log` prints one line per request and the bytes each body actually delivered,
+which is how the "opening costs megabytes, not gigabytes" claim is checked for
+the native reader as well as the browser one.
 
 The probe prints the track, the `description` (`avcC`) bytes, the frames it
 delivered, and — the number to watch — how much of the file was actually
