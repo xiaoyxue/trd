@@ -1133,7 +1133,8 @@ impl VideoEditingApp {
         self.shared.request_overlay();
     }
 
-    /// Replaces the timeline once the shell has probed the real container.    ///
+    /// Replaces the timeline once the shell has probed the real container.
+    ///
     /// The browser learns the frame rate only after `moov` has been read, which
     /// happens *after* the editor starts, so the timeline arrives late by
     /// construction. Clamps the playhead, since a shorter video may not contain
