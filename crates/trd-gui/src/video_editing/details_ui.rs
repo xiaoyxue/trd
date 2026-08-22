@@ -206,18 +206,7 @@ fn source_rows(video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut dyn 
     r.row("frame count", &video.frame_count.to_string());
     r.row(
         "unpresented tail",
-        &match video.unpresented_tail {
-            None => "unknown".to_owned(),
-            // Name the observation, then the evidence it rests on. The two
-            // delivery surfaces establish this differently, so stating one
-            // surface's mechanism for both sends the next investigation looking
-            // for a flag its path never reads (#331).
-            Some(tail) => match tail.samples {
-                0 => format!("none ({})", tail.evidence),
-                1 => format!("1 sample not presented ({})", tail.evidence),
-                n => format!("{n} samples not presented ({})", tail.evidence),
-            },
-        },
+        &unpresented_tail_label(video.unpresented_tail),
     );
     r.match_float(
         "duration",
@@ -625,6 +614,23 @@ fn source_kind_label(kind: VideoSourceKind) -> &'static str {
     }
 }
 
+/// The `unpresented tail` row's value.
+///
+/// Names the **observation**, then the evidence it rests on. The two delivery
+/// surfaces establish this differently, so stating one surface's mechanism for
+/// both sent the next investigation looking for a flag its path never reads
+/// (#331).
+fn unpresented_tail_label(tail: Option<trd_core::UnpresentedTail>) -> String {
+    match tail {
+        None => "unknown".to_owned(),
+        Some(tail) => match tail.samples {
+            0 => format!("none ({})", tail.evidence),
+            1 => format!("1 sample not presented ({})", tail.evidence),
+            n => format!("{n} samples not presented ({})", tail.evidence),
+        },
+    }
+}
+
 fn option_u32(value: Option<u32>) -> String {
     value.map_or_else(|| "none".to_owned(), |value| value.to_string())
 }
@@ -687,6 +693,38 @@ mod tests {
     /// The transfer meter is only useful if its rows are readable **and** its
     /// crossing count follows the bytes, so both are pinned here rather than
     /// checked by eye in the panel.
+    #[test]
+    fn the_unpresented_tail_row_names_its_evidence() {
+        use trd_core::{UnpresentedTail, UnpresentedTailEvidence};
+
+        // Not checked at all is not the same as checked and empty (#326).
+        assert_eq!(unpresented_tail_label(None), "unknown");
+        // The browser walks the container's own tables...
+        assert_eq!(
+            unpresented_tail_label(Some(UnpresentedTail {
+                samples: 0,
+                evidence: UnpresentedTailEvidence::SampleTable,
+            })),
+            "none (stts)"
+        );
+        // ...and the native adapter reads ffmpeg's packet flag. Reporting the
+        // second for both is the #331 defect.
+        assert_eq!(
+            unpresented_tail_label(Some(UnpresentedTail {
+                samples: 1,
+                evidence: UnpresentedTailEvidence::PacketFlags,
+            })),
+            "1 sample not presented (AV_PKT_FLAG_DISCARD)"
+        );
+        assert_eq!(
+            unpresented_tail_label(Some(UnpresentedTail {
+                samples: 3,
+                evidence: UnpresentedTailEvidence::SampleTable,
+            })),
+            "3 samples not presented (stts)"
+        );
+    }
+
     #[test]
     fn transfer_rows_report_bytes_and_derive_the_crossing_count() {
         let readback_path = crate::video_editing_renderer::TransferCounts {
