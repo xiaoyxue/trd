@@ -568,9 +568,14 @@ impl VideoEditingHandle {
         self.shared.set_video_media_observation(ready_state, ended);
     }
 
-    #[wasm_bindgen::prelude::wasm_bindgen(js_name = setVideoError)]
-    pub fn set_video_error(&self, message: String) {
-        self.shared.set_error(message);
+    /// Surfaces a failure, tagged with the path that produced it so a success
+    /// elsewhere cannot clear it (#329).
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = setError)]
+    pub fn set_error(&self, scope: u8, message: String) -> Result<(), wasm_bindgen::JsValue> {
+        let scope = trd_gui::video_editing::ErrorScope::from_code(scope)
+            .ok_or_else(|| wasm_bindgen::JsValue::from_str("unknown error scope"))?;
+        self.shared.set_error(scope, message);
+        Ok(())
     }
 
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = takeCommand)]
@@ -700,6 +705,8 @@ impl VideoEditingHandle {
         }
         .map_err(|error| wasm_bindgen::JsValue::from_str(&error))?;
         self.shared.set_catalog_renderer(asset, renderer);
+        self.shared
+            .clear_error(trd_gui::video_editing::ErrorScope::Catalog);
         Ok(())
     }
 }

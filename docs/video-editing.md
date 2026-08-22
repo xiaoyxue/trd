@@ -117,7 +117,9 @@ quad you are working in.
 Selecting a quad (clicking it) highlights the outline, washes its face, enables
 the catalog and switches **Show gizmos** on; clicking away deselects it and
 switches them back off. The toggle is flipped, not overridden, so it still
-describes what is drawn and can be set by hand between clicks.
+describes what is drawn and can be set by hand between clicks. Until a quad is
+selected the **Object catalog** is greyed out and says why on hover — *"Select a
+placement quad first"* (#329).
 
 **A placed object and its quad are bound.** The object is authored in that quad's
 frame (`draw_model = quad_placement * object_transform`), so while one is placed
@@ -390,7 +392,7 @@ appears.
 | `digest` | whether that digest has been verified here — `not browser-verified yet` is the normal state, not an error |
 | `media readyState` | the media element's readiness (`4` = enough data to play through) |
 | `loaded` / `playing` / `ended` | player state |
-| `error` | the last reported error, or `none` |
+| `error` | the last reported error, prefixed with the path that produced it (`media` / `catalog` / `document` / `render` / `pick`), or `none`. Each path clears only its own, so a decoded frame no longer erases a catalog failure (#329) |
 
 #### `[Timeline / synchronization]` — which frame is where
 

@@ -56,6 +56,55 @@ impl CatalogAsset {
     }
 }
 
+/// Which path a surfaced error came from.
+///
+/// The editor shows one error at a time, and success in one path is no evidence
+/// about another: a decoded frame says the media adapter works, not that a
+/// catalog or document load did. Tagging the message is what lets a success
+/// clear its own failure and leave the rest standing (#329).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ErrorScope {
+    Media,
+    Catalog,
+    Document,
+    Render,
+    Pick,
+}
+
+impl ErrorScope {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Media => "media",
+            Self::Catalog => "catalog",
+            Self::Document => "document",
+            Self::Render => "render",
+            Self::Pick => "pick",
+        }
+    }
+
+    pub const fn from_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::Media),
+            2 => Some(Self::Catalog),
+            3 => Some(Self::Document),
+            4 => Some(Self::Render),
+            5 => Some(Self::Pick),
+            _ => None,
+        }
+    }
+
+    pub const fn code(self) -> u8 {
+        self as u8 + 1
+    }
+}
+
+impl std::fmt::Display for ErrorScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
 const COMMAND_NONE: u8 = 0;
 const COMMAND_PICK_VIDEO: u8 = 1;
 const COMMAND_PLAY: u8 = 2;
@@ -516,7 +565,7 @@ pub struct VideoEditingShared {
     renderer: RefCell<Option<crate::video_editing_renderer::VideoPlacementRenderer>>,
     renderer_diagnostics: RefCell<Option<crate::video_editing_renderer::VideoRendererDiagnostics>>,
     asset_defaults: RefCell<Option<(CatalogAsset, trd_core::RenderMode, trd_core::DisneyMaterial)>>,
-    error: RefCell<Option<String>>,
+    error: RefCell<Option<(ErrorScope, String)>>,
 }
 
 impl Default for VideoEditingShared {
@@ -767,13 +816,32 @@ impl VideoEditingShared {
         self.request_repaint();
     }
 
-    pub fn set_error(&self, message: impl Into<String>) {
-        self.error.replace(Some(message.into()));
+    pub fn set_error(&self, scope: ErrorScope, message: impl Into<String>) {
+        self.error.replace(Some((scope, message.into())));
         self.request_repaint();
     }
 
-    pub fn clear_error(&self) {
-        self.error.replace(None);
+    /// Clears `scope`'s error and nothing else.
+    ///
+    /// Whatever else the cell holds belongs to a path this success says nothing
+    /// about, so erasing it would report a failure as resolved (#329).
+    pub fn clear_error(&self, scope: ErrorScope) {
+        let held = self
+            .error
+            .borrow()
+            .as_ref()
+            .is_some_and(|(held, _)| *held == scope);
+        if held {
+            self.error.replace(None);
+        }
+    }
+
+    /// The error to display, prefixed with the path that produced it.
+    pub fn error_text(&self) -> Option<String> {
+        self.error
+            .borrow()
+            .as_ref()
+            .map(|(scope, message)| format!("{scope}: {message}"))
     }
 
     pub fn take_command(&self) -> Option<VideoEditingCommand> {
@@ -1485,7 +1553,7 @@ impl VideoEditingApp {
         };
         if let Err(error) = renderer.resize(requested_size.0, requested_size.1) {
             self.shared.renderer.replace(Some(renderer));
-            self.shared.error.replace(Some(error));
+            self.shared.set_error(ErrorScope::Render, error);
             return;
         }
         self.shared
@@ -1584,6 +1652,7 @@ impl VideoEditingApp {
                         .renderer_diagnostics
                         .replace(Some(renderer_diagnostics.clone()));
                     shared.last_render_error.replace(None);
+                    shared.clear_error(ErrorScope::Render);
                     shared.rendered_frame.replace(Some(RenderedVideoFrame {
                         frame: IncomingVideoFrame {
                             rgba,
@@ -1618,7 +1687,7 @@ impl VideoEditingApp {
                         .renderer_diagnostics
                         .replace(Some(renderer_diagnostics));
                     shared.last_render_error.replace(Some(error.clone()));
-                    shared.error.replace(Some(error));
+                    shared.set_error(ErrorScope::Render, error);
                 }
                 (false, _) => {}
             }
@@ -1677,6 +1746,7 @@ impl VideoEditingApp {
                         .renderer_diagnostics
                         .replace(Some(renderer_diagnostics));
                     shared.last_pick_error.replace(None);
+                    shared.clear_error(ErrorScope::Pick);
                     shared.pick_result.replace(Some(PickResult {
                         id: request.id,
                         source_generation: request.source_generation,
@@ -1689,7 +1759,7 @@ impl VideoEditingApp {
                         .renderer_diagnostics
                         .replace(Some(renderer_diagnostics));
                     shared.last_pick_error.replace(Some(error.clone()));
-                    shared.error.replace(Some(error));
+                    shared.set_error(ErrorScope::Pick, error);
                 }
                 (false, _) => {}
             }
@@ -2067,6 +2137,43 @@ pub(super) mod tests {
         assert!(shared.latest_video_frame.borrow().is_none());
         assert!(app.display_texture.is_none());
         assert_eq!(app.display_size, (1920, 1080));
+    }
+
+    #[test]
+    fn a_decoded_frame_clears_only_the_media_error() {
+        let shared = VideoEditingShared::default();
+        shared.set_error(ErrorScope::Catalog, "catalog asset missing");
+
+        shared.clear_error(ErrorScope::Media);
+
+        assert_eq!(
+            shared.error_text().as_deref(),
+            Some("catalog: catalog asset missing")
+        );
+    }
+
+    #[test]
+    fn a_scope_clears_its_own_error() {
+        let shared = VideoEditingShared::default();
+        shared.set_error(ErrorScope::Media, "decoder ended early");
+
+        shared.clear_error(ErrorScope::Media);
+
+        assert_eq!(shared.error_text(), None);
+    }
+
+    #[test]
+    fn error_scope_codes_round_trip() {
+        for scope in [
+            ErrorScope::Media,
+            ErrorScope::Catalog,
+            ErrorScope::Document,
+            ErrorScope::Render,
+            ErrorScope::Pick,
+        ] {
+            assert_eq!(ErrorScope::from_code(scope.code()), Some(scope));
+        }
+        assert_eq!(ErrorScope::from_code(0), None);
     }
 
     #[test]

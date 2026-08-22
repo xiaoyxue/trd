@@ -265,7 +265,7 @@ impl VideoEditingApp {
                     (true, false) => "Video paused",
                 },
             );
-            if let Some(error) = self.shared.error.borrow().as_deref() {
+            if let Some(error) = self.shared.error_text() {
                 ui.colored_label(egui::Color32::LIGHT_RED, error);
             }
         });
@@ -343,7 +343,12 @@ impl VideoEditingApp {
                     }
                 }
             });
-        });
+        })
+        .response
+        // A section that greys out without saying why reads as a defect; this
+        // one produced a filed bug that turned out to be the missing hint
+        // (#325/#329).
+        .on_disabled_hover_text("Select a placement quad first");
     }
 
     /// The Details inspector. Its body only runs while expanded, so the facts
