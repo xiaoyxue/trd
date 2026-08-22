@@ -100,6 +100,9 @@ fn probe_trak(trak: &[u8]) -> Option<VideoTiming> {
         fps_den: fps_den.max(1),
         frame_count,
         duration_us,
+        unpresented_tail_samples: find_box(stbl, b"stts")
+            .and_then(|stts| unpresented_tail(stts, track_duration))
+            .unwrap_or(0),
     })
 }
 
@@ -189,6 +192,45 @@ fn stts_totals(stts: &[u8]) -> Option<(u32, u64)> {
         total = total.saturating_add(u64::from(count) * u64::from(delta));
     }
     Some((samples, total))
+}
+
+/// Trailing samples whose presentation time is at or past the track's declared
+/// duration — stored by the container, but never shown.
+///
+/// A recorder that stops mid-interval writes a final sample outside the
+/// presentation window; ffmpeg surfaces the same thing natively as
+/// `AV_PKT_FLAG_DISCARD`, and no decoder outputs it (#324). Counting it as a
+/// frame is what leaves a final timeline index with no picture behind it.
+///
+/// `stts` is run-length encoded, so this costs one step per *entry*, not per
+/// sample — the arithmetic finds where a run crosses the end rather than walking
+/// it. Written for "some" rather than "one" because nothing in the format
+/// promises a single such sample.
+fn unpresented_tail(stts: &[u8], track_duration: u64) -> Option<u32> {
+    if track_duration == 0 {
+        return Some(0);
+    }
+    let entry_count = u32::from_be_bytes(stts.get(4..8)?.try_into().ok()?) as usize;
+    let mut pts = 0u64;
+    let mut unpresented = 0u64;
+    for index in 0..entry_count {
+        let at = 8 + index * 8;
+        let run = u64::from(u32::from_be_bytes(stts.get(at..at + 4)?.try_into().ok()?));
+        let delta = u64::from(u32::from_be_bytes(
+            stts.get(at + 4..at + 8)?.try_into().ok()?,
+        ));
+        // How many samples of this run start before the declared end.
+        let shown = if pts >= track_duration {
+            0
+        } else if delta == 0 {
+            run
+        } else {
+            (track_duration - pts).div_ceil(delta).min(run)
+        };
+        unpresented = unpresented.saturating_add(run - shown);
+        pts = pts.saturating_add(run.saturating_mul(delta));
+    }
+    Some(unpresented.min(u64::from(u32::MAX)) as u32)
 }
 
 /// `tkhd` track dimensions, stored as 16.16 fixed point at the end of the box.
@@ -359,6 +401,48 @@ mod tests {
         let moov = atom(b"moov", &atom(b"trak", &trak));
         let info = probe_moov(&moov).expect("probe");
         assert_eq!((info.width, info.height), (3840, 2160));
+    }
+
+    /// Builds an `stts` payload from `(sample_count, delta)` runs.
+    fn stts_runs(runs: &[(u32, u32)]) -> Vec<u8> {
+        let mut p = vec![0u8; 4]; // version + flags
+        p.extend_from_slice(&(runs.len() as u32).to_be_bytes());
+        for (count, delta) in runs {
+            p.extend_from_slice(&count.to_be_bytes());
+            p.extend_from_slice(&delta.to_be_bytes());
+        }
+        p
+    }
+
+    /// #324, with the shape measured on a 217.77 GiB recording: 694 839 pictures
+    /// at one timescale unit each, then a trailing sample the container stores
+    /// but never presents — its presentation time is the declared duration
+    /// itself, so it starts exactly where the track ends.
+    ///
+    /// ffmpeg reports the same sample as `AV_PKT_FLAG_DISCARD`; here it is found
+    /// from the boxes alone, which is all the browser has.
+    #[test]
+    fn a_sample_starting_at_the_declared_end_is_never_presented() {
+        let stts = stts_runs(&[(694_838, 1), (1, 2), (1, 1)]);
+
+        assert_eq!(unpresented_tail(&stts, 694_840), Some(1));
+    }
+
+    /// The ordinary case must stay zero, or every file would grow a footnote.
+    #[test]
+    fn a_track_that_ends_with_its_last_picture_has_no_unpresented_tail() {
+        let stts = stts_runs(&[(250, 1)]);
+
+        assert_eq!(unpresented_tail(&stts, 250), Some(0));
+    }
+
+    /// A container that declares no duration says nothing about what it presents,
+    /// and guessing would invent a warning out of missing metadata.
+    #[test]
+    fn an_unknown_duration_reports_no_unpresented_tail() {
+        let stts = stts_runs(&[(250, 1)]);
+
+        assert_eq!(unpresented_tail(&stts, 0), Some(0));
     }
 
     #[test]

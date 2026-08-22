@@ -25,7 +25,7 @@ TypeScript only opens/fetches browser resources and copies decoded video pixels.
   - [Layer order](#layer-order)
   - [Selection overlays](#selection-overlays)
 - [Details and diagnostics](#details-and-diagnostics)
-  - [Inspector sections](#inspector-sections)
+  - [Inspector sections](#inspector-sections) — **field reference**
   - [Frame-path traffic](#frame-path-traffic)
   - [Stable displayed facts](#stable-displayed-facts)
 - [Build and run](#build-and-run)
@@ -357,20 +357,121 @@ TypeScript or directly in egui widgets.
 
 ### Inspector sections
 
-The six sections cover:
+Six sections, in the order the panel draws them. Every row is a *fact*, not a
+control — Details never changes anything.
 
-- expected/observed source metadata, media readiness, and the explicit
-  `not browser-verified yet` SHA-256 status;
-- requested, presented, displayed, and rendered frame identities plus source
-  generation, render revision, coalescing, seek, and render latency;
-- raw TL/TR/BR/BL tracking, K, reconstructed basis, orthogonality/handedness,
-  and unsmoothed pose delta from the previous tracked row;
-- catalog format, preview AABB/scale, Olympic preset, persistent local edit,
-  movement basis, visibility reason, and copyable `draw_model`;
-- imported maps/factors and current PBR, IBL, direct light, exposure, tone-map,
-  and debug-view state;
-- adapter/backend, render/pick targets, MSAA, layer drawable counts, upload
-  size, latest pick, and explicit render/pick errors.
+Values that a document can disagree with the file about are rendered as
+`expected … / observed …` followed by **`[MATCH]`** or **`[MISMATCH]`**: the
+first comes from the authoring document, the second from probing the file.
+Without a document there is nothing to compare, so only the observed value
+appears.
+
+#### `[Source]` — which file this is, and whether it is the one expected
+
+| Field | What it says |
+|---|---|
+| `kind` | `local file` or `URL` — how the video was opened |
+| `name` | file name, checked against the document |
+| `byte length` | size in bytes, checked against the document |
+| `declared MIME` / `declared codec` | what the container declares (e.g. `video/mp4`, `h264`) |
+| `dimensions` | the coded size, checked against the document |
+| `FPS` | frame rate as an exact **rational** (`24/1`, `30000/1001`) — never a rounded float, because the timeline numbers frames with it |
+| `frame count` | samples the video track **stores** |
+| `unpresented tail` | samples stored but **never shown** — `none`, or `N sample(s) (AV_PKT_FLAG_DISCARD)`. A recorder stopping mid-interval writes a final sample outside the presentation window; it is counted in `frame count` but no decoder outputs it, so the last timeline index has no picture behind it (#324) |
+| `duration` | container duration, checked against the document |
+| `SHA-256` | the document's digest of the file it was authored against |
+| `digest` | whether that digest has been verified here — `not browser-verified yet` is the normal state, not an error |
+| `media readyState` | the media element's readiness (`4` = enough data to play through) |
+| `loaded` / `playing` / `ended` | player state |
+| `error` | the last reported error, or `none` |
+
+#### `[Timeline / synchronization]` — which frame is where
+
+Four frame identities are reported separately **on purpose**: they diverge while
+work is in flight, and collapsing them would hide exactly the faults this panel
+exists to catch.
+
+| Field | What it says |
+|---|---|
+| `media time` | the displayed frame's presentation time, carried with the frame rather than read from the player |
+| `frame duration` | how long the displayed frame is shown, as the **container** declares it — `0.042 s` at 24 fps. Variable-rate files differ frame to frame, which is what several seek faults turned on (#317/#319/#322) |
+| `requested frame` | what the timeline last asked for |
+| `presented frame` | the newest frame the shell has handed over |
+| `displayed frame` | the frame whose pixels are on screen |
+| `rendered frame` | the frame the last completed render drew |
+| `Arrow video_frame_index` / `present_index` / `timestamp_us` | the document row for the displayed frame, or `none` where the sparse document has no row |
+| `media/row delta` | disagreement between the frame's own time and its document row |
+| `tracking state` | `tracked`, `video-only`, or `none` (no row) |
+| `source size` / `render size` | decoded frame size, and the size trd renders at (`--preview-width` scales the native decode down) |
+| `source generation` | bumped whenever the video is replaced; stale frames and picks are rejected by it |
+| `render revision` | bumped by every scene change, so a completed render for an older scene is discarded |
+| `pending render` | a render the scene has asked for but not yet started |
+| `in-flight frame` | the frame a running render is drawing |
+| `coalesced frame` | a newer frame that arrived while a render was in flight and replaced an older waiting one |
+| `last render` | wall time of the last completed render |
+| `seek target` / `seek pending` | the seek still waiting for its frame. A seek retires when the frame answering **that seek** arrives, not on a timestamp comparison (#322) |
+
+#### `[Tracking / quad frame]` — the raw tracking data and the basis built from it
+
+| Field | What it says |
+|---|---|
+| `TL` / `TR` / `BR` / `BL` | the document's placement quad, in pixels, exactly as authored |
+| `K (fx, fy, cx, cy)` | camera intrinsics for this frame |
+| `origin` / `e1` / `e2` / `e3` | the 3-D quad frame reconstructed from the quad and `K` — origin plus the two in-plane axes and the normal |
+| `half-edge lengths` | the quad's half-extents along `e1`/`e2` |
+| `axis length` | the gizmo arm length drawn for this basis |
+| `\|dot(e1,e2/e3), dot(e2,e3)\|` | orthogonality residuals — all three should be ~0 |
+| `handedness determinant` | `+1` for a right-handed basis; a sign flip means the normal inverted |
+| `previous tracked frame` | which row the deltas below are measured against |
+| `pose translation delta` / `pose rotation delta` | **unsmoothed** motion since that row — the raw tracking signal, so jitter is visible rather than hidden |
+| `axis-length ratio` | scale change against the previous row |
+| `continuity` | whether the normal's sign stayed continuous |
+| `placement error` | why a quad could not be reconstructed, or `none` |
+| `tracking smoothing` | `off` — stated so nobody assumes the deltas are filtered |
+
+#### `[Placement / object]` — what is placed on the quad and where
+
+| Field | What it says |
+|---|---|
+| `selected quad` | whether a placement quad is selected (the **Object catalog** is disabled until it is) |
+| `selected object` | index of the selected object, or `none` |
+| `catalog asset` / `source format` | which catalog entry is loaded and what it was imported from (`OBJ`, `GLB`) |
+| `preview AABB min` / `max` / `preview scale` | the imported mesh's bounds and the scale fitted to the quad |
+| `Olympic preset` | the fixed placement preset's parameters |
+| `object translation` / `rotation` / `scale` | the local edit applied on top of the tracked pose — persistent across frames |
+| `movement basis` | which axes dragging moves along (`quad e1 / quad e2 / quad e3`) |
+| `visibility` | why the object is or is not drawn — `tracked`, `no asset`, `untracked tail`, `playing` |
+| `draw_model` | the final 4×4 model matrix, copyable |
+
+#### `[Material / lighting]` — how it is shaded
+
+| Field | What it says |
+|---|---|
+| `render mode` | `filled`, `wireframe`, `textured`, or `PBR` |
+| `imported metallic` / `imported roughness` | factors the asset itself declared, kept separate from the sliders so an import can be told from an edit |
+| `base-color map` / `metallic-roughness map` / `normal map` | which texture maps the import supplied |
+| `metallic` / `roughness` / `specular` / `clearcoat` | the current material |
+| `IBL` | the environment map in use, or `none` |
+| `IBL gain (object x scene)` | the object's gain times the scene's |
+| `environment yaw` | environment rotation — the one value that drives both the visible sky and the reflections (#182) |
+| `direct light / ambient` | analytic light and ambient terms |
+| `exposure` / `tone map` | tone mapping (`reinhard` or `aces`) |
+| `PBR debug` | the debug view (`shaded`, `roughness`, `metallic`, `normal`) |
+
+#### `[Renderer]` — the device and what it did this frame
+
+| Field | What it says |
+|---|---|
+| `adapter` / `backend` / `device type` | the GPU actually chosen — confirms a discrete card rather than a software fallback |
+| `source size` / `render target` | decoded size, and the texture size rendered into |
+| `mode` | the render mode the last completed render used |
+| `frame-path crossings` | how many times full-resolution image data crossed CPU↔GPU (see below) |
+| `frame upload` / `readback` / `ui upload` / `total / frame` | the bytes behind that count |
+| `MSAA` | sample count of the mesh pass |
+| `drawables (background/foreground/selection)` | how many drawables each layer submitted |
+| `frame texture upload` | bytes uploaded for the video frame itself |
+| `pick target` / `latest pick` | the pick render target and the last pick result |
+| `last render error` / `last pick error` | explicit failures, or `none` |
 
 ### Frame-path traffic
 

@@ -204,6 +204,14 @@ fn source_rows(video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut dyn 
     );
     r.row("FPS", &format!("{}/{}", video.fps_num, video.fps_den));
     r.row("frame count", &video.frame_count.to_string());
+    r.row(
+        "unpresented tail",
+        &match video.unpresented_tail_samples {
+            0 => "none".to_owned(),
+            1 => "1 sample (AV_PKT_FLAG_DISCARD)".to_owned(),
+            n => format!("{n} samples (AV_PKT_FLAG_DISCARD)"),
+        },
+    );
     r.match_float(
         "duration",
         video.duration_us as f64 / 1_000_000.0,
