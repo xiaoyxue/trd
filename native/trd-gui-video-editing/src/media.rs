@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::sync::Arc;
@@ -36,6 +36,30 @@ pub struct DecodedFrame {
 /// however far the seek went. Both call sites share this list so neither can
 /// drift from the other.
 const REPORTING_FLAGS: [&str; 4] = ["-hide_banner", "-v", "info", "-copyts"];
+
+/// Where to look when a decode at `index` produced **no picture at all**.
+///
+/// A container can end with a packet that carries no picture: a recorder that
+/// stops mid-interval writes a trailing sample marked `AV_PKT_FLAG_DISCARD`, and
+/// `nb_frames` counts it. The timeline built from that count then has one index
+/// more than the media has pictures, and asking for that index decodes nothing —
+/// not a short read, *nothing* (#324).
+///
+/// The honest answer is the last real picture, one nominal interval back. It is
+/// also what the browser's reader already does by construction: mediabunny
+/// answers at-or-**before** the requested instant, so it simply returns the
+/// preceding picture and the phantom index is invisible there. Stepping back
+/// here is what makes the two surfaces agree.
+///
+/// A step of exactly one interval, not a search: this is a container ending one
+/// packet past its last picture, not an arbitrary gap. If the step still finds
+/// nothing, that is a genuine failure and the caller reports it.
+///
+/// `None` at index 0, where there is nothing earlier to fall back to.
+fn fallback_timestamp_seconds(index: u32, fps_num: u32, fps_den: u32) -> Option<f64> {
+    let earlier = index.checked_sub(1)?;
+    Some(f64::from(earlier) * f64::from(fps_den) / f64::from(fps_num.max(1)))
+}
 
 /// What a decoded frame should report, given what ffmpeg said about it.
 ///
@@ -190,9 +214,49 @@ impl NativeVideo {
 
     pub fn decode_one(&self, index: u32) -> Result<DecodedFrame, NativeVideoEditingError> {
         let index = index.min(self.frame_count.saturating_sub(1));
+        let mut output = self.run_decode(&self.timestamp(index))?;
+        if output.stdout.is_empty() {
+            // Nothing at all came back — not a short read, *nothing*. That is
+            // the phantom final index (#324), so ask again one frame earlier.
+            if let Some(seconds) = fallback_timestamp_seconds(index, self.fps_num, self.fps_den) {
+                output = self.run_decode(&format!("{seconds:.9}"))?;
+            }
+        }
+        let expected = self.frame_bytes();
+        if output.stdout.len() != expected {
+            return Err(NativeVideoEditingError::FrameLength {
+                index,
+                actual: output.stdout.len(),
+                expected,
+            });
+        }
+        let reported = String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .find_map(parse_showinfo);
+        // The index is derived from the timestamp the frame carries, so a
+        // fallback decode reports the picture it actually returned rather than
+        // the phantom index that was asked for (#319, #324).
+        let (index, media_time_seconds, duration_seconds) = resolve_timing(
+            reported,
+            index,
+            self.fps_num,
+            self.fps_den,
+            self.frame_count,
+        );
+        Ok(DecodedFrame {
+            index,
+            media_time_seconds,
+            duration_seconds,
+            rgba: output.stdout,
+        })
+    }
+
+    /// One `ffmpeg` invocation that seeks to `timestamp` and writes a single
+    /// scaled RGBA frame to stdout, with `showinfo` on stderr.
+    fn run_decode(&self, timestamp: &str) -> Result<Output, NativeVideoEditingError> {
         let output = Command::new("ffmpeg")
             .args(REPORTING_FLAGS)
-            .args(["-ss", &self.timestamp(index), "-i"])
+            .args(["-ss", timestamp, "-i"])
             .arg(self.source.as_os_str())
             .args([
                 "-frames:v",
@@ -216,30 +280,7 @@ impl NativeVideo {
                 stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
             });
         }
-        let expected = self.frame_bytes();
-        if output.stdout.len() != expected {
-            return Err(NativeVideoEditingError::FrameLength {
-                index,
-                actual: output.stdout.len(),
-                expected,
-            });
-        }
-        let reported = String::from_utf8_lossy(&output.stderr)
-            .lines()
-            .find_map(parse_showinfo);
-        let (index, media_time_seconds, duration_seconds) = resolve_timing(
-            reported,
-            index,
-            self.fps_num,
-            self.fps_den,
-            self.frame_count,
-        );
-        Ok(DecodedFrame {
-            index,
-            media_time_seconds,
-            duration_seconds,
-            rgba: output.stdout,
-        })
+        Ok(output)
     }
 
     pub fn play_from(&mut self, index: u32) -> Result<(), NativeVideoEditingError> {
@@ -860,6 +901,44 @@ mod tests {
             duration, 0.0,
             "an unknown duration must be reported as unknown, so the caller falls back"
         );
+    }
+
+    /// #324, with the numbers measured on the 217.77 GiB recording: it declares
+    /// `nb_frames = 694840`, so the timeline offers indices `0..=694839` — but
+    /// its last packet is marked `AV_PKT_FLAG_DISCARD` and carries no picture,
+    /// and the last frame any decoder emits is **694838** at 27793.52 s.
+    ///
+    /// Asking for the phantom index therefore decodes nothing, and the answer is
+    /// the picture one interval back — which lands exactly on that frame.
+    #[test]
+    fn the_phantom_final_index_falls_back_to_the_last_real_picture() {
+        let phantom = 694_839;
+        let fallback = fallback_timestamp_seconds(phantom, 25, 1).expect("not the first frame");
+
+        assert!(
+            (fallback - 27793.52).abs() < 1e-9,
+            "must land on the last decodable picture (694838 @ 27793.52 s), got {fallback}"
+        );
+    }
+
+    /// Not a search — one interval, once. A container that ends one packet past
+    /// its last picture needs exactly one step; anything further would be
+    /// guessing at how much of the tail is missing, and a second empty decode is
+    /// a genuine failure the caller has to report.
+    #[test]
+    fn the_step_is_one_nominal_interval_whatever_the_rate() {
+        let at_24 = fallback_timestamp_seconds(287, 24, 1).expect("not the first frame");
+        assert!((at_24 - 286.0 / 24.0).abs() < 1e-9);
+
+        let at_60 = fallback_timestamp_seconds(100, 60, 1).expect("not the first frame");
+        assert!((at_60 - 99.0 / 60.0).abs() < 1e-9);
+    }
+
+    /// The first frame has nothing behind it, so an empty decode there is a
+    /// plain failure rather than something to step back from.
+    #[test]
+    fn the_first_frame_has_nothing_to_fall_back_to() {
+        assert_eq!(fallback_timestamp_seconds(0, 25, 1), None);
     }
 
     /// `-copyts` is the difference between a source timestamp and an offset from
