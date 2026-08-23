@@ -106,7 +106,7 @@ the printed tunnel command first, then browse to <http://localhost:8080>.
 > **GPU on WSL / non-NixOS Linux.** On WSL prefix GPU commands with
 > `WGPU_BACKEND=gl`; on a native (non-NixOS) Linux GPU box, wrap them with
 > [nixGL](https://github.com/nix-community/nixGL). Details:
-> [`docs/rendering.md`](docs/rendering.md#gpu-notes) · [`docs/testing.md`](docs/testing.md#gpu).
+> [`docs/rendering.md`](docs/rendering.md#gpu-notes) · [`AGENTS.md`](AGENTS.md#gpu).
 
 ## Building with Nix
 
@@ -309,13 +309,11 @@ MP4 opens and seeks in megabytes.
 - [`docs/video-editing.md`](docs/video-editing.md) — FIBA timeline document,
   the browser media boundary (mediabunny + ranged reads), quad-local placement,
   catalog, playback, and known limits.
-- [`docs/testing.md`](docs/testing.md) — how to run every gate: GPU-adapter
-  selection, the golden render suite, the cross-front-end e2e recipes, and the
-  Windows-only checks.
 - [`docs/comments.md`](docs/comments.md) — what comments are for, what to cut and
   what to keep, and `scripts/comment_audit.py` for when you want a number.
 - [`AGENTS.md`](AGENTS.md) — contributor/agent guide: which gates a change owes
-  (the L1/L2/L3 test levels), how to report them, and the PR workflow.
+  (the L1/L2/L3 test levels), how to run every gate, how to report them, and the
+  PR workflow.
 
 ## [Tests](AGENTS.md#testing)
 
@@ -337,7 +335,7 @@ placed by kind: **unit tests inline** in the module they pin
 **There is no CI** — every gate is run by hand on both platforms. Which gates a
 change owes is the L1/L2/L3 test level in **[`AGENTS.md`](AGENTS.md#testing)**;
 how to run them (GPU selection, golden suite, e2e recipes, the Windows-only
-checks) is **[`docs/testing.md`](docs/testing.md)**.
+checks) is also in **[`AGENTS.md`](AGENTS.md#testing)**.
 
 ## Verification icons
 
@@ -347,6 +345,6 @@ checklist. **The authoritative glyph set and row order live in
 [`AGENTS.md`](AGENTS.md#verification-matrix)** — a second copy here is how the
 `📚 rustdoc` row went missing and an unresolved doc link reached `main` (#336).
 The copy-paste template is in
-[`docs/testing.md`](docs/testing.md#the-matrix-template), and the reproducible
+[`AGENTS.md`](AGENTS.md#the-matrix-template), and the reproducible
 cross-front-end smoke (the coca-cola can PBR scene) is
-[here](docs/testing.md#cross-mode-e2e-recipe--coca-cola-can-pbr--aabb--axes).
+[here](AGENTS.md#cross-mode-e2e-recipe--coca-cola-can-pbr--aabb--axes).
