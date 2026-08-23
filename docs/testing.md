@@ -409,6 +409,16 @@ Since **there is no CI** — `.github/workflows/ci.yml` is `disabled_manually` �
 every one of those cells is filled by a command someone ran on their own machine.
 Fill only your platform's column and hand the other off.
 
+**Two cells, two commands.** A gate inside the declared level is run on **both**
+platforms; `n/a` is reserved for gates the *level* excludes, and never means
+"the other platform covered it". The tempting shortcut is an argument that a gate
+cannot be affected — no `.rs` changed, `nix flake check` served the derivation
+from the store, the input hashes match. Every one of those is true and none of
+them is a run: they say the *source* is the same, and a cross-platform fault is
+by definition one where the source is the same and the toolchain, path separator
+or line ending is not. Put the argument in the PR prose; put a real result in the
+cell, or 🤝 and the commands.
+
 ---
 
 See also: [`AGENTS.md`](../AGENTS.md) (which gates a change owes),
