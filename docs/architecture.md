@@ -384,6 +384,5 @@ pins, as `#[cfg(test)] mod tests`, however long it grows; an integration test
 gets its own file in `crates/*/tests/`. There is no `src/**/tests.rs` middle
 form — it compiles into the crate like an inline module, so it would only blur
 the distinction; the reasoning is in [`AGENTS.md`](../AGENTS.md#where-a-test-lives--by-kind-not-by-size-305).
-Contributor/agent conventions (which gates a change owes, PR workflow) live in
-[`AGENTS.md`](../AGENTS.md); how to run them, including GPU-adapter selection and
-every e2e procedure, is in [`AGENTS.md`](../AGENTS.md#testing).
+Contributor/agent conventions — which gates a change owes, how to run every gate,
+and PR workflow — live in [`AGENTS.md`](../AGENTS.md).

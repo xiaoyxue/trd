@@ -335,7 +335,7 @@ placed by kind: **unit tests inline** in the module they pin
 **There is no CI** — every gate is run by hand on both platforms. Which gates a
 change owes is the L1/L2/L3 test level in **[`AGENTS.md`](AGENTS.md#testing)**;
 how to run them (GPU selection, golden suite, e2e recipes, the Windows-only
-checks) is in the same section.
+checks) is also in **[`AGENTS.md`](AGENTS.md#testing)**.
 
 ## Verification icons
 
