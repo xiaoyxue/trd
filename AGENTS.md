@@ -497,7 +497,7 @@ order the rows go in, L1 first:
 | **gate** | 🎨 fmt · 📎 clippy · 🕸️ clippy-wasm · 🧪 tests · 🔀 decoder-parity · 📚 rustdoc · 🌐 tsc/biome · 🖼️ golden-render · 🎮 gpu-tests · 🖥️ window e2e (§4.2/4.3) · 🎬 video-editor e2e (§4.5/4.6) · 📼 large-file seek (§4.7) |
 
 **Every row is always present**, in that order. A gate the level excludes reads
-`n/a (L1)` — naming the level that excluded it — so a skipped gate is always a
+`n/a (Lx)` — naming the level that excluded it — so a skipped gate is always a
 decision, never an omission: dropping a row is how an unresolved rustdoc link
 reached `main` (#336).
 
