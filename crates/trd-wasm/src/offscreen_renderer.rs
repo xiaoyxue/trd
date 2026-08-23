@@ -31,50 +31,24 @@ impl RendererState {
 
 #[wasm_bindgen]
 pub struct OffscreenRenderer {
-    /// The shared GPU context, held as one value rather than cloned apart into
-    /// separate `device` + `queue` fields (#180). Created eagerly by
-    /// [`create`](Self::create) so a JS caller learns immediately whether the
-    /// browser can render at all; the harness below waits for the stream's meshes.
+    /// Shared GPU context; created eagerly so the caller learns immediately if the browser can render.
     gpu: std::sync::Arc<trd_core::GpuContext>,
-    /// The shared render harness (`trd-core`'s offscreen render + read-back),
-    /// built lazily on the first rendered frame from the stream's leading mesh
-    /// table — a streaming front-end owns the device long before it owns the
-    /// meshes, so the device above is eager and this is not (#180).
+    /// Built lazily on the first rendered frame once the leading mesh table is decoded.
     renderer: Option<Renderer>,
-    /// The texture target the harness renders into and reads back from, built
-    /// alongside `renderer` (#203): the harness owns no target of its own, so
-    /// this front-end holds the one `Renderer::with_gpu` returns. Concretely a
-    /// [`TextureTarget`](trd_core::TextureTarget), not the
-    /// [`RenderTarget`](trd_core::RenderTarget) enum, because this renderer
-    /// always reads its pixels back.
+    /// Texture target built alongside `renderer` (#203); `TextureTarget` since pixels are always read back.
     target: Option<trd_core::TextureTarget>,
-    /// Draw mode + every overlay toggle, in the **one** type every front-end uses
-    /// to describe a frame's appearance; [`Scene::from_draws`] turns it into the
-    /// scene. The renderer keeps no overlay state of its own (#180).
+    /// Draw mode and overlay toggles; [`Scene::from_draws`] turns it into the scene.
     options: RenderOptions,
-    /// Composite the uploaded background frame texture beneath the scene as the
-    /// scene's [`Background::frame`](trd_core::Background::frame) plane (#63); a
-    /// no-op until a background is uploaded via
-    /// [`update_frame_texture_rgba`](Self::update_frame_texture_rgba).
+    /// Enable frame-plane compositing (#63); no-op until a background is uploaded.
     composite_frame: bool,
-    /// The typed Disney PBR configuration for [`RenderMode::Shaded`] draws, set via
-    /// [`set_pbr_material`](Self::set_pbr_material) before the first frame and
-    /// applied when the renderer is built. `None` ⇒ the renderer's default.
+    /// Disney PBR config for shaded draws; staged before the renderer is built. `None` ⇒ default.
     pbr: Option<PbrState>,
-    /// The decoded equirectangular HDR environment probe reflected by
-    /// [`RenderMode::Shaded`] draws, set via [`set_env_map_hdr`](Self::set_env_map_hdr).
-    /// `None` ⇒ no probe reflection.
+    /// HDR environment probe for shaded draws; `None` ⇒ no reflection.
     env_map: Option<EnvMapData>,
-    /// Blur of the HDR **background sky** requested via
-    /// [`set_env_background`](Self::set_env_background); `None` ⇒ no sky. The
-    /// exposure and operator come from the staged PBR tone mapping, so the two
-    /// are re-derived together into `options.env_background` whenever either
-    /// changes (#235 R2).
+    /// Sky blur (0.0–1.0) or `None` for no sky; re-derived with tone mapping on change (#235).
     env_background_blur: Option<f32>,
     input: InputSession,
-    /// Frames decoded by [`load_ipc`](Self::load_ipc) but not yet rendered,
-    /// replayed on demand by [`render_index`](Self::render_index) (the generic
-    /// viewer's paced playback).
+    /// Frames decoded by [`load_ipc`] for paced replay by [`render_index`].
     frames: Vec<DecodedFrame>,
     /// Last inline frames-table resource uploaded to the frame-plane texture.
     inline_frames: InlineFrameCache,
@@ -92,8 +66,7 @@ impl OffscreenRenderer {
     pub async fn create(width: u32, height: u32) -> Result<Self, JsValue> {
         console_error_panic_hook::set_once();
 
-        // The browser has no `Write` target: JS wants the finished IPC bytes as
-        // a `Uint8Array`, so this is the buffered form and keeps `drain_new`.
+        // Buffered output: JS reads finished IPC bytes as `Uint8Array` via `drain_new`.
         let output = OutputStream::buffered(width, height, None).map_err(|error| {
             crate::js_error(error_message("invalid OffscreenRenderer dimensions", error))
         })?;
@@ -175,9 +148,7 @@ impl OffscreenRenderer {
         };
     }
 
-    /// Selects textured (`true`) rendering — sampling the stream's bound texture
-    /// table at each vertex UV — or per-vertex color (`false`) for later frames.
-    /// Textured meshes without a stream texture sample the default 1×1 white.
+    /// Enables textured rendering (vertex UV sampling) or per-vertex color. Absent texture ⇒ 1×1 white.
     #[wasm_bindgen(js_name = setTextured)]
     pub fn set_textured(&mut self, enabled: bool) {
         self.options.mode = if enabled {
@@ -187,11 +158,7 @@ impl OffscreenRenderer {
         };
     }
 
-    /// Selects the Disney principled-BRDF (`true`) or per-vertex color (`false`)
-    /// mesh path for later frames — the browser twin of the native `--pbr` flag.
-    /// PBR shades the bound albedo (or the default 1×1 white) with the material
-    /// set by [`set_pbr_material`](Self::set_pbr_material) and the environment
-    /// probe from [`set_env_map_hdr`](Self::set_env_map_hdr).
+    /// Enables Disney PBR shading (`true`) or per-vertex color (`false`) for later frames.
     #[wasm_bindgen(js_name = setPbr)]
     pub fn set_pbr(&mut self, enabled: bool) {
         self.options.mode = if enabled {
@@ -201,10 +168,7 @@ impl OffscreenRenderer {
         };
     }
 
-    /// Sets the typed Disney PBR configuration applied to every
-    /// [`RenderMode::Shaded`] draw — the browser twin of trd-cli's
-    /// `--metallic/--roughness/--specular/--clearcoat/--env-intensity/--exposure/
-    /// --ambient/--tonemap` flags. `tonemap` is `"aces"` (filmic) or anything
+    /// Sets the Disney PBR material for shaded draws. `tonemap`: `"aces"` or anything
     /// else for Reinhard. Non-forwarded Disney parameters keep their defaults.
     #[wasm_bindgen(js_name = setPbrMaterial)]
     #[allow(clippy::too_many_arguments)]
@@ -250,29 +214,21 @@ impl OffscreenRenderer {
         self.refresh_env_background();
     }
 
-    /// Draws the bound HDR environment probe as the frame's **background sky**
-    /// behind every primitive — the browser twin of trd-cli's `--env-background`.
-    /// `blur` is `0.0` (sharp) … `1.0` (fully blurred); the exposure and
-    /// tone-map operator follow [`set_pbr_material`](Self::set_pbr_material), so
-    /// the sky and the objects cannot be tone-mapped differently. Needs a probe
-    /// from [`set_env_map_hdr`](Self::set_env_map_hdr) — with none bound the sky
-    /// is black.
+    /// Draws the HDR probe as background sky. `blur`: 0.0 (sharp) … 1.0 (fully blurred).
+    /// Tone map follows `set_pbr_material`; without a bound probe the sky is black.
     #[wasm_bindgen(js_name = setEnvBackground)]
     pub fn set_env_background(&mut self, enabled: bool, blur: f32) {
         self.env_background_blur = enabled.then_some(blur);
         self.refresh_env_background();
     }
 
-    /// Re-derives the scene's sky from the requested blur + the staged PBR tone
-    /// mapping. The **one** place the two are combined in this front-end.
+    /// Re-derives the sky background from the staged blur + PBR tone mapping.
     fn refresh_env_background(&mut self) {
         self.options.env_background =
             crate::env_background(self.env_background_blur, self.pbr.as_ref());
     }
 
-    /// Decodes an equirectangular Radiance `.hdr` buffer and binds it as the
-    /// environment probe reflected by [`RenderMode::Shaded`] draws — the browser
-    /// twin of trd-cli's `--env HDR` (decoded here, downscaled to 2048px).
+    /// Decodes a Radiance `.hdr` buffer and binds it as the environment probe (downscaled to 2048px).
     #[wasm_bindgen(js_name = setEnvMapHdr)]
     pub fn set_env_map_hdr(&mut self, bytes: &[u8]) -> Result<(), JsValue> {
         let env = crate::decode_env_hdr(bytes).map_err(crate::js_error)?;
@@ -295,28 +251,20 @@ impl OffscreenRenderer {
         self.options.show_axes = enabled;
     }
 
-    /// Toggles the per-draw **local** coordinate-axes gizmo for later frames — one
-    /// [`CoordinateAxes`](trd_core::Primitive::CoordinateAxes) gizmo at each object's own `model`. The
-    /// browser twin of the native `--axes-local` flag.
+    /// Toggles per-draw local coordinate-axes gizmo for later frames.
     #[wasm_bindgen(js_name = setShowLocalAxes)]
     pub fn set_show_local_axes(&mut self, enabled: bool) {
         self.options.show_local_axes = enabled;
     }
 
-    /// Toggles compositing the uploaded background frame beneath the scene as the
-    /// scene's [`Background::frame`](trd_core::Background::frame) plane (#63).
-    /// Enable it, then upload one background
-    /// per frame via [`update_frame_texture_rgba`](Self::update_frame_texture_rgba)
-    /// before that frame's [`render_index`](Self::render_index).
+    /// Enables frame-plane compositing (#63); upload a background per frame before each render.
     #[wasm_bindgen(js_name = setCompositeFrame)]
     pub fn set_composite_frame(&mut self, enabled: bool) {
         self.composite_frame = enabled;
     }
 
-    /// Uploads one RGBA background image as the reused frame-plane texture (#63),
-    /// composited beneath the scene when [`set_composite_frame`](Self::set_composite_frame)
-    /// is enabled. `rgba` must be exactly `width * height * 4` bytes (tightly
-    /// packed) and neither dimension may be zero.
+    /// Uploads an RGBA background for frame-plane compositing (#63).
+    /// `rgba` must be `width * height * 4` bytes; neither dimension may be zero.
     #[wasm_bindgen(js_name = updateFrameTextureRgba)]
     pub fn update_frame_texture_rgba(
         &mut self,
@@ -334,8 +282,7 @@ impl OffscreenRenderer {
                 rgba.len()
             )));
         }
-        // Building the renderer needs the leading mesh table already decoded
-        // (the protocol is mesh-first; the mesh renderer requires ≥1 mesh).
+        // Protocol is mesh-first: needs the leading mesh table before a renderer can be built.
         if !self.input.has_meshes() {
             return Err(crate::js_error(
                 "input is missing the required leading mesh table (protocol is mesh-first)",
@@ -349,11 +296,8 @@ impl OffscreenRenderer {
         Ok(())
     }
 
-    /// Decodes frames from an Arrow IPC chunk and **buffers** them without
-    /// rendering, returning the running total. Unlike [`push_ipc`](Self::push_ipc)
-    /// (which renders and emits an output stream), this only stages frames for
-    /// paced replay by [`render_index`](Self::render_index). Push the whole
-    /// `[mesh?][texture?][params]` stream once, then render by index.
+    /// Decodes frames from a chunk and buffers them (no render). Push the whole stream
+    /// once, then replay by index via [`render_index`].
     #[wasm_bindgen(js_name = loadIpc)]
     pub fn load_ipc(&mut self, chunk: Vec<u8>) -> Result<u32, JsValue> {
         if let Err(message) = self.state.ensure_open() {
@@ -382,9 +326,7 @@ impl OffscreenRenderer {
         u32::try_from(self.frames.len()).unwrap_or(u32::MAX)
     }
 
-    /// The buffered frame's optional external background reference
-    /// (`frame_path`/`frame_url`) the JS shell resolves + uploads before
-    /// [`render_index`](Self::render_index). `None` when out of range or absent.
+    /// External background reference for the buffered frame at `index`; `None` if absent.
     #[wasm_bindgen(js_name = frameRef)]
     pub fn frame_ref(&self, index: u32) -> Option<String> {
         self.frames
@@ -392,9 +334,7 @@ impl OffscreenRenderer {
             .and_then(|frame| frame.frame_ref.clone())
     }
 
-    /// Renders one buffered frame (by index) to the offscreen texture and returns
-    /// its tightly-packed RGBA (`width * height * 4` bytes) for the JS shell to
-    /// display — the generic viewer's per-tick call.
+    /// Renders a buffered frame by index; returns `width * height * 4` RGBA bytes.
     #[wasm_bindgen(js_name = renderIndex)]
     pub async fn render_index(&mut self, index: u32) -> Result<Vec<u8>, JsValue> {
         if let Err(message) = self.state.ensure_open() {
@@ -426,10 +366,7 @@ impl OffscreenRenderer {
         Err(crate::js_error(message))
     }
 
-    /// Lazily builds the mesh renderer on first use: a multi-mesh renderer over
-    /// the stream's (required) leading mesh table (each mesh under its
-    /// `preview_transform` base model). The protocol is mesh-first, so the session
-    /// always carries meshes by the time frames are produced.
+    /// Builds the renderer on first use from the leading mesh table; applies staged texture, PBR, and env map.
     fn ensure_renderer(&mut self) -> Result<&mut Renderer, String> {
         if self.renderer.is_none() {
             let meshes = self.input.meshes();
@@ -439,8 +376,7 @@ impl OffscreenRenderer {
             self.renderer = Some(renderer);
             self.target = Some(target);
 
-            // Bind the stream's texture (0.0.4) as the sampled albedo so
-            // RenderMode::Textured meshes show it; absent ⇒ the default 1×1 white.
+            // Bind stream texture; absent ⇒ 1×1 white.
             if let Some(texture) = self.input.texture() {
                 self.renderer
                     .as_mut()
@@ -448,8 +384,6 @@ impl OffscreenRenderer {
                     .set_texture(texture);
             }
 
-            // Apply the Disney PBR material + HDR environment probe staged by the
-            // JS shell before the first frame (RenderMode::Shaded draws only).
             if let Some(pbr) = &self.pbr {
                 pbr.apply(self.renderer.as_mut().expect("renderer just built"));
             }
@@ -463,14 +397,8 @@ impl OffscreenRenderer {
         Ok(self.renderer.as_mut().expect("renderer just built"))
     }
 
-    /// Resolves a decoded frame into its params + scene: defaults the draw list
-    /// to one instance of mesh `0` for a legacy single-object frame, validates
-    /// the mesh ids, then builds the scene with the current flags + optional
-    /// background compositing. Shared by [`push_open`](Self::push_open) (the
-    /// output-stream path) and [`render_index`](Self::render_index) (paced replay).
+    /// Resolves a decoded frame into `(FrameParams, Scene)`, shared by `push_open` and `render_index`.
     fn scene_for(&mut self, frame: &DecodedFrame) -> Result<(FrameParams, Scene), String> {
-        // The protocol is mesh-first: without a leading mesh table there is
-        // nothing to draw (and the mesh renderer requires ≥1 mesh).
         if !self.input.has_meshes() {
             return Err(
                 "input is missing the required leading mesh table (protocol is mesh-first)"
@@ -481,9 +409,6 @@ impl OffscreenRenderer {
         let has_inline_frame = self.upload_inline_frame(frame.frame_id)?;
         let has_external_frame = std::mem::take(&mut self.external_frame_ready);
         let mesh_count = self.ensure_renderer()?.mesh_count();
-        // Draw-list resolution + mesh-id validation are the protocol's rules, not
-        // this harness's, so they come from the shared assembly every front-end
-        // uses — same scene, same error text, as the CLI.
         let scene = Scene::try_from_frame(
             frame,
             mesh_count,

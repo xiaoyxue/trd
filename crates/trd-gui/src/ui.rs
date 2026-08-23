@@ -1,17 +1,5 @@
-//! Shared egui UI for the interactive viewer (#97) — the side control panel and
-//! the central image surface, written **once** and used by both the native
-//! window (`trd-gui-app`) and the wasm/browser app (`trd-wasm`'s `gui_web_app`).
-//!
-//! It is rendering-backend-agnostic: it only reads the current display texture
-//! and render size and mutates the [`InteractionController`] from pointer/scroll
-//! input, returning whether the scene changed (so the host decides *when* and
-//! *how* to re-render — synchronously on native, asynchronously on wasm).
-//!
-//! The panel is a set of **composable sections** rather than one call with
-//! callback holes: each section borrows the controller only for its own call, so
-//! a host can interleave its own widgets and act on a click where it happens
-//! instead of recording it into a flag. [`show`] is the convenience that runs
-//! them in the standard order for the plain viewers.
+//! Shared egui UI for the interactive viewer (#97) — side panel and central image,
+//! used by both the native window and the browser app.
 
 use egui::{Color32, PointerButton, Sense, TextureHandle, Vec2};
 use trd_core::{PbrDebugView, RenderMode, Tonemap};
@@ -33,22 +21,17 @@ pub enum ImageSizing {
 }
 
 /// How the shared control sections behave for a given host.
-///
-/// A plain value: hosts that need no adjustment pass [`Controls::default`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Controls {
     /// Hide the "Orbit camera" drag target (the video editor pins the camera).
     pub camera_locked: bool,
-    /// Rename the reference translation axes, e.g. the editor's quad basis
-    /// `["e1", "e2", "e3"]`. `None` keeps the parent basis and offers "Free".
+    /// Override axis labels (e.g. `["e1","e2","e3"]`); `None` keeps parent basis.
     pub move_reference_labels: Option<[&'static str; 3]>,
 }
 
 /// The central image surface: what to draw and how to size it.
 pub struct Image<'a> {
     pub controller: &'a mut InteractionController,
-    /// What to draw: a CPU-uploaded egui texture, or — when the shell shares
-    /// trd's `wgpu::Device` — the rendered texture bound directly.
     pub texture: Option<DisplayTexture<'a>>,
     pub render_size: (u32, u32),
     pub sizing: ImageSizing,
@@ -57,13 +40,8 @@ pub struct Image<'a> {
     pub hide_when_empty: bool,
 }
 
-/// The two ways a rendered frame reaches the screen.
-///
-/// `Uploaded` is the portable path: trd's pixels are read back and re-uploaded
-/// through egui. `Native` is the shared-device path: the very texture trd
-/// rendered into is sampled in place, so the readback and the re-upload
-/// disappear. Both are legitimate — a shell whose toolkit has no wgpu device to
-/// share keeps the first.
+/// `Uploaded`: pixels read back and re-uploaded through egui.
+/// `Native`: the rendered texture bound directly — no readback needed.
 #[derive(Clone, Copy)]
 pub enum DisplayTexture<'a> {
     Uploaded(&'a TextureHandle),
@@ -89,20 +67,13 @@ impl DisplayTexture<'_> {
 pub struct ImageOutcome {
     /// The pointer interaction changed the scene.
     pub needs_render: bool,
-    /// A primary **click** requested a pick at these render-target pixel
-    /// coordinates (#141). The host resolves it into a selection.
+    /// A primary click requested a pick at these render-target pixel coordinates (#141).
     pub pick: Option<(u32, u32)>,
-    /// Where the pointer is hovering, in the same render-target pixel
-    /// coordinates as [`pick`](Self::pick). `None` when the pointer is not over
-    /// the image, which is itself the signal that any hover highlight should be
-    /// cleared.
+    /// Hover position in render-target pixels; `None` clears any hover highlight.
     pub hover: Option<(u32, u32)>,
-    /// Under [`ImageSizing::FitCanvas`], the letterboxed size the image was
-    /// drawn at, in physical pixels — what a host should resize its target to.
+    /// Under [`ImageSizing::FitCanvas`], the letterboxed size in physical pixels.
     pub fitted_size: Option<(u32, u32)>,
-    /// The screen rectangle the image occupies, for hosts that annotate it —
-    /// projecting a point into render-target pixels only gets you as far as the
-    /// image, and this maps that to where it actually landed on screen.
+    /// Screen rect the image occupies, for hosts that need to annotate over it.
     pub image_rect: Option<egui::Rect>,
 }
 
@@ -114,9 +85,7 @@ pub struct View<'a> {
     pub last_render_ms: Option<f32>,
 }
 
-/// Runs the standard viewer: the control sections in their usual order plus the
-/// central image. Hosts that need to interleave their own widgets call the
-/// sections directly instead.
+/// Runs the standard viewer: control sections plus central image.
 pub fn show(ui: &mut egui::Ui, view: &mut View) -> ImageOutcome {
     let mut outcome = ImageOutcome::default();
     let controls = Controls::default();
@@ -163,7 +132,6 @@ pub fn header(ui: &mut egui::Ui) {
     ui.separator();
 }
 
-/// Every shared control section, in the standard order.
 pub fn controls_sections(
     ui: &mut egui::Ui,
     controller: &mut InteractionController,
@@ -324,8 +292,7 @@ pub fn render_mode_section(ui: &mut egui::Ui, controller: &mut InteractionContro
     })
 }
 
-/// The Disney PBR material controls. Draws nothing unless the selected object
-/// is in [`RenderMode::Shaded`].
+/// PBR material controls; draws nothing unless the selected object is in [`RenderMode::Shaded`].
 pub fn pbr_material_section(ui: &mut egui::Ui, controller: &mut InteractionController) -> bool {
     let selected_is_pbr = controller
         .state
@@ -429,9 +396,7 @@ pub fn selection_section(ui: &mut egui::Ui, controller: &mut InteractionControll
     })
 }
 
-/// A collapsible, default-open control section with a bold header. Runs `body`
-/// (which reports whether the scene changed) and folds its result back out, so
-/// the caller's `needs_render` accounting is unchanged by the grouping.
+/// A collapsible, default-open section; folds the body's `bool` out unchanged.
 fn section(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui) -> bool) -> bool {
     egui::CollapsingHeader::new(egui::RichText::new(title).strong())
         .default_open(true)
@@ -440,16 +405,9 @@ fn section(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui) -> b
         .unwrap_or(false)
 }
 
-/// The object **transform** widgets: numeric translation (x/y/z), rotation
-/// (yaw/pitch/roll in degrees), and scale (uniform + per-axis). These edit the
-/// exact same [`ObjectTransform`](crate::scene::ObjectTransform) the mouse
-/// gestures mutate, so the two input paths stay numerically in sync — dragging in
-/// the image updates these fields, and editing a field moves the object. Returns
-/// whether the transform changed.
+/// Numeric translation/rotation/scale widgets for the selected object.
 fn transform_panel(ui: &mut egui::Ui, controller: &mut InteractionController) -> bool {
     let mut changed = false;
-    // Transforms edit the *selected* object; with nothing selected there is
-    // nothing to transform, so the widgets are hidden behind a hint (#141).
     let Some(obj) = controller.state.selected_object_mut() else {
         ui.weak("Select an object to transform it");
         return false;
@@ -470,8 +428,6 @@ fn transform_panel(ui: &mut egui::Ui, controller: &mut InteractionController) ->
     changed |= angle_row(ui, "Z (roll)", &mut obj.roll);
 
     ui.label("Scale");
-    // Uniform scale drives all three axes together; per-axis rows allow a
-    // non-uniform scale. Both clamp to the object's working range.
     let mut uniform = (obj.scale[0] + obj.scale[1] + obj.scale[2]) / 3.0;
     ui.horizontal(|ui| {
         ui.label("Uniform");
@@ -502,8 +458,7 @@ fn transform_panel(ui: &mut egui::Ui, controller: &mut InteractionController) ->
     changed
 }
 
-/// A single labeled angle row that displays/edits `radians` in **degrees** (the
-/// natural unit for the widget), storing back radians. Returns whether it changed.
+/// Displays/edits `radians` as degrees, storing back radians.
 fn angle_row(ui: &mut egui::Ui, label: &str, radians: &mut f32) -> bool {
     let mut deg = radians.to_degrees();
     let mut changed = false;
@@ -520,15 +475,9 @@ fn angle_row(ui: &mut egui::Ui, label: &str, radians: &mut f32) -> bool {
     changed
 }
 
-/// The Disney PBR material sub-panel (shown only in [`RenderMode::Shaded`]): live
-/// sliders for the parameters that most change the look — metallic, roughness,
-/// environment-reflection gain, and tone-map exposure — plus a Reinhard/ACES
-/// tone-map selector. Editing any of them re-renders the scene, so the material
-/// is as interactive as the camera. Returns whether the material changed.
+/// PBR material sliders (shown only in [`RenderMode::Shaded`]).
 fn pbr_panel(ui: &mut egui::Ui, controller: &mut InteractionController) -> bool {
     let mut changed = false;
-    // The PBR material is per-object (#141): edit the *selected* object's
-    // material; with nothing selected there is no material to edit.
     let Some((material, ibl, tone_mapping, debug_view)) = controller.state.selected_pbr_mut()
     else {
         ui.weak("Select an object to edit its material");
@@ -549,8 +498,6 @@ fn pbr_panel(ui: &mut egui::Ui, controller: &mut InteractionController) -> bool 
             .selectable_value(debug_view, PbrDebugView::Normal, "Normal")
             .changed();
     });
-    // Label each slider on its own line so the text never clips in a narrow
-    // panel; the slider then spans the full panel width beneath it.
     let mapped_metallic_roughness = material.auxiliary.textures.metallic_roughness;
     ui.label(if mapped_metallic_roughness {
         "Metallic factor"
@@ -594,11 +541,7 @@ fn pbr_panel(ui: &mut egui::Ui, controller: &mut InteractionController) -> bool 
     });
     changed
 }
-/// pointer/scroll input over it into interaction events. Returns whether the
-/// scene changed.
-/// The central image surface: draws the current frame, maps pointer input onto
-/// the controller, and reports a pick request rather than writing it out through
-/// a borrow.
+/// Central image surface: draws the frame and maps pointer/scroll to interaction events.
 pub fn image_panel(ui: &mut egui::Ui, image: Image<'_>) -> ImageOutcome {
     let Image {
         controller,
@@ -671,9 +614,6 @@ pub fn image_panel(ui: &mut egui::Ui, image: Image<'_>) -> ImageOutcome {
     outcome.image_rect = Some(response.rect);
     let delta = response.drag_delta();
     let (dx, dy) = (delta.x / size.x, delta.y / size.y);
-    // Render-target pixels from a pointer position in the letterboxed image —
-    // shared by the click pick and the hover report so the two can never
-    // disagree about where the pointer is.
     let to_target_pixels = |pos: egui::Pos2| {
         let (rw, rh) = render_size;
         let u = ((pos.x - response.rect.min.x) / size.x).clamp(0.0, 1.0);
@@ -693,9 +633,6 @@ pub fn image_panel(ui: &mut egui::Ui, image: Image<'_>) -> ImageOutcome {
         outcome.needs_render |= controller.apply(InteractionEvent::Pan { dx, dy });
     }
 
-    // A primary click (press + release without dragging) requests a pick: map the
-    // pointer position within the letterboxed image to render-target pixel coords
-    // for the host app to resolve into a selection (#141).
     if response.clicked() {
         if let Some(pos) = response.interact_pointer_pos() {
             outcome.pick = Some(to_target_pixels(pos));
@@ -707,8 +644,6 @@ pub fn image_panel(ui: &mut egui::Ui, image: Image<'_>) -> ImageOutcome {
         let scroll = ui.input(|i| i.smooth_scroll_delta.y);
         if scroll != 0.0 {
             let delta = scroll / 100.0;
-            // In object Scale mode the wheel scales the object; otherwise it
-            // dollies the camera (the default zoom).
             let event = if controller.target == InteractionTarget::Object
                 && controller.mode == TransformMode::Scale
             {
@@ -734,13 +669,10 @@ pub fn image_panel(ui: &mut egui::Ui, image: Image<'_>) -> ImageOutcome {
 mod tests {
     use super::section;
 
-    /// Runs `body` inside one headless egui frame (CPU layout only — no window /
-    /// GPU) and returns its result, so panel helpers can be unit-tested.
+    /// Runs `body` inside one headless egui frame; used to test panel helpers.
     fn in_frame<R>(body: impl FnOnce(&mut egui::Ui) -> R) -> R {
         let mut out = None;
         let mut body = Some(body);
-        // A default-open `CollapsingHeader` runs its body on the first frame, so a
-        // single test-ui pass is enough to exercise `section`.
         egui::__run_test_ui(|ui| {
             if let Some(body) = body.take() {
                 out = Some(body(ui));
@@ -751,10 +683,6 @@ mod tests {
 
     #[test]
     fn section_folds_out_its_body_changed_flag() {
-        // Regression: the panel-polish refactor dropped `section`'s returned
-        // "changed" flag, so control edits (e.g. PBR sliders) didn't re-render
-        // until the next image drag. `section` must propagate its body's bool so
-        // the caller's `needs_render` accounting still fires.
         assert!(
             in_frame(|ui| section(ui, "changed", |_| true)),
             "a section whose body reports a change must return true"

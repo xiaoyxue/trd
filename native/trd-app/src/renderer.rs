@@ -1,11 +1,9 @@
 //! The live window surface, plus the per-frame render path driving the shared
 //! [`trd_core::Renderer`] harness.
 //!
-//! This shell is **not** a renderer: `trd-core`'s harness takes its render target
-//! as a per-call argument rather than owning one (#203), so the only thing left
-//! here is what is genuinely window-specific — creating the surface from a
-//! `winit` window, owning + resizing it, and the platform's surface-recovery
-//! policy (#180).
+//! This shell is **not** a renderer: it owns only what is window-specific —
+//! creating the surface from a `winit` window, resizing it, and this platform's
+//! surface-recovery policy.
 
 use std::sync::Arc;
 
@@ -22,28 +20,18 @@ use crate::stream::FrameData;
 /// GPU resources tied to a live window surface.
 pub(crate) struct WindowRenderer {
     pub(crate) window: Arc<Window>,
-    /// Retained so a **lost** surface can be rebuilt for the same window: wgpu
-    /// asks for recreation, not reconfiguration, and a new surface needs the
-    /// instance that made the first one (#203).
+    /// Retained so a **lost** surface can be rebuilt: wgpu asks for recreation,
+    /// and a new surface needs the instance that made the first one.
     instance: wgpu::Instance,
-    /// The shared GPU context (adapter + device + queue), held as one value
-    /// instead of cloned apart into separate fields (#180).
     gpu: Arc<trd_core::GpuContext>,
-    /// The window surface, owned directly by the shell (#203): the harness holds
-    /// no target of its own, so this front-end owns the surface and decides how to
-    /// repair it. Held as a [`RenderTarget`] because presenting is reachable only
-    /// through the renderer's one `render` dispatcher — the surface itself carries
-    /// no render behaviour.
+    /// The window surface, owned by the shell so it decides how to repair it.
     target: RenderTarget,
-    /// The shared render harness, built lazily once the stream's mesh table has
-    /// arrived from the reader thread.
+    /// Built lazily once the stream's mesh table arrives from the reader thread.
     pub(crate) renderer: Option<Renderer>,
-    /// The frame's light rig. Held here rather than pushed onto the harness:
-    /// lighting is a `Scene` property now (#182), so it is attached to the scene
-    /// this window builds each frame.
+    /// Attached to the scene this window builds each frame.
     lighting: Lighting,
-    /// CPU image backing the currently uploaded frame-plane texture. Inline
-    /// frame reuse preserves the same Arc, so repeated IDs skip GPU writes.
+    /// CPU image backing the uploaded frame-plane texture. Inline frame reuse
+    /// preserves the same Arc, so repeated IDs skip GPU writes.
     uploaded_frame_image: Option<Arc<ImageData>>,
 }
 
@@ -53,10 +41,8 @@ impl WindowRenderer {
         let width = size.width.max(1);
         let height = size.height.max(1);
 
-        // `new_without_display_handle_from_env` honours WGPU_BACKEND (e.g. `gl` on
-        // WSL2), matching the headless CLI. An `Arc<Window>` supplies both the
-        // window and display handles at surface creation, so the surface outlives
-        // borrows and is `'static`.
+        // Honours WGPU_BACKEND (e.g. `gl` on WSL2), matching the headless CLI.
+        // The `Arc<Window>` supplies both handles, so the surface is `'static`.
         let instance = trd_core::create_instance();
         let surface = instance.create_surface(window.clone())?;
 

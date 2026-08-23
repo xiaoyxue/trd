@@ -1,11 +1,5 @@
-//! The editor's own egui surface (#163/#167): the left-pane editing controls,
-//! the quad/catalog interaction wiring, and the player footer.
-//!
-//! This is the *editing* UI. The read-only Details inspector lives in
-//! [`super::details_ui`], and the shared viewer controls (Interaction,
-//! Transform, Render mode, PBR material, Overlays, Selection) stay in
-//! [`crate::ui`]; this module composes them for the video editor and owns the
-//! playback widgets.
+//! The editor's egui surface (#163/#167): left-pane editing controls,
+//! quad/catalog interaction, and player footer.
 
 use super::details_ui::details_ui;
 use super::{
@@ -21,7 +15,6 @@ impl eframe::App for VideoEditingApp {
             self.set_video_info(video);
         }
         if let Some(document) = self.shared.take_incoming_document() {
-            // A document attached, replaced or cleared from the Open dialog.
             self.set_document(document);
         }
         self.consume_video_frame();
@@ -78,10 +71,6 @@ impl eframe::App for VideoEditingApp {
                     self.catalog_controls(ui);
                     self.details_controls(ui);
                     needs_render |= crate::ui::reset_button(ui, &mut self.controller);
-                    // "Reset view" only re-frames the camera; this puts the whole
-                    // editing session back to its opening state, which is the
-                    // only way out of an accumulated quad/asset/transform without
-                    // reloading the clip.
                     if ui
                         .button("Reset all")
                         .on_hover_text(
@@ -107,9 +96,6 @@ impl eframe::App for VideoEditingApp {
             .show(ui, |ui| self.player_controls(ui));
 
         egui::CentralPanel::default().show(ui, |ui| {
-            // Field-level borrows: the panel takes `&mut self.controller`, so the
-            // texture must be selected from disjoint fields rather than through a
-            // `&self` method.
             let texture = if !self.shared.video_loaded.get() {
                 None
             } else if let Some(id) = self.native_texture {
@@ -149,22 +135,7 @@ impl eframe::App for VideoEditingApp {
 }
 
 impl VideoEditingApp {
-    /// Applies one frame's [`ImageOutcome`](crate::ui::ImageOutcome) **in the
-    /// order the pick contract requires**: the scene revision settles first, and
-    /// only then does a pick request capture it.
-    ///
-    /// The order is the whole point of this function existing, so it is stated
-    /// once here rather than inlined at the call site (#205).
-    /// [`image_panel`](crate::ui::image_panel) reports `needs_render` for the
-    /// *very same* primary click that requests the pick, and both
-    /// [`accepts_pick`](VideoEditingShared::accepts_pick) and the
-    /// [`schedule_pick`](Self::schedule_pick) completion guard reject a result
-    /// whose request captured a stale revision. Handling the pick first —
-    /// as it was until this was hoisted out of the `CentralPanel` closure —
-    /// therefore made the click invalidate *its own* completion, and selection
-    /// was dead. Bumping first is safe because
-    /// [`handle_pick`](Self::handle_pick) never bumps the revision on the GPU
-    /// pick path.
+    /// Scene revision settles before the pick captures it (#205).
     pub(super) fn settle_frame(
         &mut self,
         ctx: &egui::Context,
@@ -183,19 +154,7 @@ impl VideoEditingApp {
         }
     }
 
-    /// Tracks whether the pointer is over the tracked quad, so the face can be
-    /// washed before anything is clicked.
-    ///
-    /// Only a *change* acts: hover fires on every frame the pointer rests on the
-    /// image, and re-rendering each of those would peg the GPU for a picture that
-    /// is already correct.
-    ///
-    /// A change has to ask for a repaint as well as an overlay. `request_overlay`
-    /// only raises a flag, and [`schedule_overlay`](Self::schedule_overlay) reads
-    /// it at the *top* of the next frame — while hover is resolved near the
-    /// bottom, after the image has been drawn. Without a repaint the flag would
-    /// sit unread the moment the pointer stopped moving, which is exactly when a
-    /// hover highlight is supposed to be showing.
+    /// Updates hover state; only re-renders on a change.
     fn update_quad_hover(&mut self, hover: Option<(u32, u32)>, quad: Option<[[f32; 2]; 4]>) {
         let hovered = hover.is_some_and(|point| self.point_hits_quad(point, quad));
         if hovered != self.hovered_quad {
@@ -235,9 +194,6 @@ impl VideoEditingApp {
                 },
                 None => "Document: none — the video plays as-is".to_owned(),
             });
-            // What the document *contains*, as opposed to what was picked: the
-            // two differ whenever a file is selected but not yet loaded, and a
-            // name alone never says whether the rows fit this video.
             match self.document.as_ref() {
                 Some(document) => {
                     let summary = super::document_summary(document, &self.video);
@@ -280,8 +236,6 @@ impl VideoEditingApp {
     ) {
         ui.collapsing("Placement quad (standalone)", |ui| {
             let Some(frame) = self.frame_row(frame_index) else {
-                // No document, or a frame it does not annotate: the video plays
-                // and there is simply nothing to place here (#264).
                 ui.label(format!("Frame {frame_index}"));
                 ui.label(if self.has_document() {
                     "Not annotated: this frame is plain video"
@@ -302,9 +256,6 @@ impl VideoEditingApp {
             } else {
                 "Background-only row: quad and object hidden"
             });
-            // The wash is the only feedback for these two, so when it is missing
-            // there is otherwise no way to tell a pointer that never resolved
-            // from a fill that never drew.
             ui.weak(format!(
                 "Pointer: {} · quad: {}",
                 if self.hovered_quad {
@@ -345,14 +296,10 @@ impl VideoEditingApp {
             });
         })
         .response
-        // A section that greys out without saying why reads as a defect; this
-        // one produced a filed bug that turned out to be the missing hint
-        // (#325/#329).
         .on_disabled_hover_text("Select a placement quad first");
     }
 
-    /// The Details inspector. Its body only runs while expanded, so the facts
-    /// are derived only when they are actually shown.
+    /// The Details inspector.
     fn details_controls(&mut self, ui: &mut egui::Ui) {
         ui.collapsing("Details", |ui| {
             let facts = self.displayed_facts();
@@ -405,21 +352,10 @@ impl VideoEditingApp {
         }
     }
 
-    /// The **Shots** section: where the annotated ranges are, and how to get to
-    /// them.
-    ///
-    /// A sparse document may annotate a few hundred frames of a clip that runs
-    /// to hundreds of thousands, so without this nothing tells a user *where*
-    /// the editable parts are. Selecting a shot seeks to its **first** frame
-    /// (#264).
+    /// Shots section: click a shot to seek to its first frame (#264).
     fn shot_controls(&mut self, ui: &mut egui::Ui) {
         let shots = self.shots();
         ui.collapsing(format!("Shots ({})", shots.len()), |ui| {
-            // Authoring aids, not something to watch a cut through — so they are
-            // toggles, and they govern playback too. Two of them, because the
-            // quad and the basis it defines are separate questions: judging the
-            // quad against the plate wants the outline alone, reading the basis
-            // wants the gizmos alone.
             let mut changed = ui
                 .checkbox(&mut self.show_placement_quads, "Show placement quads")
                 .on_hover_text(
@@ -433,9 +369,6 @@ impl VideoEditingApp {
             if changed {
                 self.shared.request_overlay();
             }
-            // A sparse document annotates a few frames out of many, so the
-            // overlay drawing nothing is usually correct — and indistinguishable
-            // from a broken toggle unless it says which case this is.
             let state = super::overlay_state(
                 self.show_placement_quads || self.show_gizmos,
                 self.has_document(),
@@ -478,9 +411,7 @@ impl VideoEditingApp {
             return;
         }
         self.current_frame_index = frame_index;
-        // The id is what retires this seek: the shell stamps every frame it
-        // hands over with the seek it was servicing, so the answer identifies
-        // itself instead of having to be recognised from its timestamp (#322).
+        // Seek id retires the request when it arrives back (#322).
         self.pending_seek = Some(super::PendingSeek {
             frame_index,
             id: self.shared.request_seek(frame_index),
@@ -489,9 +420,6 @@ impl VideoEditingApp {
 
     fn select_catalog_asset(&mut self, asset: CatalogAsset) {
         self.selected_asset = Some(asset);
-        // The object is authored in this quad's frame, so placing it binds the
-        // two: the quad stays selected and its basis stays visible for as long
-        // as the object is there to be edited.
         self.selected_quad = true;
         self.show_gizmos = true;
         self.controller.state.objects[0] = crate::scene::ObjectTransform::default();
@@ -502,16 +430,7 @@ impl VideoEditingApp {
         self.shared.request_overlay();
     }
 
-    /// Names the basis arms `e1`/`e2`/`e3` at their tips, in the arm colours.
-    ///
-    /// egui text over the image rather than geometry in the scene: `trd-core`
-    /// draws lines and triangles and has no glyphs at all, so labelling in the
-    /// render pass would mean a font atlas — a far larger thing than the label.
-    /// The tips are still Rust's, projected through the same `K` the pass uses,
-    /// so the text lands exactly where the arm ends rather than being positioned
-    /// by eye.
-    ///
-    /// Only drawn with the gizmos, since it annotates them.
+    /// Labels basis arms `e1`/`e2`/`e3` at their tips using projected egui text.
     fn paint_axis_labels(
         &self,
         ui: &egui::Ui,
@@ -529,11 +448,6 @@ impl VideoEditingApp {
             return;
         };
         let intrinsics = trd_placement::CameraIntrinsics { row_major: k };
-        // The arms the gizmo actually draws: the quad's own half-edges in plane,
-        // the unit normal scaled to match them.
-        // Deeper greens/blues than the arms themselves: a thin anti-aliased line
-        // reads at a lightness that glyph strokes wash out at, so the text needs
-        // more saturation to stay legible over bright footage.
         let tips = [
             ("e1", frame.half_edge1, egui::Color32::from_rgb(255, 70, 70)),
             ("e2", frame.half_edge2, egui::Color32::from_rgb(20, 200, 45)),
@@ -557,8 +471,6 @@ impl VideoEditingApp {
             let Ok([x, y]) = trd_placement::project_camera(intrinsics, tip) else {
                 continue;
             };
-            // Source pixels are the calibration's space; the image is whatever
-            // egui laid it out at, so the mapping is one ratio per axis.
             let position = egui::pos2(
                 rect.min.x + x / self.video.width as f32 * rect.width(),
                 rect.min.y + y / self.video.height as f32 * rect.height(),
@@ -566,9 +478,6 @@ impl VideoEditingApp {
             if !rect.contains(position) {
                 continue;
             }
-            // Drawn twice: a dark backing under the coloured glyphs, because the
-            // labels sit over live footage that is bright in places and dark in
-            // others, and either alone vanishes into one of them.
             let font = egui::FontId::proportional(20.0);
             painter.text(
                 position + egui::vec2(1.5, 1.5),
@@ -581,15 +490,7 @@ impl VideoEditingApp {
         }
     }
 
-    /// Adopts the letterboxed image size the panel just drew at.
-    ///
-    /// The panel fits the image to the *render target's* aspect, and the render
-    /// target is then sized from what the panel drew — a loop that preserves
-    /// whatever aspect it starts with rather than correcting to the video's. So
-    /// the source's aspect is re-imposed here: whatever the panel proposes, the
-    /// target can only ever be the video's shape. Without this a single tick
-    /// with the wrong aspect latches permanently (playback drew 1493×1080 for a
-    /// 16:9 clip).
+    /// Re-imposes the source aspect so the render target stays the video's shape (#282).
     fn resize_render_target(&mut self, ctx: &egui::Context, fitted: (u32, u32)) {
         let fitted = fit_to_source_aspect(fitted, (self.video.width, self.video.height));
         if self.image_sizing != crate::ui::ImageSizing::FitCanvas
@@ -606,19 +507,8 @@ impl VideoEditingApp {
 
     /// Resolves a click on the image into a quad selection or a GPU pick request.
     ///
-    /// **A placed object and its quad are bound.** The object is authored in that
-    /// quad's reconstructed frame — `draw_model = quad_placement * object` — so
-    /// while one is placed the quad stays selected and its gizmos stay up, and
-    /// every click is about the object. Editing an object whose frame had
-    /// silently deselected itself would be editing against an invisible basis.
-    ///
-    /// With no object placed the quad simply follows the click: inside selects
-    /// it and reveals its frame, outside deselects it and takes the frame away.
-    ///
-    /// The selection change is published **before** any pick is requested, for
-    /// the reason [`settle_frame`](Self::settle_frame) spells out: a pick
-    /// captures the current render revision, and bumping the revision afterwards
-    /// would invalidate the very pick this click asked for (#205).
+    /// Resolves a click into a quad selection or GPU pick. Selection bumps before
+    /// pick so the pick captures the updated revision (#205).
     pub(super) fn handle_pick(&mut self, (x, y): (u32, u32), quad: Option<[[f32; 2]; 4]>) {
         if self.selected_asset.is_some() {
             self.shared.request_pick((x, y));
@@ -630,11 +520,6 @@ impl VideoEditingApp {
         let clicked_quad = self.point_hits_quad((x, y), quad);
         if clicked_quad != self.selected_quad {
             self.selected_quad = clicked_quad;
-            // Selecting a quad is asking to work in its frame, so reveal that
-            // frame; letting go of the quad takes it away again. This flips the
-            // visible toggle rather than overriding it behind its back, so the
-            // checkbox keeps saying what is drawn and stays free to be set by
-            // hand between clicks.
             self.show_gizmos = clicked_quad;
             self.shared.request_overlay();
         }
@@ -724,26 +609,15 @@ mod tests {
     }
 }
 
-/// Fits `source`'s aspect inside the `pane` the image panel just drew at.
-///
-/// This is what keeps the render target the shape of the video. The panel sizes
-/// the image from the *render target's* aspect, and the target is then sized
-/// from what the panel drew, so nothing in that loop consults the video after
-/// the first tick: a single wrong aspect latches forever, which is how playback
-/// came to draw 1493x1080 for a 16:9 clip (#282). Re-imposing the source aspect
-/// here makes the loop self-correcting whatever it starts from.
+/// Fits `source`'s aspect inside `pane`; keeps the render target the video's shape (#282).
 fn fit_to_source_aspect(pane: (u32, u32), source: (u32, u32)) -> (u32, u32) {
     let (pane_w, pane_h) = (pane.0.max(1), pane.1.max(1));
     let (source_w, source_h) = source;
-    // Before the source dimensions are known there is nothing to fit to, and
-    // reshaping the pane on a guess is worse than leaving it alone.
     if source_w == 0 || source_h == 0 {
         return (pane_w, pane_h);
     }
-    // Round rather than truncate. The result is fed back in as the next pane,
-    // so half a pixel lost each time walks the target smaller frame after frame
-    // (measured before this: 1493 → 1491 → 1489 …). Rounding makes it a fixed
-    // point, which the tests pin.
+    // Round rather than truncate: rounding makes the size a fixed point; truncation
+    // walks the target smaller each frame (1493 → 1491 → 1489…).
     let scale = |value: u32, num: u32, den: u32| {
         let den = u64::from(den);
         u32::try_from((u64::from(value) * u64::from(num) + den / 2) / den).unwrap_or(u32::MAX)
@@ -757,8 +631,6 @@ fn fit_to_source_aspect(pane: (u32, u32), source: (u32, u32)) -> (u32, u32) {
         (false, true) => by_height,
         _ => by_width,
     };
-    // Never ask for more pixels than the source has: upscaling costs GPU time
-    // and cannot add detail.
     (fitted.0.min(source_w).max(1), fitted.1.min(source_h).max(1))
 }
 
@@ -766,8 +638,6 @@ fn fit_to_source_aspect(pane: (u32, u32), source: (u32, u32)) -> (u32, u32) {
 mod fit_tests {
     use super::fit_to_source_aspect;
 
-    /// The bug this function exists for: the panel proposes the full pane, and
-    /// without re-imposing the source aspect that shape is adopted and latched.
     #[test]
     fn full_pane_is_letterboxed_to_the_source_aspect() {
         assert_eq!(
@@ -776,8 +646,6 @@ mod fit_tests {
         );
     }
 
-    /// The loop feeds each result back in as the next pane, so anything but a
-    /// fixed point walks the render target smaller every frame.
     #[test]
     fn repeated_application_does_not_drift() {
         let source = (1920, 1080);
@@ -791,9 +659,7 @@ mod fit_tests {
 
     #[test]
     fn a_taller_pane_is_width_bound_and_a_wider_pane_height_bound() {
-        // Pane narrower than 16:9 -> width fills, height letterboxes.
         assert_eq!(fit_to_source_aspect((800, 1000), (1920, 1080)), (800, 450));
-        // Pane wider than 16:9 -> height fills, width pillarboxes.
         assert_eq!(
             fit_to_source_aspect((4000, 1000), (1920, 1080)),
             (1778, 1000)
@@ -808,7 +674,6 @@ mod fit_tests {
         );
     }
 
-    /// An unknown source must leave the pane alone rather than collapse it.
     #[test]
     fn an_unknown_source_leaves_the_pane_alone() {
         assert_eq!(fit_to_source_aspect((0, 0), (0, 0)), (1, 1));

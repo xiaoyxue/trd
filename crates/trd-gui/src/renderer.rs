@@ -1,21 +1,14 @@
-//! The native in-process render backend (#97).
+//! The in-process render backend (#97).
 //!
 //! trd-gui owns **no rendering logic**: it hands a [`SceneState`]-derived scene
 //! to `trd-core`'s [`Renderer`](trd_core::Renderer) and displays the RGBA pixels
-//! that come back. This realizes Strategy A (the decoupled CPU-RGBA handoff):
-//! eframe draws the egui UI with its own renderer while `trd-core` renders the
-//! scene **headless** to an RGBA buffer, so the two toolkits stay independent of
-//! `trd-core`'s `wgpu 30`.
-//!
-//! There is no backend *trait* any more: with the Arrow round-trip gone there is
-//! exactly one way the GUI renders, so the abstraction had a single implementor
-//! and abstracted nothing (#180).
+//! that come back. There is no backend *trait*: with the Arrow round-trip gone
+//! the abstraction had a single implementor (#180).
 
 use crate::error::GuiError;
 use crate::scene::SceneState;
 
 /// A rendered frame: tightly packed row-major RGBA (`width * height * 4` bytes).
-/// Shared by the native backends and the wasm offscreen renderer.
 #[derive(Debug, Clone)]
 pub struct ImageRgba {
     pub width: u32,
@@ -23,13 +16,10 @@ pub struct ImageRgba {
     pub rgba: Vec<u8>,
 }
 
-// The native `Renderer`-based backends (in-process + Arrow round-trip) and
-// The native backend is native-only; on wasm the offscreen renderer is
-// `crate::web_renderer` (async) instead, so only `ImageRgba` above is shared.
 /// The appearance options for `state`: draw mode plus **every** overlay toggle,
 /// so [`scene_for`] produces exactly the scene the CLI produces from the same
-/// inputs. Platform-neutral: native and browser front-ends share it, which is
-/// what stops their overlay handling drifting apart again (#180).
+/// inputs. Platform-neutral, which is what stops native and browser overlay
+/// handling drifting apart again (#180).
 pub fn render_options(state: &SceneState) -> trd_core::RenderOptions {
     let xz = |on: bool| on.then_some(trd_core::GridPlane::Xz);
     trd_core::RenderOptions {
@@ -43,17 +33,9 @@ pub fn render_options(state: &SceneState) -> trd_core::RenderOptions {
         show_object_grid: xz(state.show_local_grid),
         selected: state.selected,
         pbr: None,
-        // The HDR sky is an ordinary appearance option now (#235 R2), so this
-        // front-end no longer reaches around `Scene::from_draws` to set it.
-        //
-        // No `rotation` here either: the probe yaw is a scene-level
-        // `EnvironmentLight`, so the sky and the reflections in front of it
-        // cannot disagree (#182).
-        //
-        // Its exposure and operator are the *background's own* (#235 S6): the sky
-        // used to read `tone_mappings.first()`, i.e. mesh 0's, so editing the
-        // first object's exposure silently re-graded the sky and editing any
-        // other object's did nothing to it.
+        // No `rotation`: the probe yaw is a scene-level `EnvironmentLight`, so
+        // the sky and the reflections in front of it cannot disagree (#182). The
+        // exposure and operator are the background's own, not mesh 0's (#235 S6).
         env_background: state.show_environment_background.then_some(
             trd_core::EnvironmentBackground {
                 exposure: state.environment_background_tone_mapping.exposure,
@@ -109,19 +91,15 @@ pub struct MaterialMaps<'a> {
 }
 
 /// The one GUI renderer: a thin adapter over `trd-core`'s
-/// [`Renderer`](trd_core::Renderer) harness that turns the interactive
-/// [`SceneState`] into a frame.
+/// [`Renderer`](trd_core::Renderer) harness that turns a [`SceneState`] into a
+/// frame.
 ///
-/// **Platform-neutral.** Native (`trd-gui-app`) and browser (`web_app`) used to
-/// have a renderer each — `InProcRenderer` and `WebRenderer` — with byte-identical
-/// fields and near-identical bodies, only because the core harness was
-/// native-only. It no longer is, so there is one type (#180). The API is `async`
-/// because GPU read-back is; natively the future is already complete when the map
-/// poll returns, so callers `pollster::block_on` it for free.
+/// **Platform-neutral** (#180). The API is `async` because GPU read-back is;
+/// natively the future is already complete when the map poll returns, so callers
+/// `pollster::block_on` it for free.
 ///
-/// It keeps **no** scene state: what to draw comes from [`scene_for`] every frame,
-/// and the GUI displays the output scaled to the panel, so the render resolution
-/// stays fixed (no GPU device churn on window resize).
+/// It keeps **no** scene state: [`scene_for`] supplies each frame, at a fixed
+/// render resolution scaled to the panel.
 pub struct GuiRenderer {
     renderer: trd_core::Renderer,
     /// The texture target the renderer draws into and reads back from — a
@@ -140,17 +118,13 @@ pub struct GuiRenderer {
 
 impl GuiRenderer {
     /// Builds the renderer for `meshes` (drawn by index) at a fixed
-    /// `width` × `height`; the meshes are centered + scaled to fit by their
-    /// preview transform inside `trd-core`.
+    /// `width` × `height`; meshes are centered + scaled by their preview
+    /// transform inside `trd-core`.
     ///
-    /// `textures` skins each object with its **own** albedo — entry `i` binds to
-    /// mesh `i` (#141) — and `material_maps` binds its optional
-    /// [`MaterialMaps`] the same way; both may be shorter than
-    /// `meshes`, and a `None` entry leaves `trd-core`'s 1×1 defaults in place. An
-    /// optional `env` HDR probe is reflected by [`RenderMode::Shaded`] surfaces
-    /// (bound once; the interactive material rides on the scene state).
-    ///
-    /// [`RenderMode::Shaded`]: trd_core::RenderMode::Shaded
+    /// `textures` and `material_maps` bind per object — entry `i` to mesh `i`
+    /// (#141); both may be shorter than `meshes`, and a `None` entry keeps
+    /// `trd-core`'s 1×1 defaults. Optional `env` HDR is reflected by
+    /// [`RenderMode::Shaded`](trd_core::RenderMode::Shaded) surfaces.
     pub async fn new(
         meshes: &[trd_core::Mesh],
         textures: &[Option<&dyn trd_core::Texture>],

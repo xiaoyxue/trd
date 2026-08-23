@@ -3,16 +3,9 @@ import type { VideoTrackFacts } from "./mp4-video.ts";
 /// Where decoded frames come from, in presentation order, for a player that
 /// does not care how they were demuxed.
 ///
-/// The seam exists because two things are being separated. *Pacing* — which
-/// frame is due against the clock, which are dropped, who closes them — is the
-/// editor's policy and lives in `VideoPlayer`. *Demuxing and decoding* — byte
-/// ranges, box parsing, decoder lifecycle, key-frame catch-up — is standard
-/// media plumbing, and a library that already does it is preferable to a
-/// hand-written one.
-///
-/// Implementations: `Mp4Video` (mp4box + `VideoDecoder`, written here) and
-/// `MediabunnyReader` (delegated). Running both under the same player is what
-/// makes them comparable on the same file.
+/// The seam separates *pacing* — which frame is due, which are dropped, who
+/// closes them, all `VideoPlayer`'s policy — from *demuxing and decoding*.
+/// Implementations: `Mp4Video` (hand-written) and `MediabunnyReader`.
 export interface FrameReader {
   readonly facts: VideoTrackFacts;
   /// The `moov` box exactly as it appears in the file. Rust derives the

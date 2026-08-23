@@ -10,62 +10,27 @@ use std::sync::Arc;
 use crate::error::NativeVideoEditingError;
 
 pub struct DecodedFrame {
-    /// The frame this picture actually is, recovered from the timestamp ffmpeg
-    /// reported for it — **not** the index that was asked for.
-    ///
-    /// The two differ on a variable-rate source: the seek time is computed from
-    /// the timeline's nominal grid, which such a container does not sit on, so
-    /// ffmpeg's at-or-after seek can hand back the neighbouring picture. Taking
-    /// the request on trust is how that became a silent one-frame placement
-    /// error rather than a visible one (#319).
+    /// Frame index recovered from ffmpeg's reported timestamp, not from the request (#319).
     pub index: u32,
-    /// The presentation timestamp ffmpeg reported, in seconds. Falls back to the
-    /// requested instant when the report could not be read.
+    /// Presentation timestamp in seconds; falls back to the requested instant.
     pub media_time_seconds: f64,
-    /// How long this frame is shown, as the container declares it; `0.0` when
-    /// unknown, which leaves the timeline's nominal interval to stand in.
+    /// Frame display duration in seconds; `0.0` when unknown.
     pub duration_seconds: f64,
     pub rgba: Vec<u8>,
 }
 
-/// The flags that make ffmpeg describe what it emits, in the source clock.
-///
-/// **`-copyts` is load-bearing.** Without it `-ss` rebases the output clock to
-/// zero, so `showinfo` reports an offset from the seek point instead of the
-/// source timestamp — a number that looks perfectly reasonable and is wrong by
-/// however far the seek went. Both call sites share this list so neither can
-/// drift from the other.
+/// `-copyts` is load-bearing: without it `showinfo` reports an offset from the
+/// seek point, not the source timestamp. Shared by both call sites.
 const REPORTING_FLAGS: [&str; 4] = ["-hide_banner", "-v", "info", "-copyts"];
 
-/// Where to look when a decode at `index` produced **no picture at all**.
-///
-/// A container can end with a packet that carries no picture: a recorder that
-/// stops mid-interval writes a trailing sample marked `AV_PKT_FLAG_DISCARD`, and
-/// `nb_frames` counts it. The timeline built from that count then has one index
-/// more than the media has pictures, and asking for that index decodes nothing —
-/// not a short read, *nothing* (#324).
-///
-/// The honest answer is the last real picture, one nominal interval back. It is
-/// also what the browser's reader already does by construction: mediabunny
-/// answers at-or-**before** the requested instant, so it simply returns the
-/// preceding picture and the phantom index is invisible there. Stepping back
-/// here is what makes the two surfaces agree.
-///
-/// A step of exactly one interval, not a search: this is a container ending one
-/// packet past its last picture, not an arbitrary gap. If the step still finds
-/// nothing, that is a genuine failure and the caller reports it.
-///
-/// `None` at index 0, where there is nothing earlier to fall back to.
+/// Fallback timestamp when a decode produced no picture (phantom final index, #324).
+/// Steps one nominal interval back — one packet past the last real picture.
 fn fallback_timestamp_seconds(index: u32, fps_num: u32, fps_den: u32) -> Option<f64> {
     let earlier = index.checked_sub(1)?;
     Some(f64::from(earlier) * f64::from(fps_den) / f64::from(fps_num.max(1)))
 }
 
-/// What a decoded frame should report, given what ffmpeg said about it.
-///
-/// Split out from the two decode paths because this is the decision the bug was
-/// in: a requested index used to be taken on trust, and here it is only a
-/// fallback for when ffmpeg said nothing (#319).
+/// Maps ffmpeg's report to `(index, pts, duration)`; requested index is only a fallback (#319).
 fn resolve_timing(
     reported: Option<(f64, f64)>,
     requested_index: u32,
@@ -75,8 +40,7 @@ fn resolve_timing(
 ) -> (u32, f64, f64) {
     match reported {
         Some((pts, duration)) => (index_at(pts, fps_num, fps_den, frame_count), pts, duration),
-        // No report: keep doing what this always did, and say the duration is
-        // unknown rather than inventing the nominal one.
+        // No report: fall back to requested index; duration unknown.
         None => (
             requested_index,
             f64::from(requested_index) * f64::from(fps_den) / f64::from(fps_num.max(1)),
@@ -85,18 +49,8 @@ fn resolve_timing(
     }
 }
 
-/// Pulls `(presentation timestamp, duration)` out of one `showinfo` line.
-///
-/// This is ffmpeg stating what it actually decoded, which is the only way to
-/// know: a raw video pipe carries pixels and no timing at all.
-///
-/// ```text
-/// [Parsed_showinfo_1 @ …] n:0 pts:69120 pts_time:5.625 duration:512 duration_time:0.0416667 fmt:rgba …
-/// ```
-///
-/// The duration is optional — a stream that does not declare one still yields a
-/// usable timestamp, and `0.0` tells the caller to fall back rather than trust a
-/// fabricated interval.
+/// Parses `(pts_time, duration_time)` from a `showinfo` filter line.
+/// Duration is optional; `0.0` means unknown.
 fn parse_showinfo(line: &str) -> Option<(f64, f64)> {
     let pts = showinfo_field(line, "pts_time:")?;
     Some((pts, showinfo_field(line, "duration_time:").unwrap_or(0.0)))
@@ -149,15 +103,8 @@ pub struct NativeVideo {
     pub height: u32,
 }
 
-/// The preview size a `--preview-width` implies for a source.
-///
-/// **The one derivation.** Both the decode size ffmpeg is asked to scale to and
-/// the render-target size the shell allocates come from here, so they cannot
-/// disagree — the divergence #170 reports was two call sites computing this
-/// separately and a third not computing it at all.
-///
-/// Clamped to the source width, so `--preview-width` only ever scales *down*;
-/// the height follows the source aspect.
+/// Derives `(width, height)` from `--preview-width`: single source of truth for
+/// both the ffmpeg scale filter and the render target (#170). Scales down only.
 pub(crate) fn preview_size(info: &trd_core::VideoInfo, preview_width: u32) -> (u32, u32) {
     let width = preview_width.min(info.width.max(1)).max(1);
     let height = ((u64::from(width) * u64::from(info.height.max(1)))
@@ -178,13 +125,8 @@ impl NativeVideo {
         Ok(Self::with_timeline(source, info, preview_width))
     }
 
-    /// Opens a video **without a document to match it against**, deriving the
-    /// timeline from the container instead (#264).
-    ///
-    /// Validation exists to catch a document paired with the wrong cut; with no
-    /// document there is nothing to disagree with, so ffprobe's answer *is* the
-    /// timeline. Returns the derived [`VideoInfo`](trd_core::VideoInfo) so the
-    /// editor can adopt it.
+    /// Opens without a document (#264): derives the timeline from the container.
+    /// Returns the derived `VideoInfo` so the editor can adopt it.
     pub fn probe(
         source: NativeVideoSource,
         preview_width: u32,
@@ -216,8 +158,7 @@ impl NativeVideo {
         let index = index.min(self.frame_count.saturating_sub(1));
         let mut output = self.run_decode(&self.timestamp(index))?;
         if output.stdout.is_empty() {
-            // Nothing at all came back — not a short read, *nothing*. That is
-            // the phantom final index (#324), so ask again one frame earlier.
+            // Empty output = phantom final index (#324); retry one frame earlier.
             if let Some(seconds) = fallback_timestamp_seconds(index, self.fps_num, self.fps_den) {
                 output = self.run_decode(&format!("{seconds:.9}"))?;
             }
@@ -233,9 +174,6 @@ impl NativeVideo {
         let reported = String::from_utf8_lossy(&output.stderr)
             .lines()
             .find_map(parse_showinfo);
-        // The index is derived from the timestamp the frame carries, so a
-        // fallback decode reports the picture it actually returned rather than
-        // the phantom index that was asked for (#319, #324).
         let (index, media_time_seconds, duration_seconds) = resolve_timing(
             reported,
             index,
@@ -356,8 +294,7 @@ impl NativeVideo {
         format!("scale={}:{}", self.width, self.height)
     }
 
-    /// The scale filter with `showinfo` behind it, so every frame ffmpeg emits
-    /// is accompanied by the timestamp it was emitted for.
+    /// Scale filter with `showinfo` appended for per-frame timestamps.
     fn reporting_filter(&self) -> String {
         format!("{},showinfo", self.scale_filter())
     }
@@ -388,8 +325,6 @@ fn stream_frames(
     sender: SyncSender<Result<DecodedFrame, String>>,
 ) {
     let spawned = Command::new("ffmpeg")
-        // See `decode_one`: `-copyts` keeps `showinfo` reporting source
-        // timestamps rather than an offset from the seek point.
         .args(REPORTING_FLAGS)
         .args(["-ss", &timestamp, "-i"])
         .arg(source.as_os_str())
@@ -412,11 +347,7 @@ fn stream_frames(
         return;
     };
 
-    // stderr must be drained *while* stdout is read, not after the process
-    // exits. `showinfo` emits a line per frame, so leaving it in the pipe would
-    // fill the buffer and wedge ffmpeg part-way through a long playback — a
-    // deadlock the old `-v error` invocation never produced only because it had
-    // almost nothing to say.
+    // Drain stderr concurrently with stdout; leaving it would fill the pipe and deadlock.
     let (timings, captured) = spawn_stderr_reader(child.stderr.take());
 
     for offset in 0.. {
@@ -433,9 +364,7 @@ fn stream_frames(
             }
             break;
         }
-        // One `showinfo` line per emitted frame, in order, so the timings are
-        // consumed one-for-one. A frame that arrives without one still plays;
-        // it just falls back to counting, which is what this used to do always.
+        // One `showinfo` line per frame, consumed one-for-one with stdout frames.
         let reported = timings
             .as_ref()
             .and_then(|rx| rx.recv_timeout(TIMING_WAIT).ok());
@@ -475,9 +404,7 @@ fn stream_frames(
     }
 }
 
-/// How long a frame waits for its `showinfo` line before falling back to
-/// counting. Generous, because it only elapses when ffmpeg is not reporting at
-/// all — a frame's line is written before the frame itself reaches stdout.
+/// Timeout waiting for a `showinfo` line; generous because the line precedes the frame on stdout.
 const TIMING_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Drains ffmpeg's stderr on its own thread, splitting it into per-frame timings
@@ -516,8 +443,7 @@ fn spawn_stderr_reader(
     (Some(receiver), handle)
 }
 
-/// The frame a reported timestamp belongs to, mapped exactly as the browser maps
-/// its own, so both surfaces number frames the same way.
+/// Maps a timestamp to a frame index using the same formula as the browser.
 fn index_at(media_time_seconds: f64, fps_num: u32, fps_den: u32, frame_count: u32) -> u32 {
     trd_gui::video_editing::frame_index_at_media_time(
         media_time_seconds,
@@ -552,28 +478,9 @@ fn validate_file(path: &Path, info: &trd_core::VideoInfo) -> Result<(), NativeVi
     Ok(())
 }
 
-/// How many trailing samples the container stores but never presents.
-///
-/// Asks the **demuxer**, not the decoder. A tail-only `-show_packets` reports
-/// ffmpeg's own `AV_PKT_FLAG_DISCARD` on each packet, so the answer needs no
-/// decoding and reads only the last second: measured at **0.05 s** on top of a
-/// 217.77 GiB recording's 1.34 s open, against 9.35 s for the same answer via
-/// `-show_frames`.
-///
-/// This is *not* how the browser reaches the same number — there it is a walk of
-/// the container's own `stts`/`ctts` against the track duration. The answer
-/// therefore carries [`trd_core::UnpresentedTailEvidence`] saying which one
-/// produced it, so a reader is never sent looking for a packet flag in a path
-/// that reads sample tables (#331).
-///
-/// **Local sources only.** This is a diagnostic, and a second remote probe would
-/// double the cost of opening a URL — on a path that is already the slow one
-/// (#326). A URL therefore reports `None`, "not checked", rather than a `0` that
-/// would read as "there are none".
-///
-/// `None` too when the probe fails or says nothing: not knowing is not a reason
-/// to refuse to open, and `decode_one`'s step-back keeps the timeline usable
-/// either way (#324).
+/// Counts trailing discard-flagged packets (#331). Local sources only (#326);
+/// returns `None` for URLs and on probe failure — `None` means "not checked",
+/// not "checked, zero".
 fn probe_unpresented_tail(
     source: &NativeVideoSource,
     duration_seconds: f64,
@@ -581,8 +488,7 @@ fn probe_unpresented_tail(
     let NativeVideoSource::Local(_) = source else {
         return None;
     };
-    // A one-second window: long enough to contain a trailing sample and the key
-    // frame ffprobe backs up to, short enough that the read stays negligible.
+    // 1-second window: enough to catch trailing discarded packets.
     let from = (duration_seconds - 1.0).max(0.0);
     let output = Command::new("ffprobe")
         .args([
@@ -611,16 +517,9 @@ fn probe_unpresented_tail(
     })
 }
 
-/// Counts `AV_PKT_FLAG_DISCARD` in `ffprobe -show_entries packet=flags -of
-/// csv=p=0` output.
-///
-/// ffprobe renders the flags as a **fixed three-character field** — `K__`,
-/// `___`, `_D_` — whose middle position is the discard flag. Matching that
-/// position rather than searching the line for a `D` is what keeps the answer
-/// right if the selected entries ever grow a second field (#331).
-///
-/// `None` when there is nothing to read at all, which is "not checked" rather
-/// than "checked, there are none".
+/// Counts discard-flagged packets from `ffprobe -show_entries packet=flags -of csv=p=0`.
+/// Checks byte position 1 (the `D` in `_D_`), not a substring search (#331).
+/// Returns `None` for empty input ("not checked").
 fn count_discarded_packets(text: &str) -> Option<u32> {
     let mut flags = text.lines().map(str::trim).filter(|line| !line.is_empty());
     let first = flags.next()?;
@@ -632,13 +531,8 @@ fn count_discarded_packets(text: &str) -> Option<u32> {
         .ok()
 }
 
-/// Reads a video's own timeline with `ffprobe` — the native counterpart of the
-/// browser's `mp4_probe`, and the source of truth when no document exists.
-///
-/// The rate is kept as the container's **rational** (`r_frame_rate`), so 29.97
-/// stays `30000/1001`. A missing `nb_frames` (common for streamed inputs) is
-/// derived from duration × rate rather than refused: a frame count that is a
-/// frame or two off still plays, while refusing to open does not.
+/// Reads timeline info from `ffprobe`. Keeps frame rate as a rational;
+/// derives `nb_frames` from duration × rate if the container omits it.
 fn probe_video_info(
     source: &NativeVideoSource,
 ) -> Result<trd_core::VideoInfo, NativeVideoEditingError> {
@@ -709,8 +603,6 @@ fn probe_video_info(
         source_name: source.display_name(),
         mime: String::new(),
         codec: field("codec_name").unwrap_or_default().to_owned(),
-        // Identity fields a document would carry: unknown here, and not needed —
-        // there is no document to match against.
         sha256: String::new(),
         byte_length: match source {
             NativeVideoSource::Local(path) => std::fs::metadata(path).map(|m| m.len()).unwrap_or(0),
@@ -857,8 +749,7 @@ mod tests {
         assert_eq!(preview_size(&info(640, 360), 1920), (640, 360));
     }
 
-    /// A real `showinfo` line, verbatim, including the ragged column padding
-    /// ffmpeg emits — the parser has to read fields, not offsets.
+    /// A real `showinfo` line verbatim; parser must read fields, not offsets.
     const SHOWINFO: &str = "[Parsed_showinfo_1 @ 000002236ab332c0] n:   0 pts:  69120 \
         pts_time:5.625   duration:    512 duration_time:0.0416667 fmt:rgba cl:unspecified \
         sar:1/1 s:960x540 i:P iskey:0 type:B checksum:7D68F5B2";
@@ -868,9 +759,7 @@ mod tests {
         assert_eq!(parse_showinfo(SHOWINFO), Some((5.625, 0.0416667)));
     }
 
-    /// `pts_time:` has to win over the `pts:` that precedes it on the same line;
-    /// matching the shorter key first would read the raw timescale value as
-    /// seconds and put the frame hours away.
+    /// `pts_time:` must win over the preceding `pts:` on the same line.
     #[test]
     fn the_raw_pts_field_is_not_mistaken_for_the_timestamp() {
         let (pts, _) = parse_showinfo(SHOWINFO).expect("parsed");
@@ -903,15 +792,9 @@ mod tests {
         );
     }
 
-    /// The timing of the variable-rate recording #319 was found on: 60 fps
-    /// nominal, 283 678 frames, `stts` alternating 272/256 units at 16 kHz.
+    /// VFR fixture from #319: 60 fps nominal, 283 678 frames.
     const VFR: (u32, u32, u32) = (60, 1, 283_678);
 
-    /// The heart of the fix. Asking for frame 200000 puts the request at
-    /// `200000/60 = 3333.333333 s`, a third of a millisecond after the real
-    /// timestamp `3333.333`, so ffmpeg answers with the *next* picture at
-    /// `3333.350`. That picture is frame 200001 and must be reported as such —
-    /// filing it under the requested index is the silent placement error.
     #[test]
     fn a_reported_timestamp_decides_the_index_not_the_request() {
         let (num, den, count) = VFR;
@@ -933,8 +816,6 @@ mod tests {
         );
     }
 
-    /// The second measured mislabel, at the far end of the same file — one
-    /// sample could be a coincidence of where that seek happened to land.
     #[test]
     fn the_same_holds_at_the_far_end_of_a_long_timeline() {
         let (num, den, count) = VFR;
@@ -946,8 +827,6 @@ mod tests {
         assert_eq!(media_time, 4575.350);
     }
 
-    /// A request that *does* land keeps its index, so this is not a blanket
-    /// off-by-one: two of the four measured probes on that file were exact.
     #[test]
     fn a_request_that_lands_keeps_its_index() {
         let (num, den, count) = VFR;
@@ -957,9 +836,6 @@ mod tests {
         assert_eq!(index, 95_838);
     }
 
-    /// A constant-rate source has no divergence to resolve — the nominal grid
-    /// *is* the timestamps — which is why every existing fixture passed while
-    /// this bug was live.
     #[test]
     fn a_constant_rate_source_reports_exactly_what_was_asked_for() {
         let (index, media_time, duration) =
@@ -970,9 +846,6 @@ mod tests {
         assert!((duration - 1.0 / 24.0).abs() < 1e-9);
     }
 
-    /// ffmpeg saying nothing must not break playback: the frame still arrives,
-    /// falling back to the request — which is what this did unconditionally
-    /// before — and declares its duration unknown rather than inventing one.
     #[test]
     fn without_a_report_the_request_stands_and_the_duration_is_unknown() {
         let (index, media_time, duration) = resolve_timing(None, 135, 24, 1, 288);
@@ -985,13 +858,6 @@ mod tests {
         );
     }
 
-    /// #324, with the numbers measured on the 217.77 GiB recording: it declares
-    /// `nb_frames = 694840`, so the timeline offers indices `0..=694839` — but
-    /// its last packet is marked `AV_PKT_FLAG_DISCARD` and carries no picture,
-    /// and the last frame any decoder emits is **694838** at 27793.52 s.
-    ///
-    /// Asking for the phantom index therefore decodes nothing, and the answer is
-    /// the picture one interval back — which lands exactly on that frame.
     #[test]
     fn the_phantom_final_index_falls_back_to_the_last_real_picture() {
         let phantom = 694_839;
@@ -1003,10 +869,6 @@ mod tests {
         );
     }
 
-    /// Not a search — one interval, once. A container that ends one packet past
-    /// its last picture needs exactly one step; anything further would be
-    /// guessing at how much of the tail is missing, and a second empty decode is
-    /// a genuine failure the caller has to report.
     #[test]
     fn the_step_is_one_nominal_interval_whatever_the_rate() {
         let at_24 = fallback_timestamp_seconds(287, 24, 1).expect("not the first frame");
@@ -1023,9 +885,6 @@ mod tests {
         assert_eq!(fallback_timestamp_seconds(0, 25, 1), None);
     }
 
-    /// `-copyts` is the difference between a source timestamp and an offset from
-    /// the seek point, and dropping it fails *silently* — every reported time
-    /// would simply be shifted. Worth pinning by name.
     #[test]
     fn the_reporting_flags_keep_timestamps_in_the_source_clock() {
         assert!(
@@ -1038,8 +897,6 @@ mod tests {
         );
     }
 
-    /// The reporter has to sit *behind* the scaler in one chain, or there is
-    /// nothing to pair frames with.
     #[test]
     fn the_filter_chain_carries_the_reporter() {
         let video = NativeVideo {
@@ -1071,9 +928,6 @@ mod tests {
 
     #[test]
     fn the_decoded_size_and_the_derived_preview_size_are_the_same_number() {
-        // The #170 divergence: the shell sized its render target from one
-        // derivation while ffmpeg decoded to another. Both now come from
-        // `preview_size`, so this can only fail if a caller stops using it.
         let info = info(1920, 1080);
         let video = NativeVideo::with_timeline(
             NativeVideoSource::Local(PathBuf::from("unused.mp4")),
@@ -1093,9 +947,7 @@ mod tests {
 
     #[test]
     fn a_d_outside_the_flag_position_is_not_a_discard() {
-        // The reason this is a field test and not a substring search: a second
-        // selected entry, or a codec/side-data column, puts `D`s on the line
-        // that are not `AV_PKT_FLAG_DISCARD` (#331).
+        // Only byte position 1 is the discard flag; other `D`s on the line must not match.
         assert_eq!(count_discarded_packets("K__,DTS\n___,DTS\n"), Some(0));
         assert_eq!(count_discarded_packets("K__,side_data\n"), Some(0));
         assert_eq!(count_discarded_packets("_D_,DTS\n___,DTS\n"), Some(1));
@@ -1107,19 +959,8 @@ mod tests {
         assert_eq!(count_discarded_packets("  \n\n"), None);
     }
 
-    /// The two derivations of the same fact, on the same file, must agree.
-    ///
-    /// Natively the count comes from `AV_PKT_FLAG_DISCARD` on the trailing
-    /// packets; in the browser it comes from walking the container's own
-    /// `stts`/`ctts` against the track duration. Nothing else compares them, and
-    /// a local file is answerable both ways (#331).
-    ///
-    /// Ignored because it needs a real MP4 and `ffprobe` on `PATH`. Name the
-    /// file with `TRD_TAIL_PARITY_MP4` and run:
-    ///
-    /// ```text
-    /// cargo test -p trd-gui-video-editing -- --ignored unpresented_tail
-    /// ```
+    /// Checks that the native (packet-flags) and browser (sample-table) tail counts agree (#331).
+    /// Needs `TRD_TAIL_PARITY_MP4` env var (local .mp4) and `ffprobe` on PATH.
     #[test]
     #[ignore = "needs TRD_TAIL_PARITY_MP4 and ffprobe on PATH"]
     fn both_derivations_agree_on_the_unpresented_tail() {
@@ -1151,9 +992,7 @@ mod tests {
         );
     }
 
-    /// The complete `moov` box, header included, which is what `probe_moov`
-    /// takes. Walks top-level boxes rather than reading the file, because the
-    /// files this is run against are hundreds of gigabytes.
+    /// Reads the complete `moov` box by walking top-level headers (not the full file).
     fn read_moov_box(path: &Path) -> Option<Vec<u8>> {
         use std::io::{Read, Seek, SeekFrom};
 

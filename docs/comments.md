@@ -1,12 +1,14 @@
 # Comment doctrine
 
-**One line in five in this repository is a comment**, and the weight is not in
-useful one-liners: measured by `scripts/comment_audit.py` at `d2b5f86`,
+**The `front-end` scope now sits inside its budget**, after a comment-only sweep
+that removed ~1,780 lines. Measured by `scripts/comment_audit.py`:
 
-| Scope | Lines | Comment lines | Share | Blocks > 10 | Lines in them |
-|---|---:|---:|---:|---:|---:|
-| **`front-end`** — bound by these rules | 16,554 | **3,171** | 19.2% | **32** | 493 |
-| `core` — exempt, see below | 26,874 | 5,372 | 20.0% | 96 | 1,735 |
+| Scope | Lines | Comment lines | Share | Blocks > 10 |
+|---|---:|---:|---:|---:|
+| **`front-end`** — bound by these rules | 15,182 | **1,797** | **11.8%** | **0** |
+| `core` — exempt, see below | 26,874 | 5,372 | 20.0% | 96 |
+
+It started at **3,171 lines / 19.2% / 32 long blocks** — one line in five.
 
 Reproduce any number here with:
 
@@ -14,13 +16,31 @@ Reproduce any number here with:
 python3 scripts/comment_audit.py                       # every area
 python3 scripts/comment_audit.py --scope front-end --files
 python3 scripts/comment_audit.py --scope front-end --check   # exits 1 over budget
+python3 scripts/comment_audit.py --self-test                 # pins the counting rule
 ```
+
+### What the script cannot do
+
+It measures **volume, not value**, and the gap matters enough to state up front:
+
+| It cannot | Consequence |
+|---|---|
+| **Tell whether a comment is any good** | A file can sit comfortably inside the budget while being full of useless one-liners. The rules below are the judgement; the script only sizes the surface they apply to. |
+| **See a doc attached to the wrong item** | This is the defect that motivated the whole doctrine — 25 `///` lines landing on `QuadOverlay` instead of `placement_scenes`. The script counted them as 25 ordinary comment lines and said nothing. **An automated sweep re-created that exact defect while applying these rules, and the script again said nothing**; a human reading the diff caught it. |
+| **Distinguish a `clap` doc from a real comment** | `native/trd-app/src/cli.rs` measures at ~44% for text that is `--help` output. The exception below is prose, and nothing enforces it. |
+| **Ignore `//` inside a string literal** | A deliberate trade-off, stated in the script: a real parser would be harder to reproduce than the thing it measures. |
+
+So the number is a *ruler*, not a verdict. What it buys is that "too many
+comments" stops being an argument and becomes a figure two machines reproduce
+exactly — this sweep measured **1,797 on both Windows and Linux**, and anyone can
+re-run it and contradict it.
 
 ## Why volume is the problem, not just style
 
-**3,171 comment lines are 3,171 lines no tool checks.** The repository has a gate
-that keeps *code* references honest and nothing that keeps *prose* honest, and
-the two defects that prove it are both real:
+**1,797 comment lines are 1,797 lines no compiler checks.** The repository has a
+gate that keeps *code* references honest and nothing that keeps *prose* honest,
+and the two defects that prove it were both real — and are both fixed by the
+sweep that produced the numbers above:
 
 - `crates/trd-gui/src/video_editing_renderer.rs:579` — 25 `///` lines with no
   blank line before `pub struct QuadOverlay`, so rustdoc attaches all of them to
@@ -70,32 +90,41 @@ pub fn set_material(&mut self, material: DisneyMaterial)
 
 ### 2. No comment block over 10 lines
 
-**32 blocks in scope violate this today; the target is 0.** If a rationale needs
-more than 10 lines it is design, and design belongs in `docs/` with a link from
-the code — one line pointing at a page beats twenty lines in a header.
+**Every block in scope now satisfies this.** If a rationale needs more than 10
+lines it is design, and design belongs in `docs/` with a link from the code —
+one line pointing at a page beats twenty lines in a header.
+
+**An automated sweep re-created the `QuadOverlay` defect above** while applying
+this very doctrine: a worker merged the free function's description back onto the
+struct, and neither the rustdoc gate nor `comment_audit.py` could see it. Two
+adjacent blocks and a missing blank line is a trap that catches careful readers
+too, which is the case for the cap rather than an argument against it.
 
 ### 3. No doc comment longer than the item it documents
 
 A 23-line doc over a one-line function inverts the reader's cost. Shorten the
 comment or, if the explanation is genuinely that large, the item is under-named.
 
-### 4. Cite the issue; do not re-litigate it
+### 4. Cite the issue number; never reproduce its content
 
-`PendingSeek::settled_by` (`crates/trd-gui/src/video_editing/mod.rs:2056`) carries
-23 doc lines over a one-line body, eleven of which replay the #322 review
+**A bare `(#322)` is the whole citation.** Do not carry the issue's argument, its
+alternatives, or what the code used to do — a reader who wants that can open the
+issue, and a reader who does not shouldn't have to skip it.
+
+`PendingSeek::settled_by` (`crates/trd-gui/src/video_editing/mod.rs`) carried 23
+doc lines over a one-line body, eleven of them replaying the #322 review
 argument — *"This used to compare the delivered frame's timestamp against the
 requested instant… the two readers miss in opposite directions…"*.
 
 That paragraph is not badly written. **It is a review argument that got absorbed
 into the source**: the right thing to write where a reader is deciding whether a
 change is correct, and the wrong thing to leave where every future reader pays
-for a decision already made. Target: three lines — what it decides, why `>=`, and
-`(#322)`.
+for a decision already made.
 
 **The limit of this rule.** *Past tense* is not the test; **whether the reader can
 act on it** is. The comment explaining why `dispatched_seek` is set inside
-`take_seek_frame` is also history, and it is load-bearing — it names an invariant
-a caller can violate. Keep that. Rule 1 already tells them apart.
+`take_seek_frame` is also history and is load-bearing — it names an invariant a
+caller can violate. Keep that. Rule 1 already tells them apart.
 
 ### 5. No architecture essays in source
 
@@ -130,20 +159,29 @@ exists, in a form no gate can check.
 If you cannot say why a reader needs a comment, the comment is the thing to
 remove — not the thing to polish.
 
+## What is not a comment
+
+**A `clap` doc comment is `--help` output.** `native/trd-app/src/cli.rs` measures
+as one of the highest comment shares in the tree, and almost all of it is the
+text a user sees when they run `--help`. Deleting it removes a user-facing
+feature, not a maintenance cost, so that file's number is expected to stay high
+and rules 1 and 3 do not apply to a `#[derive(Parser)]` field.
+
+The same reasoning covers any doc that is *generated output* rather than a note
+to a maintainer.
+
 ## Budgets
 
 `--check` fails the `front-end` scope when it exceeds them:
 
-| Metric | Today | Target |
-|---|---:|---:|
-| comment lines | 3,171 | ≤ 1,800 |
-| comment share | 19.2% | ≤ 12%, and no file over 20% |
-| blocks over 10 lines | 32 | **0** |
+| Metric | Before the sweep | Now | Budget |
+|---|---:|---:|---:|
+| comment lines | 3,171 | **1,797** | ≤ 1,800 |
+| comment share | 19.2% | **11.8%** | ≤ 12% |
+| blocks over 10 lines | 32 | **0** | 0 |
 
-`--check` is **advisory today and deliberately not wired into
-`nix flake check`**: a gate that fails on day one for 32 pre-existing violations
-teaches people to bypass it, which is the failure this doctrine exists to prevent.
-It is armed once the reduction slices bring the scope inside budget — and it is
-shipped now, with the rules, so every later slice is scored by the same tool
-instead of a fresh hand count. (Two good-faith hand counts of this tree
-previously disagreed 31 vs 27; that is what the script removes.)
+**`--check` is not wired into `nix flake check`** — it is run by hand, like every
+other gate in this repository. What the script buys is not automation but a
+*shared* verdict: the doctrine is scored by one tool instead of a fresh hand
+count, and two good-faith hand counts of this tree previously disagreed 31 vs 27.
+Run it when you touch the front-end scope, and put the numbers in the PR.

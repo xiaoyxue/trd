@@ -4,9 +4,8 @@ use std::path::PathBuf;
 
 use clap::{Parser, ValueEnum};
 
-/// Coordinate plane selector for the `--grid-local` overlay, mapped to
-/// [`trd_core::GridPlane`]. Kept in the binary so `trd-core` needn't depend on
-/// clap.
+/// Coordinate plane selector for the `--grid-local` overlay. Lives in the binary
+/// so `trd-core` needn't depend on clap.
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub(crate) enum GridPlaneArg {
     /// The local XY plane (Z = 0) — e.g. a placement quad's floor.
@@ -27,8 +26,7 @@ impl From<GridPlaneArg> for trd_core::GridPlane {
     }
 }
 
-/// PBR tone-map operator selector, mapped to [`trd_core::Tonemap`]. Kept in the
-/// binary so `trd-core` needn't depend on clap.
+/// PBR tone-map operator selector.
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub(crate) enum TonemapArg {
     /// Per-channel Reinhard `x/(1+x)` — the default.
@@ -48,11 +46,9 @@ impl From<TonemapArg> for trd_core::Tonemap {
 
 /// Interactive desktop viewer for a trd scene stream (protocol 0.0.6).
 ///
-/// Reads the Arrow IPC `[mesh][texture?][frames?][params]` stream on stdin — a leading
-/// mesh table (then an optional texture table) followed by per-frame params +
-/// instanced draw lists — and plays it live in a window, e.g.
-/// `examples/render.sh --native --mesh assets/meshes/bunny.obj`, which builds
-/// the stream and runs this binary for you.
+/// Reads the Arrow IPC `[mesh][texture?][frames?][params]` stream on stdin and
+/// plays it live in a window. `examples/render.sh --native` builds a stream and
+/// runs this for you.
 #[derive(Parser)]
 #[command(name = "trd-app", version, about)]
 pub(crate) struct Cli {

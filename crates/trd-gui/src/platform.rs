@@ -8,16 +8,13 @@
 /// Runs `future` to completion under this platform's executor.
 ///
 /// **The two arms are not the same operation, and callers must not care.**
-/// Natively this *blocks*, so anything after the call observes the future's
-/// effects. In the browser it *detaches*: `spawn_local` returns immediately and
-/// the future finishes on a later turn of the event loop. Every caller already
-/// tolerates both — each future's last act is to clear its `*_in_flight` flag
-/// and request a repaint, which is exactly how the browser's completion becomes
-/// visible — so the contract is "it will run; do not assume it has".
+/// Natively this *blocks*; in the browser `spawn_local` returns immediately and
+/// the future finishes on a later turn of the event loop. So the contract is
+/// **"it will run; do not assume it has"** — every future's last act is to clear
+/// its `*_in_flight` flag and request a repaint.
 ///
-/// The name is deliberately neither of the two: `spawn_local` would be a lie
-/// natively and `block_on` a lie in the browser, and that asymmetry went
-/// unstated at both of the call sites this replaces.
+/// Named neither `spawn_local` nor `block_on`, because each would be a lie on
+/// one of the two platforms.
 pub(crate) fn drive(future: impl std::future::Future<Output = ()> + 'static) {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_futures::spawn_local(future);

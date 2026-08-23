@@ -1,59 +1,39 @@
-//! [`InteractionController`] — maps normalized user gestures to [`SceneState`]
-//! changes (#97), the "events → matrix" core of the interaction loop.
-//!
-//! The controller is **UI-toolkit-agnostic**: it consumes a normalized
-//! [`InteractionEvent`] (drag/pan/zoom fractions, not egui types) and mutates the
-//! scene, so it is unit-testable without egui and reusable by the wasm target.
-//! egui specifics (which mouse button, the image rect) live in the shells that own the egui surface,
-//! which translates raw input into these events.
-//!
-//! The [`InteractionTarget`] decides what a primary drag means: orbit the
-//! **camera** or rotate the **object**. Panning always translates the object and
-//! zooming always dollies the camera, regardless of target.
+//! [`InteractionController`] — maps normalized gestures to [`SceneState`] changes (#97).
+//! Toolkit-agnostic: consumes [`InteractionEvent`] fractions, not egui types.
 
 use crate::scene::SceneState;
 
-/// A full-width primary drag sweeps this many radians (π ⇒ half a turn across
-/// the image), used for both camera orbit and object rotation.
+/// Full-width drag: π radians (half-turn), for orbit and object rotation.
 const ROTATE_SPEED: f32 = std::f32::consts::PI;
 /// One notch of scroll dollies the camera distance by this fraction.
 const ZOOM_SPEED: f32 = 0.1;
-/// A full-width pan translates the object by this fraction of the camera
-/// distance, so panning feels consistent as you dolly in and out.
+/// Full-width pan: fraction of camera distance (consistent feel across zoom).
 const PAN_SPEED: f32 = 1.0;
 /// One notch of scroll scales the object by this fraction (in Scale mode).
 const SCALE_WHEEL_SPEED: f32 = 0.1;
-/// A full-height Scale-mode drag scales the object by this fraction per unit of
-/// vertical travel (drag **up** grows, drag **down** shrinks).
+/// Full-height Scale drag factor (drag up grows, down shrinks).
 const SCALE_DRAG_SPEED: f32 = 1.5;
 
-/// What a **primary** (left-button) drag manipulates.
+/// What a primary drag manipulates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InteractionTarget {
-    /// Primary drag orbits the camera around the object (the default).
     #[default]
     Camera,
-    /// Primary drag manipulates the object per the active [`TransformMode`].
     Object,
 }
 
-/// When [`InteractionTarget::Object`] is active, which object transform a
-/// **primary** drag (and the scroll wheel) edits.
+/// Which object transform a primary drag (and scroll wheel) edits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TransformMode {
-    /// Primary drag rotates the object (yaw/pitch); the default.
     #[default]
     Rotate,
-    /// Primary drag translates the object in the screen plane.
     Move,
-    /// Primary drag (and the scroll wheel) uniformly scales the object.
     Scale,
 }
 
 /// Mutually exclusive direction used by an object move.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MoveDirection {
-    /// Free two-axis movement in the parent X/Y plane.
     #[default]
     Free,
     Reference1,
@@ -67,7 +47,6 @@ pub enum MoveDirection {
 /// Constrains an object rotation to a single axis, locking the other two.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AxisConstraint {
-    /// No constraint — the drag uses its natural mapping (the default).
     #[default]
     Free,
     /// Lock to the object's X axis (rotate = pitch; translate = world X).
@@ -79,7 +58,6 @@ pub enum AxisConstraint {
 }
 
 impl AxisConstraint {
-    /// The `[x, y, z]` index this axis locks to, or `None` for [`Self::Free`].
     fn index(self) -> Option<usize> {
         match self {
             AxisConstraint::Free => None,
@@ -90,11 +68,8 @@ impl AxisConstraint {
     }
 }
 
-/// A normalized interaction gesture. Drag/pan deltas are **fractions of the
-/// image size** (`dx`/`dy` in roughly `[-1, 1]` for an edge-to-edge sweep) with
-/// `+y` pointing down (egui screen convention); the controller flips `y` where a
-/// world-up mapping is needed. `Zoom.delta` is a signed scroll amount
-/// (`+` = zoom in / dolly closer).
+/// Normalized gesture: drag/pan deltas are fractions of image size, `+y` down.
+/// `Zoom.delta > 0` zooms in; the controller flips `y` for world-up mappings.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum InteractionEvent {
     /// Primary drag: orbit the camera, or rotate / move / scale the object
@@ -110,28 +85,21 @@ pub enum InteractionEvent {
     Reset,
 }
 
-/// Owns the [`SceneState`] and applies [`InteractionEvent`]s to it. Keeps the
-/// initial state so [`InteractionEvent::Reset`] can restore the view.
+/// Owns the [`SceneState`] and applies [`InteractionEvent`]s to it.
 #[derive(Debug, Clone)]
 pub struct InteractionController {
-    /// The scene being edited (read by the render backend each frame).
     pub state: SceneState,
-    /// What a primary drag currently manipulates (camera vs. object).
     pub target: InteractionTarget,
-    /// Which object transform a primary drag edits when targeting the object.
     pub mode: TransformMode,
-    /// Mutually exclusive direction used by object translation.
     pub move_direction: MoveDirection,
     /// Maps the three reference directions into the object's parent frame.
     pub move_reference_axes: [[f32; 3]; 3],
-    /// Locks an object rotation to a single axis (the other two frozen).
     pub axis: AxisConstraint,
     /// The state to restore on [`InteractionEvent::Reset`].
     initial: SceneState,
 }
 
 impl InteractionController {
-    /// Builds a controller around an initial scene (also the reset baseline).
     pub fn new(state: SceneState) -> Self {
         let initial = state.clone();
         Self {
@@ -145,13 +113,11 @@ impl InteractionController {
         }
     }
 
-    /// Uses the current scene as the new reset baseline.
     pub fn rebase_reset(&mut self) {
         self.initial = self.state.clone();
     }
 
-    /// Applies one gesture, returning `true` if the scene changed (so the caller
-    /// can re-render only when needed).
+    /// Applies one gesture, returning `true` if the scene changed.
     pub fn apply(&mut self, event: InteractionEvent) -> bool {
         match event {
             InteractionEvent::Primary { dx, dy } => {
@@ -160,8 +126,6 @@ impl InteractionController {
                 }
                 match self.target {
                     InteractionTarget::Camera => {
-                        // Drag right → orbit right (yaw follows the pointer);
-                        // drag down (dy > 0) → tilt the eye down (pitch down).
                         self.state
                             .camera
                             .orbit(dx * ROTATE_SPEED, -dy * ROTATE_SPEED);
@@ -187,7 +151,6 @@ impl InteractionController {
                 if delta == 0.0 {
                     return false;
                 }
-                // delta > 0 ⇒ dolly closer (factor < 1).
                 self.state.camera.dolly(1.0 - delta * ZOOM_SPEED);
                 true
             }
@@ -195,11 +158,9 @@ impl InteractionController {
                 if delta == 0.0 {
                     return false;
                 }
-                // Scales the *selected* object; no selection ⇒ no-op.
                 let Some(obj) = self.state.selected_object_mut() else {
                     return false;
                 };
-                // delta > 0 ⇒ grow (factor > 1).
                 obj.scale_uniform(1.0 + delta * SCALE_WHEEL_SPEED);
                 true
             }
@@ -213,11 +174,7 @@ impl InteractionController {
         }
     }
 
-    /// Applies a primary drag to the **selected** object per the active
-    /// [`TransformMode`] and [`AxisConstraint`]: rotate (about a locked axis, or
-    /// free yaw/pitch), move (along a locked axis, or in the screen plane), or
-    /// uniformly scale. Returns `false` (no change) when **no object is
-    /// selected** — with nothing selected, an object drag can't edit anything.
+    /// Applies a primary drag to the selected object; returns `false` if no object is selected.
     fn apply_object_drag(&mut self, dx: f32, dy: f32) -> bool {
         let mode = self.mode;
         let move_direction = self.move_direction;
@@ -238,7 +195,6 @@ impl InteractionController {
                         _ => obj.roll += a,
                     }
                 }
-                // Free: yaw follows horizontal, pitch follows vertical drag.
                 None => obj.rotate(dx * ROTATE_SPEED, -dy * ROTATE_SPEED),
             },
             TransformMode::Move => {
@@ -265,8 +221,7 @@ impl InteractionController {
                 }
             }
             TransformMode::Scale => {
-                // Drag up (dy < 0) grows, drag down shrinks; exponential so the
-                // gesture is symmetric and never crosses zero.
+                // Drag up (dy < 0) grows; exponential, never crosses zero.
                 obj.scale_uniform((-dy * SCALE_DRAG_SPEED).exp());
             }
         }
@@ -282,8 +237,6 @@ fn scale3(vector: [f32; 3], scalar: f32) -> [f32; 3] {
 mod tests {
     use super::*;
 
-    /// A controller whose single object is already selected — the precondition
-    /// for object transforms (a transform with no selection is a no-op).
     fn selected_controller() -> InteractionController {
         let mut c = InteractionController::new(SceneState::default());
         c.target = InteractionTarget::Object;
@@ -298,13 +251,11 @@ mod tests {
         let obj0 = c.state.objects[0];
         assert!(c.apply(InteractionEvent::Primary { dx: 0.5, dy: 0.0 }));
         assert!(c.state.camera.yaw > yaw0);
-        // Object untouched when targeting the camera.
         assert_eq!(c.state.objects[0], obj0);
     }
 
     #[test]
     fn object_transform_is_noop_without_a_selection() {
-        // Targeting the object but nothing selected ⇒ every transform is a no-op.
         let mut c = InteractionController::new(SceneState::default());
         c.target = InteractionTarget::Object;
         assert_eq!(c.state.selected, None);
@@ -329,7 +280,6 @@ mod tests {
         assert!(c.apply(InteractionEvent::Primary { dx: 0.5, dy: 0.2 }));
         assert!(c.state.objects[0].yaw > 0.0);
         assert!(c.state.objects[0].pitch < 0.0);
-        // Camera untouched when targeting the object.
         assert_eq!(c.state.camera, cam0);
     }
 
@@ -341,7 +291,6 @@ mod tests {
         assert!(c.apply(InteractionEvent::Primary { dx: 0.25, dy: -0.5 }));
         let t = c.state.objects[0].translation;
         assert!(t[0] > 0.0 && t[1] > 0.0 && t[2] == 0.0);
-        // Rotation untouched in Move mode.
         assert_eq!((c.state.objects[0].yaw, c.state.objects[0].pitch), rot0);
     }
 
@@ -362,7 +311,6 @@ mod tests {
     fn object_scale_mode_drag_up_grows() {
         let mut c = selected_controller();
         c.mode = TransformMode::Scale;
-        // Drag up (dy < 0) grows uniformly above unit scale.
         assert!(c.apply(InteractionEvent::Primary { dx: 0.0, dy: -0.3 }));
         for s in c.state.objects[0].scale {
             assert!(s > 1.0);
@@ -377,7 +325,6 @@ mod tests {
         for s in c.state.objects[0].scale {
             assert!(s > 1.0);
         }
-        // Scaling the object never dollies the camera.
         assert_eq!(c.state.camera.distance, dist0);
     }
 
@@ -388,7 +335,6 @@ mod tests {
         c.axis = AxisConstraint::X;
         assert!(c.apply(InteractionEvent::Primary { dx: 0.3, dy: 0.1 }));
         assert_ne!(c.state.objects[0].pitch, 0.0);
-        // Yaw and roll stay locked.
         assert_eq!(c.state.objects[0].yaw, 0.0);
         assert_eq!(c.state.objects[0].roll, 0.0);
     }
@@ -446,9 +392,7 @@ mod tests {
         assert_ne!(c.state, c.initial);
         assert!(c.apply(InteractionEvent::Reset));
         assert_eq!(c.state, c.initial);
-        // Reset also restored the object scale to unit.
         assert_eq!(c.state.objects[0].scale, [1.0, 1.0, 1.0]);
-        // A second reset is a no-op (nothing changed).
         assert!(!c.apply(InteractionEvent::Reset));
     }
 

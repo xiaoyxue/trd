@@ -18,50 +18,28 @@ enum CanvasState {
 pub struct CanvasRenderer {
     instance: wgpu::Instance,
     canvas: web_sys::HtmlCanvasElement,
-    /// The shared GPU context, held as one value rather than cloned apart into
-    /// separate `device` + `queue` fields (#180).
     gpu: std::sync::Arc<trd_core::GpuContext>,
-    /// The canvas surface, owned directly by the shell (#203): the harness holds
-    /// no target of its own, so this front-end always has a surface to
-    /// resize/recover, whether or not the render harness has been built yet.
-    /// Held as a [`RenderTarget`] because presenting is reachable only through
-    /// the renderer's one `render` dispatcher — the surface itself carries no
-    /// render behaviour.
+    /// The canvas surface, owned by the shell so it can be resized or recovered
+    /// before the render harness exists.
     target: RenderTarget,
-    /// The shared render harness over the canvas surface, built lazily on the
-    /// first rendered frame from the stream's leading mesh table. `None` until the
-    /// first frame arrives (the mesh table has been decoded by then).
+    /// Built lazily from the stream's leading mesh table, so `None` until the
+    /// first frame arrives.
     renderer: Option<Renderer>,
-    /// Draw mode + every overlay toggle, in the **one** type every front-end uses
-    /// to describe a frame's appearance; [`Scene::from_draws`] turns it into the
-    /// scene. The renderer keeps no overlay state of its own (#180).
+    /// Draw mode + overlay toggles; [`Scene::from_draws`] turns it into a scene.
     options: RenderOptions,
-    /// Composite the uploaded background frame texture beneath the scene as the
-    /// scene's [`Background::frame`](trd_core::Background::frame) plane (#63).
-    /// When `true`, later frames pass `Some(FrameFit::Stretch)` to
-    /// [`Scene::from_draws`]; the frame plane is a no-op until a background is
-    /// uploaded via [`update_frame_texture_rgba`](Self::update_frame_texture_rgba).
+    /// Draw the uploaded background texture beneath the scene as the scene's
+    /// frame plane. A no-op until a background is uploaded.
     composite_frame: bool,
-    /// The typed Disney PBR configuration for [`RenderMode::Shaded`] draws, set via
-    /// [`set_pbr_material`](Self::set_pbr_material) before the first frame and
-    /// applied when the renderer is built (the browser twin of trd-cli's
-    /// `--metallic/--roughness/…` flags). `None` ⇒ the renderer's default.
+    /// Staged until the renderer is built. `None` ⇒ the renderer's defaults.
     pbr: Option<PbrState>,
-    /// The decoded equirectangular HDR environment probe reflected by
-    /// [`RenderMode::Shaded`] draws, set via [`set_env_map_hdr`](Self::set_env_map_hdr)
-    /// and applied when the renderer is built. `None` ⇒ no probe reflection.
+    /// Equirectangular HDR probe reflected by [`RenderMode::Shaded`] draws.
     env_map: Option<EnvMapData>,
-    /// Blur of the HDR **background sky** requested via
-    /// [`set_env_background`](Self::set_env_background); `None` ⇒ no sky. The
-    /// exposure and operator come from the staged PBR tone mapping, so the two
-    /// are re-derived together into `options.env_background` whenever either
-    /// changes (#235 R2).
+    /// Sky blur; `None` ⇒ no sky. Re-derived into `options.env_background`
+    /// together with the tone mapping, since the sky shares its exposure.
     env_background_blur: Option<f32>,
     input: trd_core::InputSession,
-    /// Frames decoded by [`load_ipc`](Self::load_ipc) but not yet rendered,
-    /// replayed on demand by [`render_index`](Self::render_index). The generic
-    /// renderer loads the whole stream once, then paces playback by index (so the
-    /// JS shell can upload each frame's background *before* rendering it).
+    /// Loaded by [`load_ipc`](Self::load_ipc) and replayed on demand, so the JS
+    /// shell can upload each frame's background before rendering it.
     frames: Vec<DecodedFrame>,
     /// Last inline frames-table resource uploaded to the frame-plane texture.
     inline_frames: trd_core::InlineFrameCache,
@@ -99,13 +77,9 @@ impl CanvasRenderer {
         let config = surface
             .get_default_config(&gpu.adapter, width, height)
             .ok_or_else(|| js_error("surface is unsupported by the selected adapter"))?;
-        // The browser's preferred canvas format is non-sRGB (e.g. `Bgra8Unorm`),
-        // so a pipeline targeting it writes *linear* fragment values with no
-        // linear→sRGB encode — making colors look darker/muddier than the headless
-        // CLI, whose target is `Rgba8UnormSrgb` (hardware-encoded on store). A
-        // `SurfaceTarget` is rendered through an **sRGB view** of the surface
-        // (registering it in `view_formats` + configuring), so the browser matches
-        // the CLI byte-for-byte; build the mesh renderer with its `view_format()`.
+        // The browser's preferred canvas format is non-sRGB, so a pipeline
+        // targeting it directly would write linear values and look darker than
+        // the CLI. Rendering through an sRGB view of the surface matches it.
         let target = RenderTarget::surface(SurfaceTarget::new(&gpu.device, surface, config));
 
         Ok(Self {
@@ -160,12 +134,9 @@ impl CanvasRenderer {
         result
     }
 
-    /// Decodes frames from an Arrow IPC chunk and **buffers** them without
-    /// rendering (the generic viewer's load phase), returning the running total
-    /// of buffered frames. The stream's leading mesh/texture tables are consumed
-    /// as usual; only the params frames are buffered, to be replayed by
-    /// [`render_index`](Self::render_index). Push the whole `[mesh?][texture?][params]`
-    /// stream, then pace playback by index.
+    /// Buffers frames from an Arrow IPC chunk without rendering, returning the
+    /// running total. Push the whole `[mesh?][texture?][params]` stream, then
+    /// pace playback with [`render_index`](Self::render_index).
     #[wasm_bindgen(js_name = loadIpc)]
     pub fn load_ipc(&mut self, chunk: &[u8]) -> Result<u32, JsValue> {
         self.require_open()?;
@@ -193,10 +164,8 @@ impl CanvasRenderer {
         u32::try_from(self.frames.len()).unwrap_or(u32::MAX)
     }
 
-    /// The buffered frame's optional external background reference
-    /// (`frame_path`/`frame_url`), which the JS shell resolves to RGBA and uploads
-    /// via [`update_frame_texture_rgba`](Self::update_frame_texture_rgba) before
-    /// [`render_index`](Self::render_index). `None` when out of range or the frame
+    /// The frame's external background reference, which the JS shell resolves to
+    /// RGBA and uploads before rendering. `None` when out of range or the frame
     /// has no background.
     #[wasm_bindgen(js_name = frameRef)]
     pub fn frame_ref(&self, index: u32) -> Option<String> {
@@ -254,9 +223,8 @@ impl CanvasRenderer {
         };
     }
 
-    /// Selects textured (`true`) rendering — sampling the stream's bound texture
-    /// table at each vertex UV — or per-vertex color (`false`) for later frames.
-    /// Textured meshes without a stream texture sample the default 1×1 white.
+    /// Textured (`true`) samples the stream's texture table at each vertex UV,
+    /// falling back to a 1×1 white; `false` uses per-vertex color.
     #[wasm_bindgen(js_name = setTextured)]
     pub fn set_textured(&mut self, enabled: bool) {
         self.options.mode = if enabled {
@@ -267,10 +235,7 @@ impl CanvasRenderer {
     }
 
     /// Selects the Disney principled-BRDF (`true`) or per-vertex color (`false`)
-    /// mesh path for later frames — the browser twin of the native `--pbr` flag.
-    /// PBR shades the bound albedo (or the default 1×1 white) with the material
-    /// set by [`set_pbr_material`](Self::set_pbr_material) and the environment
-    /// probe from [`set_env_map_hdr`](Self::set_env_map_hdr).
+    /// mesh path — the browser twin of the native `--pbr` flag.
     #[wasm_bindgen(js_name = setPbr)]
     pub fn set_pbr(&mut self, enabled: bool) {
         self.options.mode = if enabled {
@@ -280,13 +245,9 @@ impl CanvasRenderer {
         };
     }
 
-    /// Sets the typed Disney PBR configuration applied to every
-    /// [`RenderMode::Shaded`] draw — the browser twin of trd-cli's
-    /// `--metallic/--roughness/--specular/--clearcoat/--env-intensity/--exposure/
-    /// --ambient/--tonemap` flags. `tonemap` is `"aces"` (filmic) or anything
-    /// else for Reinhard. Non-forwarded Disney parameters keep their defaults.
-    /// Takes effect on the next rendered frame (applied immediately if the
-    /// renderer is already built, else when it is).
+    /// The Disney material for every [`RenderMode::Shaded`] draw. `tonemap` is
+    /// `"aces"` or anything else for Reinhard; unlisted Disney parameters keep
+    /// their defaults.
     #[wasm_bindgen(js_name = setPbrMaterial)]
     #[allow(clippy::too_many_arguments)]
     pub fn set_pbr_material(
@@ -331,14 +292,9 @@ impl CanvasRenderer {
         self.refresh_env_background();
     }
 
-    /// Draws the bound HDR environment probe as the frame's **background sky**
-    /// behind every primitive — the browser twin of trd-cli's `--env-background`
-    /// and the `trd-gui` "Environment background" toggle. `blur` is `0.0` (sharp)
-    /// … `1.0` (fully blurred); the exposure and tone-map operator follow
-    /// [`set_pbr_material`](Self::set_pbr_material), so the sky and the objects
-    /// cannot be tone-mapped differently. Needs a probe from
-    /// [`set_env_map_hdr`](Self::set_env_map_hdr) — with none bound the sky is
-    /// black. Takes effect on the next rendered frame.
+    /// Draws the bound HDR probe as the background sky. `blur` runs `0.0` (sharp)
+    /// to `1.0`. Exposure and tone-map follow the PBR material, so sky and
+    /// objects cannot be tone-mapped differently; with no probe the sky is black.
     #[wasm_bindgen(js_name = setEnvBackground)]
     pub fn set_env_background(&mut self, enabled: bool, blur: f32) {
         self.env_background_blur = enabled.then_some(blur);
@@ -352,10 +308,8 @@ impl CanvasRenderer {
             crate::env_background(self.env_background_blur, self.pbr.as_ref());
     }
 
-    /// Decodes an equirectangular Radiance `.hdr` buffer and binds it as the
-    /// environment probe reflected by [`RenderMode::Shaded`] draws — the browser
-    /// twin of trd-cli's `--env HDR` (decoded here, downscaled to 2048px). Takes
-    /// effect on the next rendered frame.
+    /// Decodes an equirectangular Radiance `.hdr` buffer (downscaled to 2048px)
+    /// and binds it as the environment probe.
     #[wasm_bindgen(js_name = setEnvMapHdr)]
     pub fn set_env_map_hdr(&mut self, bytes: &[u8]) -> Result<(), JsValue> {
         let env = crate::decode_env_hdr(bytes).map_err(crate::js_error)?;
