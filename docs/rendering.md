@@ -304,7 +304,7 @@ http://localhost:8080/?mesh=/assets/meshes/can/coke.obj&texture=/assets/meshes/c
 > scene-level, so the sky and every reflection share it. The renderer
 > composes those typed values per mesh, so per-object appearance is real, not
 > shared. On the headless RTX Linux box, reach the browser viewer over an SSH
-> port-forward (see [AGENTS.md](../AGENTS.md)).
+> port-forward (see [`docs/testing.md`](testing.md#cross-mode-e2e-recipe--coca-cola-can-pbr--aabb--axes)).
 
 ## Video editor — `web/gui-video-editing`
 
@@ -418,7 +418,7 @@ BUN_PORT=8085 bun run --cwd gui-video-editing dev
 [bun2nix](https://github.com/nix-community/bun2nix) (`web/bun.nix` pins
 them by hash from `web/bun.lock`); regenerate it after changing
 `web/bun.lock` — see
-[`AGENTS.md`](../AGENTS.md) for the exact command.
+[`AGENTS.md`](../AGENTS.md#toolchain) for the exact command.
 
 > **Windows:** `render.ps1 -Web` builds the same generic `web/viewer` delivery
 > surface with `wasm-pack` + Bun (no Nix); `render.sh --web` uses the Nix-built
@@ -481,4 +481,4 @@ NIXPKGS_ALLOW_UNFREE=1 nix run --impure github:nix-community/nixGL#nixGLNvidia -
   examples/render.sh --cli      # or --native / --web; #nixGLIntel for Intel/Mesa
 ```
 
-Full GPU-adapter-selection details are in [`AGENTS.md`](../AGENTS.md#gpu).
+Full GPU-adapter-selection details are in [`docs/testing.md`](testing.md#gpu).

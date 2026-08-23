@@ -1,1 +1,5 @@
+# Markdown is normalised to LF on commit, so a Windows editor cannot land CRLF
+# in a doc the way `docs/gui-design.md` already did (#316).
+*.md text=auto eol=lf
+
 /web/** text=auto eol=lf
