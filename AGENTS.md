@@ -499,7 +499,8 @@ order the rows go in, L1 first:
 **Every row is always present**, in that order. A gate the level excludes reads
 `n/a (Lx)` — naming the level that excluded it — so a skipped gate is always a
 decision, never an omission: dropping a row is how an unresolved rustdoc link
-reached `main` (#336).
+reached `main` (#336). Replace `Lx` with the actual excluding level, e.g.
+`n/a (L2)`.
 
 #### The matrix template
 
