@@ -198,6 +198,14 @@ decision, never an omission: dropping a row is how an unresolved rustdoc link
 reached `main` (#336). The copy-paste template is in
 [`docs/testing.md`](docs/testing.md#the-matrix-template).
 
+**`n/a` means the *level* excludes the gate — never that the other platform ran
+it.** Every gate inside your declared level runs on **both** platforms, or it is
+🤝 with the exact commands. An argument that a gate *cannot* be affected — an
+unchanged input, a nix cache hit, a byte-identical derivation — is reasoning, not
+a run: put it in the PR prose, never in the cell. Cross-platform faults are
+precisely the ones such arguments survive, because what differs is the toolchain,
+the path separator or the line ending, not the source.
+
 **Re-post the completed matrix after a handoff** as a new comment on the PR (and
 on the issue), with that platform's column flipped from 🤝 to ✅ and the handoff
 items ticked. The completed matrix must be *visible*, not merely described.
