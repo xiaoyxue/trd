@@ -22,7 +22,7 @@ round-trip + wasm pending) · Owner: @xiaoyxue · Branch: `feat/trd-gui-design`
 - [1. Goal](#1-goal)
 - [2. Where it fits (current architecture)](#2-where-it-fits-current-architecture)
 - [3. Toolkit choice: egui vs imgui-rs](#3-toolkit-choice-egui-vs-imgui-rs)
-- [4. Key constraint — the wgpu version gap ⚠️](#4-key-constraint--the-wgpu-version-gap-️)
+- [4. Key constraint — the wgpu version gap](#4-key-constraint--the-wgpu-version-gap)
   - [Strategy A — decoupled CPU-RGBA handoff  ✅ **chosen**](#strategy-a--decoupled-cpu-rgba-handoff---chosen)
   - [Strategy B — shared-surface egui overlay](#strategy-b--shared-surface-egui-overlay---in-progress-229)
 - [5. The interaction loop (core of the request)](#5-the-interaction-loop-core-of-the-request)
@@ -161,7 +161,7 @@ platforms we must keep at parity.
 
 <a id="section-4-key-constraint-the-wgpu-version-gap"></a>
 
-## 4. Key constraint — the wgpu version gap ⚠️
+## 4. Key constraint — the wgpu version gap
 
 This is the decisive architectural fact.
 

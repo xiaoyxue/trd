@@ -301,6 +301,51 @@ copy reaches `trd-core` through `ExternalFrame`, so the shared crates carry no
 browser type and no `cfg` hiding one. Both rules are scanned by
 `tests/wasm_bindgen_containment.rs`.
 
+#### Prefer moving a `cfg` into `trd-wasm` over living with one
+
+Reach for `#[cfg(target_arch = "wasm32")]` only when both arms are real — as in
+the two `platform.rs` shims — never to hide a browser-only type. That says when a
+`cfg` is *permitted*; this says what to try first, because the cheapest `cfg` to
+review is the one that was never written.
+
+**The two directions are not the same problem.**
+
+| Written as | Means | Standing |
+|---|---|---|
+| `#[cfg(target_arch = "wasm32")]` | "this exists **only** in the browser" | Almost always belongs in `trd-wasm` instead. A native build never compiles it, so nothing native checks it — the failure the `web-sys` rule exists to prevent. |
+| `#[cfg(not(target_arch = "wasm32"))]` | "this has **no browser meaning at all**" | Legitimate. A browser has no `R: Read` and no blocking executor; `io/mod.rs` and the GPU test harness say so honestly. |
+
+**Work down this order and stop at the first that fits.**
+
+| | Resolution | Precedent |
+|---|---|---|
+| 1 | **Name a seam in the shared crate; implement it in `trd-wasm`.** The shared crate keeps the type and its invariants; the browser supplies only the part that cannot compile natively. | `ExternalFrame` (#302) — replaced eleven `cfg`s and a `web-sys` dependency across two shared crates |
+| 2 | **Two real arms behind one shim**, so no caller sees a `cfg` at all. | the two `platform.rs` files |
+| 3 | **Gate the module, not its items** — one `cfg` on the `mod`, none inside. | `render/mod.rs` gating the GPU test harness (#299) |
+| 4 | **Last resort: a `cfg` in place**, for something with genuinely no browser meaning. | `cfg(not(target_arch = "wasm32"))` on `InputStream`, the native byte transport |
+
+**A seam must not cost more than the `cfg` it removes.** If option 1 only
+relocates the complexity — spreading one call across three crates, or adding a
+trait with exactly one implementor and one caller that no third party could ever
+use — take a lower row and write the honest `cfg`. The goal is code a reader can
+follow **on one platform without mentally compiling the other**, not the smallest
+possible `cfg` count.
+
+The one thing that is never a trade-off: option 4 must not hide a **browser-only**
+type in a shared crate. That is the line `tests/wasm_bindgen_containment.rs`
+draws, and the case a native build cannot check for you.
+
+<details>
+<summary>Why — how eleven browser types accumulated unnoticed</summary>
+
+A browser type in a shared crate has to be hidden behind a `cfg` a native build
+never compiles, which is how eleven of them accumulated unnoticed; the browser
+frame copy now reaches the render core through `trd_core::ExternalFrame`
+(`trd-core` owns the trait and the destination texture, `trd-wasm`'s
+`BrowserVideoFrame` owns the `copy_external_image_to_texture` call wgpu marks
+`#[cfg(web)]`).
+</details>
+
 Runtime shape:
 
 - `CanvasRenderer.create(canvas)` holds a persistent `Renderer` + `InputSession`
@@ -338,5 +383,7 @@ Tests are placed by **kind, not size**: a unit test sits inline in the module it
 pins, as `#[cfg(test)] mod tests`, however long it grows; an integration test
 gets its own file in `crates/*/tests/`. There is no `src/**/tests.rs` middle
 form — it compiles into the crate like an inline module, so it would only blur
-the distinction. Contributor/agent conventions (build system, GPU-adapter
-selection, testing policy, PR workflow) live in [`AGENTS.md`](../AGENTS.md).
+the distinction; the reasoning is in [`docs/testing.md`](testing.md#where-a-test-lives--by-kind-not-by-size-305).
+Contributor/agent conventions (which gates a change owes, PR workflow) live in
+[`AGENTS.md`](../AGENTS.md); how to run them, including GPU-adapter selection and
+every e2e procedure, is in [`docs/testing.md`](testing.md).

@@ -106,7 +106,7 @@ the printed tunnel command first, then browse to <http://localhost:8080>.
 > **GPU on WSL / non-NixOS Linux.** On WSL prefix GPU commands with
 > `WGPU_BACKEND=gl`; on a native (non-NixOS) Linux GPU box, wrap them with
 > [nixGL](https://github.com/nix-community/nixGL). Details:
-> [`docs/rendering.md`](docs/rendering.md#gpu-notes) · [`AGENTS.md`](AGENTS.md#gpu).
+> [`docs/rendering.md`](docs/rendering.md#gpu-notes) · [`docs/testing.md`](docs/testing.md#gpu).
 
 ## Building with Nix
 
@@ -309,10 +309,13 @@ MP4 opens and seeks in megabytes.
 - [`docs/video-editing.md`](docs/video-editing.md) — FIBA timeline document,
   the browser media boundary (mediabunny + ranged reads), quad-local placement,
   catalog, playback, and known limits.
-- [`AGENTS.md`](AGENTS.md) — contributor/agent guide: build system, GPU-adapter
-  selection, testing policy, PR workflow.
+- [`docs/testing.md`](docs/testing.md) — how to run every gate: GPU-adapter
+  selection, the golden render suite, the cross-front-end e2e recipes, and the
+  Windows-only checks.
+- [`AGENTS.md`](AGENTS.md) — contributor/agent guide: which gates a change owes
+  (the L1/L2/L3 test levels), how to report them, and the PR workflow.
 
-## [Tests](AGENTS.md#testing--required-before-a-task-is-done)
+## [Tests](AGENTS.md#testing)
 
 ```sh
 cargo fmt --all --check
@@ -327,24 +330,21 @@ the pixel-level regression net: it runs committed Arrow fixtures through the rea
 **both** 4× MSAA and MSAA-off, plus PBR tone-map variants (GPU-gated). Tests are
 placed by kind: **unit tests inline** in the module they pin
 (`#[cfg(test)] mod tests`, however long), **integration tests** in
-`crates/*/tests/`. The full
-testing policy (required tiers, per-crate e2e, multi-platform verification +
-handoff, golden regeneration) lives in
-**[`AGENTS.md`](AGENTS.md#testing--required-before-a-task-is-done)**.
+`crates/*/tests/`.
+
+**There is no CI** — every gate is run by hand on both platforms. Which gates a
+change owes is the L1/L2/L3 test level in **[`AGENTS.md`](AGENTS.md#testing)**;
+how to run them (GPU selection, golden suite, e2e recipes, the Windows-only
+checks) is **[`docs/testing.md`](docs/testing.md)**.
 
 ## Verification icons
 
 PRs and issues report their dual-platform checks as a compact, icon-led
 **verification matrix** (one row per gate, one column per platform) plus a handoff
-checklist — see
-[`AGENTS.md`](AGENTS.md#multiple-platform-verification-and-handoff). The fixed
-glyph set:
-
-| Kind | Icons |
-|------|-------|
-| **Status** | ✅ passed · ❌ failed · ⏳ not yet run · 🤝 handed off |
-| **Platform** | 🪟 Windows · 🐧 Linux/Nix |
-| **Gate** | 🎨 fmt · 📎 clippy · 🕸️ clippy-wasm · 🧪 tests · 🔀 decoder-parity · 🖼️ golden-render · 🌐 tsc/biome |
-
-A reproducible cross-front-end smoke (the coca-cola can PBR scene) is in
-[`AGENTS.md`](AGENTS.md#cross-mode-e2e-recipe--coca-cola-can-pbr--aabb--axes).
+checklist. **The authoritative glyph set and row order live in
+[`AGENTS.md`](AGENTS.md#verification-matrix)** — a second copy here is how the
+`📚 rustdoc` row went missing and an unresolved doc link reached `main` (#336).
+The copy-paste template is in
+[`docs/testing.md`](docs/testing.md#the-matrix-template), and the reproducible
+cross-front-end smoke (the coca-cola can PBR scene) is
+[here](docs/testing.md#cross-mode-e2e-recipe--coca-cola-can-pbr--aabb--axes).
