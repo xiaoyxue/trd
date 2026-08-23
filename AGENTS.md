@@ -45,6 +45,10 @@ violate without anything noticing:
 - **The video-editing document (`trd.video_edit.version = 0.2.0`) is deliberately
   independent of `PROTOCOL_VERSION`** — no editor columns in `0.0.6`, no protocol
   bump for editor state.
+- **Comments say *why*, not *what*; no block over 10 lines; cite an issue rather
+  than re-litigating it.** The nine rules, their two deliberate exceptions, and
+  the budgets are in [`docs/comments.md`](docs/comments.md); measure any of it
+  with `python3 scripts/comment_audit.py --scope front-end`.
 
 ## Toolchain
 
@@ -107,7 +111,7 @@ have run.
 |---|---|
 | `*.md`, `docs/**`, doc comments, or `flake.nix` **gates** | **L1** |
 | test-only files (a `#[cfg(test)] mod tests`, a file under `crates/*/tests/`) | **L1** |
-| `scripts/` tooling that reaches no pixel — `dev-env.ps1`, `encode.py`, `extract_frames.py` | **L1** |
+| `scripts/` tooling that reaches no pixel — `dev-env.ps1`, `encode.py`, `extract_frames.py`, `comment_audit.py` | **L1** |
 | Rust/TS that changes behaviour but cannot reach pixels, a window or media — `crates/trd-placement`, `protocol/` decode, CLI arg parsing, `math/` helpers | **L2** |
 | `crates/trd-core/src/render/**`, `src/shader/*.wgsl`, PBR/tone-map, `math/` transforms feeding the GPU `Uniform`, or the golden fixtures | **L3** |
 | a delivery surface or shell — `native/**`, `crates/trd-wasm/**`, `crates/trd-gui/**`, `web/**` | **L3** |

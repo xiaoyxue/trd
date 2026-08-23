@@ -312,6 +312,9 @@ MP4 opens and seeks in megabytes.
 - [`docs/testing.md`](docs/testing.md) — how to run every gate: GPU-adapter
   selection, the golden render suite, the cross-front-end e2e recipes, and the
   Windows-only checks.
+- [`docs/comments.md`](docs/comments.md) — the comment doctrine: what a comment
+  is for, the nine rules and their exceptions, and the measured budgets
+  (`scripts/comment_audit.py`).
 - [`AGENTS.md`](AGENTS.md) — contributor/agent guide: which gates a change owes
   (the L1/L2/L3 test levels), how to report them, and the PR workflow.
 
