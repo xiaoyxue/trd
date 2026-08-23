@@ -507,7 +507,8 @@ reached `main` (#336). Replace `Lx` with the actual excluding level, e.g.
 Copy this into the PR (and mirror it in the issue). The gate rows and their order
 are fixed by [the glyph table above](#verification-matrix); **every row is
 always present**, and one the level excludes reads `n/a (Lx)` rather than being
-deleted.
+deleted. In the sample below, replace `(L2)` with the actual level that excludes
+those gates.
 
 ```markdown
 **Test level: L2** — touches `crates/trd-core/src/render/` (render path).
