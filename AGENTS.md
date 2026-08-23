@@ -45,10 +45,10 @@ violate without anything noticing:
 - **The video-editing document (`trd.video_edit.version = 0.2.0`) is deliberately
   independent of `PROTOCOL_VERSION`** — no editor columns in `0.0.6`, no protocol
   bump for editor state.
-- **Comments say *why*, not *what*; no block over 10 lines; cite an issue rather
-  than re-litigating it.** The nine rules, their two deliberate exceptions, and
-  the budgets are in [`docs/comments.md`](docs/comments.md); measure any of it
-  with `python3 scripts/comment_audit.py --scope front-end`.
+- **Comments say *why*, not *what*, and stay short enough to see what they attach
+  to.** Guidance rather than a gate, with the reasoning and a measuring script in
+  [`docs/comments.md`](docs/comments.md) — run
+  `python3 scripts/comment_audit.py --scope front-end` when a file feels heavy.
 
 ## Toolchain
 

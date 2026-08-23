@@ -1,12 +1,8 @@
-// WebCodecs decode probe (#282): can mp4box.js + `VideoDecoder` open this
-// project's videos over *range reads* — a local file or a URL — and land on an
-// exact frame without transferring the whole thing?
+// WebCodecs decode probe (#282): can this project's videos be opened over
+// *range reads* — a local file or a URL — and seeked to an exact frame without
+// transferring the whole thing?
 //
-// Deliberately standalone: it touches none of the editor's code, so a failure
-// here is cheap. What it shares with the editor is the part that must be right,
-// `src/media/` — the byte source and the ranged MP4 reader the playback path
-// will be rebuilt on.
-//
+// Standalone: it touches none of the editor's code, sharing only `src/media/`.
 // The number to watch is "read": opening a multi-gigabyte video must cost
 // megabytes, and so must each seek.
 import { type ByteSource, fileByteSource, urlByteSource } from "./media/byte-source.ts";

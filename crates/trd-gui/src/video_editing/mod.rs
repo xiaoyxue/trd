@@ -1,10 +1,5 @@
 //! Shared browser/native video-editing state (#163/#167).
-//!
-//! This module owns the editor state, the typed render/pick scheduler, and the
-//! wasm browser bridge. The surfaces built on top of it live alongside:
-//! [`editing_ui`] renders the editor panels and player, [`details_ui`] draws
-//! the Details inspector in immediate mode, and [`diagnostics`] holds the pure
-//! domain calculations both rely on.
+//! Sub-modules: [`editing_ui`] (panels/player), [`details_ui`] (inspector), [`diagnostics`] (domain math).
 
 mod details_ui;
 mod diagnostics;
@@ -14,11 +9,7 @@ pub use diagnostics::{PoseDeltaDiagnostics, QuadFrameDiagnostics, TrackingPlacem
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-// `std::time::Instant::now()` panics on `wasm32-unknown-unknown` ("time not
-// implemented on this platform"), which surfaces in the browser as
-// `RuntimeError: unreachable` the moment the first video frame schedules a
-// render. `web_time::Instant` is that same type on native and a
-// `performance.now()`-backed clock on wasm.
+// `std::time::Instant::now()` panics on wasm32; `web_time::Instant` is `performance.now()`-backed there.
 use web_time::Instant;
 
 use diagnostics::{dot3, pose_delta};
@@ -56,12 +47,8 @@ impl CatalogAsset {
     }
 }
 
-/// Which path a surfaced error came from.
-///
-/// The editor shows one error at a time, and success in one path is no evidence
-/// about another: a decoded frame says the media adapter works, not that a
-/// catalog or document load did. Tagging the message is what lets a success
-/// clear its own failure and leave the rest standing (#329).
+/// Which path a surfaced error came from. A success clears only its own scope,
+/// leaving other paths' errors standing (#329).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ErrorScope {
@@ -112,25 +99,15 @@ const COMMAND_PAUSE: u8 = 3;
 const COMMAND_PICK_DOCUMENT: u8 = 4;
 const COMMAND_LOAD_SELECTION: u8 = 5;
 
-/// A source the dialog has **selected but not loaded**.
-///
-/// Picking a file and loading it are separate steps because the annotation
-/// document is optional *and* independent: the user chooses a video, maybe a
-/// document, sees both, and then commits with one Load. A picker that loaded
-/// immediately would make "video + document" impossible to express (#264).
+/// A source the dialog has selected but not loaded: picking and loading are separate steps (#264).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingSource {
     pub kind: VideoSourceKind,
-    /// A file name (local) or the URL itself. Display text *and* — for a URL —
-    /// what the shell fetches.
+    /// File name (local) or full URL (used as display text and fetch target).
     pub name: String,
 }
 
-/// The annotation-document formats the Open dialog accepts.
-///
-/// Extension matching is a **hint for the file picker only**: the real loader
-/// must sniff magic bytes, because a URL need not carry a useful suffix and a
-/// mislabelled file should still be read correctly (#264).
+/// Annotation-document formats accepted by the Open dialog. Extension is a hint only; the real loader sniffs bytes (#264).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DocumentFormat {
     ArrowIpc,
@@ -178,19 +155,13 @@ fn selection_label(
     }
 }
 
-/// Whether a string is an `http`/`https` URL, the only schemes either source
-/// accepts — a browser cannot fetch anything else cross-origin, and a `file:`
-/// URL would silently mean the wrong thing on each platform.
+/// Whether a string is an `http`/`https` URL (the only accepted schemes).
 pub fn is_http_url(url: &str) -> bool {
     url.starts_with("http://") || url.starts_with("https://")
 }
 
 /// Why the placement overlay is or is not drawing at the current frame.
-///
-/// It draws nothing for four different reasons, three of which are the ordinary
-/// state of a **sparse** document — most frames of a long recording carry no
-/// row at all (#264). A checkbox that appears to do nothing is indistinguishable
-/// from a broken one, so the reason is stated rather than left to be inferred.
+/// Three of the four silent reasons are normal for a sparse document (#264).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverlayState {
     /// The toggle is off.
@@ -222,10 +193,7 @@ impl OverlayState {
     }
 }
 
-/// Resolves the overlay's state. `tracked` is `None` when the document has no
-/// row for this frame at all. `show_overlay` is the combined toggle state: with
-/// both the quads and the gizmos switched off there is nothing to draw, and the
-/// reason is the toggle rather than the document.
+/// Resolves the overlay's state. `tracked` is `None` for an unannotated frame; `show_overlay` is the combined toggle.
 pub fn overlay_state(
     show_overlay: bool,
     has_document: bool,
@@ -243,33 +211,21 @@ pub fn overlay_state(
     }
 }
 
-/// Whether the dialog's Load button has anything to commit.
-///
-/// A newly selected video is the obvious case. A video that is **already
-/// playing** is the other one: the annotation document is optional and
-/// independent, so it has to be attachable to the video already on screen
-/// (#264). Requiring a fresh video selection made that impossible — a video
-/// opened from `?video=`, which never goes through the picker, left Load
-/// permanently disabled and a picked `.arrow` with no way to apply it.
+/// Whether the Load button has anything to commit: a freshly selected video,
+/// or an already-playing video (so a document can be attached without re-picking, #264).
 pub fn load_is_available(video_selected: bool, video_loaded: bool) -> bool {
     video_selected || video_loaded
 }
 
-/// What a loaded annotation document says about itself, read next to the video
-/// that is actually playing.
-///
-/// Pure, so the readout is pinned by tests instead of by looking at the UI, and
-/// so both shells show the same thing.
+/// What a loaded annotation document says about itself, compared against the playing video.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DocumentSummary {
     /// The video the document was authored against.
     pub describes: String,
     /// How many frames carry placement data, and where they are.
     pub annotated: String,
-    /// Set when the document does not describe the video on screen. Rows are
-    /// keyed by frame number, so a document from another clip does not fail to
-    /// load — it silently lines its quads up with the wrong frames, which is
-    /// worth saying out loud (#264).
+    /// Set when the document is for a different video: a foreign document loads without error
+    /// but silently places quads on the wrong frames (#264).
     pub mismatch: Option<String>,
 }
 
@@ -309,9 +265,7 @@ pub fn document_summary(
         )
     };
 
-    // Resolution is the objective signal. The *names* cannot be compared: a
-    // video opened from a URL is labelled with the whole URL, so a match there
-    // would be luck rather than evidence.
+    // Resolution is compared, not names: a URL-opened video has its URL as name.
     let last_annotated = shots.last().map_or(0, |shot| shot.end_frame);
     let mismatch = if authored.width != playing.width || authored.height != playing.height {
         Some(format!(
@@ -334,11 +288,7 @@ pub fn document_summary(
     }
 }
 
-/// Validates a typed annotation-document URL, naming the format its suffix
-/// suggests.
-///
-/// Pure so the dialog's rules are testable without a UI, and so both shells
-/// agree about what is acceptable before anything is fetched.
+/// Validates an annotation-document URL and infers its format from the suffix.
 pub fn document_url_selection(url: &str) -> Result<DocumentFormat, String> {
     let url = url.trim();
     if url.is_empty() {
@@ -367,11 +317,9 @@ pub fn document_url_selection(url: &str) -> Result<DocumentFormat, String> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoEditingCommand {
     OpenLocalVideo,
-    /// Pick a local annotation document (`.arrow` / `.parquet`). Optional by
-    /// design: without one the video simply plays (#264).
+    /// Pick a local annotation document (`.arrow` / `.parquet`); optional (#264).
     OpenLocalDocument,
-    /// Load what the dialog has selected — the picked local video, plus the
-    /// document if one was chosen. Picking never loads on its own.
+    /// Load the dialog's selection (video + optional document). Picking alone never loads.
     LoadSelection,
     Play,
     Pause,
@@ -398,9 +346,7 @@ struct VideoMetadataObservation {
     duration_seconds: f64,
 }
 
-/// Media-element level state. It is deliberately *not* per-frame: `mediaTime`
-/// travels with its own frame (`IncomingVideoFrame::media_time_seconds`) so the
-/// timeline diagnostics describe the frame on screen, not a newer one.
+/// Media-element level state (not per-frame; `mediaTime` rides with the frame it belongs to).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 struct VideoMediaObservation {
     ready_state: u8,
@@ -414,24 +360,12 @@ struct IncomingVideoFrame {
     height: u32,
     frame_index: u32,
     media_time_seconds: f64,
-    /// How long this frame is on screen, as the container declares it. Zero
-    /// when the shell cannot say — a derived clock, or a decoder that dropped
-    /// the field.
-    ///
-    /// Reported rather than acted on: a seek retires on *which seek this frame
-    /// answers*, not on whether the requested instant falls in some window, so
-    /// no decision depends on this being present or accurate (#322).
+    /// On-screen duration per container. Zero when unavailable.
+    /// Reported only; seek retirement uses `answers_seek`, not this (#322).
     duration_seconds: f64,
     source_generation: u64,
-    /// The newest seek a shell had **taken** when this frame was handed over —
-    /// so, the seek this frame answers.
-    ///
-    /// Stamped here rather than echoed by the shell, exactly like
-    /// `source_generation`, because a shell delivers a seek's frame while it is
-    /// still servicing the take: natively `take_seek_frame` → `decode_one` →
-    /// submit is one synchronous call, and in the browser `seekToSeconds`
-    /// bumps its own generation and drains the queue before its first `await`,
-    /// so nothing older can be presented in between (#322).
+    /// Seek generation this frame answers — the newest seek taken when the frame
+    /// was handed over. Stamped at take time, so no older frame can slip through (#322).
     answers_seek: u64,
 }
 
@@ -444,8 +378,7 @@ struct RenderedVideoFrame {
 #[derive(Clone)]
 struct RenderedFrameDiagnostics {
     media_time_seconds: f64,
-    /// Travels with its frame for the same reason `media_time_seconds` does, so
-    /// Details describes the frame on screen rather than a newer one.
+    /// Pinned to the displayed frame (same reason as `media_time_seconds`).
     duration_seconds: f64,
     scene: crate::scene::SceneState,
     selected_asset: Option<CatalogAsset>,
@@ -479,55 +412,23 @@ pub struct VideoEditingShared {
     latest_video_frame: RefCell<Option<IncomingVideoFrame>>,
     rendered_frame: RefCell<Option<RenderedVideoFrame>>,
     context: RefCell<Option<egui::Context>>,
-    /// Set when the host binds the render texture directly into egui: the render
-    /// task then draws without reading the pixels back.
+    /// True when the render texture is bound directly into egui (no pixel readback).
     skip_readback: Cell<bool>,
-    /// The **UI toolkit's own** GPU context, when the shell built the renderer on
-    /// it (`eframe`'s `wgpu_render_state`).
-    ///
-    /// Held rather than merely flagged for two reasons. It is *declared* by the
-    /// shell because `wgpu 30`'s `Device` has no identity comparison — nothing
-    /// can be detected — and keeping the context itself means every **rebuilt**
-    /// renderer (a catalog asset swap rebuilds one) lands on the same device
-    /// instead of quietly opening another, which would make the bound texture
-    /// come from a device egui knows nothing about.
+    /// The toolkit's GPU context when the renderer shares eframe's device.
+    /// Held (not just flagged) so rebuilt renderers reuse the same device.
     shared_gpu: RefCell<Option<std::sync::Arc<trd_core::GpuContext>>>,
-    /// A decoded frame the delivery surface kept on the GPU, waiting to be
-    /// drawn. Set by the browser, always `None` natively — ffmpeg hands over CPU
-    /// bytes, which have nothing to keep on the GPU (#229).
-    ///
-    /// A trait object rather than a `web_sys::VideoFrame`, so this crate builds
-    /// for every platform without naming a browser type (#302); the browser's
-    /// implementation, and the `close()` that releases its decoder-pool slot,
-    /// live in `trd-wasm`.
-    ///
-    /// `Rc`, and read by cloning it rather than taking it: a render can run more
-    /// than once for the same frame, since any UI change repaints, so a taken
-    /// frame would leave the repaint with nothing to draw. The frame is released
-    /// when the last handle drops — which is when a newer frame replaces it —
-    /// so unlike the raw handle this replaces, there is no way for a reader to
-    /// release it early.
+    /// GPU-resident frame from the browser (always `None` natively, #229). Trait object to avoid
+    /// naming `web_sys::VideoFrame` here (#302). Cloned rather than taken so repaints find it.
     external_frame: RefCell<Option<Rc<dyn trd_core::ExternalFrame>>>,
-    /// A timeline the shell probed from the container, waiting to be adopted.
-    ///
-    /// The browser learns the real frame rate only after `moov` has been read,
-    /// which happens *after* the editor starts — so this arrives late by
-    /// construction and the app consumes it on its next frame (#264).
+    /// Timeline probed from the container, consumed on the next frame (arrives late, after `moov`, #264).
     pending_video_info: RefCell<Option<trd_core::VideoInfo>>,
-    /// An annotation document the shell fetched, waiting to be adopted — or
-    /// `Some(None)` to drop the current one.
-    ///
-    /// A slot rather than a direct call because only the shell can read a file
-    /// or a URL, while only the app owns the document; the app takes it on its
-    /// next frame (#264). Distinct from `pending_document`, which is the
-    /// dialog's *selection* — this is the decoded result of loading it.
+    /// Decoded document from the shell, or `Some(None)` to clear. Consumed next frame.
+    /// Distinct from `pending_document` (the dialog's selection — this is the loaded result).
     incoming_document: RefCell<Option<Option<trd_core::VideoEditingDocument>>>,
     command: Cell<u8>,
     asset_request: Cell<u8>,
 
-    /// What the dialog has **selected but not yet loaded**. The shells fill the
-    /// local-file entries in (only they run a file picker); the dialog fills in
-    /// URLs itself.
+    /// Selected but not yet loaded (shells fill local-file entries; the dialog fills URLs).
     pending_video: RefCell<Option<PendingSource>>,
     pending_document: RefCell<Option<PendingSource>>,
     seek_frame: Cell<i32>,
@@ -535,12 +436,8 @@ pub struct VideoEditingShared {
     /// the value this had when it was made, which is what a delivered frame is
     /// matched against (#322).
     seek_generation: Cell<u64>,
-    /// The newest seek a shell has actually **taken**. Frames are stamped with
-    /// it, which is what turns "a frame arrived" into "the seek was answered".
-    ///
-    /// Distinct from `seek_generation` because the two differ for exactly as
-    /// long as a request is queued: frames delivered in that gap belong to the
-    /// *previous* position and must not retire the new seek.
+    /// Newest seek actually taken by a shell. Frames are stamped with it.
+    /// Differs from `seek_generation` while a request is queued: frames in that gap are old.
     dispatched_seek: Cell<u64>,
     video_loaded: Cell<bool>,
     video_playing: Cell<bool>,
@@ -617,33 +514,23 @@ impl Default for VideoEditingShared {
 }
 
 impl VideoEditingShared {
-    /// Switches the render task off the readback path, for a host that binds the
-    /// rendered texture directly into egui.
+    /// Disables pixel readback when the render texture is bound directly into egui.
     pub fn set_skip_readback(&self, skip: bool) {
         self.skip_readback.set(skip);
     }
 
-    /// Declares that the renderer was built on the **UI toolkit's own device**,
-    /// and keeps that context so rebuilt renderers stay on it.
-    ///
-    /// Declared by the shell rather than detected: `wgpu 30`'s `Device` derives
-    /// only `Debug, Clone` — no `PartialEq`, no `global_id()` — so there is
-    /// nothing to compare, and the shell is the component that *chose* the
-    /// device anyway. Binding a texture from a different device is undefined.
+    /// Declares the toolkit's GPU context so rebuilt renderers reuse it.
+    /// Must be set by the shell (wgpu `Device` has no identity comparison).
     pub fn set_shared_gpu(&self, gpu: std::sync::Arc<trd_core::GpuContext>) {
         self.shared_gpu.replace(Some(gpu));
     }
 
-    /// The toolkit's GPU context, if this editor shares one. A renderer rebuilt
-    /// for a catalog asset **must** use it, or its texture belongs to a device
-    /// egui cannot sample.
+    /// Returns the toolkit's GPU context; rebuilt renderers must use it or their texture is unusable.
     pub fn shared_gpu(&self) -> Option<std::sync::Arc<trd_core::GpuContext>> {
         self.shared_gpu.borrow().clone()
     }
 
-    /// The current renderer's target view + size + identity, for a host binding
-    /// it into its UI toolkit. `None` while a render is in flight (the renderer
-    /// is moved out for the duration) or before one exists.
+    /// Renderer's target view/size/identity for direct egui binding. `None` while in-flight or absent.
     pub fn target_binding(&self) -> Option<(wgpu::TextureView, (u32, u32), usize)> {
         let renderer = self.renderer.borrow();
         let renderer = renderer.as_ref()?;
@@ -654,35 +541,13 @@ impl VideoEditingShared {
         ))
     }
 
-    /// Hands over the decoded frame whose pixels are copied GPU→GPU, so the
-    /// render task can present it without any crossing the wasm boundary.
-    ///
-    /// Leaves the frame in the slot rather than taking it: a render can run more
-    /// than once for the same frame — any UI change repaints — and a taken frame
-    /// would leave the second pass with an empty RGBA buffer. What comes back is
-    /// another `Rc` to the *same* frame, so it costs no extra decoder-pool slot,
-    /// and the frame is released only when the last handle drops.
+    /// GPU-resident frame, cloned rather than taken so repeated repaints find it.
     fn external_frame(&self) -> Option<Rc<dyn trd_core::ExternalFrame>> {
         self.external_frame.borrow().clone()
     }
 
-    /// Publishes a decoded frame that lives **only on the GPU**: the frame holds
-    /// the pixels, so the editor is told which timeline row is on screen and
-    /// nothing else.
-    ///
-    /// **Takes ownership of the frame**, as an `Rc` whose last drop releases it.
-    /// That is the whole lifetime rule now: a browser `VideoFrame` holds a slot
-    /// in a small decoder-side pool, and the three hand-written `close()` calls
-    /// this replaces — superseded, rejected-degenerate, rejected-out-of-range,
-    /// spread across two crates — are one `Drop` in `trd-wasm` (#302). It is
-    /// deliberately *not* released after the upload: a render can run more than
-    /// once for the same frame, so it is held until superseded.
-    ///
-    /// A separate entry point from
-    /// [`update_video_frame_rgba`](Self::update_video_frame_rgba) rather than a
-    /// flag on it, because the two have genuinely different preconditions — this
-    /// one *requires* an empty buffer, and that buffer reaching `epaint` would
-    /// panic if the display path had not been taught to skip it.
+    /// Publishes a GPU-resident frame. Held until superseded (repaints reuse it).
+    /// Requires an empty RGBA buffer; see also `update_video_frame_rgba` (#302).
     pub fn present_external_frame(
         &self,
         frame: Rc<dyn trd_core::ExternalFrame>,
@@ -739,14 +604,7 @@ impl VideoEditingShared {
         Ok(())
     }
 
-    /// Takes the pending playback command as its **wire code**, leaving
-    /// `COMMAND_NONE`.
-    ///
-    /// These raw accessors exist so the browser bridge polls the shared state
-    /// through an API instead of reaching into its cells — the bridge lives in the
-    /// wasm surface crate now (#180). They are the untyped twins of
-    /// [`take_command`](Self::take_command) and friends, which the Rust app uses;
-    /// JS gets the code because that is what crosses the ABI.
+    /// Takes the pending command as its wire code, leaving `COMMAND_NONE`. Used by the JS bridge (#180).
     pub fn take_command_code(&self) -> u8 {
         self.command.replace(COMMAND_NONE)
     }
@@ -821,10 +679,7 @@ impl VideoEditingShared {
         self.request_repaint();
     }
 
-    /// Clears `scope`'s error and nothing else.
-    ///
-    /// Whatever else the cell holds belongs to a path this success says nothing
-    /// about, so erasing it would report a failure as resolved (#329).
+    /// Clears only `scope`'s error; leaves other scopes' errors untouched (#329).
     pub fn clear_error(&self, scope: ErrorScope) {
         let held = self
             .error
@@ -870,12 +725,7 @@ impl VideoEditingShared {
         self.pending_video_info.borrow_mut().take()
     }
 
-    /// Decodes `bytes` as an annotation document and hands it to the editor.
-    ///
-    /// Decoding here rather than in each shell keeps one implementation of the
-    /// contract — and one error message — for native and web alike. A failure
-    /// leaves the current document untouched: a bad file must not empty the
-    /// editor (#264).
+    /// Decodes `bytes` as an annotation document. On failure the current document is unchanged (#264).
     pub fn load_document_bytes(&self, bytes: &[u8]) -> Result<(), String> {
         let document =
             trd_core::decode_video_editing_document(bytes).map_err(|error| error.to_string())?;
@@ -884,8 +734,7 @@ impl VideoEditingShared {
         Ok(())
     }
 
-    /// Drops the current annotation document: the video keeps playing, as plain
-    /// video.
+    /// Drops the current annotation document; the video keeps playing.
     pub fn clear_document(&self) {
         self.incoming_document.replace(Some(None));
         self.request_repaint();
@@ -895,8 +744,7 @@ impl VideoEditingShared {
         self.incoming_document.borrow_mut().take()
     }
 
-    /// Records what a shell's file picker returned, **without loading it**. The
-    /// dialog shows it and enables Load; nothing happens until Load is pressed.
+    /// Records a file-picker result without loading; displayed by the dialog until Load is pressed.
     pub fn set_pending_video(&self, source: Option<PendingSource>) {
         self.pending_video.replace(source);
     }
@@ -914,12 +762,7 @@ impl VideoEditingShared {
         self.pending_document.borrow().clone()
     }
 
-    /// Records a seek the timeline wants and returns its id.
-    ///
-    /// The id is what retires the seek once its frame comes back, so it is
-    /// minted here — at the request — rather than when a shell picks the target
-    /// up. Two requests before a single take coalesce onto the newer id, which
-    /// is the one the pending seek is holding.
+    /// Records a seek and returns its id. Multiple requests before one take coalesce onto the newest id.
     fn request_seek(&self, frame_index: u32) -> u64 {
         let id = self.seek_generation.get().wrapping_add(1);
         self.seek_generation.set(id);
@@ -927,10 +770,7 @@ impl VideoEditingShared {
         id
     }
 
-    /// Takes the pending seek target, leaving "no seek".
-    ///
-    /// Taking it **is** the dispatch: from here until the next take, every
-    /// frame a shell hands over answers this seek.
+    /// Takes the pending seek target. Taking is the dispatch: all subsequent frames answer this seek.
     pub fn take_seek_frame(&self) -> Option<u32> {
         let frame = self.seek_frame.replace(-1);
         if frame < 0 {
@@ -1005,14 +845,7 @@ impl VideoEditingShared {
 }
 
 pub struct VideoEditingApp {
-    /// What the editor knows about the video **being played** — its size, rate,
-    /// frame count and identity.
-    ///
-    /// Held separately from the document because the document is optional: with
-    /// one it comes from the document, without one the shell synthesizes it from
-    /// the container (ffprobe natively, `mp4_probe` in the browser). The editor
-    /// only ever reads the timeline from here, so "no document" is not a special
-    /// case anywhere else (#264).
+    /// Timeline of the playing video. Always present; the document is optional (#264).
     video: trd_core::VideoInfo,
     /// The annotation rows, when a document was supplied. `None` means the
     /// editor is a plain player: the placement UI is inert and every frame is
@@ -1032,14 +865,9 @@ pub struct VideoEditingApp {
     /// The pointer is over the tracked quad. Purely a highlight, recomputed from
     /// the pointer every frame, so it never has to be cleared by hand.
     hovered_quad: bool,
-    /// Whether the local grid + basis axes are drawn. Independent of
-    /// [`show_placement_quads`](Self::show_placement_quads): the quad says where
-    /// an object may be placed, the gizmos describe the basis it is placed in,
-    /// and either is useful without the other.
+    /// Whether the local grid + basis axes are drawn (independent of placement quads).
     show_gizmos: bool,
-    /// Whether the placement quads are drawn at all — including **during
-    /// playback**, which is the point: an annotated frame shows its quad as it
-    /// plays past, and this is how you turn that off (#264).
+    /// Whether placement quads are drawn, including during playback (#264).
     show_placement_quads: bool,
     was_playing: bool,
     selected_asset: Option<CatalogAsset>,
@@ -1047,9 +875,7 @@ pub struct VideoEditingApp {
     fitted_render_size: (u32, u32),
     show_video_source_dialog: bool,
     video_url: String,
-    /// The URLs being typed, and the last thing the dialog said about each —
-    /// `Ok` describes what is selected, `Err` why it was rejected. Cleared to
-    /// `None` once the row falls back to reporting the pending selection.
+    /// URL input and last validation result (`Ok` = selected, `Err` = rejected).
     video_status: Option<Result<String, String>>,
     document_url: String,
     document_status: Option<Result<String, String>>,
@@ -1071,13 +897,7 @@ impl VideoEditingApp {
         Self::with_timeline(document.video.clone(), Some(document), shared)
     }
 
-    /// The editor as a **plain player**: a timeline the shell probed from the
-    /// container, and no annotation document.
-    ///
-    /// This is the video-first entry point (#264). Everything downstream reads
-    /// the timeline from `video` and the rows through
-    /// [`frame_row`](Self::frame_row), so "no document" needs no special case
-    /// beyond an inert placement UI.
+    /// The editor as a plain player: container timeline, no annotation document (#264).
     pub fn player(video: trd_core::VideoInfo, shared: Rc<VideoEditingShared>) -> Self {
         Self::with_timeline(video, None, shared)
     }
@@ -1109,9 +929,6 @@ impl VideoEditingApp {
             controller,
             selected_quad: false,
             hovered_quad: false,
-            // Nothing is selected at start-up, and the gizmos describe a
-            // *selected* quad's basis, so they start off and are revealed by the
-            // first selection.
             show_gizmos: false,
             show_placement_quads: true,
             was_playing: false,
@@ -1130,12 +947,7 @@ impl VideoEditingApp {
         }
     }
 
-    /// The annotation row for `frame_index`, if the document has one.
-    ///
-    /// An `Option`, not an index: with no document — and, with sparse rows, on
-    /// any unannotated frame — the absence of a row is the **normal** state, not
-    /// an error. Every caller therefore has to say what it draws for a plain
-    /// video frame (#264).
+    /// Returns the annotation row for `frame_index`, or `None` for unannotated frames (normal for sparse docs).
     pub fn frame_row(&self, frame_index: u32) -> Option<&trd_core::VideoEditingFrame> {
         self.document.as_ref()?.frame(frame_index)
     }
@@ -1155,13 +967,8 @@ impl VideoEditingApp {
         self.document.is_some()
     }
 
-    /// Adopts (or drops) an annotation document **while the video keeps
-    /// playing**.
-    ///
-    /// The video position is deliberately kept: attaching a document is an
-    /// annotation change, not a source change. Everything derived from the old
-    /// document is not — the selection, the placed object and any pick in flight
-    /// all refer to a quad that may no longer exist, so they are cleared (#264).
+    /// Adopts or drops an annotation document while the video keeps playing.
+    /// Selection/object/pick are cleared (they refer to the old document's quads, #264).
     pub fn set_document(&mut self, document: Option<trd_core::VideoEditingDocument>) {
         self.document = document;
         self.selected_quad = false;
@@ -1173,15 +980,7 @@ impl VideoEditingApp {
         self.shared.request_overlay();
     }
 
-    /// Returns every editing decision to its opening state, keeping the loaded
-    /// video and document.
-    ///
-    /// Editing accumulates state across several panels — a chosen quad, a
-    /// catalog asset with its own material and lighting, a transform built up by
-    /// dragging, a render mode, overlay toggles, a pick — and unpicking that by
-    /// hand means visiting all of them and knowing what each started as. The
-    /// media is deliberately untouched: the point is to start the *placement*
-    /// over, not to reload the clip and lose the playhead.
+    /// Resets all editing state (selection, asset, transform, overlays, pick) without touching the media.
     pub fn reset_all(&mut self) {
         self.selected_quad = false;
         self.hovered_quad = false;
@@ -1194,19 +993,13 @@ impl VideoEditingApp {
         self.controller.mode = crate::interaction::TransformMode::default();
         self.controller.move_direction = crate::interaction::MoveDirection::default();
         self.controller.rebase_reset();
-        // The renderer holds the imported mesh and its material; dropping it is
-        // what makes "no asset" true on the GPU as well as in this struct.
+        // Drop the renderer to clear the GPU-side asset too.
         self.shared.renderer.borrow_mut().take();
         self.shared.asset_request.set(0);
         self.shared.request_overlay();
     }
 
-    /// Replaces the timeline once the shell has probed the real container.
-    ///
-    /// The browser learns the frame rate only after `moov` has been read, which
-    /// happens *after* the editor starts, so the timeline arrives late by
-    /// construction. Clamps the playhead, since a shorter video may not contain
-    /// the frame currently displayed.
+    /// Replaces the timeline (arrives late after moov). Clamps the playhead to the new range.
     pub fn set_video_info(&mut self, video: trd_core::VideoInfo) {
         let last = video.frame_count.saturating_sub(1);
         self.video = video;
@@ -1215,19 +1008,8 @@ impl VideoEditingApp {
         self.pending_seek = None;
     }
 
-    /// Binds trd's render texture straight into egui when both share a device.
-    ///
-    /// This is what removes the readback: instead of copying the rendered pixels
-    /// GPU→CPU and re-uploading them through egui, the texture trd just drew
-    /// into is registered once and sampled in place. It lives on the app rather
-    /// than in a shell so **native and web share one implementation**.
-    ///
-    /// Registration is keyed on `(renderer identity, size)`, so a resize or an
-    /// asset swap — both of which recreate the target — re-registers instead of
-    /// sampling a freed view.
-    ///
-    /// A no-op unless the shell built the renderer on the toolkit's own device;
-    /// two devices cannot share a texture, so those shells keep the readback.
+    /// Registers the render texture directly in egui (no readback) when sharing a device.
+    /// Keyed on (identity, size): resize or asset swap triggers re-registration.
     fn sync_native_texture(&mut self, frame: &mut eframe::Frame) {
         if self.shared.shared_gpu().is_none() {
             return;
@@ -1290,9 +1072,7 @@ impl VideoEditingApp {
         self.show_video_source_dialog = open && !close;
     }
 
-    /// The video row. Choosing a file or accepting a URL only **selects** it —
-    /// loading waits for the Load button, so a document can be chosen in the
-    /// same visit (#264).
+    /// The video row. Selecting a file or URL waits for the Load button (#264).
     fn video_source_row(&mut self, ui: &mut egui::Ui) {
         ui.heading("Video");
         ui.label("The video to play. Required.");
@@ -1335,11 +1115,7 @@ impl VideoEditingApp {
         ui.weak("A URL must allow cross-origin video frame access.");
     }
 
-    /// The **optional** annotation-document row: a single `.arrow` or `.parquet`,
-    /// local or over HTTP, plus Clear.
-    ///
-    /// Mock for now — it validates and reports what *would* be loaded. Landing
-    /// the shape first keeps the loading slices free of layout churn (#264).
+    /// The optional annotation-document row (`.arrow`/`.parquet`, local or HTTP, plus Clear).
     fn document_source_row(&mut self, ui: &mut egui::Ui) {
         ui.heading("Annotation document (optional)");
         ui.label("Arrow IPC or Parquet rows naming the frames that carry placement data.");
@@ -1418,10 +1194,7 @@ impl VideoEditingApp {
                 self.pending_seek = None;
             }
         }
-        // On the shared-device path the pixels were never read back — the
-        // rendered texture is bound directly — so there is nothing to upload.
-        // Missing this is a panic, not a silent bug: `ColorImage` asserts the
-        // buffer matches the size (`epaint/src/image.rs`).
+        // Shared-device path: no readback, so no pixels to upload. Skipping is a panic.
         if frame.rgba.is_empty() {
             return;
         }
@@ -1504,9 +1277,7 @@ impl VideoEditingApp {
         };
         let background_frame = self.frame_row(video.frame_index).cloned();
         let quad_frame = self.quad_frame_at(video.frame_index);
-        // The overlay follows the **toggles**, not the play state: an annotated
-        // frame shows its quad as it plays past, which is how a sparse document
-        // announces itself during ordinary playback (#264).
+        // Overlay follows the toggles, not play state (#264).
         let tracked = background_frame.as_ref().is_some_and(|frame| frame.tracked);
         let show_quad = self.show_placement_quads && tracked;
         let show_gizmos = self.show_gizmos && tracked;
@@ -1529,20 +1300,8 @@ impl VideoEditingApp {
         let Some(mut renderer) = self.shared.renderer.borrow_mut().take() else {
             return;
         };
-        // The **decoded** frame, not the document. `--preview-width` lets the
-        // native shell decode below source resolution, and a target larger than
-        // the frame it uploads just upscales a smaller decode at full GPU cost —
-        // under `OriginalResolution`, unconditionally (#170).
-        //
-        // Browser-neutral by construction: `present_external_frame` sizes the
-        // frame from `ExternalFrame::size()`, which for a WebCodecs `VideoFrame`
-        // is the full source, so this is the same number the document carries
-        // and nothing changes there.
-        //
-        // Calibration is deliberately *not* read from here — it stays the
-        // document size, taken separately below — because the document's `K` is
-        // expressed in source pixels and `frame_camera` rescales it to whatever
-        // target this picks (#168).
+        // Size from the decoded frame (not the document): `--preview-width` may decode below
+        // source res. Calibration K stays at document size; `frame_camera` rescales it (#168/#170).
         let decoded_size = (video.width.max(1), video.height.max(1));
         let requested_size = match self.image_sizing {
             crate::ui::ImageSizing::FitCanvas => (
@@ -1591,11 +1350,7 @@ impl VideoEditingApp {
         let background_duration = video.duration_seconds;
         let answers_seek = video.answers_seek;
         let render_started = Instant::now();
-        // A frame published by `present_external_frame` carries no pixels: the
-        // decoded frame still holds them on the GPU, so the source is the frame
-        // itself and nothing crosses the wasm boundary. Natively the slot is
-        // always empty — nothing implements `ExternalFrame` there — so this
-        // needs no `cfg` to fall through to the RGBA arm (#302).
+        // GPU-path: `present_external_frame` frame has no RGBA bytes; always None natively (#302).
         let external_frame = shared.external_frame().filter(|_| video.rgba.is_empty());
         let render = async move {
             let source = match external_frame.as_deref() {
@@ -1603,10 +1358,7 @@ impl VideoEditingApp {
                 None => crate::video_editing_renderer::FrameSource::Rgba(&video.rgba),
             };
             let result = if shared.skip_readback.get() {
-                // Shared-device path: the rendered texture is bound straight into
-                // egui, so there is nothing to read back. The empty `Vec` is the
-                // frame's payload, and `set_display_frame` skips the upload for
-                // exactly that reason.
+                // Shared-device: no readback; empty Vec signals `set_display_frame` to skip upload.
                 renderer
                     .draw(
                         source,
@@ -1809,19 +1561,12 @@ impl VideoEditingApp {
         Some(quad_basis * object_model)
     }
 
-    /// Resolves the values the Details panel cannot simply read off the app:
-    /// they need the displayed-frame pin plus a little domain math. Everything
-    /// else the panel shows — document metadata and live host observations — is
-    /// read directly at draw time, so nothing is copied twice.
-    ///
-    /// Computed once per Details draw, and only while the panel is open.
+    /// Derives the values the Details panel can't read directly: displayed-frame pin + domain math.
     pub(super) fn displayed_facts(&self) -> DisplayedFacts {
         let displayed_frame_index = self
             .displayed_frame_ready
             .then_some(self.displayed_frame_index);
         let timeline_frame = displayed_frame_index.and_then(|index| self.frame_row(index));
-        // Media time rides with its own frame, so the timeline block describes
-        // the frame actually on screen rather than a newer presented one.
         let media_time_seconds = self
             .displayed_frame_ready
             .then(|| {
@@ -1830,9 +1575,6 @@ impl VideoEditingApp {
                     .map(|displayed| displayed.media_time_seconds)
             })
             .flatten();
-        // Rides with its frame for the same reason the media time does, and is
-        // reported for its own sake: it is the quantity the seek-timing faults
-        // in #317/#319/#322 all turned on, so Details has to be able to show it.
         let frame_duration_seconds = self
             .displayed_diagnostics
             .as_ref()
@@ -1887,9 +1629,6 @@ impl VideoEditingApp {
             .or_else(|| self.shared.renderer_diagnostics.borrow().clone());
 
         let tracked = timeline_frame.is_some_and(|frame| frame.tracked);
-        // Quad *selection* is no longer part of this: a placed object stays on
-        // the plane once its asset is chosen, so it survives clicking away from
-        // the quad.
         let visibility_reason = if playing {
             "playing"
         } else if selected_asset.is_none() {
@@ -1929,9 +1668,6 @@ impl VideoEditingApp {
         let show_quad = displayed.is_some_and(|d| d.show_quad);
         let show_gizmos = displayed.is_some_and(|d| d.show_gizmos);
         let quad_washed = show_quad && displayed.is_some_and(|d| d.hovered_quad || d.selected_quad);
-        // The gizmos no longer ride on the quad: each toggle contributes its own
-        // drawables, so the count follows them independently. The hover /
-        // selection wash is one more, and only when the quads are drawn at all.
         let background_drawables =
             1 + u32::from(show_quad) + u32::from(quad_washed) + if show_gizmos { 2 } else { 0 };
         let foreground_drawables = if object_visible {
@@ -1982,11 +1718,7 @@ impl VideoEditingApp {
     }
 }
 
-/// The subset of Details values that must be derived rather than read.
-///
-/// Deliberately *not* a snapshot of everything the panel shows: static document
-/// metadata and live host observations are read straight from the app while
-/// drawing, so there is exactly one representation of each value.
+/// Derived Details values (live observations are read directly at draw time).
 pub(super) struct DisplayedFacts {
     pub frame_index: Option<u32>,
     pub media_time_seconds: Option<f64>,
@@ -2041,11 +1773,7 @@ pub fn media_time_at_frame(frame_index: u32, fps_num: u32, fps_den: u32, frame_c
     f64::from(frame) * f64::from(fps_den) / f64::from(fps_num.max(1))
 }
 
-/// A seek the timeline has asked for whose frame has not arrived yet.
-///
-/// It carries the **id** the request was minted with, not a time: the frame that
-/// answers a seek is decided by which seek the shell was servicing when it
-/// handed the frame over, and that is something the shell knows exactly.
+/// An outstanding seek: carries the id minted at request time, not a timestamp.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct PendingSeek {
     frame_index: u32,
@@ -2053,29 +1781,7 @@ struct PendingSeek {
 }
 
 impl PendingSeek {
-    /// Whether the frame that just arrived answers this seek.
-    ///
-    /// This used to compare the delivered frame's timestamp against the
-    /// requested instant, allowing one frame's presentation window. That cannot
-    /// be made right, because **the two readers miss in opposite directions**:
-    /// mediabunny answers a seek with the frame at-or-**before** the instant, so
-    /// the delivered frame covers it; ffmpeg's `-ss` is at-or-**after**, so the
-    /// delivered frame is the *next* one and the gap is bounded by the duration
-    /// of the frame that was **skipped** — which is not the window the check was
-    /// given. On a container whose frames alternate 272/256 units, a long frame
-    /// followed by a short one makes that bound too small and the seek never
-    /// retires (#322); it only ever settled at all because the comparison was
-    /// two-sided, which is the opposite of what a presentation window means.
-    ///
-    /// The delivered frame is the answer to the request **by construction**, in
-    /// either direction — so no timestamp arithmetic can add information, only
-    /// take it away. All that is missing is *which* request it answers, and a
-    /// monotonic id supplies exactly that: once, deterministically, with no
-    /// window, no tolerance, and no dependence on how uniform the container is.
-    ///
-    /// `>=` rather than `==` because a newer seek supersedes this one: its
-    /// answer is a strictly better position than the one still being waited on,
-    /// so it retires this too rather than leaving a stale target behind.
+    /// True when `answers_seek >= self.id` — the frame answers this seek or a superseding one (#322).
     fn settled_by(self, answers_seek: u64) -> bool {
         answers_seek >= self.id
     }
@@ -2225,9 +1931,6 @@ pub(super) mod tests {
         assert_eq!(shared.take_seek_frame(), None);
     }
 
-    /// Why the overlay is drawing nothing, pinned without a UI. Three of the
-    /// four silences are the ordinary state of a sparse document, which is
-    /// exactly why the toggle looked broken.
     #[test]
     fn overlay_state_names_each_reason_it_draws_nothing() {
         assert_eq!(
@@ -2262,9 +1965,7 @@ pub(super) mod tests {
         );
     }
 
-    /// The document readout, pinned without a UI. The mismatch line is the point:
-    /// a document from another clip loads perfectly well and then annotates the
-    /// wrong frames, so nothing else would tell the user.
+    /// Document summary flags a foreign document (different clip = wrong frames).
     #[test]
     fn document_summary_reports_contents_and_flags_a_foreign_document() {
         let authored = trd_core::VideoInfo {
@@ -2353,9 +2054,6 @@ pub(super) mod tests {
         );
     }
 
-    /// Load's precondition, pinned without a UI. The second case is the one that
-    /// was missing: a document has to be attachable to a video that is already
-    /// playing, including one opened from `?video=` rather than the picker.
     #[test]
     fn load_is_available_for_a_new_selection_or_an_already_playing_video() {
         assert!(
@@ -2373,8 +2071,6 @@ pub(super) mod tests {
         );
     }
 
-    /// The document row's rules, pinned without a UI: what the dialog accepts is
-    /// what both shells will have to accept when the loading path is real.
     #[test]
     fn document_url_selection_names_the_format_or_says_why_not() {
         assert_eq!(
@@ -2392,7 +2088,6 @@ pub(super) mod tests {
             "a query string is not part of the extension"
         );
 
-        // An empty box is not an error state: no document is the default.
         assert!(document_url_selection("").is_err());
         assert!(document_url_selection("file:///tmp/shot.arrow").is_err());
         assert!(document_url_selection("https://example.com/shot.mp4").is_err());
@@ -2427,8 +2122,6 @@ pub(super) mod tests {
         );
     }
 
-    /// Selecting is not loading, and the two sources are independent: clearing
-    /// the document must leave the video's selection alone (#264).
     #[test]
     fn pending_sources_are_selected_independently() {
         let shared = VideoEditingShared::default();
@@ -2460,19 +2153,10 @@ pub(super) mod tests {
         assert_eq!(media_time_at_frame(288, 24, 1, 288), 287.0 / 24.0);
     }
 
-    /// The timescale of the 11.79 GiB recording #317, #319 and #322 were all
-    /// found on. It is nominally 60 fps, but its `stts` alternates **272/256**
-    /// units per frame — so consecutive frames genuinely differ in length, which
-    /// is what no window-based rule could survive.
+    /// Recording timescale from #317/#319/#322 (nominally 60fps, `stts` alternates 272/256 units/frame).
     const TIMESCALE: f64 = 16_000.0;
 
-    /// Hands the app one decoded frame the way a shell does: published to the
-    /// shared slot, then carried to the screen through the render round-trip.
-    ///
-    /// `(index, media time, duration)` is the triple a shell reports, so a case
-    /// is written exactly as the container presents it — with no media, no
-    /// decoder and no GPU in the loop. A 0×0 frame carries no pixels, which is
-    /// what lets the display path run without an egui texture.
+    /// Delivers `(frame_index, media_time, duration)` as a shell would; 0×0 needs no egui texture.
     fn deliver(app: &mut VideoEditingApp, shared: &Rc<VideoEditingShared>, frame: (u32, f64, f64)) {
         let (frame_index, media_time_seconds, duration_seconds) = frame;
         shared
@@ -2493,9 +2177,7 @@ pub(super) mod tests {
         });
     }
 
-    /// One seek all the way round the loop both shells implement — the timeline
-    /// requests it, the shell takes it, the shell answers with a frame — and
-    /// whether it retired.
+    /// Runs one seek round-trip and reports whether it retired.
     fn seek_answered_by(requested: u32, delivered: (u32, f64, f64)) -> bool {
         let shared = Rc::new(VideoEditingShared::default());
         let mut app = VideoEditingApp::new(document(), shared.clone());
@@ -2513,26 +2195,16 @@ pub(super) mod tests {
         app.pending_seek.is_none()
     }
 
-    /// #322, with the numbers measured on the native editor: the timeline asked
-    /// for frame 6311 and ffmpeg's at-or-**after** `-ss` answered with 6312.
-    ///
-    /// The frame that was *skipped* is 272 units long and the one landed on is
-    /// 256, so the gap the request left behind is wider than the delivered
-    /// frame's own window. The old rule compared exactly those two and left the
-    /// seek pending for good — three of eight positions around t ≈ 117 s did
-    /// this, and one left a target naming a frame that was neither on screen nor
-    /// being sought.
+    /// #322: ffmpeg overshoots (asked 6311, got 6312). The old window rule left the seek pending
+    /// because delivered duration < gap. Identity-based retirement fixes this.
     #[test]
     fn an_overshooting_seek_retires_though_the_frame_landed_on_is_shorter() {
         let skipped_pts = 1_682_933.0 / TIMESCALE;
-        // The request lands ε = 5⅓ units into the skipped frame — the first
-        // ~1 ms of it, which is the window the latch lives in.
         let requested_time = skipped_pts + (16.0 / 3.0) / TIMESCALE;
         let delivered_pts = skipped_pts + 272.0 / TIMESCALE;
         let delivered_duration = 256.0 / TIMESCALE;
 
-        // The fixture has to actually reproduce the latch or it proves nothing:
-        // under the window rule this frame is rejected.
+        // Verify the fixture falls outside the window rule (otherwise it proves nothing).
         assert!(
             (delivered_pts - requested_time).abs() >= delivered_duration,
             "fixture must fall outside the delivered frame's own presentation window"
@@ -2544,10 +2216,7 @@ pub(super) mod tests {
         );
     }
 
-    /// #317's direction, which must stay fixed: mediabunny answers a seek
-    /// at-or-**before** the requested instant, so the index that comes back is
-    /// one *lower* than the one asked for. Measured in the browser: asked for
-    /// 95838, got 95837 presented at 1597.283 s.
+    /// #317: mediabunny undershoots (asked 95838, got 95837 at 1597.283 s).
     #[test]
     fn an_undershooting_seek_still_retires() {
         assert!(
@@ -2556,16 +2225,11 @@ pub(super) mod tests {
         );
     }
 
-    /// Why the dispatch is tracked separately from the request. A frame decoded
-    /// for the *previous* position can land after a seek has been asked for but
-    /// before any shell has taken it, and it answers nothing. Stamping frames at
-    /// request time instead would retire the seek on this one.
+    /// Frame decoded for the previous position must not retire a new seek that hasn't been taken yet.
     #[test]
     fn a_frame_delivered_before_the_shell_took_the_seek_does_not_retire_it() {
         let shared = Rc::new(VideoEditingShared::default());
         let mut app = VideoEditingApp::new(document(), shared.clone());
-        // The browser polls this on every animation frame; an empty poll must
-        // not dispatch anything.
         assert_eq!(shared.take_seek_frame(), None);
 
         app.pending_seek = Some(PendingSeek {
@@ -2587,10 +2251,7 @@ pub(super) mod tests {
         );
     }
 
-    /// A dragged scrubber asks for many positions between two takes. They
-    /// coalesce onto the newest id — the one the pending seek is holding — so
-    /// the single frame that comes back retires it rather than leaving the
-    /// earlier requests waiting for frames that will never be decoded.
+    /// Multiple seeks before one take coalesce; one frame retires them all.
     #[test]
     fn requests_coalesced_into_one_take_are_answered_by_a_single_frame() {
         let shared = Rc::new(VideoEditingShared::default());
@@ -2611,10 +2272,7 @@ pub(super) mod tests {
         assert!(app.pending_seek.is_none());
     }
 
-    /// A seek superseded before its frame arrives must not leave a stale target
-    /// behind — natively a latched one could name a frame that was neither on
-    /// screen nor being sought. A newer seek's answer is a strictly better
-    /// position, so it retires the older wait too.
+    /// A newer seek's answer also retires older outstanding seeks.
     #[test]
     fn a_newer_seeks_answer_retires_an_older_wait() {
         let older = PendingSeek {
@@ -2712,11 +2370,7 @@ pub(super) mod tests {
         app.selected_quad = true;
         app.selected_asset = Some(CatalogAsset::CocaColaCan);
 
-        // A primary click makes `image_panel` report *both* `needs_render` and a
-        // pick point, so drive the real `settle_frame` with exactly that pair
-        // rather than hand-rolling the order here — hand-rolling would pass even
-        // if the app went back to handling the pick before the revision settled,
-        // which is the bug (#205).
+        // Drive `settle_frame` directly so both render + pick are submitted in the real order (#205).
         let before = shared.render_revision.get();
         app.settle_frame(&egui::Context::default(), true, Some((3, 4)), None, None);
         let settled = shared.render_revision.get();
@@ -2744,19 +2398,12 @@ pub(super) mod tests {
         assert!(shared.accepts_pick(&result));
     }
 
-    /// Clicking a quad selects it *and* reveals its local frame: the gizmos are
-    /// what "work in this quad's basis" looks like, so selecting without showing
-    /// them leaves the choice invisible, and letting go of the quad takes them
-    /// away again. It flips the user-visible toggle rather than overriding it,
-    /// so the checkbox still describes what is drawn.
     #[test]
     fn selecting_a_quad_reveals_its_gizmos() {
         let shared = Rc::new(VideoEditingShared::default());
         let mut app = VideoEditingApp::new(document(), shared.clone());
         app.display_size = (1920, 1080);
         app.show_gizmos = false;
-        // Source-pixel quad; `display_size` matches the video, so target pixels
-        // map through unchanged.
         let quad = Some([[0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0]]);
 
         app.handle_pick((50, 50), quad);
@@ -2768,10 +2415,6 @@ pub(super) mod tests {
         assert!(!app.show_gizmos, "and takes its local frame away again");
     }
 
-    /// Hovering the quad raises the wash flag and asks for a new overlay, and
-    /// does so only when the answer *changes* — hover fires every frame the
-    /// pointer rests on the image, and re-rendering each one would peg the GPU
-    /// for a picture that is already correct.
     #[test]
     fn hovering_the_quad_requests_one_overlay_per_change() {
         let shared = Rc::new(VideoEditingShared::default());
@@ -2806,10 +2449,6 @@ pub(super) mod tests {
         assert!(!app.hovered_quad, "off the image is not hovering either");
     }
 
-    /// A placed object and its quad are bound: the object is authored in that
-    /// quad's reconstructed frame, so editing it must not silently take the
-    /// frame away. Clicks go to the object's pick pass while the quad stays
-    /// selected and its gizmos stay up.
     #[test]
     fn a_placed_object_keeps_its_quad_selected() {
         let shared = Rc::new(VideoEditingShared::default());
@@ -2822,7 +2461,6 @@ pub(super) mod tests {
         assert!(app.show_gizmos);
 
         app.selected_asset = Some(CatalogAsset::CocaColaCan);
-        // Clicking the object — or anywhere else — while it is placed.
         app.handle_pick((500, 500), quad);
         assert!(app.selected_quad, "the object's frame stays selected");
         assert!(app.show_gizmos, "and its basis stays visible");

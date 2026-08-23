@@ -3,9 +3,8 @@ use std::rc::Rc;
 use crate::assets;
 use crate::video_editing::CatalogAsset;
 
-/// Adapter facts fixed at device creation. Held behind an [`Rc`] so the
-/// per-frame diagnostics clone is a refcount bump instead of three `String`
-/// allocations on every rendered frame.
+/// Adapter facts fixed at device creation. Held behind an [`Rc`] to avoid
+/// repeated `String` allocations on per-frame diagnostics clones.
 #[derive(Debug)]
 pub struct RendererIdentity {
     pub adapter_name: String,
@@ -26,23 +25,8 @@ pub struct ImportedAssetDiagnostics {
 /// **observed** rather than asserted.
 ///
 /// Each field is the bytes that crossed the boundary for the most recent frame.
-/// A zero means that crossing did not happen at all — which is what makes this a
-/// meter rather than a comment: a later change that claims to remove a copy has
-/// to show a `0` here, and a silent fall back to the copying path shows up as
-/// the old number instead.
-///
-/// **Scope, so `0` is not over-read.** This counts *full-resolution image data*
-/// only. A frame reading `0` still involves small CPU→GPU writes that are not
-/// tracked here and never go away:
-///
-/// * the per-frame uniforms (camera, lighting, the frame-plane fit, instance
-///   models) — tens to hundreds of bytes each;
-/// * egui's own tessellated UI geometry and font atlas, re-uploaded each frame
-///   by `egui-wgpu`, which is far larger than the uniforms though still far
-///   smaller than a frame.
-///
-/// So `0` means *no frame-sized buffer crossed the boundary*, not that the
-/// renderer touched the GPU without any CPU writes at all.
+/// Per-frame CPU↔GPU traffic on the video frame path. `0` means no frame-sized
+/// buffer crossed; per-frame uniforms and egui geometry are not tracked here.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TransferCounts {
     /// Video frame CPU→GPU (`queue.write_texture`).
@@ -54,12 +38,7 @@ pub struct TransferCounts {
 }
 
 impl TransferCounts {
-    /// How many **frame-sized** buffers crossed the CPU↔GPU boundary.
-    ///
-    /// Derived from the byte counts rather than stored, so it cannot drift from
-    /// them: a path that stops reading pixels back reports one crossing fewer
-    /// *because* its `readback` is `0`, not because someone remembered to update
-    /// a constant.
+    /// How many frame-sized buffers crossed the CPU↔GPU boundary.
     pub fn crossings(self) -> u8 {
         [self.frame_upload, self.readback, self.ui_upload]
             .into_iter()
@@ -85,19 +64,7 @@ pub struct VideoRendererDiagnostics {
     pub transfers: TransferCounts,
 }
 
-/// Where a frame's pixels come from.
-///
-/// Native decodes into CPU bytes (an ffmpeg pipe), so it has nothing to avoid.
-/// The browser's `VideoDecoder` has already decoded **into GPU memory**, so
-/// naming the frame lets the copy stay on the GPU — the difference is a whole
-/// frame of traffic at source resolution, ~99 MB for 4K (#229). One `draw`
-/// serves both, so the scene assembly cannot drift between them.
-///
-/// Neither variant is `cfg`'d (#302). `External` is unconstructible natively —
-/// nothing there implements [`ExternalFrame`](trd_core::ExternalFrame) — which
-/// is the same fact expressed by the type system instead of by the
-/// preprocessor, and unlike a `cfg` it is compiled, linted and understood by a
-/// native build.
+/// Where a frame's pixels come from. `External` keeps the frame on GPU (#229, #302).
 pub enum FrameSource<'a> {
     /// Tightly-packed row-major RGBA8, `width * height * 4` bytes.
     Rgba(&'a [u8]),
@@ -106,8 +73,7 @@ pub enum FrameSource<'a> {
 }
 
 impl FrameSource<'_> {
-    /// Bytes this source moves CPU→GPU — zero when the frame never leaves the
-    /// GPU, which is exactly what the transfer meter must report.
+    /// Bytes this source moves CPU→GPU; zero for GPU-resident frames.
     fn upload_bytes(&self) -> usize {
         match self {
             Self::Rgba(rgba) => rgba.len(),
@@ -117,28 +83,15 @@ impl FrameSource<'_> {
 }
 
 pub struct VideoPlacementRenderer {
-    /// The shared render harness. This type is a **placement** front-end, not a
-    /// renderer: it turns the editor's timeline state into layered scenes and hands
-    /// them to `trd-core` like every other front-end (#180).
+    /// Shared render harness (#180).
     renderer: trd_core::Renderer,
-    /// The texture target the renderer draws into and reads back from. Owned
-    /// here rather than by the harness (#203): the harness has no opinion about
-    /// *where* a frame lands, and this front-end resizes its own target on the
-    /// editor panel's resize.
-    ///
-    /// The concrete [`TextureTarget`](trd_core::TextureTarget) rather than the
-    /// [`RenderTarget`](trd_core::RenderTarget) enum, because the editor always
-    /// reads its frames back — a surface has no pixels to read.
+    /// Texture target owned here, not by the harness (#203).
     target: trd_core::TextureTarget,
     default_mode: trd_core::RenderMode,
     default_material: trd_core::DisneyMaterial,
     identity: Rc<RendererIdentity>,
     asset_diagnostics: Option<ImportedAssetDiagnostics>,
-    /// What the **last** frame actually moved across the CPU↔GPU boundary.
-    ///
-    /// Written at the transfer sites themselves rather than derived from which
-    /// method was called, so a count can only be non-zero if that copy really
-    /// ran (#229).
+    /// Transfer counts written at the transfer sites (#229).
     pub transfers: TransferCounts,
 }
 
@@ -148,12 +101,7 @@ impl VideoPlacementRenderer {
         Self::new_empty_with_gpu(gpu, width, height)
     }
 
-    /// Builds the placement renderer on an **already-created** GPU context —
-    /// normally the UI toolkit's own device (`eframe`'s `wgpu_render_state`).
-    ///
-    /// Sharing one device is what lets the rendered texture be handed to egui
-    /// directly; two devices on the same adapter cannot share textures, so a
-    /// separate context forces a GPU→CPU→GPU round trip every frame.
+    /// Builds on an already-created GPU context (e.g. `eframe`'s shared device).
     pub fn new_empty_with_gpu(
         gpu: std::sync::Arc<trd_core::GpuContext>,
         width: u32,
@@ -179,11 +127,7 @@ impl VideoPlacementRenderer {
         })
     }
 
-    /// Requests a **standalone** context, for a shell with no device to share.
-    ///
-    /// Keeps the portable path intact: a front-end that does not run on wgpu, or
-    /// that has not reached its toolkit's device yet, still gets a renderer — it
-    /// just pays the readback.
+    /// Requests a standalone GPU context for shells with no device to share.
     async fn own_gpu() -> Result<std::sync::Arc<trd_core::GpuContext>, String> {
         let instance = trd_core::create_instance();
         trd_core::GpuContext::request(
@@ -217,10 +161,7 @@ impl VideoPlacementRenderer {
         )
     }
 
-    /// Like [`new`](Self::new), on an already-created (shared) GPU context.
-    ///
-    /// The catalog renderer is rebuilt on **every** asset swap, so a shell that
-    /// misses this one opens a third device without noticing.
+    /// Like [`new`](Self::new) on a shared GPU context; rebuilt on every asset swap.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_gpu(
         gpu: std::sync::Arc<trd_core::GpuContext>,
@@ -288,10 +229,7 @@ impl VideoPlacementRenderer {
         }
     }
 
-    /// Resizes the editor's own render target (#203): the harness owns no target
-    /// to resize on its behalf, so this front-end tracks it and asks the renderer
-    /// to rebuild it — `TextureTarget::new`'s zero/`max_texture_dimension_2d`
-    /// checks are all that guards against a degenerate size here.
+    /// Resizes the render target (#203).
     pub fn resize(&mut self, width: u32, height: u32) -> Result<(), String> {
         if self.size() == (width, height) {
             return Ok(());
@@ -360,15 +298,8 @@ impl VideoPlacementRenderer {
         Ok(pixels)
     }
 
-    /// Draws the three placement layers into the target **without reading them
-    /// back**.
-    ///
-    /// The readback in [`render`](Self::render) exists only so a shell on a
-    /// *different* device can re-upload the pixels through its UI toolkit. When
-    /// the toolkit shares trd's device, the rendered texture is bound directly
-    /// (see [`trd_core::TextureTarget::create_view`]) and those two crossings
-    /// disappear. Note the return type: there are **no pixels to return** here.
-    /// The readback is not "skipped" on this path; it is absent from it.
+    /// Draws the three placement layers without reading them back.
+    /// Use [`render`](Self::render) when the shell needs pixels (different device).
     #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &mut self,
@@ -382,10 +313,6 @@ impl VideoPlacementRenderer {
         model: Option<trd_core::Matrix4>,
         state: &crate::scene::SceneState,
     ) -> Result<(), String> {
-        // Counted at the transfer site, not inferred from the call: the frame
-        // genuinely crosses CPU→GPU here — or, for a GPU-resident frame, does
-        // not. `render` adds the readback pair afterwards, so a `draw`-only
-        // frame is left with exactly what it moved.
         self.transfers = TransferCounts {
             frame_upload: source.upload_bytes(),
             readback: 0,
@@ -401,9 +328,7 @@ impl VideoPlacementRenderer {
         let identity_camera = trd_core::FrameParams::IDENTITY
             .to_camera(self.viewport())
             .map_err(|error| error.to_string())?;
-        // No row — no document, or a frame the document does not annotate — is
-        // the ordinary case for a plain video frame: draw it with the identity
-        // camera rather than refusing to draw at all (#264).
+        // No annotated row: draw with the identity camera (#264).
         let background_camera = background_frame
             .and_then(|frame| self.frame_camera(frame, calibration_size).ok())
             .unwrap_or(identity_camera);
@@ -437,15 +362,12 @@ impl VideoPlacementRenderer {
         Ok(())
     }
 
-    /// A sampleable view of the rendered target, for a shell sharing trd's
-    /// device. Gamma space — see [`trd_core::TextureTarget::create_view`].
+    /// Sampleable view of the rendered target (gamma space).
     pub fn target_view(&self) -> wgpu::TextureView {
         self.target.create_view()
     }
 
-    /// Identifies *which* target the current view belongs to, so a host can tell
-    /// when its registered texture went stale — the target is recreated on a
-    /// resize and on an asset swap, and sampling the freed view is undefined.
+    /// Generation key; changes on resize or asset swap (stale views are invalid).
     pub fn renderer_generation_key(&self) -> usize {
         Rc::as_ptr(&self.identity) as usize
     }
@@ -576,35 +498,11 @@ impl ImportedAsset {
     }
 }
 
-/// Authors the three layers of an editor frame from the timeline + scene state.
-///
-/// * **background** — the video plane (the scene's
-///   [`Background::frame`](trd_core::Background::frame), not a drawable — #204),
-///   plus the placement quad's outline and (when selected) its floor grid and
-///   basis axes. Seen through the *background* frame's calibration.
-/// * **foreground** — the placed object and its world/local gizmos, seen through
-///   the *placement* frame's calibration.
-/// * **selection overlay** — the selection AABB, drawn last so it is never
-///   occluded by the object it outlines.
-///
-/// Free function rather than a method: this is placement logic, not rendering, and
-/// keeping it out of the renderer makes it testable without a GPU (#180).
-/// What the background pass draws for the tracked quad on one frame.
-///
-/// The outline and the gizmos are **independent** toggles over the same
-/// reconstructed frame: the quad says *where* an object may be placed, while the
-/// grid and axes describe the local basis it is placed in. Wanting one without
-/// the other is ordinary — the quad alone to judge the fit against the plate,
-/// the gizmos alone to read the basis — so neither implies the other, and a row
-/// with no reconstruction simply carries `None` matrices.
-///
-/// `hovered` and `selected` are the pointer states the outline alone cannot
-/// express: both wash the quad's face translucent green so the *area* an object
-/// would land on is visible, and `selected` additionally turns the edge yellow.
+/// The tracked quad's draw state: independent outline/gizmo toggles;
+/// `hovered`/`selected` wash the quad face.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct QuadOverlay {
-    /// Places the quad outline, the fill and the local grid. `None` on an
-    /// untracked row.
+    /// Quad outline, fill, and local grid model. `None` on an untracked row.
     pub model: Option<trd_core::Matrix4>,
     /// Places the local-frame axes. `None` on an untracked row.
     pub axes: Option<trd_core::Matrix4>,
@@ -618,6 +516,9 @@ pub struct QuadOverlay {
     pub selected: bool,
 }
 
+/// Authors the three layers — background (video + quad overlay), foreground
+/// (object), selection overlay (AABB) drawn last. Free function so it is
+/// testable without a GPU (#180).
 pub fn placement_scenes(
     quad: QuadOverlay,
     model: Option<trd_core::Matrix4>,
@@ -628,8 +529,6 @@ pub fn placement_scenes(
         frame: Some(trd_core::FrameFit::Stretch),
     });
     if let Some(quad_model) = quad.model.filter(|_| quad.show_quads) {
-        // The wash rides with the outline: it is that outline's hover/selection
-        // feedback, so hiding the quads hides it too.
         if quad.hovered || quad.selected {
             background.push(trd_core::DrawableObject::quad_fill(quad_model));
         }
@@ -678,9 +577,7 @@ pub fn placement_scenes(
             ));
         }
     }
-    // Every layer carries the frame's light rig (#182): only the foreground
-    // holds a PBR mesh today, but the rig is a scene property, so each scene
-    // states it rather than depending on what a previous encode left behind.
+    // Each layer carries the full light rig (#182).
     (
         background.with_lighting(state.lighting),
         foreground.with_lighting(state.lighting),
@@ -697,9 +594,7 @@ mod tests {
         matches!(d.primitive(), trd_core::Primitive::CoordinateAxes)
     }
 
-    /// The video plane is the background of the background layer, so everything
-    /// else composites over it. It is a scene *setting* now, not a leading
-    /// drawable (#204).
+    /// Video plane is a scene setting, not a drawable (#204).
     #[test]
     fn the_video_plane_is_always_the_background() {
         let (background, _, _) =
@@ -710,9 +605,7 @@ mod tests {
         );
     }
 
-    /// The quad outline and the gizmos are independent toggles over one
-    /// reconstruction: either can be drawn without the other, and selection only
-    /// highlights the outline.
+    /// Quad outline and gizmos are independent toggles.
     #[test]
     fn the_quad_outline_and_the_gizmos_toggle_independently() {
         let matrix = trd_core::Matrix4::IDENTITY;
@@ -765,8 +658,7 @@ mod tests {
         );
     }
 
-    /// Pointing at a quad washes its face; selecting keeps the wash and turns the
-    /// edge yellow. Neither adds anything when the quads are hidden.
+    /// Hover washes the quad face; selection yellows the edge.
     #[test]
     fn hover_and_selection_wash_the_quad_face() {
         let matrix = trd_core::Matrix4::IDENTITY;
@@ -830,8 +722,7 @@ mod tests {
         assert_eq!(fill(&hidden), 0, "no wash with the quads switched off");
     }
 
-    /// The selection AABB goes in its own layer, so it is drawn over the object it
-    /// outlines rather than z-fighting with it.
+    /// Selection AABB in its own layer to avoid z-fighting.
     #[test]
     fn the_selection_aabb_is_its_own_layer() {
         let state = SceneState {
@@ -857,8 +748,7 @@ mod tests {
             .any(|d| matches!(d.primitive(), trd_core::Primitive::AabbBox { .. })));
     }
 
-    /// Without a placed object there is no foreground at all — the editor still
-    /// shows the video and the quad.
+    /// Video-only frame: no foreground.
     #[test]
     fn a_video_only_frame_has_an_empty_foreground() {
         let (background, foreground, overlay) =

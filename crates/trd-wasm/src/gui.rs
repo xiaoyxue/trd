@@ -1,23 +1,10 @@
 //! The `trd-gui` JS ABI: the interactive viewer (`start`) and the video editor
 //! (`startVideoEditing` + [`VideoEditingHandle`]).
-//!
-//! `trd-gui` itself is a plain rlib — all UI, interaction, scene authoring, and
-//! rendering live there, free of `wasm-bindgen`. **Every** `#[wasm_bindgen]`
-//! export in the repo lives in this crate (#180), so there is exactly one browser
-//! delivery surface to build and one generated JS package to import.
 
 use std::rc::Rc;
 
-/// The browser entry point (Slice 4): builds the offscreen renderer and runs the
-/// eframe app on `canvas`. `mesh_bytes`, `texture_bytes`, and `env_bytes` are the
-/// browser equivalents of the native `--mesh` / `--texture` / `--env` flags — an
-/// optional Wavefront OBJ or binary glTF **as bytes**, optional texture image
-/// **bytes** (PNG/JPEG), and an optional Radiance HDR environment probe **bytes**; the thin
-/// JS bootstrap fetches them from `?mesh=` / `?texture=` / `?env=` URLs and passes
-/// them in. `None`/absent falls back to the built-in cube / no texture / no probe.
-/// Supplying an env probe starts the viewer in Disney **PBR** mode (the material
-/// is then editable live in the UI). All UI + interaction + rendering happen in
-/// Rust, per the repo's "JS is a thin bootstrap only" invariant.
+/// Runs the GUI viewer on `canvas`. OBJ/GLB bytes from `?mesh=`, texture from `?texture=`,
+/// HDR probe from `?env=` (enables PBR mode); absent parameters fall back to built-in defaults.
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub async fn start(
     canvas: web_sys::HtmlCanvasElement,
@@ -43,12 +30,8 @@ pub async fn start(
         is_gltf: bool,
     }
 
-    /// Starts the dedicated `web/gui-video-editing/` poster/document example.
-    /// Starts the dedicated `web/gui-video-editing/` editor.
-    ///
-    /// `document_bytes` is **optional**: without one the editor is a plain
-    /// player — the timeline comes from the container (see
-    /// `setVideoTimelineFromMoov`) and the placement UI stays inert (#264).
+    /// Starts the video editor. Without `document_bytes`, acts as a plain player
+    /// with timeline from the container (#264).
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = startVideoEditing)]
     pub async fn start_video_editing(
         canvas: web_sys::HtmlCanvasElement,
@@ -77,12 +60,7 @@ pub async fn start(
             .start(
                 canvas,
                 eframe::WebOptions::default(),
-                // Built **inside** the creator so the renderer can adopt eframe's
-                // own WebGPU device: one device means trd's rendered texture is
-                // bound straight into egui, with no GPU→CPU→GPU round trip per
-                // frame. `wgpu_render_state` exists nowhere else — which is why
-                // the renderer used to be built before `start`, and therefore had
-                // to request a device of its own.
+                // Renderer adopts eframe's WebGPU device to avoid a GPU→CPU→GPU round trip per frame.
                 Box::new(move |context| {
                     let state = context
                         .wgpu_render_state
@@ -162,10 +140,7 @@ pub async fn start(
             .collect::<Result<_, wasm_bindgen::JsValue>>()?
     };
     let has_gltf = loaded.iter().any(|asset| asset.is_gltf);
-    // One optional albedo texture per mesh (positional: entry `i` skins mesh `i`);
-    // an empty/absent entry leaves that object untextured (1×1 white). The JS
-    // bootstrap passes an array of `Uint8Array` (one per mesh). Decoded in Rust so
-    // trd-core stays I/O-free.
+    // One optional albedo texture per mesh (positional); absent ⇒ 1×1 white.
     for (i, asset) in loaded.iter_mut().enumerate() {
         let entry = texture_bytes.get(i as u32);
         let bytes: Vec<u8> = if entry.is_undefined() || entry.is_null() {
@@ -184,14 +159,11 @@ pub async fn start(
         .iter()
         .map(|asset| (asset.metallic_roughness.clone(), asset.normal.clone()))
         .collect();
-    // The optional HDR env probe (browser `?env=`). Decoded in Rust so trd-core
-    // stays I/O-free; when present, the viewer starts in PBR mode.
     let env = match env_bytes {
         Some(bytes) => Some(trd_gui::assets::decode_env_hdr(&bytes).map_err(to_js)?),
         None => None,
     };
-    // Per-object mode: start every object in PBR when an env probe is supplied
-    // (`?env=`), else Filled — each object's mode is then editable when selected.
+    // Start in PBR when env probe supplied, else Filled.
     let initial_mode = if env.is_some() || has_gltf {
         trd_core::RenderMode::Shaded
     } else {
@@ -214,9 +186,6 @@ pub async fn start(
     } else {
         trd_core::ToneMapping::default()
     };
-    // One transform + mode + material per loaded mesh, so `draws()` lays them out
-    // side-by-side and each object has its **own** editable render mode + PBR
-    // material (#141). `seeded` keeps those per-object vectors the same length.
     let scene = SceneState::seeded(SceneSeed {
         materials: loaded.iter().map(|asset| asset.material.clone()).collect(),
         mode: initial_mode,
@@ -225,10 +194,6 @@ pub async fn start(
         lighting,
         environment_available: env.is_some(),
     });
-    // Render at a resolution suitable for the browser: the canvas's CSS size ×
-    // the device pixel ratio, so the image is crisp on high-DPI / large displays
-    // instead of upscaling a small fixed buffer. Bounded (aspect-preserving) to
-    // keep GPU + readback cost in check.
     let (render_w, render_h) = browser_render_size(&canvas);
     let textures: Vec<Option<&dyn trd_core::Texture>> = textures
         .iter()
@@ -257,13 +222,9 @@ pub async fn start(
         .await
 }
 
-/// A render resolution suitable for the browser: the canvas's CSS size × the
-/// device pixel ratio (so the image is crisp on high-DPI / large displays rather
-/// than an upscaled small buffer), with the larger axis bounded to [`MAX_DIM`]
-/// aspect-preserving to keep GPU + readback cost in check. Falls back to a
-/// reasonable size if the canvas isn't laid out yet.
+/// CSS size × device pixel ratio, larger axis bounded to `MAX_DIM` (aspect-preserving).
+/// Falls back to 1280×720 if not yet laid out.
 fn browser_render_size(canvas: &web_sys::HtmlCanvasElement) -> (u32, u32) {
-    /// Upper bound per axis (aspect-preserving) — crisp yet safe on any GPU.
     const MAX_DIM: f64 = 2048.0;
     const MIN_DIM: u32 = 64;
 
@@ -271,15 +232,11 @@ fn browser_render_size(canvas: &web_sys::HtmlCanvasElement) -> (u32, u32) {
         .map(|w| w.device_pixel_ratio())
         .filter(|d| d.is_finite() && *d > 0.0)
         .unwrap_or(1.0);
-    // CSS pixel size from layout (the canvas fills the viewport). Fall back to a
-    // reasonable default if it hasn't been laid out yet.
     let (css_w, css_h) = match (canvas.client_width(), canvas.client_height()) {
         (w, h) if w > 1 && h > 1 => (w as f64, h as f64),
         _ => (1280.0, 720.0),
     };
     let (mut w, mut h) = (css_w * dpr, css_h * dpr);
-    // Cap the larger axis, scaling both by the same factor to preserve aspect
-    // (an off-aspect render would distort the camera and letterbox the display).
     let scale = (MAX_DIM / w.max(h)).min(1.0);
     w *= scale;
     h *= scale;
@@ -287,8 +244,7 @@ fn browser_render_size(canvas: &web_sys::HtmlCanvasElement) -> (u32, u32) {
     (px(w), px(h))
 }
 
-/// The placeholder timeline a document-less editor starts on, until the shell
-/// has probed the container (#264).
+/// Placeholder timeline until the container is probed (#264).
 fn player_timeline(width: u32, height: u32) -> trd_core::VideoInfo {
     trd_core::VideoInfo {
         source_name: String::new(),
@@ -306,11 +262,7 @@ fn player_timeline(width: u32, height: u32) -> trd_core::VideoInfo {
     }
 }
 
-/// The timeline facts the browser bridge needs for frame↔time mapping.
-///
-/// `Copy` in a `Cell` because they are **replaced** when the container is
-/// probed: the document's numbers are a starting point, not the truth, and with
-/// no document there is nothing but the container (#264).
+/// Timeline facts for frame↔time mapping; replaced when the container is probed (#264).
 #[derive(Debug, Clone, Copy)]
 struct TimelineFacts {
     fps_num: u32,
@@ -320,14 +272,11 @@ struct TimelineFacts {
     height: u32,
 }
 
-/// Browser bridge for the dedicated editor. It transfers browser-decoded pixels
-/// and services commands emitted by Rust UI; it never computes scene matrices.
+/// Browser bridge for the video editor: transfers decoded frames, services Rust UI commands.
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub struct VideoEditingHandle {
     shared: Rc<trd_gui::video_editing::VideoEditingShared>,
-    /// The identity a **document** declared, which an opened file must match.
-    /// `None` when there is no document — then nothing is expected, so nothing
-    /// can mismatch.
+    /// File identity from the document; `None` when document-less (no check).
     expected: Option<(String, u64)>,
     timeline: std::cell::Cell<TimelineFacts>,
 }
@@ -353,8 +302,7 @@ impl VideoEditingHandle {
         }
     }
 
-    /// The handle for a **plain player**: no document, so no expectations and a
-    /// placeholder timeline until the container is probed.
+    /// Plain-player handle: no document, placeholder timeline until container is probed.
     pub(crate) fn player(shared: Rc<trd_gui::video_editing::VideoEditingShared>) -> Self {
         Self {
             shared,
@@ -405,8 +353,7 @@ impl VideoEditingHandle {
         self.shared
             .set_video_metadata_observation(width, height, duration_seconds);
         if self.expected.is_none() {
-            // Video-first: the container defines the timeline, so its own
-            // dimensions and duration cannot disagree with anything (#264).
+            // Video-first: container defines the timeline, nothing to check (#264).
             return Ok(());
         }
         let timeline = self.timeline.get();
@@ -429,11 +376,8 @@ impl VideoEditingHandle {
         Ok(())
     }
 
-    /// Adopts the timeline from a `moov` box the shell located with range reads.
-    ///
-    /// `<video>` never exposes a frame rate, so without this the browser numbers
-    /// frames on an invented grid — a 25 fps clip reported 300 frames instead of
-    /// 250. The editor picks the new timeline up on its next frame (#264).
+    /// Adopts rational fps + frame count from a range-read `moov` box.
+    /// `<video>` never exposes frame rate directly; the editor picks this up on its next frame (#264).
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = setVideoTimelineFromMoov)]
     pub fn set_video_timeline_from_moov(
         &self,
@@ -503,20 +447,9 @@ impl VideoEditingHandle {
             .map_err(|error| wasm_bindgen::JsValue::from_str(&error))
     }
 
-    /// Presents a decoded frame without copying it anywhere: the browser
-    /// decoded it into GPU memory and it stays there (#229, #282).
-    ///
-    /// **Takes ownership of the frame** — do not `close()` it in JS. It holds a
-    /// slot in a small decoder-side pool, and Rust releases that slot when a
-    /// newer frame supersedes this one, *not* once the GPU copy is done: a
-    /// render can run more than once for the same frame, since any UI change
-    /// repaints, so a frame released after its first upload would leave the
-    /// repaint with nothing to draw.
-    ///
-    /// A separate entry point from
-    /// [`update_video_frame_rgba`](Self::update_video_frame_rgba) rather than a
-    /// flag, because the preconditions differ — this one carries no buffer at
-    /// all.
+    /// Presents a browser-decoded frame that stays in GPU memory (#229, #282).
+    /// **Takes ownership** — do not `close()` it in JS; the decoder-pool slot is
+    /// released when a newer frame supersedes it.
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = presentVideoFrame)]
     pub fn present_video_frame(
         &self,
@@ -525,10 +458,8 @@ impl VideoEditingHandle {
         media_time_seconds: f64,
         duration_seconds: f64,
     ) -> Result<(), wasm_bindgen::JsValue> {
-        // Wrapped before the first early return, so from here on *every* path
-        // releases the decoder-pool slot by dropping — including the rejection
-        // below, which used to be one of three hand-written `close()` calls
-        // (#302).
+        // Wrap before the bounds check so the rejection path also releases the
+        // decoder-pool slot by dropping (#302).
         let frame = std::rc::Rc::new(crate::BrowserVideoFrame::new(frame));
         if frame_index >= self.timeline.get().frame_count {
             return Err(wasm_bindgen::JsValue::from_str(
@@ -568,8 +499,7 @@ impl VideoEditingHandle {
         self.shared.set_video_media_observation(ready_state, ended);
     }
 
-    /// Surfaces a failure, tagged with the path that produced it so a success
-    /// elsewhere cannot clear it (#329).
+    /// Surfaces a scoped failure; a success elsewhere cannot clear it (#329).
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = setError)]
     pub fn set_error(&self, scope: u8, message: String) -> Result<(), wasm_bindgen::JsValue> {
         let scope = trd_gui::video_editing::ErrorScope::from_code(scope)
@@ -588,11 +518,7 @@ impl VideoEditingHandle {
         self.shared.take_asset_request_code()
     }
 
-    /// Loads an annotation document from bytes the shell fetched — a local file
-    /// or an HTTP(S) URL, decided by the shell (#264).
-    ///
-    /// Decoding happens in Rust so native and web share one contract and one
-    /// error message; a failure leaves the current document in place.
+    /// Loads an annotation document from bytes; a failure leaves the current document in place.
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = loadDocument)]
     pub fn load_document(&self, bytes: Vec<u8>) -> Result<(), wasm_bindgen::JsValue> {
         self.shared
@@ -600,16 +526,13 @@ impl VideoEditingHandle {
             .map_err(|error| wasm_bindgen::JsValue::from_str(&error))
     }
 
-    /// Drops the current annotation document: the video keeps playing, as plain
-    /// video.
+    /// Drops the current annotation document; video keeps playing.
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = clearDocument)]
     pub fn clear_document(&self) {
         self.shared.clear_document();
     }
 
-    /// Records what the shell's file picker returned, **without loading it**:
-    /// the dialog stays open so an optional document can be chosen too, and its
-    /// Load button commits both (#264).
+    /// Records the pending video selection (loading deferred to Load, #264).
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = setPendingVideoSelection)]
     pub fn set_pending_video_selection(&self, name: String) {
         self.shared
@@ -619,8 +542,7 @@ impl VideoEditingHandle {
             }));
     }
 
-    /// Records the local annotation document the shell's file picker returned.
-    /// **Mock**: nothing is decoded yet (#264).
+    /// Records the pending document selection (not decoded yet, #264).
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = setPendingDocumentSelection)]
     pub fn set_pending_document_selection(&self, name: String) {
         self.shared
@@ -630,8 +552,7 @@ impl VideoEditingHandle {
             }));
     }
 
-    /// The pending document's URL, or `None` when the selection is a local file
-    /// the shell already holds (or nothing is selected).
+    /// URL of the pending document; `None` for local-file selections or no selection.
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = pendingDocumentUrl)]
     pub fn pending_document_url(&self) -> Option<String> {
         self.shared.pending_document().and_then(|source| {
@@ -643,15 +564,13 @@ impl VideoEditingHandle {
         })
     }
 
-    /// Whether the dialog has any document selected at all — the shell needs to
-    /// know, because Load with none means "play unannotated".
+    /// `true` if a document is selected (Load with none means play unannotated).
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = hasPendingDocument)]
     pub fn has_pending_document(&self) -> bool {
         self.shared.pending_document().is_some()
     }
 
-    /// The pending video's URL, or `None` when the selection is a local file the
-    /// shell already holds.
+    /// URL of the pending video; `None` for local-file selections.
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = pendingVideoUrl)]
     pub fn pending_video_url(&self) -> Option<String> {
         self.shared.pending_video().and_then(|source| {
@@ -678,9 +597,7 @@ impl VideoEditingHandle {
     ) -> Result<(), wasm_bindgen::JsValue> {
         let asset = trd_gui::video_editing::CatalogAsset::from_code(asset_code)
             .ok_or_else(|| wasm_bindgen::JsValue::from_str("unknown catalog asset"))?;
-        // A catalog swap rebuilds the renderer. It must land on the **same**
-        // device as the one egui samples, or the newly registered texture comes
-        // from a device the toolkit knows nothing about.
+        // Must use the same device egui samples — a different device yields an unusable texture.
         let renderer = match self.shared.shared_gpu() {
             Some(gpu) => trd_gui::video_editing_renderer::VideoPlacementRenderer::new_with_gpu(
                 gpu,

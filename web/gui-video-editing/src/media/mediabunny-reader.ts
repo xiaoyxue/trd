@@ -1,18 +1,11 @@
 /// The browser media layer delegated to [mediabunny], as an alternative to the
-/// hand-written mp4box + `VideoDecoder` reader next door.
+/// hand-written mp4box + `VideoDecoder` reader next door: range reads, locating
+/// `moov`, feeding the demuxer, decoder configuration and reset, key-frame
+/// catch-up and the end-of-stream drain are all its job.
 ///
-/// What it replaces is not a detail: range reads, locating `moov`, feeding the
-/// demuxer, decoder configuration and reset, key-frame catch-up, and the
-/// end-of-stream drain. Every fault this package has hit — a `flush()` that
-/// deadlocks against its own output pool, a seek offset misread as end of
-/// stream, samples arriving after a drain concluded, a decoder left `closed`
-/// by an overlapping seek — lives in exactly that layer, and is the kind of
-/// thing a maintained library has already met.
-///
-/// One thing it does not supply is the raw `moov`, which Rust parses to get the
-/// frame rate as a rational rather than a sample count over a duration. That is
-/// one extra range read, done here with the same `ByteSource` and box walk the
-/// other reader uses.
+/// It does not supply the raw `moov`, which Rust parses to get the frame rate as
+/// a rational; that is one extra range read, done here with the same
+/// `ByteSource` and box walk the other reader uses.
 ///
 /// [mediabunny]: https://mediabunny.dev/
 import { ALL_FORMATS, BlobSource, Input, UrlSource, VideoSampleSink } from "mediabunny";

@@ -1,21 +1,11 @@
 #![cfg(target_arch = "wasm32")]
 
-//! trd browser (wasm) bindings. The crate root only wires the two
-//! `#[wasm_bindgen]` renderers and the small glue they share; each renderer
-//! lives in its own module:
-//!
-//! * [`CanvasRenderer`] (`canvas_renderer`) renders an Arrow stream straight to
-//!   an on-screen `<canvas>` surface — the browser twin of `trd-cli`'s live
-//!   view (`render.sh --web --canvas-renderer`).
-//! * [`OffscreenRenderer`] (`offscreen_renderer`) renders each frame to an
-//!   **offscreen** texture and returns the pixels as an Arrow output stream — the
-//!   browser twin of headless `trd-cli` (`render.sh --web --offscreen-renderer`).
-//! * [`gui`] holds the `trd-gui` entry points — the interactive viewer (`start`)
-//!   and the video editor (`startVideoEditing`) — plus the browser shell they run
-//!   in (`gui_web_app`).
-//! * [`browser_frame`] implements [`trd_core::ExternalFrame`] over a WebCodecs
-//!   `VideoFrame`, so the GPU→GPU frame copy lives on the delivery surface and
-//!   the shared crates never name a browser type (#302).
+//! trd browser (wasm) bindings. The crate root wires the two `#[wasm_bindgen]`
+//! renderers — [`CanvasRenderer`] (on-screen surface) and [`OffscreenRenderer`]
+//! (offscreen texture read back as an Arrow output stream) — plus [`gui`] (the
+//! `trd-gui` entry points and their browser shell) and [`browser_frame`], which
+//! implements [`trd_core::ExternalFrame`] so the shared crates never name a
+//! browser type (#302).
 //!
 //! **Every** `#[wasm_bindgen]` export in the repo lives here (#180): one browser
 //! delivery surface, one generated JS package. `trd-gui` is a plain rlib.

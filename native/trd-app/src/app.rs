@@ -1,12 +1,9 @@
 //! Native windowed streaming viewer: a winit application that owns a live wgpu
 //! surface and renders trd frame-params streamed from stdin.
 //!
-//! A background thread reads the Arrow IPC stream (the same `[mesh][params]`
-//! input `trd-cli` consumes) via [`trd_core::InputStream`],
-//! forwarding the decoded mesh table then each frame's params + instanced draw
-//! list over a channel. The window plays them at a fixed rate, encoding each
-//! frame's [`trd_core::Scene`] with the shared [`trd_core::Renderer`] — so
-//! all rendering logic still lives in `trd-core`.
+//! A background thread reads the Arrow IPC stream and forwards the mesh table
+//! then each frame's params over a channel; the window plays them at a fixed
+//! rate through the shared [`trd_core::Renderer`].
 
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
@@ -166,11 +163,10 @@ impl App {
     /// The instant the next frame boundary is due, for scheduling a wakeup.
     fn next_boundary(&self) -> Option<Instant> {
         let start = self.playback_start?;
-        // The next absolute frame boundary after *now* (wall-clock), so the wakeup
-        // is always in the future. Deriving it from `shown_index` breaks once
-        // playback loops (the looped index is small, e.g. 0..len), scheduling an
-        // instant in the past that turns the `WaitUntil` sleep into a busy-loop
-        // (100% CPU, and the render thread never gets to pace/present cleanly).
+        // The next absolute frame boundary after *now* (wall-clock), so the
+        // wakeup is always in the future. Deriving it from `shown_index`
+        // breaks once playback loops: the instant lands in the past and the
+        // `WaitUntil` sleep becomes a busy-loop.
         let elapsed = start.elapsed().as_secs_f64();
         let next_frame = (elapsed * self.rate()).floor() + 1.0;
         Some(start + Duration::from_secs_f64(next_frame / self.rate()))
@@ -193,14 +189,11 @@ impl ApplicationHandler for App {
             return;
         }
 
-        // The CV camera `k` intrinsics (fx/fy/cx/cy) are render-resolution-specific,
-        // so the GPU surface must be exactly the authored `--width`×`--height`. On
-        // Windows, per-monitor DPI scaling turns a `LogicalSize` request into a
-        // larger physical surface (e.g. 960×540 → 1440×810 at 150%), which
-        // misprojects the scene over the stretched background frame (the mesh
-        // "floats" off its placement quad). Request the size in physical pixels
-        // there so the surface matches the authored resolution; other platforms
-        // (validated at 100% scale) keep the logical-size request.
+        // The CV camera `k` intrinsics are render-resolution-specific, so the
+        // surface must be exactly the authored `--width`x`--height`. Windows
+        // per-monitor DPI turns a `LogicalSize` request into a larger
+        // physical surface, which misprojects the scene over the background
+        // frame — so request physical pixels there.
         #[cfg(target_os = "windows")]
         let size_attr = PhysicalSize::new(self.window_size.0, self.window_size.1);
         #[cfg(not(target_os = "windows"))]
@@ -336,11 +329,9 @@ pub fn run() -> Result<(), AppError> {
         RenderMode::Filled
     };
 
-    // Assemble the Disney PBR config (material + optional HDR env probe) when
-    // `--pbr` is set. The `.hdr` file is decoded here so trd-core does no
-    // file/codec I/O; it is downscaled to the renderer's portable 2048px limit.
-    // `--env-background` needs it too: the sky is the same bound probe the
-    // shaded surfaces reflect (#235 R2).
+    // The `.hdr` is decoded here so trd-core does no file/codec I/O, and
+    // downscaled to the renderer's portable 2048px limit. `--env-background`
+    // needs it too: the sky is the same probe the surfaces reflect.
     let pbr_config = if cli.pbr || cli.env_background {
         let material = DisneyMaterial {
             metallic: cli.metallic,

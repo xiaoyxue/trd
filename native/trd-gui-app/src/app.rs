@@ -1,14 +1,11 @@
 //! [`TrdGuiApp`] — the egui application: the display surface and the control
 //! panel that together close the interaction loop (#97).
 //!
-//! The central panel shows the latest RGBA frame (a `trd-core` render uploaded
-//! as an egui texture) and is itself the interaction surface: pointer drags and
-//! the scroll wheel become normalized [`InteractionEvent`](trd_gui::interaction::InteractionEvent)s, the
-//! [`InteractionController`] turns them into a new camera / model matrix, and the
-//! scene is re-rendered — the "input → matrix → render → display" cycle. The side
-//! panel exposes the render mode, overlay toggles, the primary-drag target, and a
-//! reset. This crate holds **no rendering logic**; every pixel comes from
-//! `trd-core` via the [`GuiRenderer`].
+//! The central panel shows the latest `trd-core` render and is itself the
+//! interaction surface: pointer and wheel input become
+//! [`InteractionEvent`](trd_gui::interaction::InteractionEvent)s, the
+//! [`InteractionController`] turns them into a camera / model matrix, and the
+//! scene is re-rendered. This crate holds **no rendering logic**.
 
 use std::time::Instant;
 

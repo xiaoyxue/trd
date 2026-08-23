@@ -1,55 +1,44 @@
 //! [`SceneState`] — the interactive scene the GUI authors and re-renders (#97).
 //!
-//! This is the shared, platform-agnostic model the interaction loop mutates:
-//! an **orbit camera** (the CG `eye`/`target`/`fovy` form) plus a single
-//! **object transform** (the per-draw model matrix), together with the render
-//! mode and overlay flags. It carries no GPU or egui state — it only produces
-//! the two values `trd-core` consumes each frame: a [`FrameParams`](trd_core::FrameParams) camera and a
-//! list of [`Draw`]s. The render backend ([`crate::renderer`]) turns those
-//! into pixels; the interaction controller ([`crate::interaction`]) mutates this
-//! state from user gestures.
+//! The shared, platform-agnostic model the interaction loop mutates: an orbit
+//! camera plus a single object transform, the render mode and overlay flags. It
+//! holds no GPU or egui state — it produces the two values `trd-core` consumes
+//! each frame, a [`FrameParams`](trd_core::FrameParams) camera and a [`Draw`] list.
 //!
-//! Conventions follow `trd-core::math`: right-handed world, `+Y` up, radians.
-//! The loaded mesh is centered and scaled to fit by
-//! [`trd_core::Mesh::preview_transform`] beneath the draw model, so the scene is
-//! authored around the world origin — the camera targets the origin by default.
+//! Conventions follow `trd-core::math`: right-handed world, `+Y` up, radians; the
+//! mesh is preview-scaled by [`trd_core::Mesh::preview_transform`] about the origin.
 
 use trd_core::{
     Camera, DisneyMaterial, Draw, DrawSelection, ImageBasedLighting, Lighting, Matrix4,
     PbrDebugView, Point3, RenderMode, Rotation, ToneMapping, Transform, Vector3, Viewport,
 };
 
-/// The minimum orbit distance (never let the camera cross the target).
+/// Orbit limits: never cross the target, never reach the poles (`up = +Y` would
+/// degenerate), keep the framed object on screen.
 const MIN_DISTANCE: f32 = 0.2;
-/// The maximum orbit distance (keep the framed object on screen).
 const MAX_DISTANCE: f32 = 100.0;
-/// Clamp the pitch just shy of the poles so `up = +Y` never degenerates.
 const MAX_PITCH: f32 = std::f32::consts::FRAC_PI_2 - 0.01;
-/// The smallest per-axis object scale, so a scale gesture/widget can never
-/// collapse the object to a degenerate (zero or negative) size.
+
+/// Scale limits: a gesture can never collapse an object to a degenerate size.
 pub const MIN_SCALE: f32 = 0.01;
-/// The largest per-axis object scale, keeping the framed object on screen.
 pub const MAX_SCALE: f32 = 100.0;
-/// World-space spacing between adjacent objects in a multi-object scene. The
-/// preview transform fits each mesh to a max extent of `DEFAULT_PREVIEW_TARGET`
-/// (~2 world units), so `2.6` leaves a small gap between neighbours.
+
+/// World-space spacing between neighbours in a multi-object scene. Each mesh is
+/// preview-fitted to ~2 world units, so this leaves a small gap.
 const OBJECT_SPACING: f32 = 2.6;
 
-/// A camera that orbits a target point on a sphere: `yaw`/`pitch` place the eye,
-/// `distance` sets the radius, `fovy` the vertical field of view. This is the
-/// CG (`eye`/`target`/`fovy`) half of [`FrameParams`](trd_core::FrameParams), the natural form for an
-/// orbit interaction (the object stays put; the camera moves around it).
+/// A camera that orbits a target point on a sphere — the CG
+/// (`eye`/`target`/`fovy`) half of [`FrameParams`](trd_core::FrameParams), which
+/// is the natural form for an orbit interaction: the object stays put and the
+/// camera moves around it. Angles in radians; `yaw = 0` looks along `-Z`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OrbitCamera {
-    /// Azimuth about `+Y`, radians. `0` looks along `-Z` toward the target.
     pub yaw: f32,
-    /// Elevation above the `XZ` plane, radians, clamped to `±MAX_PITCH`.
+    /// Elevation above the `XZ` plane, clamped to `±MAX_PITCH`.
     pub pitch: f32,
-    /// Distance from `target` to the eye, clamped to `[MIN_DISTANCE, MAX_DISTANCE]`.
+    /// Clamped to `[MIN_DISTANCE, MAX_DISTANCE]`.
     pub distance: f32,
-    /// The world-space point the camera looks at.
     pub target: [f32; 3],
-    /// Vertical field of view, radians.
     pub fovy: f32,
 }
 
@@ -58,9 +47,7 @@ impl Default for OrbitCamera {
         Self {
             yaw: 0.0,
             pitch: 0.3,
-            // The mesh is preview-scaled to a max extent of
-            // `DEFAULT_PREVIEW_TARGET` (2.0) about the origin; ~4 units frames it
-            // comfortably at a 45° fov.
+            // ~4 units frames the preview-scaled mesh at a 45° fov.
             distance: 4.0,
             target: [0.0, 0.0, 0.0],
             fovy: trd_core::DEFAULT_FOV_Y,
@@ -69,8 +56,7 @@ impl Default for OrbitCamera {
 }
 
 impl OrbitCamera {
-    /// The world-space eye position derived from `yaw`/`pitch`/`distance` about
-    /// `target`. `yaw = pitch = 0` sits on `+Z` looking toward `-Z`.
+    /// `yaw = pitch = 0` sits on `+Z` looking toward `-Z`.
     pub fn eye(&self) -> [f32; 3] {
         let (sp, cp) = self.pitch.sin_cos();
         let (sy, cy) = self.yaw.sin_cos();
@@ -79,35 +65,27 @@ impl OrbitCamera {
         (target + dir * self.distance).to_array()
     }
 
-    /// Rotates the eye about the target by `(dyaw, dpitch)` radians (pitch is
-    /// clamped shy of the poles).
     pub fn orbit(&mut self, dyaw: f32, dpitch: f32) {
         self.yaw += dyaw;
         self.pitch = (self.pitch + dpitch).clamp(-MAX_PITCH, MAX_PITCH);
     }
 
-    /// Dollies toward (`factor < 1`) or away from (`factor > 1`) the target,
-    /// scaling `distance` and clamping it to the working range.
+    /// `factor < 1` dollies toward the target, `> 1` away.
     pub fn dolly(&mut self, factor: f32) {
         self.distance = (self.distance * factor).clamp(MIN_DISTANCE, MAX_DISTANCE);
     }
 }
 
-/// A single object's placement: an intrinsic yaw/pitch/roll rotation and a
-/// per-axis scale composed under a world translation. Produces the per-draw
-/// **model** matrix `T · R · S` (scale, then rotate, then translate) that
-/// `trd-core` applies beneath the mesh's preview base model.
+/// A single object's placement, producing the per-draw model matrix `T · R · S`
+/// that `trd-core` applies beneath the mesh's preview base model. Rotation is
+/// intrinsic yaw (`+Y`), pitch (`+X`), roll (`+Z`), in radians.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ObjectTransform {
-    /// Rotation about the object's `+Y` axis, radians.
     pub yaw: f32,
-    /// Rotation about the object's `+X` axis, radians.
     pub pitch: f32,
-    /// Rotation about the object's `+Z` axis, radians.
     pub roll: f32,
-    /// Per-axis scale (`x`, `y`, `z`), each clamped to `[MIN_SCALE, MAX_SCALE]`.
+    /// Per-axis, each clamped to `[MIN_SCALE, MAX_SCALE]`.
     pub scale: [f32; 3],
-    /// World-space translation applied after rotation.
     pub translation: [f32; 3],
 }
 
@@ -130,11 +108,8 @@ impl ObjectTransform {
             * Rotation::from_rotation_z(self.roll)
     }
 
-    /// The column-major model matrix `T · R · S`: scale, then rotate about `+Y`,
-    /// `+X`, `+Z`, then translate. Built with the typed `trd-core` transforms so
-    /// the affine composition rule (`a.then(b) == b · a`) holds, and handed out
-    /// typed — a `Draw`'s model is a `Matrix4` (#235 R3), so there is no array
-    /// round-trip left in between.
+    /// Built with the typed `trd-core` transforms so the affine composition rule
+    /// (`a.then(b) == b · a`) holds, and handed out typed (#235 R3).
     pub fn model_matrix(&self) -> Matrix4 {
         self.model_matrix_offset([0.0, 0.0, 0.0])
     }
