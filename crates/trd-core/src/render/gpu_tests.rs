@@ -647,24 +647,30 @@ fn a_material_change_between_frames_still_reaches_the_slots() {
         })
     };
 
-    renderer.set_disney_material(crate::DisneyMaterial {
-        base_color: [0.9, 0.05, 0.05],
-        metallic: 0.0,
-        roughness: 0.5,
-        ..Default::default()
-    });
+    renderer.set_disney_material(
+        crate::MeshTarget::All,
+        crate::DisneyMaterial {
+            base_color: [0.9, 0.05, 0.05],
+            metallic: 0.0,
+            roughness: 0.5,
+            ..Default::default()
+        },
+    );
     let red = frame(&mut renderer);
     // A second frame with nothing changed: the slots are skipped, and the image
     // must be identical — the skip is invisible.
     let red_again = frame(&mut renderer);
     assert_eq!(red, red_again, "an unchanged scene renders identically");
 
-    renderer.set_disney_material(crate::DisneyMaterial {
-        base_color: [0.05, 0.05, 0.9],
-        metallic: 0.0,
-        roughness: 0.5,
-        ..Default::default()
-    });
+    renderer.set_disney_material(
+        crate::MeshTarget::All,
+        crate::DisneyMaterial {
+            base_color: [0.05, 0.05, 0.9],
+            metallic: 0.0,
+            roughness: 0.5,
+            ..Default::default()
+        },
+    );
     let blue = frame(&mut renderer);
     assert_ne!(
         red, blue,
@@ -1871,4 +1877,72 @@ fn picking_resolves_object_ids_and_background() {
     assert_eq!(pick(2, 2), None, "corner → background");
     // Out-of-bounds coordinates are safely rejected.
     assert_eq!(pick(width, 0), None, "x == width is out of bounds");
+}
+
+/// `MeshTarget` decides *which* meshes an appearance edit reaches, and the
+/// out-of-range case must be a no-op rather than a silent write elsewhere.
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn mesh_target_selects_which_meshes_an_appearance_edit_reaches() {
+    let meshes = [Mesh::hello_triangle(), Mesh::hello_triangle()];
+    let mut renderer = Renderer::new(
+        test_gpu(),
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+        &meshes,
+        &[Matrix4::IDENTITY; 2],
+    )
+    .expect("two meshes with two base models is a valid mesh set");
+
+    let red = crate::MeshAppearance {
+        material: crate::DisneyMaterial {
+            base_color: [1.0, 0.0, 0.0],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    renderer.set_appearance(crate::MeshTarget::All, red.clone());
+    assert_eq!(
+        renderer.mesh_appearance(0),
+        Some(&red),
+        "All reaches mesh 0"
+    );
+    assert_eq!(
+        renderer.mesh_appearance(1),
+        Some(&red),
+        "All reaches mesh 1"
+    );
+
+    let blue = crate::DisneyMaterial {
+        base_color: [0.0, 0.0, 1.0],
+        ..Default::default()
+    };
+    renderer.set_disney_material(crate::MeshTarget::One(1), blue.clone());
+    assert_eq!(
+        renderer.mesh_appearance(0).map(|a| &a.material),
+        Some(&red.material),
+        "One(1) leaves mesh 0 alone"
+    );
+    assert_eq!(
+        renderer.mesh_appearance(1).map(|a| &a.material),
+        Some(&blue),
+        "One(1) reaches mesh 1"
+    );
+
+    // Out of range: nothing to write, and nothing written anywhere else.
+    renderer.set_disney_material(
+        crate::MeshTarget::One(9),
+        crate::DisneyMaterial {
+            base_color: [0.0, 1.0, 0.0],
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        renderer.mesh_appearance(0).map(|a| &a.material),
+        Some(&red.material)
+    );
+    assert_eq!(
+        renderer.mesh_appearance(1).map(|a| &a.material),
+        Some(&blue)
+    );
+    assert!(renderer.mesh_appearance(9).is_none());
 }

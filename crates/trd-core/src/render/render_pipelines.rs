@@ -243,11 +243,12 @@ impl SceneUniforms {
             return;
         }
         for (slot, mesh) in meshes.iter().enumerate() {
+            let appearance = mesh.appearance();
             let uniform = PbrUniform::new(PbrUniformInputs {
-                material: &mesh.material,
-                ibl: mesh.ibl,
-                tone_mapping: mesh.tone_mapping,
-                debug_view: mesh.debug_view,
+                material: &appearance.material,
+                ibl: appearance.ibl,
+                tone_mapping: appearance.tone_mapping,
+                debug_view: appearance.debug_view,
             });
             self.pbr.write_slot(queue, slot, &uniform);
         }

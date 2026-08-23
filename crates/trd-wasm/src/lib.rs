@@ -63,13 +63,17 @@ impl PbrState {
     }
 
     /// Pushes the staged per-object material onto the render harness. Shared by
-    /// the offscreen and canvas renderers — they use the same non-generic
-    /// [`trd_core::Renderer`], differing only in which target they pass to their
-    /// render calls (#203).
+    /// the offscreen and canvas renderers.
     pub(crate) fn apply(&self, renderer: &mut trd_core::Renderer) {
-        renderer.set_disney_material(self.material.clone());
-        renderer.set_image_based_lighting(self.ibl);
-        renderer.set_tone_mapping(self.tone_mapping);
+        renderer.set_appearance(
+            trd_core::MeshTarget::All,
+            trd_core::MeshAppearance {
+                material: self.material.clone(),
+                ibl: self.ibl,
+                tone_mapping: self.tone_mapping,
+                ..Default::default()
+            },
+        );
     }
 }
 

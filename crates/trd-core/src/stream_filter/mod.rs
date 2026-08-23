@@ -208,9 +208,15 @@ pub fn run_stream<R: Read, W: Write>(
         options.msaa.sample_count(),
     ))?;
     if let Some(pbr) = &options.pbr {
-        renderer.set_disney_material(pbr.material.clone());
-        renderer.set_image_based_lighting(pbr.ibl);
-        renderer.set_tone_mapping(pbr.tone_mapping);
+        renderer.set_appearance(
+            crate::MeshTarget::All,
+            crate::MeshAppearance {
+                material: pbr.material.clone(),
+                ibl: pbr.ibl,
+                tone_mapping: pbr.tone_mapping,
+                ..Default::default()
+            },
+        );
         if let Some(env) = &pbr.env_map {
             renderer.set_env_map(env.clone());
         }

@@ -337,14 +337,15 @@ impl VideoPlacementRenderer {
             .transpose()?
             .unwrap_or(background_camera);
         if self.renderer.mesh_count() > 0 {
-            self.renderer
-                .set_mesh_disney_material(0, state.materials[0].clone());
-            self.renderer
-                .set_mesh_image_based_lighting(0, state.image_based_lighting[0]);
-            self.renderer
-                .set_mesh_tone_mapping(0, state.tone_mappings[0]);
-            self.renderer
-                .set_mesh_pbr_debug_view(0, state.pbr_debug_views[0]);
+            self.renderer.set_appearance(
+                trd_core::MeshTarget::One(0),
+                trd_core::MeshAppearance {
+                    material: state.materials[0].clone(),
+                    ibl: state.image_based_lighting[0],
+                    tone_mapping: state.tone_mappings[0],
+                    debug_view: state.pbr_debug_views[0],
+                },
+            );
         }
 
         let has_mesh = self.renderer.mesh_count() > 0;
@@ -478,7 +479,7 @@ impl ImportedAsset {
                     roughness: 0.35,
                     ..Default::default()
                 };
-                renderer.set_mesh_disney_material(0, material.clone());
+                renderer.set_disney_material(trd_core::MeshTarget::One(0), material.clone());
                 (trd_core::RenderMode::Shaded, material)
             }
             Self::Pbr(asset) => {
@@ -491,7 +492,7 @@ impl ImportedAsset {
                 if let Some(texture) = asset.normal_texture.as_ref() {
                     renderer.set_mesh_normal_texture(0, texture);
                 }
-                renderer.set_mesh_disney_material(0, asset.material.clone());
+                renderer.set_disney_material(trd_core::MeshTarget::One(0), asset.material.clone());
                 (trd_core::RenderMode::Shaded, asset.material)
             }
         }

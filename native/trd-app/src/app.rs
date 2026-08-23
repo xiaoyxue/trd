@@ -276,10 +276,13 @@ impl ApplicationHandler for App {
             // Apply the Disney PBR material + env probe once the renderer exists.
             if !self.pbr_applied && gpu.renderer.is_some() {
                 if let Some(pbr) = self.pbr_config.take() {
-                    gpu.set_disney_material(pbr.material);
                     gpu.set_lighting(pbr.lighting);
-                    gpu.set_image_based_lighting(pbr.ibl);
-                    gpu.set_tone_mapping(pbr.tone_mapping);
+                    gpu.set_appearance(trd_core::MeshAppearance {
+                        material: pbr.material,
+                        ibl: pbr.ibl,
+                        tone_mapping: pbr.tone_mapping,
+                        ..Default::default()
+                    });
                     if let Some(env) = pbr.env_map {
                         gpu.set_env_map(env);
                     }

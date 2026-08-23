@@ -15,66 +15,109 @@ use super::buffer::{IndexBuffer, VertexBuffer};
 use super::*;
 use crate::material::DisneyMaterial;
 use crate::math::Matrix4;
+use crate::texture::Texture;
 
-/// A mesh uploaded to the GPU. Its `vertex_buffer` feeds both the filled
-/// `triangles` and the deduped wireframe `edges` (#38); the `aabb` overlay (#42)
-/// is a standalone box of 12 screen-space-expanded edge quads. `base_model` is
-/// the base (preview) transform pre-multiplied beneath every per-frame instance
-/// model (`effective = model · base`).
-///
-/// It owns **all** of one mesh's per-object state, shading included: the
-/// material, IBL gain, tone map and debug view used to sit on the renderer as
-/// four `Vec`s parallel to the mesh store, each allocated to the mesh count with
-/// nothing keeping them that length — one concept in two storage schemes, of
-/// which only the `Vec`s could fall out of sync (#203). They are scalars here
-/// because the `Vec` already exists one level up, in
-/// [`MeshStore::meshes`](super::mesh_store::MeshStore).
+/// A mesh uploaded to the GPU, in three parts by how they change: `geometry` is
+/// fixed at upload, `textures` are bind groups uploaded the moment they are set,
+/// and `appearance` is the PBR slot's input, written only through
+/// `Renderer::edit_appearance`.
 pub(super) struct MeshGpu {
-    pub(super) vertex_buffer: VertexBuffer<Vertex>,
-    /// The derived shading attributes for the Disney PBR path (`pbr.wgsl`):
-    /// smooth normal + tangent, bound at vertex slot 2 *beside* `vertex_buffer`
-    /// rather than duplicating its positions and UVs (#247 S7). Built once per
-    /// mesh; only bound by [`RenderMode::Shaded`] draws.
-    pub(super) shading: VertexBuffer<ShadingVertex>,
-    pub(super) triangles: IndexBuffer,
-    pub(super) edges: IndexBuffer,
-    pub(super) aabb: VertexBuffer<GizmoLineVertex>,
-    pub(super) base_model: Matrix4,
-    /// This mesh's **own** albedo texture (group 1), so a multi-object scene skins
-    /// each object with its own diffuse (#141). Defaults to 1×1 white (identity
-    /// albedo) until [`set`](BoundTexture::set) via `set_mesh_texture`.
-    pub(super) texture: BoundTexture,
-    pub(super) material_maps: BoundMaterialMaps,
-    /// The Disney material applied to this mesh's [`RenderMode::Shaded`] draws
-    /// (#141) — so a multi-object scene gives every object its own
-    /// metallic/roughness/base_color.
-    pub(super) material: DisneyMaterial,
-    /// This mesh's environment reflection gain.
-    pub(super) ibl: ImageBasedLighting,
-    /// This mesh's output transform (exposure + tone-map curve).
-    pub(super) tone_mapping: ToneMapping,
-    /// Which PBR input this mesh renders diagnostically (`Shaded` = the real
-    /// shading).
-    pub(super) debug_view: PbrDebugView,
+    geometry: MeshGeometry,
+    textures: MeshTextures,
+    appearance: MeshAppearance,
+}
+
+/// The buffers and base transform, fixed when the mesh is uploaded. `vertices`
+/// feeds both the filled `triangles` and the deduped wireframe `edges` (#38);
+/// `aabb` is a standalone box of 12 screen-space-expanded edge quads (#42).
+struct MeshGeometry {
+    vertices: VertexBuffer<Vertex>,
+    /// Smooth normal + tangent for `pbr.wgsl`, bound at vertex slot 2 *beside*
+    /// `vertices` rather than duplicating its positions and UVs.
+    shading: VertexBuffer<ShadingVertex>,
+    triangles: IndexBuffer,
+    edges: IndexBuffer,
+    aabb: VertexBuffer<GizmoLineVertex>,
+    /// The preview transform pre-multiplied beneath every per-frame instance
+    /// model (`effective = model · base`).
+    base_model: Matrix4,
+}
+
+/// This mesh's own bind groups (group 1 and 3), so a multi-object scene skins
+/// each object separately (#141). Uploaded when set, and **not** part of a PBR
+/// slot — which is why setting one must not mark the slots dirty.
+struct MeshTextures {
+    /// Defaults to 1×1 white — an identity albedo — until set.
+    albedo: BoundTexture,
+    maps: BoundMaterialMaps,
+}
+
+/// **The entire input of one mesh's PBR uniform slot** — which is what makes
+/// this a type rather than four loose fields: it is exactly what
+/// [`SceneUniforms::write_pbr`](super::SceneUniforms::write_pbr) reads, so
+/// writing it is exactly when the slot array goes stale.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MeshAppearance {
+    pub material: DisneyMaterial,
+    /// Environment reflection gain.
+    pub ibl: ImageBasedLighting,
+    /// Exposure + tone-map curve.
+    pub tone_mapping: ToneMapping,
+    /// Which PBR input to render diagnostically (`Shaded` = the real shading).
+    pub debug_view: PbrDebugView,
 }
 
 impl MeshGpu {
     pub(super) fn filled(&self) -> (&VertexBuffer<Vertex>, &IndexBuffer) {
-        (&self.vertex_buffer, &self.triangles)
+        (&self.geometry.vertices, &self.geometry.triangles)
     }
 
     /// What a shaded draw binds **in addition** to [`filled`](Self::filled) —
     /// the geometry is the same buffer, so there is no second copy of it.
     pub(super) fn shading(&self) -> &VertexBuffer<ShadingVertex> {
-        &self.shading
+        &self.geometry.shading
     }
 
     pub(super) fn wireframe(&self) -> (&VertexBuffer<Vertex>, &IndexBuffer) {
-        (&self.vertex_buffer, &self.edges)
+        (&self.geometry.vertices, &self.geometry.edges)
     }
 
     pub(super) fn aabb(&self) -> &VertexBuffer<GizmoLineVertex> {
-        &self.aabb
+        &self.geometry.aabb
+    }
+
+    pub(super) fn base_model(&self) -> Matrix4 {
+        self.geometry.base_model
+    }
+
+    pub(super) fn albedo_bind_group(&self) -> &wgpu::BindGroup {
+        self.textures.albedo.bind_group()
+    }
+
+    pub(super) fn material_maps_bind_group(&self) -> &wgpu::BindGroup {
+        self.textures.maps.bind_group()
+    }
+
+    pub(super) fn appearance(&self) -> &MeshAppearance {
+        &self.appearance
+    }
+
+    /// The only way to mutate appearance, so `Renderer::edit_appearance` stays
+    /// the single place `slots_dirty` is set.
+    pub(super) fn appearance_mut(&mut self) -> &mut MeshAppearance {
+        &mut self.appearance
+    }
+
+    pub(super) fn set_albedo(&mut self, gpu: &GpuContext, texture: &dyn Texture) {
+        self.textures.albedo.set(gpu, texture);
+    }
+
+    pub(super) fn set_metallic_roughness(&mut self, gpu: &GpuContext, texture: &dyn Texture) {
+        self.textures.maps.set_metallic_roughness(gpu, texture);
+    }
+
+    pub(super) fn set_normal_map(&mut self, gpu: &GpuContext, texture: &dyn Texture) {
+        self.textures.maps.set_normal(gpu, texture);
     }
 }
 
@@ -85,7 +128,7 @@ pub(super) fn upload_mesh(
     texture_layout: &wgpu::BindGroupLayout,
     material_maps_layout: &wgpu::BindGroupLayout,
 ) -> MeshGpu {
-    let vertex_buffer = VertexBuffer::new(&gpu.device, "trd mesh vertex buffer", &mesh.vertices);
+    let vertices = VertexBuffer::new(&gpu.device, "trd mesh vertex buffer", &mesh.vertices);
     let triangles = IndexBuffer::new(&gpu.device, "trd mesh index buffer", &mesh.indices);
     let edges = mesh.edge_indices();
     let edges = IndexBuffer::new(&gpu.device, "trd mesh edge buffer", &edges);
@@ -119,18 +162,19 @@ pub(super) fn upload_mesh(
     let aabb_vertices = aabb_line_vertices(&aabb_corners);
 
     MeshGpu {
-        vertex_buffer,
-        shading,
-        triangles,
-        edges,
-        aabb: VertexBuffer::new(&gpu.device, "trd mesh aabb line buffer", &aabb_vertices),
-        base_model,
-        texture: BoundTexture::with_layout(gpu, texture_layout.clone()),
-        material_maps: BoundMaterialMaps::with_layout(gpu, material_maps_layout.clone()),
-        material: DisneyMaterial::default(),
-        ibl: ImageBasedLighting::default(),
-        tone_mapping: ToneMapping::default(),
-        debug_view: PbrDebugView::default(),
+        geometry: MeshGeometry {
+            vertices,
+            shading,
+            triangles,
+            edges,
+            aabb: VertexBuffer::new(&gpu.device, "trd mesh aabb line buffer", &aabb_vertices),
+            base_model,
+        },
+        textures: MeshTextures {
+            albedo: BoundTexture::with_layout(gpu, texture_layout.clone()),
+            maps: BoundMaterialMaps::with_layout(gpu, material_maps_layout.clone()),
+        },
+        appearance: MeshAppearance::default(),
     }
 }
 

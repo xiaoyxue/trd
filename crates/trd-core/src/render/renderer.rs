@@ -80,7 +80,7 @@ use super::draw_command::{build_batches, Batches};
 use super::environment::{EnvBackgroundSettings, Environment};
 use super::frame_plane::FramePlane;
 use super::gizmo::GizmoGeometry;
-use super::mesh_store::MeshStore;
+use super::mesh_store::{MeshGpu, MeshStore};
 use super::picking::{PickTarget, Picking};
 use super::*;
 use super::{Draw, GridPlane, Primitive, RenderMode, Scene};
@@ -91,6 +91,19 @@ use crate::texture::Texture;
 use crate::Camera;
 use futures_channel::oneshot;
 use thiserror::Error;
+
+/// Which meshes one appearance edit applies to.
+///
+/// A value rather than a pair of setters per field: "which meshes" and "what to
+/// change" are independent questions, and keeping them apart is what lets
+/// [`Renderer::edit_appearance`] be the single writer of `slots_dirty`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeshTarget {
+    /// Every uploaded mesh — the single-mesh and wire-protocol default.
+    All,
+    /// One mesh by id. Out-of-range ids change nothing.
+    One(usize),
+}
 
 /// Errors constructing or driving a [`Renderer`].
 ///
@@ -484,7 +497,7 @@ impl Renderer {
     /// [`render`](Self::render).
     pub fn set_mesh_texture(&mut self, mesh_id: usize, texture: &dyn Texture) {
         if let Some(mesh) = self.meshes.get_mut(mesh_id) {
-            mesh.texture.set(&self.gpu, texture);
+            mesh.set_albedo(&self.gpu, texture);
         }
     }
 
@@ -493,8 +506,7 @@ impl Renderer {
     /// material values. Out-of-range ids are ignored.
     pub fn set_mesh_metallic_roughness_texture(&mut self, mesh_id: usize, texture: &dyn Texture) {
         if let Some(mesh) = self.meshes.get_mut(mesh_id) {
-            mesh.material_maps
-                .set_metallic_roughness(&self.gpu, texture);
+            mesh.set_metallic_roughness(&self.gpu, texture);
         }
     }
 
@@ -502,70 +514,64 @@ impl Renderer {
     /// shading normal in [`RenderMode::Shaded`]. Out-of-range ids are ignored.
     pub fn set_mesh_normal_texture(&mut self, mesh_id: usize, texture: &dyn Texture) {
         if let Some(mesh) = self.meshes.get_mut(mesh_id) {
-            mesh.material_maps.set_normal(&self.gpu, texture);
+            mesh.set_normal_map(&self.gpu, texture);
         }
     }
 
-    /// Sets the [`DisneyMaterial`] of **every** mesh — the single-mesh / global
-    /// default. For a multi-object scene, give each object its own material with
-    /// [`set_mesh_disney_material`](Self::set_mesh_disney_material). Takes effect
-    /// on the next [`render`](Self::render).
-    pub fn set_disney_material(&mut self, material: DisneyMaterial) {
-        for mesh in self.meshes.iter_mut() {
-            mesh.material = material.clone();
+    /// **The one path that mutates per-mesh appearance, and therefore the one
+    /// place `slots_dirty` is set.** An out-of-range [`MeshTarget::One`] edits
+    /// nothing and leaves the slots clean.
+    ///
+    /// The texture setters above deliberately do *not* come through here: they
+    /// upload a bind group immediately and feed no PBR slot.
+    fn edit_appearance(&mut self, target: MeshTarget, mut edit: impl FnMut(&mut MeshAppearance)) {
+        match target {
+            MeshTarget::All => self
+                .meshes
+                .iter_mut()
+                .for_each(|mesh| edit(mesh.appearance_mut())),
+            MeshTarget::One(mesh_id) => {
+                let Some(mesh) = self.meshes.get_mut(mesh_id) else {
+                    return;
+                };
+                edit(mesh.appearance_mut());
+            }
         }
         self.slots_dirty = true;
     }
 
-    /// Sets the [`DisneyMaterial`] of mesh `mesh_id` only (#141) — so each
-    /// object in a multi-object scene has its own metallic/roughness/base_color.
-    /// Out-of-range ids are ignored. Takes effect on the next
+    /// Replaces `target`'s whole [`MeshAppearance`] — what most callers want,
+    /// since material, IBL, tone map and debug view are set together.
+    pub fn set_appearance(&mut self, target: MeshTarget, appearance: MeshAppearance) {
+        self.edit_appearance(target, |current| current.clone_from(&appearance));
+    }
+
+    /// The current appearance of mesh `mesh_id`, or `None` if out of range.
+    pub fn mesh_appearance(&self, mesh_id: usize) -> Option<&MeshAppearance> {
+        self.meshes.get(mesh_id).map(MeshGpu::appearance)
+    }
+
+    /// Sets the [`DisneyMaterial`] of `target`. Takes effect on the next
     /// [`render`](Self::render).
-    pub fn set_mesh_disney_material(&mut self, mesh_id: usize, material: DisneyMaterial) {
-        if let Some(mesh) = self.meshes.get_mut(mesh_id) {
-            mesh.material = material;
-        }
-        self.slots_dirty = true;
+    pub fn set_disney_material(&mut self, target: MeshTarget, material: DisneyMaterial) {
+        self.edit_appearance(target, |appearance| {
+            appearance.material.clone_from(&material);
+        });
     }
 
-    /// Sets image-based-lighting controls for every PBR object.
-    pub fn set_image_based_lighting(&mut self, ibl: ImageBasedLighting) {
-        for mesh in self.meshes.iter_mut() {
-            mesh.ibl = ibl;
-        }
-        self.slots_dirty = true;
+    /// Sets the environment-reflection gain of `target`.
+    pub fn set_image_based_lighting(&mut self, target: MeshTarget, ibl: ImageBasedLighting) {
+        self.edit_appearance(target, |appearance| appearance.ibl = ibl);
     }
 
-    /// Sets image-based-lighting controls for one PBR object.
-    pub fn set_mesh_image_based_lighting(&mut self, mesh_id: usize, ibl: ImageBasedLighting) {
-        if let Some(mesh) = self.meshes.get_mut(mesh_id) {
-            mesh.ibl = ibl;
-        }
-        self.slots_dirty = true;
+    /// Sets the output transform (exposure + curve) of `target`.
+    pub fn set_tone_mapping(&mut self, target: MeshTarget, tone_mapping: ToneMapping) {
+        self.edit_appearance(target, |appearance| appearance.tone_mapping = tone_mapping);
     }
 
-    /// Sets the per-object output transform of every PBR object.
-    pub fn set_tone_mapping(&mut self, tone_mapping: ToneMapping) {
-        for mesh in self.meshes.iter_mut() {
-            mesh.tone_mapping = tone_mapping;
-        }
-        self.slots_dirty = true;
-    }
-
-    /// Sets the output transform of one PBR object.
-    pub fn set_mesh_tone_mapping(&mut self, mesh_id: usize, tone_mapping: ToneMapping) {
-        if let Some(mesh) = self.meshes.get_mut(mesh_id) {
-            mesh.tone_mapping = tone_mapping;
-        }
-        self.slots_dirty = true;
-    }
-
-    /// Selects a diagnostic PBR output for one mesh.
-    pub fn set_mesh_pbr_debug_view(&mut self, mesh_id: usize, debug_view: PbrDebugView) {
-        if let Some(mesh) = self.meshes.get_mut(mesh_id) {
-            mesh.debug_view = debug_view;
-        }
-        self.slots_dirty = true;
+    /// Selects a diagnostic PBR output for `target`.
+    pub fn set_pbr_debug_view(&mut self, target: MeshTarget, debug_view: PbrDebugView) {
+        self.edit_appearance(target, |appearance| appearance.debug_view = debug_view);
     }
 
     /// Binds `env` as the equirectangular HDR environment map reflected by
@@ -1024,7 +1030,7 @@ impl Renderer {
             batches, meshes, ..
         } = self;
         build_batches(batches, scene.objects(), |mesh_id| {
-            meshes.get(mesh_id).map(|mesh| mesh.base_model)
+            meshes.get(mesh_id).map(MeshGpu::base_model)
         });
         self.instances.upload(&self.gpu, &self.batches.instances);
 
@@ -1221,7 +1227,7 @@ impl Renderer {
             let Some(mesh) = self.meshes.get(draw.mesh_id as usize) else {
                 continue;
             };
-            let effective = draw.model * mesh.base_model;
+            let effective = draw.model * mesh.base_model();
             let slot = instances.len() as u32;
             instances.push(PickInstanceRaw::new(effective, index as u32));
             records.push((draw.mesh_id as usize, slot));
@@ -1482,7 +1488,7 @@ impl Renderer {
             RenderMode::Textured => {
                 pass.set_pipeline(&self.pipelines.textured);
                 pass.set_bind_group(0, self.uniforms.camera.bind_group(), &[]);
-                pass.set_bind_group(1, mesh.texture.bind_group(), &[]);
+                pass.set_bind_group(1, mesh.albedo_bind_group(), &[]);
                 draw_indexed(pass, mesh.filled(), range);
             }
             RenderMode::Shaded => {
@@ -1492,9 +1498,9 @@ impl Renderer {
                 pass.set_pipeline(&self.pipelines.pbr);
                 let offset = self.uniforms.pbr.offset(mesh_id as usize);
                 pass.set_bind_group(0, self.uniforms.pbr.bind_group(), &[offset]);
-                pass.set_bind_group(1, mesh.texture.bind_group(), &[]);
+                pass.set_bind_group(1, mesh.albedo_bind_group(), &[]);
                 pass.set_bind_group(2, self.environment.bind_group(), &[]);
-                pass.set_bind_group(3, mesh.material_maps.bind_group(), &[]);
+                pass.set_bind_group(3, mesh.material_maps_bind_group(), &[]);
                 // Slot 2 carries this mesh's derived normals/tangents; the
                 // geometry at slot 0 is the same buffer every other mode draws
                 // (#247 S7).
