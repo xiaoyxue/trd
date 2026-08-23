@@ -507,8 +507,8 @@ reached `main` (#336). Replace `Lx` with the actual excluding level, e.g.
 Copy this into the PR (and mirror it in the issue). The gate rows and their order
 are fixed by [the glyph table above](#verification-matrix); **every row is
 always present**, and one the level excludes reads `n/a (Lx)` rather than being
-deleted. In the sample below, replace `Lx` with the actual level that excludes
-those gates.
+deleted. The sample below is an L2 matrix; replace `L2` when a different level
+excludes those gates.
 
 ```markdown
 **Test level: L2** — touches `crates/trd-core/src/render/` (render path).
@@ -526,9 +526,9 @@ those gates.
 | 🌐 `tsc --noEmit` + Biome      | ✅ | 🤝 |
 | 🖼️ `golden_render` (6/6, GPU)  | ✅ | 🤝 |
 | 🎮 `gpu_tests` + `gui_render`  | ✅ | 🤝 |
-| 🖥️ window e2e (§4.2/4.3)       | n/a (Lx) | n/a (Lx) |
-| 🎬 video-editor e2e (§4.5/4.6) | n/a (Lx) | n/a (Lx) |
-| 📼 large-file seek (§4.7)      | n/a (Lx) | n/a (Lx) |
+| 🖥️ window e2e (§4.2/4.3)       | n/a (L2) | n/a (L2) |
+| 🎬 video-editor e2e (§4.5/4.6) | n/a (L2) | n/a (L2) |
+| 📼 large-file seek (§4.7)      | n/a (L2) | n/a (L2) |
 
 ## 🤝 Handoff — 🐧 Linux/Nix
 - [ ] `nix flake check -L`
