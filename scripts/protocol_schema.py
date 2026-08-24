@@ -25,6 +25,9 @@ tests use.
 
     python3 scripts/protocol_schema.py            # rewrite both JSON files
     python3 scripts/protocol_schema.py --check    # fail if stale or contradicted
+
+`pyarrow` is not in the nix dev shell, so inside `nix develop` run it as
+``uv run --with pyarrow scripts/protocol_schema.py --check``.
 """
 
 import argparse

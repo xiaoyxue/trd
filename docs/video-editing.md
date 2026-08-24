@@ -15,6 +15,8 @@ generated FIBA document when one is present:
 
 ```sh
 python3 scripts/protocol_schema.py --check   # stale or contradicted ⇒ non-zero
+# inside `nix develop`, where pyarrow is not on the path:
+uv run --with pyarrow scripts/protocol_schema.py --check
 ```
 
 ## Contents
