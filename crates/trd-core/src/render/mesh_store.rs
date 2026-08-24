@@ -178,6 +178,16 @@ impl MeshStore {
         Self { meshes }
     }
 
+    /// Appends an uploaded mesh, returning its id.
+    ///
+    /// The store is still decode-once *per mesh* — this adds one the caller did
+    /// not have at construction (a runtime model load, #353), it does not
+    /// re-upload an existing one.
+    pub(super) fn push(&mut self, mesh: MeshGpu) -> usize {
+        self.meshes.push(mesh);
+        self.meshes.len() - 1
+    }
+
     pub(super) fn len(&self) -> usize {
         self.meshes.len()
     }
