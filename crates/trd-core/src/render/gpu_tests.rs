@@ -2118,3 +2118,91 @@ fn remove_mesh_frees_the_slot_without_renumbering_the_survivors() {
     });
     assert_eq!(pixels.len(), (width * height * 4) as usize);
 }
+
+/// Removing a mesh releases its GPU memory **at the call**, not at the next
+/// frame (#353).
+///
+/// Dropping a wgpu resource does not free it: wgpu reclaims while servicing a
+/// submission, so before `remove_mesh` flushed, a deleted mesh kept its memory
+/// until something else rendered — ~445 MiB for a real GLB, which is what
+/// "delete freed nothing" looked like from the outside. The allocator report is
+/// the only honest witness here: `nvidia-smi` reports per-process memory as
+/// `[N/A]` on WDDM.
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn removing_a_mesh_releases_its_memory_immediately() {
+    // A **private** device, not the shared `test_gpu()`: the allocator report is
+    // device-global, and the rest of the suite runs concurrently on that one, so
+    // a neighbour's allocation would perturb the totals and — worse — a
+    // neighbour's submission could service this mesh's release, letting the test
+    // pass with the flush removed.
+    let gpu = pollster::block_on(create_test_device());
+    let backend = gpu.adapter_facts().backend;
+    assert!(
+        gpu.device.generate_allocator_report().is_some() || backend == "Gl",
+        "the {backend} backend should report allocations; without a report this \
+         test cannot pin anything and must not quietly pass"
+    );
+    if gpu.device.generate_allocator_report().is_none() {
+        // GL keeps no allocator of its own to report on.
+        return;
+    }
+    let mut renderer = Renderer::new(
+        gpu.clone(),
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+        std::slice::from_ref(&Mesh::hello_triangle()),
+        &[Matrix4::IDENTITY],
+    )
+    .expect("one mesh with one base model is a valid mesh set");
+
+    // ~64k vertices and a 512² map: small enough to stay quick, far larger than
+    // the allocator's own noise.
+    let big = Mesh {
+        vertices: (0..64_000)
+            .map(|i| {
+                let f = i as f32 * 0.001;
+                Vertex {
+                    position: [f.sin(), f.cos(), 0.0],
+                    color: [1.0, 1.0, 1.0],
+                    uv: [0.0, 0.0],
+                }
+            })
+            .collect(),
+        indices: (0..64_000).collect(),
+        shading: None,
+    };
+    let texture = crate::ImageTexture::from_rgba(512, 512, vec![200u8; 512 * 512 * 4])
+        .expect("a 512² texture builds");
+
+    let live = |gpu: &GpuContext| {
+        gpu.device.poll(wgpu::PollType::wait_indefinitely()).ok();
+        gpu.device
+            .generate_allocator_report()
+            .map_or(0, |r| r.total_allocated_bytes)
+    };
+    let baseline = live(&gpu);
+
+    let id = renderer.add_mesh(&big);
+    renderer.set_mesh_texture(id, &texture);
+    renderer.set_mesh_metallic_roughness_texture(id, &texture);
+    renderer.set_mesh_normal_texture(id, &texture);
+    let loaded = live(&gpu);
+    assert!(
+        loaded > baseline,
+        "the mesh and its maps must show up as allocated ({baseline} -> {loaded} bytes)"
+    );
+
+    assert!(renderer.remove_mesh(id));
+    let freed = live(&gpu);
+    assert!(
+        freed < loaded,
+        "removing must release, not defer: still {freed} bytes allocated of {loaded}"
+    );
+    // Back to roughly the baseline: allow slack for the grown slot array, which
+    // is a high-water mark by design.
+    let slack = (loaded - baseline) / 10;
+    assert!(
+        freed <= baseline + slack,
+        "removing must return almost everything: {freed} bytes vs a {baseline}-byte baseline"
+    );
+}

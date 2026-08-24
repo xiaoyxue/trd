@@ -28,6 +28,11 @@ impl IndexBuffer {
         let count = u32::try_from(indices.len()).expect("index count exceeds u32::MAX");
         Self { buffer, count }
     }
+
+    /// Frees the buffer, whoever else still holds a handle to it.
+    pub(super) fn destroy(&self) {
+        self.buffer.destroy();
+    }
 }
 
 /// A vertex buffer plus its element count, typed by the vertex record it holds
@@ -75,6 +80,11 @@ impl<T> VertexBuffer<T> {
     /// binding and drawing never touch `T`, only uploading does.
     pub(super) fn slice(&self) -> wgpu::BufferSlice<'_> {
         self.buffer.slice(..)
+    }
+
+    /// Frees the buffer, whoever else still holds a handle to it.
+    pub(super) fn destroy(&self) {
+        self.buffer.destroy();
     }
 }
 

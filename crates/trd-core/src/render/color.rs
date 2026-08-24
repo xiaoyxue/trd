@@ -14,7 +14,7 @@ pub(crate) fn upload_texture(
     gpu: &GpuContext,
     layout: &wgpu::BindGroupLayout,
     image: &ImageData,
-) -> wgpu::BindGroup {
+) -> (wgpu::BindGroup, wgpu::Texture) {
     let (device, queue) = (&gpu.device, &gpu.queue);
     let mip_level_count = 1 + image.width.max(image.height).max(1).ilog2();
     let size = wgpu::Extent3d {
@@ -74,7 +74,7 @@ pub(crate) fn upload_texture(
         mipmap_filter: wgpu::MipmapFilterMode::Linear,
         ..Default::default()
     });
-    device.create_bind_group(&wgpu::BindGroupDescriptor {
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("trd texture bind group"),
         layout,
         entries: &[
@@ -87,7 +87,11 @@ pub(crate) fn upload_texture(
                 resource: wgpu::BindingResource::Sampler(&sampler),
             },
         ],
-    })
+    });
+    // The texture is handed back so its owner can `destroy()` it. Dropping the
+    // bind group is not a release: these are refcounted handles, so it frees
+    // only while nothing else holds one (#353).
+    (bind_group, texture)
 }
 
 /// sRGB byte (`0..=255`) → linear `[0, 1]`.

@@ -515,9 +515,24 @@ impl Renderer {
     /// it and silently repoint any scene holding an id. A later
     /// [`add_mesh`](Self::add_mesh) reuses the hole. Drawing a removed id is
     /// skipped like any other unknown id, not an error.
+    ///
+    /// **What the release does and does not guarantee.** The mesh's buffers and
+    /// textures are destroyed explicitly and the queue is flushed, so no later
+    /// render is needed to get the memory back — which is the bug this replaced,
+    /// where a delete freed nothing until something else happened to draw. It is
+    /// not a synchronous free: wgpu defers the physical deallocation of anything
+    /// still referenced by an in-flight submission until that submission
+    /// completes, so loading another large model immediately afterwards can
+    /// briefly hold both.
     pub fn remove_mesh(&mut self, mesh_id: usize) -> bool {
         let removed = self.meshes.remove(mesh_id);
         if removed {
+            // `MeshStore::remove` destroyed the resources; this hands wgpu a
+            // submission to service that destruction on. Dropping alone frees
+            // nothing here on two counts: the handles are refcounted, and
+            // reclamation happens while servicing a submission rather than on
+            // drop or on poll.
+            self.gpu.queue.submit([]);
             // The freed slot keeps its stale contents; the next frame rewrites
             // every live one.
             self.slots_dirty = true;

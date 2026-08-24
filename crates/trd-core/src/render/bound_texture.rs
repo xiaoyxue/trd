@@ -19,6 +19,10 @@ use crate::texture::{ConstantTexture, Texture};
 pub(super) struct BoundTexture {
     layout: wgpu::BindGroupLayout,
     bind_group: wgpu::BindGroup,
+    /// Retained so [`destroy`](Self::destroy) can free it explicitly. Dropping
+    /// the bind group frees the texture only while nothing else holds a handle
+    /// to it — a property nothing enforces, and whose failure is silent (#353).
+    texture: wgpu::Texture,
 }
 
 impl BoundTexture {
@@ -31,14 +35,27 @@ impl BoundTexture {
         // documented purpose is this default (#247 T5) — so the 1×1 image is
         // built by the texture abstraction rather than open-coded here.
         let image = ConstantTexture::white().to_image();
-        let bind_group = upload_texture(gpu, &layout, &image);
-        Self { layout, bind_group }
+        let (bind_group, texture) = upload_texture(gpu, &layout, &image);
+        Self {
+            layout,
+            bind_group,
+            texture,
+        }
     }
 
-    /// Replaces the source image, uploading it immediately.
+    /// Replaces the source image, uploading it immediately and freeing the one
+    /// it replaces.
     pub(super) fn set(&mut self, gpu: &GpuContext, texture: &dyn Texture) {
         let image = texture.to_image();
-        self.bind_group = upload_texture(gpu, &self.layout, &image);
+        let (bind_group, uploaded) = upload_texture(gpu, &self.layout, &image);
+        self.texture.destroy();
+        self.bind_group = bind_group;
+        self.texture = uploaded;
+    }
+
+    /// Frees the texture, whoever else still holds a handle to it.
+    pub(super) fn destroy(&self) {
+        self.texture.destroy();
     }
 
     /// The group-1 bind group. Always valid: it is uploaded at construction and
