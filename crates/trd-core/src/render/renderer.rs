@@ -515,20 +515,23 @@ impl Renderer {
     /// it and silently repoint any scene holding an id. A later
     /// [`add_mesh`](Self::add_mesh) reuses the hole. Drawing a removed id is
     /// skipped like any other unknown id, not an error.
+    ///
+    /// **What the release does and does not guarantee.** The mesh's buffers and
+    /// textures are destroyed explicitly and the queue is flushed, so no later
+    /// render is needed to get the memory back — which is the bug this replaced,
+    /// where a delete freed nothing until something else happened to draw. It is
+    /// not a synchronous free: wgpu defers the physical deallocation of anything
+    /// still referenced by an in-flight submission until that submission
+    /// completes, so loading another large model immediately afterwards can
+    /// briefly hold both.
     pub fn remove_mesh(&mut self, mesh_id: usize) -> bool {
         let removed = self.meshes.remove(mesh_id);
         if removed {
-            // Dropping the mesh is not the release: wgpu reclaims a dropped
-            // resource while **servicing a submission**, so without this the
-            // memory stays held until something else renders — measurably
-            // ~445 MiB for a real GLB, which is what "delete freed nothing"
-            // looks like from the outside. An empty submit is the whole fix;
-            // an explicit `destroy()` on each buffer and texture was measured
-            // to change nothing on top of it, so there is none.
-            //
-            // Flushing *here* rather than letting the next frame do it also
-            // returns more to the driver, because the allocator's blocks are
-            // released before the next frame allocates into them.
+            // `MeshStore::remove` destroyed the resources; this hands wgpu a
+            // submission to service that destruction on. Dropping alone frees
+            // nothing here on two counts: the handles are refcounted, and
+            // reclamation happens while servicing a submission rather than on
+            // drop or on poll.
             self.gpu.queue.submit([]);
             // The freed slot keeps its stale contents; the next frame rewrites
             // every live one.

@@ -2131,13 +2131,29 @@ fn remove_mesh_frees_the_slot_without_renumbering_the_survivors() {
 #[test]
 #[ignore = "requires a GPU adapter"]
 fn removing_a_mesh_releases_its_memory_immediately() {
-    let gpu = test_gpu();
-    let Some(before) = gpu.device.generate_allocator_report() else {
-        // Only the wgpu-core backends report allocations; nothing to assert on
-        // a backend that does not.
+    // A **private** device, not the shared `test_gpu()`: the allocator report is
+    // device-global, and the rest of the suite runs concurrently on that one, so
+    // a neighbour's allocation would perturb the totals and — worse — a
+    // neighbour's submission could service this mesh's release, letting the test
+    // pass with the flush removed.
+    let gpu = pollster::block_on(create_test_device());
+    let backend = gpu.adapter_facts().backend;
+    assert!(
+        gpu.device.generate_allocator_report().is_some() || backend == "Gl",
+        "the {backend} backend should report allocations; without a report this \
+         test cannot pin anything and must not quietly pass"
+    );
+    if gpu.device.generate_allocator_report().is_none() {
+        // GL keeps no allocator of its own to report on.
         return;
-    };
-    let mut renderer = single(wgpu::TextureFormat::Rgba8UnormSrgb, &Mesh::hello_triangle());
+    }
+    let mut renderer = Renderer::new(
+        gpu.clone(),
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+        std::slice::from_ref(&Mesh::hello_triangle()),
+        &[Matrix4::IDENTITY],
+    )
+    .expect("one mesh with one base model is a valid mesh set");
 
     // ~64k vertices and a 512² map: small enough to stay quick, far larger than
     // the allocator's own noise.
@@ -2164,7 +2180,6 @@ fn removing_a_mesh_releases_its_memory_immediately() {
             .generate_allocator_report()
             .map_or(0, |r| r.total_allocated_bytes)
     };
-    let _ = before;
     let baseline = live(&gpu);
 
     let id = renderer.add_mesh(&big);

@@ -95,9 +95,13 @@ impl MeshGpu {
     /// Explicitly, not by dropping: `wgpu::Buffer`/`Texture` are refcounted
     /// handles, so dropping ours frees the memory only while nothing else holds
     /// one — measured, a second handle keeps a 256 MiB buffer resident through a
-    /// drop **and** a flush. Nothing enforces that no one else holds one, and
-    /// the failure is silent, which is exactly how "delete freed nothing" looks
-    /// from the outside (#353).
+    /// drop **and** a flush, while `destroy()` frees it regardless.
+    ///
+    /// Today the bind group holds the last reference, so dropping would work and
+    /// **no test fails without this** — verified by disabling it. It is here
+    /// because nothing enforces that property: the first cached view or bind
+    /// group added anywhere makes delete silently stop freeing, which is exactly
+    /// the failure this file previously shipped (#353, #357).
     pub(super) fn destroy(&self) {
         self.geometry.vertices.destroy();
         self.geometry.shading.destroy();
