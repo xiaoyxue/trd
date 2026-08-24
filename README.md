@@ -302,13 +302,17 @@ MP4 opens and seeks in megabytes.
   AR demos, the native window, the interactive viewer, web, and Windows setup.
 - [`docs/pbr.md`](docs/pbr.md) — the Disney principled-BRDF material model, all PBR
   parameters + defaults, tone mapping, and the HDR environment probe.
-- [`docs/protocol/0.0.6.md`](docs/protocol/0.0.6.md) — the full stream-protocol spec.
+- [`docs/protocol/0.0.6.md`](docs/protocol/0.0.6.md) — the full stream-protocol spec,
+  with [`0.0.6.schema.json`](docs/protocol/0.0.6.schema.json) beside it as the
+  machine-readable form producers can generate against.
 - [`docs/frame-extraction.md`](docs/frame-extraction.md) — background-frame
   extraction, external references, and inline frames-table authoring.
 - [`docs/gui-design.md`](docs/gui-design.md) — the `trd-gui` interactive-viewer design.
 - [`docs/video-editing.md`](docs/video-editing.md) — FIBA timeline document,
   the browser media boundary (mediabunny + ranged reads), quad-local placement,
-  catalog, playback, and known limits.
+  catalog, playback, and known limits. Its schema is also machine-readable as
+  [`video-editing.schema.json`](docs/video-editing.schema.json) — the **sparse**
+  table: one row per *annotated* frame, not per video frame.
 - [`docs/comments.md`](docs/comments.md) — what comments are for, what to cut and
   what to keep, and `scripts/comment_audit.py` for when you want a number.
 - [`AGENTS.md`](AGENTS.md) — contributor/agent guide: which gates a change owes

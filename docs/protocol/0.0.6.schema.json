@@ -1,0 +1,311 @@
+{
+  "protocol_version": "0.0.6",
+  "generated_by": "scripts/protocol_schema.py",
+  "prose_spec": "docs/protocol/0.0.6.md",
+  "row_model": "dense — one params row is one rendered frame, and the output image stream is 1:1 with the params rows. The sparse, per-annotated-frame table is a different schema: docs/video-editing.schema.json",
+  "compatibility": "none — the renderer accepts exactly this version and hard-rejects any other or missing one",
+  "stream": {
+    "container": "concatenated Apache Arrow IPC streams on one byte channel",
+    "order": [
+      "mesh",
+      "texture?",
+      "frames?",
+      "params"
+    ],
+    "note": "resource tables precede the terminal params table; duplicate or out-of-order tables are hard errors"
+  },
+  "schema_metadata": {
+    "trd.protocol.version": {
+      "required": true,
+      "value": "0.0.6",
+      "doc": "carried by every input sub-stream and by the output stream"
+    },
+    "trd.table.kind": {
+      "required": true,
+      "one_of": [
+        "mesh",
+        "texture",
+        "frames",
+        "params"
+      ],
+      "doc": "input sub-streams declare their kind; schemas are never sniffed from column names"
+    },
+    "trd.stream.frame_rate": {
+      "required": false,
+      "type": "float, frames per second",
+      "default": 30.0,
+      "doc": "playback speed as a property of the data; trd-cli copies it to the output stream"
+    }
+  },
+  "conventions": {
+    "matrices": "column-major, right-handed, flattened to 16 floats",
+    "clip_space": "wgpu, z in [0, 1]",
+    "vertex_chain": "clip = P * V * M * (position, 1)",
+    "images": "top-left origin, sRGB byte values"
+  },
+  "tables": {
+    "mesh": {
+      "trd.table.kind": "mesh",
+      "required": true,
+      "row_meaning": "one row is one mesh; its 0-based ordinal is the id params draw lists use",
+      "reference_producer": "scripts/obj_to_arrow.py",
+      "columns": [
+        {
+          "name": "position",
+          "arrow_type": "list<item: fixed_size_list<item: float>[3]>",
+          "required": true,
+          "doc": "vertex positions"
+        },
+        {
+          "name": "color",
+          "arrow_type": "list<item: fixed_size_list<item: float>[3]>",
+          "required": false,
+          "doc": "vertex RGB; absent means white"
+        },
+        {
+          "name": "uv",
+          "arrow_type": "list<item: fixed_size_list<item: float>[2]>",
+          "required": false,
+          "doc": "top-left-origin texture coordinates"
+        },
+        {
+          "name": "index",
+          "arrow_type": "list<item: uint32>",
+          "required": false,
+          "doc": "triangle indices; absent means sequential"
+        }
+      ],
+      "constraints": [
+        "color and uv, when present, carry one value per vertex",
+        "null values in any present column are rejected",
+        "a zero-row table is an error"
+      ]
+    },
+    "texture": {
+      "trd.table.kind": "texture",
+      "required": false,
+      "row_meaning": "one row is the mesh albedo; the first non-empty row is bound",
+      "reference_producer": "scripts/texture_to_arrow.py",
+      "columns": [
+        {
+          "name": "rgba",
+          "arrow_type": "extension<arrow.fixed_shape_tensor[value_type=uint8, shape=[H,W,4], dim_names=[height,width,channel]]>",
+          "required": true,
+          "doc": "row-major RGBA8 albedo",
+          "storage_type": "fixed_size_list<item: uint8>[H*W*4]",
+          "extension_name": "arrow.fixed_shape_tensor",
+          "nullable": false
+        }
+      ],
+      "constraints": [
+        "shape is field metadata, so every row shares H, W and 4 channels"
+      ]
+    },
+    "frames": {
+      "trd.table.kind": "frames",
+      "required": false,
+      "row_meaning": "one row is one reusable inline background image; its 0-based ordinal is the frame_id params reference, so several params rows may reuse one image",
+      "reference_producer": "scripts/frames_to_arrow.py",
+      "columns": [
+        {
+          "name": "frame_bytes",
+          "arrow_type": "binary",
+          "required": false,
+          "doc": "encoded PNG or JPEG bytes",
+          "nullable": true
+        },
+        {
+          "name": "frame_pixels",
+          "arrow_type": "extension<arrow.fixed_shape_tensor[value_type=uint8, shape=[H,W,C], dim_names=[height,width,channel]]>",
+          "required": false,
+          "doc": "raw row-major pixels; C is 3 or 4",
+          "storage_type": "fixed_size_list<item: uint8>[H*W*C]",
+          "extension_name": "arrow.fixed_shape_tensor",
+          "nullable": true
+        }
+      ],
+      "constraints": [
+        "exactly one of the two payloads is non-null per row",
+        "RGB tensors gain opaque alpha; RGBA is preserved byte-for-byte",
+        "frame_pixels rows in one table share their dimensions; frame_bytes rows need not"
+      ]
+    },
+    "params": {
+      "trd.table.kind": "params",
+      "required": true,
+      "terminal": true,
+      "row_meaning": "one row is one rendered frame; output is 1:1 with these rows",
+      "reference_producer": "scripts/jsonl_to_arrow.py",
+      "all_columns_optional": true,
+      "columns": [
+        {
+          "name": "model",
+          "arrow_type": "fixed_size_list<item: float>[16]",
+          "required": false,
+          "doc": "single-object fallback model matrix"
+        },
+        {
+          "name": "k",
+          "arrow_type": "fixed_size_list<item: float>[9]",
+          "required": false,
+          "doc": "CV camera intrinsics"
+        },
+        {
+          "name": "pose",
+          "arrow_type": "fixed_size_list<item: float>[16]",
+          "required": false,
+          "doc": "CV camera-to-world pose"
+        },
+        {
+          "name": "eye",
+          "arrow_type": "fixed_size_list<item: float>[3]",
+          "required": false,
+          "doc": "CG camera position"
+        },
+        {
+          "name": "target",
+          "arrow_type": "fixed_size_list<item: float>[3]",
+          "required": false,
+          "doc": "CG look-at target"
+        },
+        {
+          "name": "direction",
+          "arrow_type": "fixed_size_list<item: float>[3]",
+          "required": false,
+          "doc": "CG look direction (alternative to target)"
+        },
+        {
+          "name": "up",
+          "arrow_type": "fixed_size_list<item: float>[3]",
+          "required": false,
+          "doc": "CG up vector"
+        },
+        {
+          "name": "fovy",
+          "arrow_type": "float",
+          "required": false,
+          "doc": "CG vertical field of view, radians"
+        },
+        {
+          "name": "aspect",
+          "arrow_type": "float",
+          "required": false,
+          "doc": "CG aspect ratio"
+        },
+        {
+          "name": "znear",
+          "arrow_type": "float",
+          "required": false,
+          "doc": "CG near plane"
+        },
+        {
+          "name": "zfar",
+          "arrow_type": "float",
+          "required": false,
+          "doc": "CG far plane"
+        },
+        {
+          "name": "draw_mesh",
+          "arrow_type": "list<item: uint32>",
+          "required": false,
+          "doc": "mesh-table row ids, one per draw"
+        },
+        {
+          "name": "draw_model",
+          "arrow_type": "list<item: fixed_size_list<item: float>[16]>",
+          "required": false,
+          "doc": "per-draw model matrices; length equals draw_mesh"
+        },
+        {
+          "name": "draw_mode",
+          "arrow_type": "list<item: uint8>",
+          "required": false,
+          "doc": "per-draw render-mode override; length equals draw_mesh",
+          "values": {
+            "0": "filled",
+            "1": "wireframe",
+            "2": "textured",
+            "3": "shadow",
+            "4": "pbr",
+            "255": "inherit the front-end's global mode"
+          }
+        },
+        {
+          "name": "frame_path",
+          "arrow_type": "string",
+          "required": false,
+          "doc": "external background, native filesystem path",
+          "nullable": true
+        },
+        {
+          "name": "frame_url",
+          "arrow_type": "string",
+          "required": false,
+          "doc": "external background, browser URL",
+          "nullable": true
+        },
+        {
+          "name": "frame_id",
+          "arrow_type": "uint32",
+          "required": false,
+          "doc": "inline background, frames-table row id",
+          "nullable": true
+        }
+      ],
+      "constraints": [
+        "draw_mesh and draw_model are present together or not at all; one without the other is an error",
+        "no draw columns renders mesh 0 using model; an explicit empty draw list renders no meshes",
+        "CV (k/pose) and CG (eye/target/direction/up/fovy/aspect/znear/zfar) camera forms are mutually exclusive",
+        "eye requires target or direction, and vice versa",
+        "a row has at most one background source: inline frame_id, or external frame_path/frame_url",
+        "frame_id requires a preceding frames table and must be in range",
+        "frame_path wins over frame_url when both are non-empty on a row"
+      ]
+    }
+  },
+  "output": {
+    "doc": "the rendered image stream trd-cli writes; one row per params row, batch boundaries mirrored",
+    "schema_metadata": {
+      "trd.protocol.version": "0.0.6",
+      "trd.stream.frame_rate": "copied from the input when it declared one"
+    },
+    "columns": [
+      {
+        "name": "r",
+        "arrow_type": "extension<arrow.fixed_shape_tensor[value_type=uint8, shape=[height,width], dim_names=[height,width]]>",
+        "required": true,
+        "doc": "planar R channel, row-major uint8",
+        "storage_type": "fixed_size_list<item: uint8>[height*width]",
+        "extension_name": "arrow.fixed_shape_tensor",
+        "nullable": false
+      },
+      {
+        "name": "g",
+        "arrow_type": "extension<arrow.fixed_shape_tensor[value_type=uint8, shape=[height,width], dim_names=[height,width]]>",
+        "required": true,
+        "doc": "planar G channel, row-major uint8",
+        "storage_type": "fixed_size_list<item: uint8>[height*width]",
+        "extension_name": "arrow.fixed_shape_tensor",
+        "nullable": false
+      },
+      {
+        "name": "b",
+        "arrow_type": "extension<arrow.fixed_shape_tensor[value_type=uint8, shape=[height,width], dim_names=[height,width]]>",
+        "required": true,
+        "doc": "planar B channel, row-major uint8",
+        "storage_type": "fixed_size_list<item: uint8>[height*width]",
+        "extension_name": "arrow.fixed_shape_tensor",
+        "nullable": false
+      },
+      {
+        "name": "a",
+        "arrow_type": "extension<arrow.fixed_shape_tensor[value_type=uint8, shape=[height,width], dim_names=[height,width]]>",
+        "required": true,
+        "doc": "planar A channel, row-major uint8",
+        "storage_type": "fixed_size_list<item: uint8>[height*width]",
+        "extension_name": "arrow.fixed_shape_tensor",
+        "nullable": false
+      }
+    ]
+  }
+}
