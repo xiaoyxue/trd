@@ -85,6 +85,9 @@ pub struct WebApp {
     shared: Rc<GuiShared>,
     /// The most recent model-load failure, shown in the panel until one succeeds.
     model_error: Option<String>,
+    /// Meshes whose objects were deleted, waiting for a frame where the renderer
+    /// is not out on an async render or pick (#353).
+    pending_free: Vec<u32>,
 }
 
 impl WebApp {
@@ -109,6 +112,27 @@ impl WebApp {
             pick_result: Rc::new(RefCell::new(None)),
             shared,
             model_error: None,
+            pending_free: Vec::new(),
+        }
+    }
+
+    /// Frees the meshes of deleted objects, once the renderer is home.
+    ///
+    /// An async render holds the renderer by value, so a delete during one has
+    /// to wait a frame — the scene already stopped drawing the mesh, this is
+    /// only the memory.
+    fn consume_pending_frees(&mut self) {
+        if self.pending_free.is_empty() {
+            return;
+        }
+        let mut slot = self.renderer.borrow_mut();
+        let Some(renderer) = slot.as_mut() else {
+            return;
+        };
+        for mesh_id in self.pending_free.drain(..) {
+            if renderer.remove_mesh(mesh_id as usize) {
+                log::info!("freed mesh {mesh_id}");
+            }
         }
     }
 
@@ -268,6 +292,11 @@ impl eframe::App for WebApp {
         if outcome.load_model {
             self.shared.request_pick();
         }
+
+        if let Some(mesh_id) = outcome.freed_mesh {
+            self.pending_free.push(mesh_id);
+        }
+        self.consume_pending_frees();
 
         // A click queued a pick; run it when the renderer is free (retried while busy).
         if let Some(xy) = outcome.pick {

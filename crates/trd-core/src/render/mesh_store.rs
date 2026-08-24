@@ -155,10 +155,15 @@ pub(super) fn upload_mesh(
 /// three unrelated lifetimes in one struct, of which the name described one.
 /// Those are now [`GizmoGeometry`](super::gizmo::GizmoGeometry) (constant) and
 /// [`InstanceBuffer`](super::buffer::InstanceBuffer) (per frame), leaving this
-/// type holding exactly what it is called: the caller's meshes, fixed at
-/// construction.
+/// type holding exactly what it is called: the caller's meshes.
+///
+/// Slots are `Option` because a mesh can be **removed** at runtime (#353) and
+/// its GPU memory has to go back — a 138 MiB GLB holds vertex/index buffers and
+/// three 2048² textures. Compacting the `Vec` instead would renumber every mesh
+/// after the hole, silently repointing scenes that hold ids; a tombstone keeps
+/// every surviving id valid and lets the next upload reuse the slot.
 pub(super) struct MeshStore {
-    meshes: Vec<MeshGpu>,
+    meshes: Vec<Option<MeshGpu>>,
 }
 
 impl MeshStore {
@@ -173,54 +178,76 @@ impl MeshStore {
         let meshes = meshes
             .iter()
             .zip(base_models)
-            .map(|(mesh, &base)| upload_mesh(gpu, mesh, base, texture_layout, material_maps_layout))
+            .map(|(mesh, &base)| {
+                Some(upload_mesh(
+                    gpu,
+                    mesh,
+                    base,
+                    texture_layout,
+                    material_maps_layout,
+                ))
+            })
             .collect();
         Self { meshes }
     }
 
-    /// Appends an uploaded mesh, returning its id.
+    /// Adds an uploaded mesh, reusing a removed mesh's slot when there is one,
+    /// and returns its id.
     ///
     /// The store is still decode-once *per mesh* — this adds one the caller did
     /// not have at construction (a runtime model load, #353), it does not
     /// re-upload an existing one.
     pub(super) fn push(&mut self, mesh: MeshGpu) -> usize {
-        self.meshes.push(mesh);
-        self.meshes.len() - 1
+        match self.meshes.iter().position(Option::is_none) {
+            Some(slot) => {
+                self.meshes[slot] = Some(mesh);
+                slot
+            }
+            None => {
+                self.meshes.push(Some(mesh));
+                self.meshes.len() - 1
+            }
+        }
     }
 
+    /// Drops mesh `id`, freeing its GPU memory, and reports whether one was
+    /// there. The slot is left as a hole so no other mesh is renumbered.
+    ///
+    /// Dropping is the release: the buffers and bind groups are the last
+    /// references to their textures, and wgpu reclaims the memory on the next
+    /// poll — which the render loop does every frame.
+    pub(super) fn remove(&mut self, id: usize) -> bool {
+        self.meshes
+            .get_mut(id)
+            .is_some_and(|slot| slot.take().is_some())
+    }
+
+    /// The number of **slots**, live or removed — the span valid ids come from,
+    /// and the size the PBR slot array must cover.
     pub(super) fn len(&self) -> usize {
         self.meshes.len()
     }
 
-    /// Every uploaded mesh, in id order — what
+    /// Every slot, in id order — what
     /// [`SceneUniforms::write_pbr`](super::SceneUniforms::write_pbr) walks to
-    /// fill one PBR slot per mesh.
-    pub(super) fn all(&self) -> &[MeshGpu] {
+    /// fill one PBR slot per mesh. A `None` is a removed mesh, whose slot keeps
+    /// its index so the surviving ids still address their own.
+    pub(super) fn all(&self) -> &[Option<MeshGpu>] {
         &self.meshes
     }
 
     /// The mesh for `id`, or `None` when a draw names one that was never
-    /// uploaded (out-of-range ids are skipped, not an error).
+    /// uploaded or has been removed (such ids are skipped, not an error).
     pub(super) fn get(&self, id: usize) -> Option<&MeshGpu> {
-        self.meshes.get(id)
+        self.meshes.get(id)?.as_ref()
     }
 
     pub(super) fn get_mut(&mut self, id: usize) -> Option<&mut MeshGpu> {
-        self.meshes.get_mut(id)
+        self.meshes.get_mut(id)?.as_mut()
     }
 
-    /// Every mesh, mutably — for the setters that apply one value to all of them.
+    /// Every live mesh, mutably — for the setters that apply one value to all.
     pub(super) fn iter_mut(&mut self) -> impl Iterator<Item = &mut MeshGpu> {
-        self.meshes.iter_mut()
-    }
-}
-
-/// Indexing is for ids a batch already resolved through [`MeshStore::get`];
-/// anything reading straight from a scene must use `get` instead.
-impl std::ops::Index<usize> for MeshStore {
-    type Output = MeshGpu;
-
-    fn index(&self, id: usize) -> &MeshGpu {
-        &self.meshes[id]
+        self.meshes.iter_mut().filter_map(Option::as_mut)
     }
 }

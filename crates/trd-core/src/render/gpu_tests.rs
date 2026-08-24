@@ -2045,3 +2045,76 @@ fn add_mesh_grows_the_pbr_slots_and_keeps_existing_appearance() {
         "the added mesh draws on the right"
     );
 }
+
+/// A removed mesh frees its slot, keeps every other id valid, and the slot is
+/// reused by the next upload (#353).
+///
+/// Compacting the store instead would renumber meshes after the hole, silently
+/// repointing any scene that holds an id — so what is asserted here is that
+/// mesh 2 is still mesh 2 after mesh 0 is gone.
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn remove_mesh_frees_the_slot_without_renumbering_the_survivors() {
+    let meshes = [
+        Mesh::hello_triangle(),
+        Mesh::hello_triangle(),
+        Mesh::hello_triangle(),
+    ];
+    let mut renderer = Renderer::new(
+        test_gpu(),
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+        &meshes,
+        &[Matrix4::IDENTITY; 3],
+    )
+    .expect("three meshes with three base models is a valid mesh set");
+
+    let blue = crate::DisneyMaterial {
+        base_color: [0.0, 0.0, 1.0],
+        ..Default::default()
+    };
+    renderer.set_disney_material(crate::MeshTarget::One(2), blue.clone());
+
+    assert!(renderer.remove_mesh(0), "mesh 0 was there to remove");
+    assert!(!renderer.remove_mesh(0), "and removing it twice is a no-op");
+    assert!(
+        renderer.mesh_appearance(0).is_none(),
+        "the removed id resolves to nothing"
+    );
+    assert_eq!(
+        renderer.mesh_appearance(2).map(|a| &a.material),
+        Some(&blue),
+        "mesh 2 is still mesh 2, with its own material"
+    );
+
+    // The next upload reuses the hole rather than growing past it.
+    let reused = renderer.add_mesh(&Mesh::hello_triangle());
+    assert_eq!(reused, 0, "the freed slot is reused");
+    assert_eq!(renderer.mesh_count(), 3, "so the store did not grow");
+    assert_eq!(
+        renderer.mesh_appearance(0),
+        Some(&crate::MeshAppearance::default()),
+        "and the reused slot starts clean rather than inheriting the old mesh"
+    );
+
+    // A scene naming the removed id renders rather than failing: an unknown id
+    // is skipped, exactly like an out-of-range one.
+    let gpu = test_gpu();
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+    let (width, height) = (32, 32);
+    assert!(renderer.remove_mesh(1), "free one more to leave a hole");
+    let scene: Scene = [
+        DrawableObject::mesh(1, Matrix4::IDENTITY, RenderMode::Shaded),
+        DrawableObject::mesh(2, Matrix4::IDENTITY, RenderMode::Shaded),
+    ]
+    .into_iter()
+    .collect();
+    let pixels = render_with_readback(&gpu, format, width, height, |e, v| {
+        renderer.encode(
+            e,
+            v,
+            camera_of(FrameParams::IDENTITY, width, height),
+            &scene,
+        );
+    });
+    assert_eq!(pixels.len(), (width * height * 4) as usize);
+}

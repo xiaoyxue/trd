@@ -60,6 +60,10 @@ pub fn scene_for(state: &SceneState) -> trd_core::Scene {
 }
 
 /// Pushes `state`'s per-object PBR material state onto the renderer.
+///
+/// Keyed by the object's **mesh id**, not its row: after a delete the two are no
+/// longer the same integer, and writing row `i` to mesh `i` would re-skin some
+/// other object (#353).
 pub fn apply_materials(renderer: &mut trd_core::Renderer, state: &SceneState) {
     for (i, ((material, ibl), tone_mapping)) in state
         .materials
@@ -68,8 +72,9 @@ pub fn apply_materials(renderer: &mut trd_core::Renderer, state: &SceneState) {
         .zip(&state.tone_mappings)
         .enumerate()
     {
+        let mesh_id = state.mesh_ids.get(i).copied().unwrap_or(i as u32) as usize;
         renderer.set_appearance(
-            trd_core::MeshTarget::One(i),
+            trd_core::MeshTarget::One(mesh_id),
             trd_core::MeshAppearance {
                 material: material.clone(),
                 ibl: *ibl,
@@ -180,6 +185,16 @@ impl GuiRenderer {
     pub fn set_env(&mut self, env: trd_core::EnvMapData) {
         self.renderer.set_env_map(env);
         self.has_env = true;
+    }
+
+    /// Removes the mesh behind a deleted object, freeing its GPU memory (#353).
+    ///
+    /// The id stays valid for every *other* object: the renderer leaves a hole
+    /// rather than renumbering, which is what lets
+    /// [`SceneState::mesh_ids`](crate::scene::SceneState::mesh_ids) keep
+    /// pointing at the right meshes after a delete.
+    pub fn remove_mesh(&mut self, mesh_id: usize) -> bool {
+        self.renderer.remove_mesh(mesh_id)
     }
 
     /// Uploads `asset`'s mesh as a **new** object and binds its imported material

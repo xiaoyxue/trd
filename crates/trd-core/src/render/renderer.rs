@@ -507,6 +507,24 @@ impl Renderer {
         mesh_id
     }
 
+    /// Removes mesh `mesh_id`, freeing its GPU memory, and reports whether one
+    /// was there (#353).
+    ///
+    /// Surviving meshes **keep their ids**: the slot becomes a hole rather than
+    /// the `Vec` compacting, because compacting would renumber every mesh after
+    /// it and silently repoint any scene holding an id. A later
+    /// [`add_mesh`](Self::add_mesh) reuses the hole. Drawing a removed id is
+    /// skipped like any other unknown id, not an error.
+    pub fn remove_mesh(&mut self, mesh_id: usize) -> bool {
+        let removed = self.meshes.remove(mesh_id);
+        if removed {
+            // The freed slot keeps its stale contents; the next frame rewrites
+            // every live one.
+            self.slots_dirty = true;
+        }
+        removed
+    }
+
     /// The GPU context this harness renders on.
     ///
     /// Exposed so a shell can build further resources — or bind the rendered

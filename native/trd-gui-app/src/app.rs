@@ -176,6 +176,14 @@ impl eframe::App for TrdGuiApp {
             self.pick_and_load_model();
         }
 
+        // Free the deleted object's mesh. Rendering is synchronous here, so the
+        // renderer is never mid-frame at this point.
+        if let Some(mesh_id) = outcome.freed_mesh {
+            if self.renderer.remove_mesh(mesh_id as usize) {
+                log::info!("freed mesh {mesh_id}");
+            }
+        }
+
         // A click requested a pick: resolve the object under the cursor via the
         // id pass, update the selection, and re-render so its AABB shows (#141).
         if let Some((x, y)) = outcome.pick {

@@ -235,7 +235,7 @@ impl SceneUniforms {
         &self,
         queue: &wgpu::Queue,
         camera: Camera,
-        meshes: &[MeshGpu],
+        meshes: &[Option<MeshGpu>],
         lighting: Lighting,
         use_env: bool,
         write_slots: bool,
@@ -250,7 +250,12 @@ impl SceneUniforms {
         if !write_slots {
             return;
         }
+        // A removed mesh leaves a hole whose slot nothing draws; skipping it
+        // keeps every surviving mesh on the slot its id names.
         for (slot, mesh) in meshes.iter().enumerate() {
+            let Some(mesh) = mesh.as_ref() else {
+                continue;
+            };
             let appearance = mesh.appearance();
             let uniform = PbrUniform::new(PbrUniformInputs {
                 material: &appearance.material,

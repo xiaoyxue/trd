@@ -68,14 +68,17 @@ async function main(): Promise<void> {
   );
 
   const envUrl = params.get("env");
-  let envBytes: Uint8Array | undefined;
-  if (envUrl) {
-    const res = await fetch(envUrl);
-    if (!res.ok) {
-      throw new Error(`failed to fetch env map "${envUrl}": ${res.status} ${res.statusText}`);
-    }
-    envBytes = new Uint8Array(await res.arrayBuffer());
-  }
+  // The viewer is lit by image-based lighting alone, so a probe is not optional:
+  // without `?env=` it falls back to the built-in Uffizi one rather than
+  // rendering an unlit scene.
+  const envBytes: Uint8Array = envUrl
+    ? await fetch(envUrl).then(async (res) => {
+        if (!res.ok) {
+          throw new Error(`failed to fetch env map "${envUrl}": ${res.status} ${res.statusText}`);
+        }
+        return new Uint8Array(await res.arrayBuffer());
+      })
+    : await uffiziProbe();
 
   // The "Load model…" button lives in the Rust panel, but opening a file picker
   // needs a user gesture the browser only grants the page — so Rust calls out to

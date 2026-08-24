@@ -17,9 +17,15 @@ use crate::scene::{ibl_only_lighting, SceneState};
 ///
 /// Checked **before** decode, because the failure being guarded is a file big
 /// enough to exhaust wasm's 32-bit address space while `gltf` builds its own
-/// buffers — by the time that fails, the tab is already gone. 128 MiB clears the
-/// demo assets (the Dragon GLB is ~7 MiB) with room to spare.
-pub const MAX_MODEL_BYTES: usize = 128 * 1024 * 1024;
+/// buffers — by the time that fails, the tab is already gone. The ceiling is
+/// deliberately generous: real exports run well past 100 MiB, and the point is
+/// to fail fast with a clear message instead of OOMing, not to police size.
+///
+/// 1 GiB is near the practical browser ceiling rather than a safe budget — the
+/// decode holds the file *and* its expanded buffers and images at once, so a
+/// model close to this may still exhaust a tab. It is the line past which we
+/// refuse to try, not a promise that anything under it will load.
+pub const MAX_MODEL_BYTES: usize = 1024 * 1024 * 1024;
 
 /// The magic a glTF binary starts with.
 const GLB_MAGIC: &[u8; 4] = b"glTF";
@@ -51,11 +57,21 @@ pub struct PendingModel {
 ///
 /// Split from [`load_model`] so the rejections are unit-testable without a GPU.
 pub fn decode_glb(name: &str, bytes: &[u8]) -> Result<trd_core::GltfAsset, GuiError> {
-    if bytes.len() > MAX_MODEL_BYTES {
+    decode_glb_within(name, bytes, MAX_MODEL_BYTES)
+}
+
+/// [`decode_glb`] with an explicit ceiling, so the rejection can be exercised
+/// without allocating a [`MAX_MODEL_BYTES`]-sized buffer to do it.
+fn decode_glb_within(
+    name: &str,
+    bytes: &[u8],
+    limit: usize,
+) -> Result<trd_core::GltfAsset, GuiError> {
+    if bytes.len() > limit {
         return Err(GuiError::ModelTooLarge {
             name: name.to_owned(),
             size: bytes.len(),
-            limit: MAX_MODEL_BYTES,
+            limit,
         });
     }
     if !bytes.starts_with(GLB_MAGIC) {
@@ -97,13 +113,10 @@ pub fn load_model(
 
     let mesh_id = renderer.add_model(&asset);
     let index = state.add_object(
+        mesh_id as u32,
         asset.material,
         trd_core::RenderMode::Shaded,
         gltf_tone_mapping(),
-    );
-    debug_assert_eq!(
-        mesh_id as u32, index,
-        "the renderer's mesh id and the scene's object row must stay the same integer"
     );
     state.lighting = ibl_only_lighting();
     state.environment_available = true;
@@ -116,15 +129,33 @@ mod tests {
 
     #[test]
     fn an_oversized_file_is_rejected_before_decode() {
-        // One byte over the limit, and not even a GLB: the size check must be
-        // the one that fires, since it is the one that runs first.
-        let error = decode_glb("huge.glb", &vec![0u8; MAX_MODEL_BYTES + 1])
-            .expect_err("over the limit is rejected");
+        // A tiny explicit ceiling: the rejection is what is under test, not the
+        // production constant, and allocating MAX_MODEL_BYTES to prove it would
+        // cost a gigabyte.
+        let error =
+            decode_glb_within("huge.glb", &[0u8; 16], 8).expect_err("over the limit is rejected");
         assert!(
             matches!(error, GuiError::ModelTooLarge { size, limit, .. }
-                if size == MAX_MODEL_BYTES + 1 && limit == MAX_MODEL_BYTES),
+                if size == 16 && limit == 8),
             "expected a size rejection, got: {error}"
         );
+        // Size is checked first: these bytes are not a GLB either, and the size
+        // error is the one that must fire.
+        assert!(
+            error.to_string().contains("MiB"),
+            "the message is in MiB, not raw bytes: {error}"
+        );
+    }
+
+    /// The production ceiling is the one the panel advertises, and a file just
+    /// under it is not rejected on size.
+    #[test]
+    fn the_limit_is_one_gibibyte() {
+        assert_eq!(MAX_MODEL_BYTES, 1024 * 1024 * 1024);
+        // Just under the limit falls through to the magic check, not the size one.
+        let error = decode_glb_within("under.bin", b"not a glb", MAX_MODEL_BYTES)
+            .expect_err("still not a GLB");
+        assert!(matches!(error, GuiError::NotGlb { .. }));
     }
 
     #[test]
@@ -153,14 +184,23 @@ mod tests {
     /// first thing the panel has to answer.
     #[test]
     fn rejections_name_the_file() {
-        for error in [
-            decode_glb("a.glb", &vec![0u8; MAX_MODEL_BYTES + 1]).expect_err("too large"),
-            decode_glb("b.obj", b"not a glb").expect_err("not a glb"),
-            decode_glb("c.glb", b"glTF\x02\x00\x00\x00").expect_err("corrupt"),
+        for (file, error) in [
+            (
+                "a.glb",
+                decode_glb_within("a.glb", &[0u8; 4], 2).expect_err("too large"),
+            ),
+            (
+                "b.obj",
+                decode_glb("b.obj", b"not a glb").expect_err("not a glb"),
+            ),
+            (
+                "c.glb",
+                decode_glb("c.glb", b"glTF\x02\x00\x00\x00").expect_err("corrupt"),
+            ),
         ] {
             let message = error.to_string();
             assert!(
-                message.contains("a.glb") || message.contains("b.obj") || message.contains("c.glb"),
+                message.contains(file),
                 "every rejection names its file, got: {message}"
             );
         }

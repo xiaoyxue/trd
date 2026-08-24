@@ -61,7 +61,11 @@ pub enum GuiError {
     },
 
     /// A picked model was rejected on size **before** being decoded (#353).
-    #[error("'{name}' is {size} bytes — over the {limit}-byte limit for a loaded model")]
+    #[error(
+        "'{name}' is {:.1} MiB — over the {:.0} MiB limit for a loaded model",
+        *size as f64 / (1024.0 * 1024.0),
+        *limit as f64 / (1024.0 * 1024.0)
+    )]
     ModelTooLarge {
         name: String,
         size: usize,

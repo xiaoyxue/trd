@@ -170,21 +170,16 @@ pub async fn start(
         Some(bytes) => Some(trd_gui::assets::decode_env_hdr(&bytes).map_err(to_js)?),
         None => None,
     };
-    // Start in PBR when env probe supplied, else Filled.
+    // Start in PBR when a probe or a glTF material is present, else Filled.
     let initial_mode = if env.is_some() || has_gltf {
         trd_core::RenderMode::Shaded
     } else {
         trd_core::RenderMode::Filled
     };
-    let lighting = if has_gltf && env.is_some() {
-        trd_core::Lighting {
-            ambient: 0.0,
-            scale: 0.0,
-            ..trd_core::Lighting::default()
-        }
-    } else {
-        trd_core::Lighting::default()
-    };
+    // The viewer is lit by the probe alone: a key/fill/rim rig on top of image-
+    // based lighting double-lights the surface and washes a real PBR material
+    // out. `?env=` (or the built-in probe the shell supplies) is what lights it.
+    let lighting = trd_gui::scene::ibl_only_lighting();
     let tone_mapping = if has_gltf {
         trd_core::ToneMapping {
             operator: trd_core::Tonemap::Aces,
@@ -200,6 +195,9 @@ pub async fn start(
         tone_mapping,
         lighting,
         environment_available: env.is_some(),
+        // The probe lights the scene; it becomes the backdrop only when the
+        // panel's "Environment background" checkbox is ticked.
+        show_environment_background: false,
     });
     let (render_w, render_h) = browser_render_size(&canvas);
     let textures: Vec<Option<&dyn trd_core::Texture>> = textures

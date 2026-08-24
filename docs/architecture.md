@@ -128,6 +128,19 @@ that places it, so every primitive can be instanced.
 Geometry is owned once (decode-once mesh store + shared line-quad/arrow buffers).
 A drawable is a light handle naming *which* primitive + its per-frame model.
 
+The store decodes each mesh once, but the **set** is not fixed at construction:
+`Renderer::add_mesh` uploads one at runtime and `remove_mesh` drops one, so a
+front-end can load and unload models without rebuilding the renderer (#353).
+Two consequences are structural rather than incidental:
+
+- **A removed mesh leaves a hole, and ids never shift.** Compacting would
+  renumber every mesh after it and silently repoint any scene holding an id, so
+  the slot is tombstoned and reused by the next upload instead.
+- **Adding one reallocates the PBR slot array.** A slot is chosen by a dynamic
+  offset validated against the slot buffer, so slot `n` of an `n`-slot buffer is
+  a wgpu error, not a mis-render — the buffer *and* its bind group are rebuilt,
+  and every live slot is rewritten on the next frame.
+
 A `Scene` (an object list plus its `Background`) is rebuilt each frame; every
 front-end hands it to `Renderer::render` without per-type branching. The render
 core walks its objects into a flat list, batches by primitive — a batch key is a
