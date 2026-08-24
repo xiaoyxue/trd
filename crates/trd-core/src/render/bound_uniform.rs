@@ -107,7 +107,13 @@ impl BoundSceneSlots {
             mapped_at_creation: false,
         });
         let bind_group = Self::bind(
-            device, layout, label, &scene, scene_size, &slot_buffer, slot_size,
+            device,
+            layout,
+            label,
+            &scene,
+            scene_size,
+            &slot_buffer,
+            slot_size,
         );
         Self {
             scene,

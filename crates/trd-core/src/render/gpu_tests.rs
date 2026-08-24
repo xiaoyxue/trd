@@ -1946,3 +1946,102 @@ fn mesh_target_selects_which_meshes_an_appearance_edit_reaches() {
     );
     assert!(renderer.mesh_appearance(9).is_none());
 }
+
+/// A mesh added at runtime is drawable, and adding it leaves the meshes already
+/// uploaded exactly as they were (#353).
+///
+/// The interesting half is the PBR slot array. A slot is selected by a **dynamic
+/// offset validated against the slot buffer**, so before `add_mesh` grew that
+/// buffer, binding slot 1 of a one-slot array was a wgpu error rather than a
+/// mis-render — which is why both draws below are `Shaded`: a `Filled` draw
+/// never binds the group and would pass either way.
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn add_mesh_grows_the_pbr_slots_and_keeps_existing_appearance() {
+    let gpu = test_gpu();
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+    let (width, height) = (64, 64);
+    let mut renderer = single(format, &Mesh::hello_triangle());
+
+    // Mesh 0 gets a distinctive appearance *before* the add, so the assertion
+    // afterwards is that reallocating the slot buffer did not lose it.
+    let red = crate::MeshAppearance {
+        material: crate::DisneyMaterial {
+            base_color: [1.0, 0.0, 0.0],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    renderer.set_appearance(crate::MeshTarget::One(0), red.clone());
+    assert_eq!(renderer.mesh_count(), 1, "one mesh to start");
+
+    let one: Scene = [DrawableObject::mesh(
+        0,
+        Matrix4::from_translation(Vector3::new(-0.4, 0.0, 0.0)),
+        RenderMode::Shaded,
+    )]
+    .into_iter()
+    .collect();
+    let before = render_with_readback(&gpu, format, width, height, |e, v| {
+        renderer.encode(e, v, camera_of(FrameParams::IDENTITY, width, height), &one);
+    });
+
+    let added = renderer.add_mesh(&Mesh::hello_triangle());
+    assert_eq!(added, 1, "the new mesh id is the next index");
+    assert_eq!(
+        renderer.mesh_count(),
+        2,
+        "and the store grew by exactly one"
+    );
+    assert_eq!(
+        renderer.mesh_appearance(0),
+        Some(&red),
+        "the existing mesh keeps its appearance across the slot reallocation"
+    );
+    assert_eq!(
+        renderer.mesh_appearance(1),
+        Some(&crate::MeshAppearance::default()),
+        "and the new mesh starts from the default"
+    );
+
+    // Drawing mesh 1 binds slot 1: the frame renders, and it differs from the
+    // one-mesh frame because the second triangle is there.
+    let two: Scene = [
+        DrawableObject::mesh(
+            0,
+            Matrix4::from_translation(Vector3::new(-0.4, 0.0, 0.0)),
+            RenderMode::Shaded,
+        ),
+        DrawableObject::mesh(
+            1,
+            Matrix4::from_translation(Vector3::new(0.4, 0.0, 0.0)),
+            RenderMode::Shaded,
+        ),
+    ]
+    .into_iter()
+    .collect();
+    let after = render_with_readback(&gpu, format, width, height, |e, v| {
+        renderer.encode(e, v, camera_of(FrameParams::IDENTITY, width, height), &two);
+    });
+
+    assert_ne!(
+        before, after,
+        "the mesh added at runtime must reach the frame"
+    );
+    let lit_in = |px: &[u8], xs: std::ops::Range<u32>| {
+        xs.into_iter().any(|x| {
+            (0..height).any(|y| {
+                let i = ((y * width + x) * 4) as usize;
+                px[i] > 0 || px[i + 1] > 0 || px[i + 2] > 0
+            })
+        })
+    };
+    assert!(
+        !lit_in(&before, 2 * width / 3..width),
+        "nothing was drawn on the right before the add"
+    );
+    assert!(
+        lit_in(&after, 2 * width / 3..width),
+        "the added mesh draws on the right"
+    );
+}

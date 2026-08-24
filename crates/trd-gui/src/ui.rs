@@ -75,6 +75,8 @@ pub struct ImageOutcome {
     pub fitted_size: Option<(u32, u32)>,
     /// Screen rect the image occupies, for hosts that need to annotate over it.
     pub image_rect: Option<egui::Rect>,
+    /// "Load model…" was clicked: the host should open its file picker (#353).
+    pub load_model: bool,
 }
 
 /// The per-frame view [`show`] draws for the plain viewers.
@@ -83,6 +85,9 @@ pub struct View<'a> {
     pub texture: Option<&'a TextureHandle>,
     pub render_size: (u32, u32),
     pub last_render_ms: Option<f32>,
+    /// The most recent model-load failure, shown in the panel until the next
+    /// load succeeds (#353). The scene behind it is still the previous one.
+    pub model_error: Option<&'a str>,
 }
 
 /// Runs the standard viewer: control sections plus central image.
@@ -97,6 +102,7 @@ pub fn show(ui: &mut egui::Ui, view: &mut View) -> ImageOutcome {
         .show(ui, |ui| {
             header(ui);
             egui::ScrollArea::vertical().show(ui, |ui| {
+                outcome.load_model |= model_section(ui, view.model_error);
                 outcome.needs_render |= controls_sections(ui, view.controller, controls);
                 outcome.needs_render |= reset_button(ui, view.controller);
                 ui.separator();
@@ -130,6 +136,26 @@ pub fn header(ui: &mut egui::Ui) {
         });
     });
     ui.separator();
+}
+
+/// "Load model…" plus the last failure, if any. Returns whether a load was
+/// requested — the host owns the file picker, since it is `rfd` natively and an
+/// `<input type=file>` in the browser (#353).
+///
+/// The error stays visible next to the button that produced it, and the scene
+/// behind it is untouched: a rejected file changes nothing.
+pub fn model_section(ui: &mut egui::Ui, error: Option<&str>) -> bool {
+    let mut requested = false;
+    section(ui, "Model", |ui| {
+        requested = ui.button("Load model…").clicked();
+        ui.weak("GLB — lit by the environment probe");
+        if let Some(error) = error {
+            ui.add_space(4.0);
+            ui.colored_label(Color32::from_rgb(0xF0, 0x80, 0x80), error);
+        }
+        false
+    });
+    requested
 }
 
 pub fn controls_sections(

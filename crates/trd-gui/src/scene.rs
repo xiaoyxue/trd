@@ -27,6 +27,21 @@ pub const MAX_SCALE: f32 = 100.0;
 /// preview-fitted to ~2 world units, so this leaves a small gap.
 const OBJECT_SPACING: f32 = 2.6;
 
+/// The rig a runtime-loaded model is lit by: **image-based lighting only** — no
+/// direct light and no ambient, so every photon comes from the HDR probe (#353).
+///
+/// This is exactly the video editor's `CatalogAsset::Dragon` rig, which is what
+/// makes a GLB dropped into the viewer look the way the same GLB looks in the
+/// editor. It relies on a probe being bound: with none, an IBL-only scene is
+/// black.
+pub fn ibl_only_lighting() -> Lighting {
+    Lighting {
+        ambient: 0.0,
+        scale: 0.0,
+        ..Lighting::default()
+    }
+}
+
 /// A camera that orbits a target point on a sphere — the CG
 /// (`eye`/`target`/`fovy`) half of [`FrameParams`](trd_core::FrameParams), which
 /// is the natural form for an orbit interaction: the object stays put and the
@@ -281,6 +296,31 @@ pub struct SceneSeed {
 }
 
 impl SceneState {
+    /// Appends an object for a mesh just added to the renderer, keeping every
+    /// per-object vector the same length, and returns its index — which **is**
+    /// the renderer's new mesh id, since [`draws`](Self::draws) maps row `i` to
+    /// `mesh_id: i`.
+    ///
+    /// The new object is selected, so the transform and PBR panels act on what
+    /// was just loaded rather than on whatever was selected before.
+    pub fn add_object(
+        &mut self,
+        material: DisneyMaterial,
+        mode: RenderMode,
+        tone_mapping: ToneMapping,
+    ) -> u32 {
+        self.objects.push(ObjectTransform::default());
+        self.modes.push(mode);
+        self.materials.push(material);
+        self.image_based_lighting
+            .push(ImageBasedLighting::default());
+        self.tone_mappings.push(tone_mapping);
+        self.pbr_debug_views.push(PbrDebugView::default());
+        let index = (self.objects.len() - 1) as u32;
+        self.selected = Some(index);
+        index
+    }
+
     /// The initial scene for [`SceneSeed`], with every per-object vector exactly
     /// `seed.materials.len()` long.
     pub fn seeded(seed: SceneSeed) -> Self {
@@ -622,5 +662,82 @@ mod tests {
             assert!(state.environment_available);
             assert!(state.show_environment_background);
         }
+    }
+
+    /// The same invariant, on the runtime-add path: a model loaded into a live
+    /// scene must extend **every** per-object vector, or `draws()` and the PBR
+    /// panel start reading a different object's row than the one selected (#353).
+    #[test]
+    fn add_object_keeps_every_per_object_vector_the_same_length() {
+        let mut state = SceneState::seeded(SceneSeed {
+            materials: vec![DisneyMaterial::default(); 2],
+            mode: RenderMode::Filled,
+            image_based_lighting: ImageBasedLighting::default(),
+            tone_mapping: ToneMapping::default(),
+            lighting: Lighting::default(),
+            environment_available: false,
+        });
+
+        let index = state.add_object(
+            DisneyMaterial::default(),
+            RenderMode::Shaded,
+            ToneMapping::default(),
+        );
+
+        assert_eq!(index, 2, "the new object is appended, keeping earlier rows");
+        for len in [
+            state.objects.len(),
+            state.modes.len(),
+            state.materials.len(),
+            state.image_based_lighting.len(),
+            state.tone_mappings.len(),
+            state.pbr_debug_views.len(),
+            state.draws().len(),
+        ] {
+            assert_eq!(len, 3, "every per-object vector grew by exactly one");
+        }
+        // The draw list is what binds an object row to a renderer mesh id.
+        assert_eq!(state.draws()[index as usize].mesh_id, index);
+        assert_eq!(
+            state.selected,
+            Some(index),
+            "the freshly loaded object is what the panels edit"
+        );
+    }
+
+    /// Adding an object must not re-render the objects already on screen with a
+    /// different mode or material — only lay them out around the newcomer.
+    #[test]
+    fn add_object_leaves_the_existing_objects_alone() {
+        let mut state = SceneState::seeded(SceneSeed {
+            materials: vec![DisneyMaterial {
+                base_color: [1.0, 0.0, 0.0],
+                ..DisneyMaterial::default()
+            }],
+            mode: RenderMode::Wireframe,
+            image_based_lighting: ImageBasedLighting::default(),
+            tone_mapping: ToneMapping::default(),
+            lighting: Lighting::default(),
+            environment_available: false,
+        });
+
+        state.add_object(
+            DisneyMaterial::default(),
+            RenderMode::Shaded,
+            ToneMapping::default(),
+        );
+
+        assert_eq!(state.modes[0], RenderMode::Wireframe);
+        assert_eq!(state.materials[0].base_color, [1.0, 0.0, 0.0]);
+        assert_eq!(state.modes[1], RenderMode::Shaded);
+    }
+
+    /// The rig a loaded model is lit by is the video editor's Dragon rig: the
+    /// probe alone, with direct light and ambient both off.
+    #[test]
+    fn the_runtime_load_rig_is_image_based_lighting_only() {
+        let rig = ibl_only_lighting();
+        assert_eq!(rig.scale, 0.0, "no direct light");
+        assert_eq!(rig.ambient, 0.0, "and no ambient");
     }
 }

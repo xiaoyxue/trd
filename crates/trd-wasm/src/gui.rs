@@ -5,13 +5,20 @@ use std::rc::Rc;
 
 /// Runs the GUI viewer on `canvas`. OBJ/GLB bytes from `?mesh=`, texture from `?texture=`,
 /// HDR probe from `?env=` (enables PBR mode); absent parameters fall back to built-in defaults.
+///
+/// `on_pick_model` is invoked (with no arguments) when the panel's **Load model…**
+/// button is pressed, so the shell can open its `<input type=file>`; the chosen
+/// bytes come back through [`GuiHandle::load_model`] (#353). The file picker
+/// stays in JS because opening one needs a user gesture the browser only grants
+/// to the page.
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub async fn start(
     canvas: web_sys::HtmlCanvasElement,
     mesh_bytes: js_sys::Array,
     texture_bytes: js_sys::Array,
     env_bytes: Option<Vec<u8>>,
-) -> Result<(), wasm_bindgen::JsValue> {
+    on_pick_model: Option<js_sys::Function>,
+) -> Result<GuiHandle, wasm_bindgen::JsValue> {
     use crate::gui_web_app::WebApp;
     use trd_gui::interaction::InteractionController;
     use trd_gui::renderer::{GuiRenderer, MaterialMaps};
@@ -211,7 +218,8 @@ pub async fn start(
     let renderer = GuiRenderer::new(&meshes, &textures, &material_maps, env, render_w, render_h)
         .await
         .map_err(to_js)?;
-    let app = WebApp::new(InteractionController::new(scene), renderer);
+    let shared = Rc::new(crate::gui_web_app::GuiShared::new(on_pick_model));
+    let app = WebApp::new(InteractionController::new(scene), renderer, shared.clone());
 
     eframe::WebRunner::new()
         .start(
@@ -219,7 +227,33 @@ pub async fn start(
             eframe::WebOptions::default(),
             Box::new(|_cc| Ok(Box::new(app))),
         )
-        .await
+        .await?;
+    Ok(GuiHandle { shared })
+}
+
+/// The live viewer, for the shell to push a picked model into (#353).
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub struct GuiHandle {
+    shared: Rc<crate::gui_web_app::GuiShared>,
+}
+
+#[wasm_bindgen::prelude::wasm_bindgen]
+impl GuiHandle {
+    /// Queues a picked GLB to be loaded into the running scene.
+    ///
+    /// `env_bytes` is the HDR probe to light it by when the viewer was started
+    /// without `?env=`; it is ignored once a probe is bound. The load itself
+    /// happens on the next frame, when the renderer is not mid-render — nothing
+    /// here touches the GPU, so JS never has to know whether a render is in
+    /// flight.
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = loadModel)]
+    pub fn load_model(&self, name: String, bytes: Vec<u8>, env_bytes: Option<Vec<u8>>) {
+        self.shared.queue_model(trd_gui::model::PendingModel {
+            name,
+            bytes,
+            env_bytes,
+        });
+    }
 }
 
 /// CSS size × device pixel ratio, larger axis bounded to `MAX_DIM` (aspect-preserving).
