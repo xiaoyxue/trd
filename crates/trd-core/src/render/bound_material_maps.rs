@@ -9,6 +9,9 @@ pub(super) struct BoundMaterialMaps {
     bind_group: wgpu::BindGroup,
     metallic_roughness: ImageData,
     normal: ImageData,
+    /// Retained so [`destroy`](Self::destroy) can free them explicitly — see
+    /// [`BoundTexture`](super::BoundTexture) for why dropping is not enough.
+    textures: [wgpu::Texture; 2],
 }
 
 impl BoundMaterialMaps {
@@ -39,12 +42,20 @@ impl BoundMaterialMaps {
         // still lives at upload, where `upload_linear_view` makes it.
         let metallic_roughness = ConstantTexture::new([0, 255, 255, 255]).to_image();
         let normal = ConstantTexture::new([128, 128, 255, 255]).to_image();
-        let bind_group = build_bind_group(gpu, &layout, &metallic_roughness, &normal);
+        let (bind_group, textures) = build_bind_group(gpu, &layout, &metallic_roughness, &normal);
         Self {
             layout,
             bind_group,
             metallic_roughness,
             normal,
+            textures,
+        }
+    }
+
+    /// Frees both maps, whoever else still holds a handle to them.
+    pub(super) fn destroy(&self) {
+        for texture in &self.textures {
+            texture.destroy();
         }
     }
 
@@ -59,8 +70,11 @@ impl BoundMaterialMaps {
     }
 
     fn upload(&mut self, gpu: &GpuContext) {
-        self.bind_group =
+        let (bind_group, textures) =
             build_bind_group(gpu, &self.layout, &self.metallic_roughness, &self.normal);
+        self.destroy();
+        self.bind_group = bind_group;
+        self.textures = textures;
     }
 
     pub(super) fn bind_group(&self) -> &wgpu::BindGroup {
@@ -74,7 +88,7 @@ fn build_bind_group(
     layout: &wgpu::BindGroupLayout,
     mr_image: &ImageData,
     normal_image: &ImageData,
-) -> wgpu::BindGroup {
+) -> (wgpu::BindGroup, [wgpu::Texture; 2]) {
     let device = &gpu.device;
     let metallic_roughness = upload_linear_view(gpu, "trd metallic-roughness", mr_image, false);
     let normal = upload_linear_view(gpu, "trd normal map", normal_image, true);
@@ -88,24 +102,25 @@ fn build_bind_group(
         mipmap_filter: wgpu::MipmapFilterMode::Linear,
         ..Default::default()
     });
-    device.create_bind_group(&wgpu::BindGroupDescriptor {
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("trd PBR material maps bind group"),
         layout,
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: wgpu::BindingResource::TextureView(&metallic_roughness),
+                resource: wgpu::BindingResource::TextureView(&metallic_roughness.0),
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: wgpu::BindingResource::TextureView(&normal),
+                resource: wgpu::BindingResource::TextureView(&normal.0),
             },
             wgpu::BindGroupEntry {
                 binding: 2,
                 resource: wgpu::BindingResource::Sampler(&sampler),
             },
         ],
-    })
+    });
+    (bind_group, [metallic_roughness.1, normal.1])
 }
 
 fn texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
@@ -126,7 +141,7 @@ fn upload_linear_view(
     label: &str,
     image: &ImageData,
     normal_map: bool,
-) -> wgpu::TextureView {
+) -> (wgpu::TextureView, wgpu::Texture) {
     let (device, queue) = (&gpu.device, &gpu.queue);
     let size = wgpu::Extent3d {
         width: image.width,
@@ -173,7 +188,8 @@ fn upload_linear_view(
             height = (height / 2).max(1);
         }
     }
-    texture.create_view(&wgpu::TextureViewDescriptor::default())
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (view, texture)
 }
 
 fn downsample_linear(width: u32, height: u32, rgba: &[u8], normal_map: bool) -> Vec<u8> {

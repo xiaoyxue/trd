@@ -89,6 +89,24 @@ impl MeshGpu {
     pub(super) fn appearance_mut(&mut self) -> &mut MeshAppearance {
         &mut self.appearance
     }
+
+    /// Frees every GPU resource this mesh owns.
+    ///
+    /// Explicitly, not by dropping: `wgpu::Buffer`/`Texture` are refcounted
+    /// handles, so dropping ours frees the memory only while nothing else holds
+    /// one — measured, a second handle keeps a 256 MiB buffer resident through a
+    /// drop **and** a flush. Nothing enforces that no one else holds one, and
+    /// the failure is silent, which is exactly how "delete freed nothing" looks
+    /// from the outside (#353).
+    pub(super) fn destroy(&self) {
+        self.geometry.vertices.destroy();
+        self.geometry.shading.destroy();
+        self.geometry.triangles.destroy();
+        self.geometry.edges.destroy();
+        self.geometry.aabb.destroy();
+        self.textures.albedo.destroy();
+        self.textures.maps.destroy();
+    }
 }
 
 pub(super) fn upload_mesh(
@@ -213,13 +231,16 @@ impl MeshStore {
     /// Drops mesh `id`, freeing its GPU memory, and reports whether one was
     /// there. The slot is left as a hole so no other mesh is renumbered.
     ///
-    /// Dropping is the release: the buffers and bind groups are the last
-    /// references to their textures, and wgpu reclaims the memory on the next
-    /// poll — which the render loop does every frame.
+    /// The release is explicit — see [`MeshGpu::destroy`].
     pub(super) fn remove(&mut self, id: usize) -> bool {
-        self.meshes
-            .get_mut(id)
-            .is_some_and(|slot| slot.take().is_some())
+        let Some(slot) = self.meshes.get_mut(id) else {
+            return false;
+        };
+        let Some(mesh) = slot.take() else {
+            return false;
+        };
+        mesh.destroy();
+        true
     }
 
     /// The number of **slots**, live or removed — the span valid ids come from,

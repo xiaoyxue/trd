@@ -518,6 +518,18 @@ impl Renderer {
     pub fn remove_mesh(&mut self, mesh_id: usize) -> bool {
         let removed = self.meshes.remove(mesh_id);
         if removed {
+            // Dropping the mesh is not the release: wgpu reclaims a dropped
+            // resource while **servicing a submission**, so without this the
+            // memory stays held until something else renders — measurably
+            // ~445 MiB for a real GLB, which is what "delete freed nothing"
+            // looks like from the outside. An empty submit is the whole fix;
+            // an explicit `destroy()` on each buffer and texture was measured
+            // to change nothing on top of it, so there is none.
+            //
+            // Flushing *here* rather than letting the next frame do it also
+            // returns more to the driver, because the allocator's blocks are
+            // released before the next frame allocates into them.
+            self.gpu.queue.submit([]);
             // The freed slot keeps its stale contents; the next frame rewrites
             // every live one.
             self.slots_dirty = true;
