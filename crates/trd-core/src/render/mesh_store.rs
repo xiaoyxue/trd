@@ -15,41 +15,43 @@ use super::buffer::{IndexBuffer, VertexBuffer};
 use super::*;
 use crate::material::DisneyMaterial;
 use crate::math::Matrix4;
-use crate::texture::Texture;
 
 /// A mesh uploaded to the GPU, in three parts by how they change: `geometry` is
 /// fixed at upload, `textures` are bind groups uploaded the moment they are set,
-/// and `appearance` is the PBR slot's input, written only through
-/// `Renderer::edit_appearance`.
+/// and `appearance` is the PBR slot's input.
+///
+/// Only `appearance` is private, and that is the point: privacy here means
+/// "there is an invariant", so the one private field is the one
+/// `Renderer::edit_appearance` must be the sole writer of (#347).
 pub(super) struct MeshGpu {
-    geometry: MeshGeometry,
-    textures: MeshTextures,
+    pub(super) geometry: MeshGeometry,
+    pub(super) textures: MeshTextures,
     appearance: MeshAppearance,
 }
 
 /// The buffers and base transform, fixed when the mesh is uploaded. `vertices`
 /// feeds both the filled `triangles` and the deduped wireframe `edges` (#38);
 /// `aabb` is a standalone box of 12 screen-space-expanded edge quads (#42).
-struct MeshGeometry {
-    vertices: VertexBuffer<Vertex>,
+pub(super) struct MeshGeometry {
+    pub(super) vertices: VertexBuffer<Vertex>,
     /// Smooth normal + tangent for `pbr.wgsl`, bound at vertex slot 2 *beside*
     /// `vertices` rather than duplicating its positions and UVs.
-    shading: VertexBuffer<ShadingVertex>,
-    triangles: IndexBuffer,
-    edges: IndexBuffer,
-    aabb: VertexBuffer<GizmoLineVertex>,
+    pub(super) shading: VertexBuffer<ShadingVertex>,
+    pub(super) triangles: IndexBuffer,
+    pub(super) edges: IndexBuffer,
+    pub(super) aabb: VertexBuffer<GizmoLineVertex>,
     /// The preview transform pre-multiplied beneath every per-frame instance
     /// model (`effective = model · base`).
-    base_model: Matrix4,
+    pub(super) base_model: Matrix4,
 }
 
 /// This mesh's own bind groups (group 1 and 3), so a multi-object scene skins
 /// each object separately (#141). Uploaded when set, and **not** part of a PBR
 /// slot — which is why setting one must not mark the slots dirty.
-struct MeshTextures {
+pub(super) struct MeshTextures {
     /// Defaults to 1×1 white — an identity albedo — until set.
-    albedo: BoundTexture,
-    maps: BoundMaterialMaps,
+    pub(super) albedo: BoundTexture,
+    pub(super) maps: BoundMaterialMaps,
 }
 
 /// **The entire input of one mesh's PBR uniform slot** — which is what makes
@@ -68,34 +70,14 @@ pub struct MeshAppearance {
 }
 
 impl MeshGpu {
+    /// Composes the pair a draw binds — `vertices` is shared with
+    /// [`wireframe`](Self::wireframe), so there is no second copy of it.
     pub(super) fn filled(&self) -> (&VertexBuffer<Vertex>, &IndexBuffer) {
         (&self.geometry.vertices, &self.geometry.triangles)
     }
 
-    /// What a shaded draw binds **in addition** to [`filled`](Self::filled) —
-    /// the geometry is the same buffer, so there is no second copy of it.
-    pub(super) fn shading(&self) -> &VertexBuffer<ShadingVertex> {
-        &self.geometry.shading
-    }
-
     pub(super) fn wireframe(&self) -> (&VertexBuffer<Vertex>, &IndexBuffer) {
         (&self.geometry.vertices, &self.geometry.edges)
-    }
-
-    pub(super) fn aabb(&self) -> &VertexBuffer<GizmoLineVertex> {
-        &self.geometry.aabb
-    }
-
-    pub(super) fn base_model(&self) -> Matrix4 {
-        self.geometry.base_model
-    }
-
-    pub(super) fn albedo_bind_group(&self) -> &wgpu::BindGroup {
-        self.textures.albedo.bind_group()
-    }
-
-    pub(super) fn material_maps_bind_group(&self) -> &wgpu::BindGroup {
-        self.textures.maps.bind_group()
     }
 
     pub(super) fn appearance(&self) -> &MeshAppearance {
@@ -106,18 +88,6 @@ impl MeshGpu {
     /// the single place `slots_dirty` is set.
     pub(super) fn appearance_mut(&mut self) -> &mut MeshAppearance {
         &mut self.appearance
-    }
-
-    pub(super) fn set_albedo(&mut self, gpu: &GpuContext, texture: &dyn Texture) {
-        self.textures.albedo.set(gpu, texture);
-    }
-
-    pub(super) fn set_metallic_roughness(&mut self, gpu: &GpuContext, texture: &dyn Texture) {
-        self.textures.maps.set_metallic_roughness(gpu, texture);
-    }
-
-    pub(super) fn set_normal_map(&mut self, gpu: &GpuContext, texture: &dyn Texture) {
-        self.textures.maps.set_normal(gpu, texture);
     }
 }
 

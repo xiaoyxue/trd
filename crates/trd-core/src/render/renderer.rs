@@ -497,7 +497,7 @@ impl Renderer {
     /// [`render`](Self::render).
     pub fn set_mesh_texture(&mut self, mesh_id: usize, texture: &dyn Texture) {
         if let Some(mesh) = self.meshes.get_mut(mesh_id) {
-            mesh.set_albedo(&self.gpu, texture);
+            mesh.textures.albedo.set(&self.gpu, texture);
         }
     }
 
@@ -506,7 +506,7 @@ impl Renderer {
     /// material values. Out-of-range ids are ignored.
     pub fn set_mesh_metallic_roughness_texture(&mut self, mesh_id: usize, texture: &dyn Texture) {
         if let Some(mesh) = self.meshes.get_mut(mesh_id) {
-            mesh.set_metallic_roughness(&self.gpu, texture);
+            mesh.textures.maps.set_metallic_roughness(&self.gpu, texture);
         }
     }
 
@@ -514,7 +514,7 @@ impl Renderer {
     /// shading normal in [`RenderMode::Shaded`]. Out-of-range ids are ignored.
     pub fn set_mesh_normal_texture(&mut self, mesh_id: usize, texture: &dyn Texture) {
         if let Some(mesh) = self.meshes.get_mut(mesh_id) {
-            mesh.set_normal_map(&self.gpu, texture);
+            mesh.textures.maps.set_normal(&self.gpu, texture);
         }
     }
 
@@ -524,7 +524,7 @@ impl Renderer {
     ///
     /// The texture setters above deliberately do *not* come through here: they
     /// upload a bind group immediately and feed no PBR slot.
-    fn edit_appearance(&mut self, target: MeshTarget, mut edit: impl FnMut(&mut MeshAppearance)) {
+    fn edit_appearance(&mut self, target: MeshTarget, edit: impl Fn(&mut MeshAppearance)) {
         match target {
             MeshTarget::All => self
                 .meshes
@@ -543,7 +543,7 @@ impl Renderer {
     /// Replaces `target`'s whole [`MeshAppearance`] — what most callers want,
     /// since material, IBL, tone map and debug view are set together.
     pub fn set_appearance(&mut self, target: MeshTarget, appearance: MeshAppearance) {
-        self.edit_appearance(target, |current| current.clone_from(&appearance));
+        self.edit_appearance(target, |current| *current = appearance.clone());
     }
 
     /// The current appearance of mesh `mesh_id`, or `None` if out of range.
@@ -555,7 +555,7 @@ impl Renderer {
     /// [`render`](Self::render).
     pub fn set_disney_material(&mut self, target: MeshTarget, material: DisneyMaterial) {
         self.edit_appearance(target, |appearance| {
-            appearance.material.clone_from(&material);
+            appearance.material = material.clone();
         });
     }
 
@@ -1030,7 +1030,7 @@ impl Renderer {
             batches, meshes, ..
         } = self;
         build_batches(batches, scene.objects(), |mesh_id| {
-            meshes.get(mesh_id).map(MeshGpu::base_model)
+            meshes.get(mesh_id).map(|mesh| mesh.geometry.base_model)
         });
         self.instances.upload(&self.gpu, &self.batches.instances);
 
@@ -1227,7 +1227,7 @@ impl Renderer {
             let Some(mesh) = self.meshes.get(draw.mesh_id as usize) else {
                 continue;
             };
-            let effective = draw.model * mesh.base_model();
+            let effective = draw.model * mesh.geometry.base_model;
             let slot = instances.len() as u32;
             instances.push(PickInstanceRaw::new(effective, index as u32));
             records.push((draw.mesh_id as usize, slot));
@@ -1488,7 +1488,7 @@ impl Renderer {
             RenderMode::Textured => {
                 pass.set_pipeline(&self.pipelines.textured);
                 pass.set_bind_group(0, self.uniforms.camera.bind_group(), &[]);
-                pass.set_bind_group(1, mesh.albedo_bind_group(), &[]);
+                pass.set_bind_group(1, mesh.textures.albedo.bind_group(), &[]);
                 draw_indexed(pass, mesh.filled(), range);
             }
             RenderMode::Shaded => {
@@ -1498,13 +1498,13 @@ impl Renderer {
                 pass.set_pipeline(&self.pipelines.pbr);
                 let offset = self.uniforms.pbr.offset(mesh_id as usize);
                 pass.set_bind_group(0, self.uniforms.pbr.bind_group(), &[offset]);
-                pass.set_bind_group(1, mesh.albedo_bind_group(), &[]);
+                pass.set_bind_group(1, mesh.textures.albedo.bind_group(), &[]);
                 pass.set_bind_group(2, self.environment.bind_group(), &[]);
-                pass.set_bind_group(3, mesh.material_maps_bind_group(), &[]);
+                pass.set_bind_group(3, mesh.textures.maps.bind_group(), &[]);
                 // Slot 2 carries this mesh's derived normals/tangents; the
                 // geometry at slot 0 is the same buffer every other mode draws
                 // (#247 S7).
-                pass.set_vertex_buffer(2, mesh.shading().slice());
+                pass.set_vertex_buffer(2, mesh.geometry.shading.slice());
                 draw_indexed(pass, mesh.filled(), range);
             }
             RenderMode::Wireframe => {
@@ -1541,7 +1541,7 @@ impl Renderer {
         let Some(mesh) = self.meshes.get(mesh_id as usize) else {
             return;
         };
-        self.record_gizmo_lines(pass, mesh.aabb(), range);
+        self.record_gizmo_lines(pass, &mesh.geometry.aabb, range);
     }
 
     /// Records the coordinate-plane grid lattice on `plane`, resolving the plane
