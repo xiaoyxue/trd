@@ -506,7 +506,9 @@ impl Renderer {
     /// material values. Out-of-range ids are ignored.
     pub fn set_mesh_metallic_roughness_texture(&mut self, mesh_id: usize, texture: &dyn Texture) {
         if let Some(mesh) = self.meshes.get_mut(mesh_id) {
-            mesh.textures.maps.set_metallic_roughness(&self.gpu, texture);
+            mesh.textures
+                .maps
+                .set_metallic_roughness(&self.gpu, texture);
         }
     }
 
