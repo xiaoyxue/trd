@@ -1,0 +1,149 @@
+{
+  "video_edit_version": "0.2.0",
+  "generated_by": "scripts/protocol_schema.py",
+  "prose_spec": "docs/video-editing.md",
+  "independent_of": "trd.protocol.version — the two versions move separately on purpose; editor state never bumps the stream protocol and vice versa",
+  "containers": [
+    "Arrow IPC stream",
+    "Parquet"
+  ],
+  "container_note": "both decode through one path; the format is sniffed, not declared. Parquet compression is limited to uncompressed and snappy, because zstd/gzip/lz4/brotli are C shims that would break the wasm build",
+  "row_model": {
+    "shape": "sparse",
+    "rule": "the timeline table stores only frames with ad-placement quads; everything else is ordinary video and is played as such. A frame with no row is looked up as None and rendered as plain video",
+    "join_key": "video_frame_index",
+    "row_count": "<= trd.video.frame_count, often far below it",
+    "worked_example": {
+      "document": "web/gui-video-editing/data/fiba-shot1.arrow",
+      "container_frame_count": 288,
+      "rows": 222,
+      "frames_without_a_row": 66,
+      "note": "frames 222-287 carry no row, which is why the editor reports `Arrow video_frame_index: none` and `tracking state: none` for them. In this document the annotated frames happen to be a contiguous prefix; the schema does not require that — gaps may fall anywhere, which is what video_frame_index is for"
+    }
+  },
+  "schema_metadata": {
+    "trd.video_edit.version": {
+      "required": true,
+      "value": "0.2.0"
+    },
+    "trd.video_edit.table.kind": {
+      "required": true,
+      "value": "timeline"
+    },
+    "trd.video.source_name": {
+      "required": true,
+      "type": "string",
+      "doc": "source file name, e.g. shot_0001.mp4"
+    },
+    "trd.video.mime": {
+      "required": true,
+      "type": "string",
+      "doc": "e.g. video/mp4"
+    },
+    "trd.video.codec": {
+      "required": true,
+      "type": "string",
+      "doc": "e.g. h264"
+    },
+    "trd.video.sha256": {
+      "required": true,
+      "type": "hex string",
+      "doc": "identifies the exact source the document was authored against"
+    },
+    "trd.video.byte_length": {
+      "required": true,
+      "type": "integer"
+    },
+    "trd.video.width": {
+      "required": true,
+      "type": "integer"
+    },
+    "trd.video.height": {
+      "required": true,
+      "type": "integer"
+    },
+    "trd.video.fps_num": {
+      "required": true,
+      "type": "integer",
+      "doc": "rational frame rate numerator; never a rounded float"
+    },
+    "trd.video.fps_den": {
+      "required": true,
+      "type": "integer"
+    },
+    "trd.video.frame_count": {
+      "required": true,
+      "type": "integer",
+      "doc": "the container's frame count, which the sparse rows index into"
+    },
+    "trd.video.duration_us": {
+      "required": true,
+      "type": "integer"
+    }
+  },
+  "metadata_note": "every key above is required; a missing one is rejected rather than defaulted. The container's unpresented tail is deliberately NOT carried here — it is a property of the file, discovered by probing",
+  "table": {
+    "trd.video_edit.table.kind": "timeline",
+    "row_meaning": "one annotated frame",
+    "reference_producer": "scripts/fiba_video_editing_bundle.py",
+    "columns": [
+      {
+        "name": "video_frame_index",
+        "arrow_type": "uint32",
+        "required": true,
+        "doc": "the container frame this row annotates; the join key that makes the table sparse",
+        "nullable": false
+      },
+      {
+        "name": "present_index",
+        "arrow_type": "uint32",
+        "required": true,
+        "doc": "the source parquet row this timeline row copies",
+        "nullable": false
+      },
+      {
+        "name": "timestamp_us",
+        "arrow_type": "int64",
+        "required": true,
+        "doc": "deterministic media timestamp, microseconds",
+        "nullable": false
+      },
+      {
+        "name": "k",
+        "arrow_type": "fixed_size_list<item: float>[9]",
+        "required": false,
+        "doc": "row-major OpenCV intrinsics; paired with placement_quad",
+        "nullable": true
+      },
+      {
+        "name": "placement_quad",
+        "arrow_type": "fixed_size_list<item: float>[8]",
+        "required": false,
+        "doc": "the ad-placement quad as 4 corners x (x, y) in image pixels, ordered TL, TR, BR, BL",
+        "nullable": true
+      },
+      {
+        "name": "tracked",
+        "arrow_type": "bool",
+        "required": true,
+        "doc": "whether the K/quad geometry on this row is valid",
+        "nullable": false
+      },
+      {
+        "name": "poster_bytes",
+        "arrow_type": "binary",
+        "required": false,
+        "doc": "optional encoded JPEG so an editor can show something before the first decode",
+        "nullable": true
+      }
+    ],
+    "constraints": [
+      "video_frame_index is strictly increasing across the whole table, not merely unique",
+      "video_frame_index < trd.video.frame_count; a row past the video is rejected",
+      "rows may skip frames freely — that is the point of the schema",
+      "k and placement_quad are present together or absent together; one without the other is rejected",
+      "poster_bytes is non-null on at most one row, and only on the first row",
+      "a sparse document need not annotate frame 0, so the poster is optional; the first decoded frame serves instead"
+    ]
+  }
+}

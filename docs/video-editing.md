@@ -5,6 +5,20 @@ objects on a tracked court quad while the external FIBA MP4 plays. Rust owns
 Arrow, placement, state, picking, materials, and all WebGPU rendering;
 TypeScript only opens/fetches browser resources and copies decoded video pixels.
 
+The document schema (`trd.video_edit.version = 0.2.0`) also has a
+machine-readable form beside this page:
+[`video-editing.schema.json`](./video-editing.schema.json) — every metadata key,
+column, Arrow type and constraint as data, including the
+[sparse-row](#sparse-rows) contract. It is emitted by
+`scripts/protocol_schema.py`, which also checks the declared types against a
+generated FIBA document when one is present:
+
+```sh
+python3 scripts/protocol_schema.py --check   # stale or contradicted ⇒ non-zero
+# inside `nix develop`, where pyarrow is not on the path:
+uv run --with pyarrow scripts/protocol_schema.py --check
+```
+
 ## Contents
 
 - [Data set](#data-set)
