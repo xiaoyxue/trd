@@ -60,6 +60,10 @@ pub fn scene_for(state: &SceneState) -> trd_core::Scene {
 }
 
 /// Pushes `state`'s per-object PBR material state onto the renderer.
+///
+/// Keyed by the object's **mesh id**, not its row: after a delete the two are no
+/// longer the same integer, and writing row `i` to mesh `i` would re-skin some
+/// other object (#353).
 pub fn apply_materials(renderer: &mut trd_core::Renderer, state: &SceneState) {
     for (i, ((material, ibl), tone_mapping)) in state
         .materials
@@ -68,8 +72,9 @@ pub fn apply_materials(renderer: &mut trd_core::Renderer, state: &SceneState) {
         .zip(&state.tone_mappings)
         .enumerate()
     {
+        let mesh_id = state.mesh_ids.get(i).copied().unwrap_or(i as u32) as usize;
         renderer.set_appearance(
-            trd_core::MeshTarget::One(i),
+            trd_core::MeshTarget::One(mesh_id),
             trd_core::MeshAppearance {
                 material: material.clone(),
                 ibl: *ibl,
@@ -114,6 +119,8 @@ pub struct GuiRenderer {
     target: trd_core::TextureTarget,
     width: u32,
     height: u32,
+    /// Whether an HDR probe is bound — see [`has_env`](Self::has_env).
+    has_env: bool,
 }
 
 impl GuiRenderer {
@@ -134,6 +141,7 @@ impl GuiRenderer {
         height: u32,
     ) -> Result<Self, GuiError> {
         let (mut renderer, target) = trd_core::Renderer::with_meshes(width, height, meshes).await?;
+        let had_env = env.is_some();
         for (i, texture) in textures.iter().enumerate() {
             if let Some(texture) = texture {
                 renderer.set_mesh_texture(i, *texture);
@@ -155,12 +163,62 @@ impl GuiRenderer {
             target,
             width,
             height,
+            has_env: had_env,
         })
     }
 
     /// The fixed render dimensions.
     pub fn size(&self) -> (u32, u32) {
         (self.width, self.height)
+    }
+
+    /// Whether an HDR probe is bound — i.e. whether IBL can light a surface.
+    ///
+    /// A model loaded at runtime is lit **only** by the probe (#353), so a
+    /// caller must bind one through [`set_env`](Self::set_env) first; without it
+    /// an IBL-only rig renders black.
+    pub fn has_env(&self) -> bool {
+        self.has_env
+    }
+
+    /// Binds `env` as the HDR probe, replacing any previous one.
+    pub fn set_env(&mut self, env: trd_core::EnvMapData) {
+        self.renderer.set_env_map(env);
+        self.has_env = true;
+    }
+
+    /// Removes the mesh behind a deleted object, freeing its GPU memory (#353).
+    ///
+    /// The id stays valid for every *other* object: the renderer leaves a hole
+    /// rather than renumbering, which is what lets
+    /// [`SceneState::mesh_ids`](crate::scene::SceneState::mesh_ids) keep
+    /// pointing at the right meshes after a delete.
+    pub fn remove_mesh(&mut self, mesh_id: usize) -> bool {
+        self.renderer.remove_mesh(mesh_id)
+    }
+
+    /// Uploads `asset`'s mesh as a **new** object and binds its imported material
+    /// and glTF maps, returning the new mesh id (#353).
+    ///
+    /// The id is also the object's row in [`SceneState`](crate::scene::SceneState)'s
+    /// parallel vectors, because [`draws`](crate::scene::SceneState::draws) maps
+    /// row `i` to `mesh_id: i` — so the caller must register exactly one object
+    /// per call, in the same order.
+    pub fn add_model(&mut self, asset: &trd_core::GltfAsset) -> usize {
+        let mesh_id = self.renderer.add_mesh(&asset.mesh);
+        if let Some(texture) = asset.base_color_texture.as_ref() {
+            self.renderer.set_mesh_texture(mesh_id, texture);
+        }
+        if let Some(texture) = asset.metallic_roughness_texture.as_ref() {
+            self.renderer
+                .set_mesh_metallic_roughness_texture(mesh_id, texture);
+        }
+        if let Some(texture) = asset.normal_texture.as_ref() {
+            self.renderer.set_mesh_normal_texture(mesh_id, texture);
+        }
+        self.renderer
+            .set_disney_material(trd_core::MeshTarget::One(mesh_id), asset.material.clone());
+        mesh_id
     }
 
     /// Renders `state` to an RGBA image.

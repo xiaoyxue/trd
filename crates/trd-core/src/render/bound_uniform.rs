@@ -69,6 +69,11 @@ pub(crate) struct BoundSceneSlots {
     /// rounded up to `min_uniform_buffer_offset_alignment`, because a dynamic
     /// offset must satisfy that alignment.
     stride: u64,
+    /// The two binding sizes and the label, kept so [`grow`](Self::grow) can
+    /// rebuild the bind group without the caller re-supplying `F`/`S`.
+    scene_size: u64,
+    slot_size: u64,
+    label: String,
 }
 
 impl BoundSceneSlots {
@@ -101,14 +106,44 @@ impl BoundSceneSlots {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let bind_group = Self::bind(
+            device,
+            layout,
+            label,
+            &scene,
+            scene_size,
+            &slot_buffer,
+            slot_size,
+        );
+        Self {
+            scene,
+            slots: slot_buffer,
+            bind_group,
+            stride,
+            scene_size,
+            slot_size,
+            label: label.to_owned(),
+        }
+    }
+
+    /// The single-slot window over `slots` that [`offset`](Self::offset) indexes.
+    fn bind(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        label: &str,
+        scene: &wgpu::Buffer,
+        scene_size: u64,
+        slots: &wgpu::Buffer,
+        slot_size: u64,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some(&format!("{label} bind group")),
             layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
                     resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &scene,
+                        buffer: scene,
                         offset: 0,
                         size: wgpu::BufferSize::new(scene_size),
                     }),
@@ -116,19 +151,52 @@ impl BoundSceneSlots {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &slot_buffer,
+                        buffer: slots,
                         offset: 0,
                         size: wgpu::BufferSize::new(slot_size),
                     }),
                 },
             ],
-        });
-        Self {
-            scene,
-            slots: slot_buffer,
-            bind_group,
-            stride,
+        })
+    }
+
+    /// How many slots the array currently holds.
+    pub(crate) fn capacity(&self) -> usize {
+        (self.slots.size() / self.stride) as usize
+    }
+
+    /// Widens the array to hold at least `slots`, a no-op when it already does.
+    ///
+    /// A dynamic offset is validated against the *buffer*, so slot `n` of an
+    /// `n`-slot buffer is not a mis-render but a wgpu error: adding a mesh at
+    /// runtime has to reallocate. The bind group is rebuilt because its entry
+    /// names the old buffer handle — the binding *size* is one slot either way.
+    /// **Reallocation drops every slot's contents**, so the caller must rewrite
+    /// them all (`slots_dirty`).
+    pub(crate) fn grow(
+        &mut self,
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        slots: usize,
+    ) {
+        if slots <= self.capacity() {
+            return;
         }
+        self.slots = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(&format!("{} uniform", self.label)),
+            size: self.stride * slots as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.bind_group = Self::bind(
+            device,
+            layout,
+            &self.label,
+            &self.scene,
+            self.scene_size,
+            &self.slots,
+            self.slot_size,
+        );
     }
 
     /// The dynamic offset selecting `slot`, for

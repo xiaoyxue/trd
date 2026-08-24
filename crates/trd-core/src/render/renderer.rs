@@ -80,7 +80,7 @@ use super::draw_command::{build_batches, Batches};
 use super::environment::{EnvBackgroundSettings, Environment};
 use super::frame_plane::FramePlane;
 use super::gizmo::GizmoGeometry;
-use super::mesh_store::{MeshGpu, MeshStore};
+use super::mesh_store::{upload_mesh, MeshGpu, MeshStore};
 use super::picking::{PickTarget, Picking};
 use super::*;
 use super::{Draw, GridPlane, Primitive, RenderMode, Scene};
@@ -470,6 +470,59 @@ impl Renderer {
     /// `0..mesh_count()`.
     pub fn mesh_count(&self) -> usize {
         self.meshes.len()
+    }
+
+    /// Uploads `mesh` as a new drawable and returns its mesh id — the runtime
+    /// twin of the constructor's mesh set (#353).
+    ///
+    /// The renderer's mesh set used to be fixed at construction, so loading a
+    /// model meant rebuilding the whole renderer and losing the scene. This
+    /// grows the store **and** the PBR slot array together, which is the part
+    /// that cannot be a plain `Vec` push: a slot is chosen by a dynamic offset
+    /// validated against the slot buffer, so the buffer and its bind group are
+    /// reallocated. Every existing mesh keeps its appearance — the slots are
+    /// re-uploaded from the meshes that own them on the next frame.
+    ///
+    /// The new mesh gets [`Mesh::preview_transform`]
+    /// ([`crate::DEFAULT_PREVIEW_TARGET`]) as its base model, exactly like
+    /// [`auto_fit`](Self::auto_fit), and starts with the 1×1 white albedo and a
+    /// default appearance; bind its textures and material through the setters
+    /// above.
+    pub fn add_mesh(&mut self, mesh: &Mesh) -> usize {
+        let texture_layout = create_texture_bind_group_layout(&self.gpu.device);
+        let material_maps_layout = BoundMaterialMaps::create_layout(&self.gpu.device);
+        let uploaded = upload_mesh(
+            &self.gpu,
+            mesh,
+            mesh.preview_transform(crate::DEFAULT_PREVIEW_TARGET)
+                .matrix(),
+            &texture_layout,
+            &material_maps_layout,
+        );
+        let mesh_id = self.meshes.push(uploaded);
+        self.uniforms
+            .grow_pbr_slots(&self.gpu.device, self.meshes.len());
+        // Reallocating the slot buffer discards every slot, not just the new one.
+        self.slots_dirty = true;
+        mesh_id
+    }
+
+    /// Removes mesh `mesh_id`, freeing its GPU memory, and reports whether one
+    /// was there (#353).
+    ///
+    /// Surviving meshes **keep their ids**: the slot becomes a hole rather than
+    /// the `Vec` compacting, because compacting would renumber every mesh after
+    /// it and silently repoint any scene holding an id. A later
+    /// [`add_mesh`](Self::add_mesh) reuses the hole. Drawing a removed id is
+    /// skipped like any other unknown id, not an error.
+    pub fn remove_mesh(&mut self, mesh_id: usize) -> bool {
+        let removed = self.meshes.remove(mesh_id);
+        if removed {
+            // The freed slot keeps its stale contents; the next frame rewrites
+            // every live one.
+            self.slots_dirty = true;
+        }
+        removed
     }
 
     /// The GPU context this harness renders on.

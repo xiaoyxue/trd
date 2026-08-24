@@ -8,6 +8,7 @@
 pub mod assets;
 pub mod error;
 pub mod interaction;
+pub mod model;
 mod platform;
 pub mod renderer;
 pub mod scene;

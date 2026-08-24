@@ -75,6 +75,10 @@ pub struct ImageOutcome {
     pub fitted_size: Option<(u32, u32)>,
     /// Screen rect the image occupies, for hosts that need to annotate over it.
     pub image_rect: Option<egui::Rect>,
+    /// "Load model…" was clicked: the host should open its file picker (#353).
+    pub load_model: bool,
+    /// A deleted object's mesh, for the host to free on its renderer (#353).
+    pub freed_mesh: Option<u32>,
 }
 
 /// The per-frame view [`show`] draws for the plain viewers.
@@ -83,6 +87,9 @@ pub struct View<'a> {
     pub texture: Option<&'a TextureHandle>,
     pub render_size: (u32, u32),
     pub last_render_ms: Option<f32>,
+    /// The most recent model-load failure, shown in the panel until the next
+    /// load succeeds (#353). The scene behind it is still the previous one.
+    pub model_error: Option<&'a str>,
 }
 
 /// Runs the standard viewer: control sections plus central image.
@@ -97,6 +104,10 @@ pub fn show(ui: &mut egui::Ui, view: &mut View) -> ImageOutcome {
         .show(ui, |ui| {
             header(ui);
             egui::ScrollArea::vertical().show(ui, |ui| {
+                let model = model_section(ui, view.controller, view.model_error);
+                outcome.load_model |= model.load_requested;
+                outcome.needs_render |= model.needs_render;
+                outcome.freed_mesh = outcome.freed_mesh.or(model.freed_mesh);
                 outcome.needs_render |= controls_sections(ui, view.controller, controls);
                 outcome.needs_render |= reset_button(ui, view.controller);
                 ui.separator();
@@ -130,6 +141,53 @@ pub fn header(ui: &mut egui::Ui) {
         });
     });
     ui.separator();
+}
+
+/// What the Model section produced this frame.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ModelOutcome {
+    /// "Load model…" was pressed; the host opens its file picker.
+    pub load_requested: bool,
+    /// The scene changed (an object was deleted).
+    pub needs_render: bool,
+    /// The mesh the deleted object was drawing. The panel cannot free it —
+    /// the renderer owns the GPU memory — so the host does, on its own
+    /// renderer.
+    pub freed_mesh: Option<u32>,
+}
+
+/// "Load model…" / "Delete selected", plus the last load failure.
+///
+/// The picker itself belongs to the host — `rfd` natively, an `<input type=file>`
+/// in the browser — so this only reports the press (#353). Deleting needs no
+/// host help: it removes scene rows and nothing else, since the mesh stays
+/// uploaded under its stable id.
+pub fn model_section(
+    ui: &mut egui::Ui,
+    controller: &mut InteractionController,
+    error: Option<&str>,
+) -> ModelOutcome {
+    let mut outcome = ModelOutcome::default();
+    section(ui, "Model", |ui| {
+        ui.horizontal(|ui| {
+            outcome.load_requested = ui.button("Load model…").clicked();
+            let selected = controller.state.selected.is_some();
+            let delete = ui
+                .add_enabled(selected, egui::Button::new("Delete selected"))
+                .on_disabled_hover_text("Click an object to select it first");
+            if delete.clicked() {
+                outcome.freed_mesh = controller.state.remove_selected_object();
+                outcome.needs_render = outcome.freed_mesh.is_some();
+            }
+        });
+        ui.weak("GLB — lit by the environment probe");
+        if let Some(error) = error {
+            ui.add_space(4.0);
+            ui.colored_label(Color32::from_rgb(0xF0, 0x80, 0x80), error);
+        }
+        false
+    });
+    outcome
 }
 
 pub fn controls_sections(

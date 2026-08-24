@@ -15,6 +15,7 @@ anything they do, you can run by hand with `cargo run`.
 - [Native window — `trd-app`](#native-window--trd-app)
 - [Interactive viewer — `trd-gui`](#interactive-viewer--trd-gui)
   - [Controls & operations](#controls--operations)
+  - [Lighting: the probe, not a virtual rig](#lighting-the-probe-not-a-virtual-rig)
   - [Multi-object scenes & URL params (browser)](#multi-object-scenes--url-params-browser)
 - [Video editor — `web/gui-video-editing`](#video-editor--webgui-video-editing)
 - [Web (wasm)](#web-wasm)
@@ -234,6 +235,7 @@ needed:
 
 ```sh
 # Native (eframe): defaults to a built-in cube; pass a mesh + texture to view it.
+# `--mesh` takes an OBJ or a GLB (sniffed by its `glTF` magic, like the browser).
 cargo run -p trd-gui-app -- --mesh assets/meshes/bunny_with_texture/bunny.obj \
   --texture assets/meshes/bunny_with_texture/bunny_uv_map1.jpg
 
@@ -277,7 +279,30 @@ controls. Everything is **per-object**: click an object to select it, then edit
   axes**, **XZ plane grid** (**World** floor / **Local** per-object), and the
   spherical HDR background; background blur and the scene's single
   Background/IBL rotation are adjustable.
+- **Load / delete models at runtime.** The **Model** panel's **Load model…**
+  opens a file picker — `rfd` natively, a hidden `<input type=file>` in the
+  browser — and adds the chosen **GLB** to the *running* scene, selected and
+  ready to transform; **Delete selected** removes an object and frees its GPU
+  memory. A rejected file (not a GLB, corrupt, or over the 1 GiB ceiling) shows
+  a typed error beside the button and **leaves the current scene rendering**.
 - **Reset view** restores the camera + every object's transform.
+
+### Lighting: the probe, not a virtual rig
+
+The viewer is lit by **image-based lighting alone** — no key/fill/rim rig and no
+ambient fill by default, the same rig the video editor lights the Dragon with. A
+real PBR material lit by both a probe *and* a three-light rig is double-lit and
+washes out, which is why the rig is gone rather than merely dimmed.
+
+That makes a probe non-optional, so one is **always bound**: `--env` / `?env=`
+when given, otherwise the built-in `assets/envmap/uffizi-large.hdr`. Two
+consequences worth knowing:
+
+- **A bound probe does not draw a sky.** The environment *lights* the scene;
+  the backdrop appears only when **Environment background** is ticked.
+- **`--ambient` / `--exposure` / `--tonemap` follow the asset.** A glTF asset
+  defaults to the ACES grade at unit exposure (what `?mesh=<glb>` already used),
+  an OBJ to Reinhard at 1.2. An explicit flag still wins over both.
 
 ### Multi-object scenes & URL params (browser)
 
@@ -287,9 +312,9 @@ query params — the equivalents of the native `--mesh`/`--texture`/`--env`/
 
 | Param | Meaning |
 |-------|---------|
-| `?mesh=<url>` | An object's OBJ or single-primitive GLB. **Repeatable** — each `?mesh=` adds an object laid out side-by-side; GLB starts in PBR and uses its embedded base-color, metallic-roughness, normal maps, and material. |
+| `?mesh=<url>` | An object's OBJ or single-primitive GLB. **Repeatable** — each `?mesh=` adds an object laid out side-by-side; GLB starts in PBR and uses its embedded base-color, metallic-roughness, normal maps, and material. Objects can also be added after load via **Load model…**. |
 | `?texture=<url>` | **Positional** albedo: the *i*-th `?texture=` skins the *i*-th `?mesh=` (each object its own diffuse). |
-| `?env=<url>` | An equirectangular HDR probe; supplying it **starts every object in PBR** mode. |
+| `?env=<url>` | An equirectangular HDR probe, **overriding** the built-in Uffizi one. Every object starts in PBR; the probe lights the scene but is not drawn behind it until **Environment background** is ticked. |
 
 ```
 # Three objects (coke can, textured bunny, beer can), each with its own diffuse,

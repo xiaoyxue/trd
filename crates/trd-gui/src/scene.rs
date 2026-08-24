@@ -27,6 +27,21 @@ pub const MAX_SCALE: f32 = 100.0;
 /// preview-fitted to ~2 world units, so this leaves a small gap.
 const OBJECT_SPACING: f32 = 2.6;
 
+/// The rig a runtime-loaded model is lit by: **image-based lighting only** — no
+/// direct light and no ambient, so every photon comes from the HDR probe (#353).
+///
+/// This is exactly the video editor's `CatalogAsset::Dragon` rig, which is what
+/// makes a GLB dropped into the viewer look the way the same GLB looks in the
+/// editor. It relies on a probe being bound: with none, an IBL-only scene is
+/// black.
+pub fn ibl_only_lighting() -> Lighting {
+    Lighting {
+        ambient: 0.0,
+        scale: 0.0,
+        ..Lighting::default()
+    }
+}
+
 /// A camera that orbits a target point on a sphere — the CG
 /// (`eye`/`target`/`fovy`) half of [`FrameParams`](trd_core::FrameParams), which
 /// is the natural form for an orbit interaction: the object stays put and the
@@ -174,6 +189,14 @@ pub struct SceneState {
     /// side-by-side by [`Self::draws`]. A single-object scene is the degenerate
     /// one-element case. Transforms edit the [`selected`](Self::selected) object.
     pub objects: Vec<ObjectTransform>,
+    /// The renderer mesh each object draws, parallel to [`objects`](Self::objects).
+    ///
+    /// Object row and mesh id used to be the *same* integer, which held only
+    /// while the scene could grow but never shrink: removing object 1 of 3 would
+    /// slide object 2 down into row 1 and silently make it draw the **removed**
+    /// object's mesh. The renderer's ids are stable for the life of the mesh, so
+    /// the row records which one it draws (#353).
+    pub mesh_ids: Vec<u32>,
     /// How **each** object is drawn (parallel to [`objects`](Self::objects)):
     /// filled / wireframe / textured / PBR — per-object, so each object can use a
     /// different render mode. The UI edits the **selected** object's mode.
@@ -233,6 +256,7 @@ impl Default for SceneState {
         Self {
             camera: OrbitCamera::default(),
             objects: vec![ObjectTransform::default()],
+            mesh_ids: vec![0],
             modes: vec![RenderMode::Filled],
             materials: vec![DisneyMaterial::default()],
             image_based_lighting: vec![ImageBasedLighting::default()],
@@ -275,18 +299,77 @@ pub struct SceneSeed {
     pub tone_mapping: ToneMapping,
     /// The shared scene light rig.
     pub lighting: Lighting,
-    /// Whether an HDR probe was supplied; also decides whether the environment
-    /// is drawn as the background.
+    /// Whether an HDR probe was supplied; enables the environment controls.
     pub environment_available: bool,
+    /// Whether the probe is also **drawn** behind the scene at startup.
+    ///
+    /// Separate from [`environment_available`](Self::environment_available)
+    /// because the viewer always binds a probe now (it is lit by nothing else),
+    /// and "there is a probe" must not mean "show the sky": the background is a
+    /// deliberate choice, off until the panel's checkbox is ticked.
+    pub show_environment_background: bool,
 }
 
 impl SceneState {
+    /// Appends an object for a mesh just added to the renderer, keeping every
+    /// per-object vector the same length, and returns its index — which **is**
+    /// the renderer's new mesh id, since [`draws`](Self::draws) maps row `i` to
+    /// `mesh_id: i`.
+    ///
+    /// The new object is selected, so the transform and PBR panels act on what
+    /// was just loaded rather than on whatever was selected before.
+    pub fn add_object(
+        &mut self,
+        mesh_id: u32,
+        material: DisneyMaterial,
+        mode: RenderMode,
+        tone_mapping: ToneMapping,
+    ) -> u32 {
+        self.objects.push(ObjectTransform::default());
+        self.mesh_ids.push(mesh_id);
+        self.modes.push(mode);
+        self.materials.push(material);
+        self.image_based_lighting
+            .push(ImageBasedLighting::default());
+        self.tone_mappings.push(tone_mapping);
+        self.pbr_debug_views.push(PbrDebugView::default());
+        let index = (self.objects.len() - 1) as u32;
+        self.selected = Some(index);
+        index
+    }
+
+    /// Removes the selected object, returning the **mesh id** it was drawing so
+    /// the caller can free it, or `None` when nothing was removed.
+    ///
+    /// Only the scene rows go here; the mesh itself is the renderer's to drop,
+    /// and it keeps every other id valid by leaving a hole rather than
+    /// renumbering.
+    pub fn remove_selected_object(&mut self) -> Option<u32> {
+        let index = self.selected.map(|i| i as usize)?;
+        if index >= self.objects.len() {
+            return None;
+        }
+        let mesh_id = self.mesh_ids.get(index).copied();
+        self.objects.remove(index);
+        self.mesh_ids.remove(index);
+        self.modes.remove(index);
+        self.materials.remove(index);
+        self.image_based_lighting.remove(index);
+        self.tone_mappings.remove(index);
+        self.pbr_debug_views.remove(index);
+        // Every row above the hole shifted down, so the old index would now name
+        // a different object: select nothing rather than something arbitrary.
+        self.selected = None;
+        mesh_id
+    }
+
     /// The initial scene for [`SceneSeed`], with every per-object vector exactly
     /// `seed.materials.len()` long.
     pub fn seeded(seed: SceneSeed) -> Self {
         let n = seed.materials.len();
         Self {
             objects: vec![ObjectTransform::default(); n],
+            mesh_ids: (0..n as u32).collect(),
             modes: vec![seed.mode; n],
             materials: seed.materials,
             image_based_lighting: vec![seed.image_based_lighting; n],
@@ -294,7 +377,7 @@ impl SceneState {
             pbr_debug_views: vec![PbrDebugView::default(); n],
             lighting: seed.lighting,
             environment_available: seed.environment_available,
-            show_environment_background: seed.environment_available,
+            show_environment_background: seed.show_environment_background,
             // Same starting point as the objects, then edited independently.
             environment_background_tone_mapping: seed.tone_mapping,
             ..Self::default()
@@ -326,18 +409,19 @@ impl SceneState {
     }
 
     /// The per-frame draw list: one instance per object in
-    /// [`objects`](Self::objects), drawn as mesh `i` (row index) placed by that
-    /// object's model matrix **shifted by a per-object layout offset** so multiple
-    /// objects spread side-by-side along world `X` (a single object stays at the
-    /// origin). Each draw carries its **own** render mode (`Some(modes[i])`), so
-    /// objects can mix filled / wireframe / textured / PBR.
+    /// [`objects`](Self::objects), drawing that object's
+    /// [`mesh_ids`](Self::mesh_ids) entry placed by its model matrix **shifted by
+    /// a per-object layout offset** so multiple objects spread side-by-side along
+    /// world `X` (a single object stays at the origin). Each draw carries its
+    /// **own** render mode (`Some(modes[i])`), so objects can mix filled /
+    /// wireframe / textured / PBR.
     pub fn draws(&self) -> Vec<Draw> {
         let n = self.objects.len();
         self.objects
             .iter()
             .enumerate()
             .map(|(i, obj)| Draw {
-                mesh_id: i as u32,
+                mesh_id: self.mesh_ids.get(i).copied().unwrap_or(i as u32),
                 model: obj.model_matrix_offset(layout_offset(i, n)),
                 selection: DrawSelection::Mesh(Some(self.mode_of(i))),
             })
@@ -610,6 +694,7 @@ mod tests {
                 tone_mapping: ToneMapping::default(),
                 lighting: Lighting::default(),
                 environment_available: true,
+                show_environment_background: false,
             });
             assert_eq!(state.objects.len(), n);
             assert_eq!(state.modes.len(), n);
@@ -618,9 +703,163 @@ mod tests {
             assert_eq!(state.tone_mappings.len(), n);
             assert_eq!(state.pbr_debug_views.len(), n);
             assert_eq!(state.draws().len(), n);
-            // An env probe seeds both flags together.
+            // A probe enables the environment controls, but does not turn the
+            // sky on: the viewer always has one, so coupling them would make the
+            // backdrop unavoidable (#353).
             assert!(state.environment_available);
-            assert!(state.show_environment_background);
+            assert!(!state.show_environment_background);
         }
+    }
+
+    /// The same invariant, on the runtime-add path: a model loaded into a live
+    /// scene must extend **every** per-object vector, or `draws()` and the PBR
+    /// panel start reading a different object's row than the one selected (#353).
+    #[test]
+    fn add_object_keeps_every_per_object_vector_the_same_length() {
+        let mut state = SceneState::seeded(SceneSeed {
+            materials: vec![DisneyMaterial::default(); 2],
+            mode: RenderMode::Filled,
+            image_based_lighting: ImageBasedLighting::default(),
+            tone_mapping: ToneMapping::default(),
+            lighting: Lighting::default(),
+            environment_available: false,
+            show_environment_background: false,
+        });
+
+        let index = state.add_object(
+            7,
+            DisneyMaterial::default(),
+            RenderMode::Shaded,
+            ToneMapping::default(),
+        );
+
+        assert_eq!(index, 2, "the new object is appended, keeping earlier rows");
+        for len in [
+            state.objects.len(),
+            state.mesh_ids.len(),
+            state.modes.len(),
+            state.materials.len(),
+            state.image_based_lighting.len(),
+            state.tone_mappings.len(),
+            state.pbr_debug_views.len(),
+            state.draws().len(),
+        ] {
+            assert_eq!(len, 3, "every per-object vector grew by exactly one");
+        }
+        // The row records which mesh it draws; the two are no longer the same
+        // integer once a scene can shrink.
+        assert_eq!(state.draws()[index as usize].mesh_id, 7);
+        assert_eq!(
+            state.selected,
+            Some(index),
+            "the freshly loaded object is what the panels edit"
+        );
+    }
+
+    /// Adding an object must not re-render the objects already on screen with a
+    /// different mode or material — only lay them out around the newcomer.
+    #[test]
+    fn add_object_leaves_the_existing_objects_alone() {
+        let mut state = SceneState::seeded(SceneSeed {
+            materials: vec![DisneyMaterial {
+                base_color: [1.0, 0.0, 0.0],
+                ..DisneyMaterial::default()
+            }],
+            mode: RenderMode::Wireframe,
+            image_based_lighting: ImageBasedLighting::default(),
+            tone_mapping: ToneMapping::default(),
+            lighting: Lighting::default(),
+            environment_available: false,
+            show_environment_background: false,
+        });
+
+        state.add_object(
+            7,
+            DisneyMaterial::default(),
+            RenderMode::Shaded,
+            ToneMapping::default(),
+        );
+
+        assert_eq!(state.modes[0], RenderMode::Wireframe);
+        assert_eq!(state.materials[0].base_color, [1.0, 0.0, 0.0]);
+        assert_eq!(state.modes[1], RenderMode::Shaded);
+    }
+
+    /// The rig a loaded model is lit by is the video editor's Dragon rig: the
+    /// probe alone, with direct light and ambient both off.
+    #[test]
+    fn the_runtime_load_rig_is_image_based_lighting_only() {
+        let rig = ibl_only_lighting();
+        assert_eq!(rig.scale, 0.0, "no direct light");
+        assert_eq!(rig.ambient, 0.0, "and no ambient");
+    }
+
+    /// Deleting the **middle** object must not make the ones after it draw a
+    /// different mesh (#353).
+    ///
+    /// This is why a row records its mesh id instead of being it: with row ==
+    /// mesh id, removing row 1 of 3 slides row 2 down into slot 1 and it would
+    /// silently start drawing the deleted object's mesh.
+    #[test]
+    fn removing_an_object_keeps_the_survivors_on_their_own_meshes() {
+        let mut state = SceneState::seeded(SceneSeed {
+            materials: vec![DisneyMaterial::default(); 3],
+            mode: RenderMode::Filled,
+            image_based_lighting: ImageBasedLighting::default(),
+            tone_mapping: ToneMapping::default(),
+            lighting: Lighting::default(),
+            environment_available: false,
+            show_environment_background: false,
+        });
+        state.materials[2].base_color = [0.0, 0.0, 1.0];
+
+        state.selected = Some(1);
+        assert_eq!(
+            state.remove_selected_object(),
+            Some(1),
+            "the removed row hands back the mesh it drew, for the caller to free"
+        );
+
+        assert_eq!(state.objects.len(), 2);
+        assert_eq!(
+            state.mesh_ids,
+            vec![0, 2],
+            "the survivor keeps mesh 2, even though it now sits in row 1"
+        );
+        let draws = state.draws();
+        assert_eq!(draws.len(), 2);
+        assert_eq!(draws[1].mesh_id, 2, "row 1 still draws mesh 2");
+        assert_eq!(
+            state.materials[1].base_color,
+            [0.0, 0.0, 1.0],
+            "and keeps its own material"
+        );
+        assert_eq!(
+            state.selected, None,
+            "the old index would now name a different object, so nothing stays selected"
+        );
+    }
+
+    /// Delete is a no-op without a selection, and the last object may go —
+    /// leaving an empty scene rather than refusing.
+    #[test]
+    fn removing_without_a_selection_does_nothing_and_the_last_object_may_go() {
+        let mut state = SceneState::default();
+        assert_eq!(state.selected, None, "a fresh scene selects nothing");
+        assert_eq!(
+            state.remove_selected_object(),
+            None,
+            "nothing selected, nothing removed — and nothing to free"
+        );
+        assert_eq!(state.objects.len(), 1);
+
+        state.selected = Some(0);
+        assert_eq!(state.remove_selected_object(), Some(0));
+        assert!(state.objects.is_empty(), "an empty scene is allowed");
+        assert!(state.draws().is_empty());
+
+        // And a stale out-of-range selection is refused rather than panicking.
+        state.selected = Some(4);
+        assert_eq!(state.remove_selected_object(), None);
     }
 }

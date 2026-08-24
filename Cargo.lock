@@ -4152,6 +4152,7 @@ dependencies = [
  "env_logger",
  "log",
  "pollster 0.4.0",
+ "rfd",
  "trd-core",
  "trd-gui",
 ]

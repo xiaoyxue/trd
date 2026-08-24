@@ -221,11 +221,19 @@ then edits *that* object. Everything is **per-object**:
   edited live per object;
 - **Diffuse texture** — each object skins its own albedo;
 - **Overlays** — smooth, thickness-controlled bounding boxes/grids and
-  arrowheaded world/local axes.
+  arrowheaded world/local axes;
+- **Model** — **Load model…** adds a GLB to the *running* scene (`rfd` natively,
+  a file picker in the browser) and **Delete selected** removes one, freeing its
+  GPU memory. The viewer is lit by **image-based lighting alone**, so it always
+  binds a probe — `--env` / `?env=` or the built-in Uffizi one — and a loaded
+  model lands PBR-shaded on its GLB's own material and maps, graded like the
+  video editor's Dragon. The environment is the *light*, not the backdrop: the
+  sky is drawn only when "Environment background" is ticked.
 
-The browser loads OBJ or single-primitive GLB objects from **repeatable
-`?mesh=`** (+ positional `?texture=`, and `?env=` for PBR). GLB uses its
-embedded base-color / metallic-roughness / normal maps and starts in PBR:
+Both front-ends load OBJ or single-primitive GLB objects — natively via
+repeatable `--mesh`, in the browser via repeatable **`?mesh=`** (+ positional
+`?texture=`, and `?env=` to override the probe). GLB uses its embedded
+base-color / metallic-roughness / normal maps and starts in PBR:
 `?mesh=a.obj&texture=a.jpg&mesh=b.obj&env=probe.hdr`. Full control reference + URL
 params: **[`docs/rendering.md`](docs/rendering.md#interactive-viewer--trd-gui)**.
 

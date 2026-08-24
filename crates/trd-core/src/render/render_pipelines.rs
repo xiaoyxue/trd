@@ -203,6 +203,14 @@ pub(crate) fn create_render_pipelines(
 }
 
 impl SceneUniforms {
+    /// Widens the PBR slot array to one slot per mesh after a runtime mesh add
+    /// (#353). The layout is a pure function of the device, so it is rebuilt
+    /// here rather than retained — [`create_render_pipelines`] drops its own.
+    pub(super) fn grow_pbr_slots(&mut self, device: &wgpu::Device, meshes: usize) {
+        let layout = create_pbr_bind_group_layout(device);
+        self.pbr.grow(device, &layout, meshes);
+    }
+
     /// Rewrites the camera `P·V` uniform for this frame's `camera`.
     pub(super) fn write_camera(&self, queue: &wgpu::Queue, camera: Camera) {
         write_view_proj(queue, &self.camera, camera);
@@ -227,7 +235,7 @@ impl SceneUniforms {
         &self,
         queue: &wgpu::Queue,
         camera: Camera,
-        meshes: &[MeshGpu],
+        meshes: &[Option<MeshGpu>],
         lighting: Lighting,
         use_env: bool,
         write_slots: bool,
@@ -242,7 +250,12 @@ impl SceneUniforms {
         if !write_slots {
             return;
         }
+        // A removed mesh leaves a hole whose slot nothing draws; skipping it
+        // keeps every surviving mesh on the slot its id names.
         for (slot, mesh) in meshes.iter().enumerate() {
+            let Some(mesh) = mesh.as_ref() else {
+                continue;
+            };
             let appearance = mesh.appearance();
             let uniform = PbrUniform::new(PbrUniformInputs {
                 material: &appearance.material,

@@ -59,4 +59,32 @@ pub enum GuiError {
         #[source]
         source: std::io::Error,
     },
+
+    /// A picked model was rejected on size **before** being decoded (#353).
+    #[error(
+        "'{name}' is {:.1} MiB — over the {:.0} MiB limit for a loaded model",
+        *size as f64 / (1024.0 * 1024.0),
+        *limit as f64 / (1024.0 * 1024.0)
+    )]
+    ModelTooLarge {
+        name: String,
+        size: usize,
+        limit: usize,
+    },
+
+    /// The picked file is not a glTF binary.
+    #[error("'{name}' is not a GLB — a glTF binary starts with the magic \"glTF\"")]
+    NotGlb { name: String },
+
+    /// `trd-core` could not import the picked GLB.
+    #[error("failed to import '{name}': {source}")]
+    ModelImport {
+        name: String,
+        #[source]
+        source: trd_core::GltfImportError,
+    },
+
+    /// A model is lit by the HDR probe alone, and the scene has none to bind.
+    #[error("cannot load '{name}': no HDR environment probe is available to light it")]
+    ModelNeedsEnvironment { name: String },
 }
