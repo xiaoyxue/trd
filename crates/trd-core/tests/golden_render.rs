@@ -645,18 +645,24 @@ fn golden_environment_light_syncs_sky_and_reflection() {
     let (mut renderer, target) = pollster::block_on(Renderer::with_meshes(WIDTH, HEIGHT, &[mesh]))
         .expect("build renderer for the environment-light golden");
     renderer.set_env_map(quadrant_env());
-    renderer.set_disney_material(DisneyMaterial {
-        base_color: [1.0, 1.0, 1.0],
-        metallic: 1.0,
-        roughness: 0.06,
-        specular: 1.0,
-        ..DisneyMaterial::default()
-    });
-    renderer.set_image_based_lighting(ImageBasedLighting { intensity: 1.0 });
-    renderer.set_tone_mapping(ToneMapping {
-        operator: Tonemap::Aces,
-        exposure: 1.0,
-    });
+    renderer.set_appearance(
+        trd_core::MeshTarget::All,
+        trd_core::MeshAppearance {
+            material: DisneyMaterial {
+                base_color: [1.0, 1.0, 1.0],
+                metallic: 1.0,
+                roughness: 0.06,
+                specular: 1.0,
+                ..DisneyMaterial::default()
+            },
+            ibl: ImageBasedLighting { intensity: 1.0 },
+            tone_mapping: ToneMapping {
+                operator: Tonemap::Aces,
+                exposure: 1.0,
+            },
+            ..Default::default()
+        },
+    );
 
     // A yaw no symmetry can hide: 2.2 rad ≈ 126°, inside the second quadrant.
     let scene = Scene::from_draws(

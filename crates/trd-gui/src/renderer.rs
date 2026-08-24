@@ -60,10 +60,6 @@ pub fn scene_for(state: &SceneState) -> trd_core::Scene {
 }
 
 /// Pushes `state`'s per-object PBR material state onto the renderer.
-///
-/// Still setters rather than a per-frame argument: these write GPU uniform slots,
-/// and threading them through `encode` is the next step (#180). Sharing the loop
-/// at least means native and browser cannot disagree about it.
 pub fn apply_materials(renderer: &mut trd_core::Renderer, state: &SceneState) {
     for (i, ((material, ibl), tone_mapping)) in state
         .materials
@@ -72,11 +68,15 @@ pub fn apply_materials(renderer: &mut trd_core::Renderer, state: &SceneState) {
         .zip(&state.tone_mappings)
         .enumerate()
     {
-        renderer.set_mesh_disney_material(i, material.clone());
-        renderer.set_mesh_image_based_lighting(i, *ibl);
-        renderer.set_mesh_tone_mapping(i, *tone_mapping);
-        renderer
-            .set_mesh_pbr_debug_view(i, state.pbr_debug_views.get(i).copied().unwrap_or_default());
+        renderer.set_appearance(
+            trd_core::MeshTarget::One(i),
+            trd_core::MeshAppearance {
+                material: material.clone(),
+                ibl: *ibl,
+                tone_mapping: *tone_mapping,
+                debug_view: state.pbr_debug_views.get(i).copied().unwrap_or_default(),
+            },
+        );
     }
 }
 

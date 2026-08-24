@@ -8,8 +8,8 @@
 use std::sync::Arc;
 
 use trd_core::{
-    DisneyMaterial, EnvMapData, FrameFit, ImageBasedLighting, ImageData, ImageTexture, Lighting,
-    Mesh, RenderError, RenderOptions, RenderTarget, Renderer, Scene, SurfaceTarget, ToneMapping,
+    EnvMapData, FrameFit, ImageData, ImageTexture, Lighting, Mesh, RenderError, RenderOptions,
+    RenderTarget, Renderer, Scene, SurfaceTarget,
 };
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
@@ -129,28 +129,15 @@ impl WindowRenderer {
         }
     }
 
-    /// Sets the Disney PBR material applied to [`RenderMode::Shaded`](trd_core::RenderMode::Shaded) meshes. No-op
-    /// until the renderer is built.
-    pub(crate) fn set_disney_material(&mut self, material: DisneyMaterial) {
+    /// Sets the appearance of every mesh. No-op until the renderer is built.
+    pub(crate) fn set_appearance(&mut self, appearance: trd_core::MeshAppearance) {
         if let Some(renderer) = self.renderer.as_mut() {
-            renderer.set_disney_material(material);
+            renderer.set_appearance(trd_core::MeshTarget::All, appearance);
         }
     }
 
     pub(crate) fn set_lighting(&mut self, lighting: Lighting) {
         self.lighting = lighting;
-    }
-
-    pub(crate) fn set_image_based_lighting(&mut self, ibl: ImageBasedLighting) {
-        if let Some(renderer) = self.renderer.as_mut() {
-            renderer.set_image_based_lighting(ibl);
-        }
-    }
-
-    pub(crate) fn set_tone_mapping(&mut self, tone_mapping: ToneMapping) {
-        if let Some(renderer) = self.renderer.as_mut() {
-            renderer.set_tone_mapping(tone_mapping);
-        }
     }
 
     /// Binds the HDR environment probe reflected by PBR meshes. No-op until the

@@ -79,6 +79,7 @@ pub use frame_params::{CameraFormError, FrameParams, Viewport};
 pub(crate) use gpu_context::LimitsPreset;
 pub use gpu_context::{create_instance, AdapterFacts, GpuContext, GpuInitError, GpuRequest};
 pub use gpu_types::Vertex;
+pub use mesh_store::MeshAppearance;
 pub use options::{Msaa, PbrConfig, RenderOptions};
 pub use pbr::PbrDebugView;
 pub use render_target::{
@@ -87,7 +88,7 @@ pub use render_target::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use renderer::check_dimensions;
-pub use renderer::{RenderError, Renderer, SurfaceError, SurfaceRepair};
+pub use renderer::{MeshTarget, RenderError, Renderer, SurfaceError, SurfaceRepair};
 pub use scene::{Background, EnvironmentBackground, Scene, SceneError};
 pub use tonemap::{ToneMapping, Tonemap};
 /// Reference + test scaffolding only (#202): the minimal canonical wgpu
