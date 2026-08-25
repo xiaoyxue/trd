@@ -5,7 +5,7 @@ use clap::Parser;
 #[derive(Debug, Parser)]
 #[command(name = "trd-gui-video-editing", version, about)]
 pub struct Cli {
-    /// Versioned `trd.video_edit.version = 0.2.0` Arrow IPC or Parquet timeline.
+    /// Versioned `trd.video_edit.version = 0.2.0` Arrow IPC timeline.
     ///
     /// The version is matched exactly, not as a minimum: `trd-core`'s
     /// `VIDEO_EDIT_VERSION` is the only accepted value and any other is

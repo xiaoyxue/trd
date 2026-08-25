@@ -76,11 +76,12 @@ def build_video_edit():
             "trd.protocol.version — the two versions move separately on purpose; "
             "editor state never bumps the stream protocol and vice versa"
         ),
-        "containers": ["Arrow IPC stream", "Parquet"],
+        "containers": ["Arrow IPC stream"],
         "container_note": (
-            "both decode through one path; the format is sniffed, not declared. "
-            "Parquet compression is limited to uncompressed and snappy, because "
-            "zstd/gzip/lz4/brotli are C shims that would break the wasm build"
+            "the container is recognised from the bytes, not declared. Parquet was "
+            "accepted until #359 and was dropped because its reader cost roughly a "
+            "megabyte of the browser bundle; a Parquet file is now recognised and "
+            "refused by name so the fix reads as a conversion, not a corrupt file"
         ),
         "row_model": {
             "shape": "sparse",
@@ -137,7 +138,7 @@ def build_video_edit():
                     "the container frame this row annotates; the join key that makes the table sparse",
                     nullable=False,
                 ),
-                column("present_index", "uint32", True, "the source parquet row this timeline row copies", nullable=False),
+                column("present_index", "uint32", True, "the source calibration row this timeline row copies", nullable=False),
                 column("timestamp_us", "int64", True, "deterministic media timestamp, microseconds", nullable=False),
                 column(
                     "k",

@@ -4,10 +4,9 @@
   "prose_spec": "docs/video-editing.md",
   "independent_of": "trd.protocol.version — the two versions move separately on purpose; editor state never bumps the stream protocol and vice versa",
   "containers": [
-    "Arrow IPC stream",
-    "Parquet"
+    "Arrow IPC stream"
   ],
-  "container_note": "both decode through one path; the format is sniffed, not declared. Parquet compression is limited to uncompressed and snappy, because zstd/gzip/lz4/brotli are C shims that would break the wasm build",
+  "container_note": "the container is recognised from the bytes, not declared. Parquet was accepted until #359 and was dropped because its reader cost roughly a megabyte of the browser bundle; a Parquet file is now recognised and refused by name so the fix reads as a conversion, not a corrupt file",
   "row_model": {
     "shape": "sparse",
     "rule": "the timeline table stores only frames with ad-placement quads; everything else is ordinary video and is played as such. A frame with no row is looked up as None and rendered as plain video",
@@ -98,7 +97,7 @@
         "name": "present_index",
         "arrow_type": "uint32",
         "required": true,
-        "doc": "the source parquet row this timeline row copies",
+        "doc": "the source calibration row this timeline row copies",
         "nullable": false
       },
       {

@@ -8,6 +8,26 @@ repository.workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+# `wasm-opt` flags for the `wasm-pack` build path. wasm-pack's default is `-O`,
+# while `nix build .#trd-wasm` already runs `-Oz` (flake.nix) — two build paths
+# producing two different binaries. This settles them on `-Oz`.
+#
+# Measured on the pre-parquet-removal module (#359), same input, wasm-opt 117:
+#
+#   -O                                    11,887,726 B   35.3 s
+#   -Oz                                   11,481,346 B   39.5 s   -3.4%
+#   -Oz --converge                        11,469,385 B  130.4 s   -11,961 B more
+#   -Oz --strip-debug --strip-producers --vacuum
+#                                         11,497,140 B   40.4 s   *worse* than -Oz
+#
+# So: plain `-Oz`. `--converge` triples the time for 0.1%, the strip flags are a
+# no-op here (wasm-bindgen already emits no debug info) and reordering the passes
+# costs bytes. Note the win is in *raw* size — after brotli `-Oz` is a wash
+# (3,072,430 vs 3,070,222 B), so this buys download parse/compile time and
+# honesty between the two build paths, not transfer size.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-Oz"]
+
 # trd-wasm targets the browser only. On non-wasm hosts it compiles to an empty
 # crate (see the crate-level cfg in src/lib.rs) so workspace-wide native builds,
 # clippy, and tests skip it cleanly instead of failing on web-only wgpu APIs.
