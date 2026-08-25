@@ -7,6 +7,7 @@
 
 pub mod assets;
 pub mod error;
+pub mod fonts;
 pub mod interaction;
 pub mod model;
 mod platform;

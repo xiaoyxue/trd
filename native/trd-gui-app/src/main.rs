@@ -107,5 +107,12 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default().with_inner_size(window),
         ..Default::default()
     };
-    eframe::run_native("trd-gui", options, Box::new(|_cc| Ok(Box::new(app))))
+    eframe::run_native(
+        "trd-gui",
+        options,
+        Box::new(|cc| {
+            trd_gui::fonts::install(&cc.egui_ctx);
+            Ok(Box::new(app))
+        }),
+    )
 }

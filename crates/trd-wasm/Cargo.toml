@@ -42,11 +42,10 @@ trd-core.workspace = true
 # The GUI entry points live here too: `trd-gui` is a plain rlib holding the UI,
 # interaction, and scene authoring; this crate owns its JS ABI (#180).
 trd-gui = { path = "../trd-gui" }
-egui = "0.36.1"
+egui = { version = "0.36.1", default-features = false }
 # WebGPU, not WebGL2: see the rationale in `crates/trd-gui/Cargo.toml` (#257).
 eframe = { version = "0.36.1", default-features = false, features = [
     "wgpu",
-    "default_fonts",
 ] }
 log = "0.4"
 wasm-bindgen = "=0.2.126"
