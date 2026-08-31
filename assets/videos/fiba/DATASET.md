@@ -5,7 +5,8 @@ Only `per_frame_KVP_cube_best.parquet` + `per_frame_KVP_cube_best_schema.json` a
 vendored into this repo — pure numeric camera calibration (K, floor quads,
 homographies) for the two most-accurate methods (2VP + 1circle), no imagery. They
 are all the FIBA court AR demo needs (see the repo README "FIBA court AR demo" +
-`scripts/fiba_perception_to_arrow.py`).
+`scripts/fiba_perception_to_arrow.py`). `fiba-shot1.arrow` is the sparse `0.2.0`
+video-editing document built from them: geometry on the 222 tracked frames only.
 
 NOT vendored (copyrighted broadcast footage / bulky / not needed by the demo):
 `shot_0001.mp4`, `2024-Olympic-Basketball-1.mp4`, `inputs/`, the other

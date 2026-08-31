@@ -113,6 +113,7 @@ have run.
 | test-only files (a `#[cfg(test)] mod tests`, a file under `crates/*/tests/`) | **L1** |
 | `scripts/` tooling that reaches no pixel — `dev-env.ps1`, `encode.py`, `extract_frames.py`, `comment_audit.py`, `protocol_schema.py` | **L1** |
 | manifest metadata that no code reads — `repository` / `description` / `license` in a `Cargo.toml`, `package.json` fields outside `dependencies`/`scripts` | **L1** |
+| a vendored `assets/**` data file no build, test or front-end reads | **L1** |
 | a manifest change that *builds* differently — a dependency, feature, profile, lint or workspace-member edit in `Cargo.toml`/`Cargo.lock`, `web/**/package.json` deps or `bun.lock` | **L3** — it changes what every binary compiles to, so the blast radius is the whole tree |
 | Rust/TS that changes behaviour but cannot reach pixels, a window or media — `crates/trd-placement`, `protocol/` decode, CLI arg parsing, `math/` helpers | **L2** |
 | `crates/trd-core/src/render/**`, `src/shader/*.wgsl`, PBR/tone-map, `math/` transforms feeding the GPU `Uniform`, or the golden fixtures | **L3** |
