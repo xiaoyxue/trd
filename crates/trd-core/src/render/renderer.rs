@@ -81,7 +81,7 @@ use super::environment::{EnvBackgroundSettings, Environment};
 use super::frame_plane::FramePlane;
 use super::gizmo::GizmoGeometry;
 use super::mesh_store::{upload_mesh, MeshGpu, MeshStore};
-use super::picking::{PickTarget, Picking};
+use super::picking::{PickPass, Picking};
 use super::*;
 use super::{Draw, GridPlane, Primitive, RenderMode, Scene};
 use crate::material::DisneyMaterial;
@@ -215,18 +215,12 @@ pub struct Renderer {
     /// not state — nothing outside `encode_pass` reads it between frames.
     batches: Batches,
     frame_plane: FramePlane,
-    /// The mesh pass's depth attachment, (re)created lazily in `encode` to match
-    /// the viewport. Gives solid (filled/textured) meshes real z-occlusion.
-    depth: Option<DepthTarget>,
-    /// The mesh pass's color attachment: the format and sample count every
-    /// pipeline was built for, plus the multisampled target (re)created lazily
-    /// in `encode` to match the viewport. When MSAA is on the pass renders into
-    /// that target and resolves into the caller's single-sample `view`, so every
-    /// front-end gets multisampled mesh/arrowhead edges transparently; gizmo
-    /// lines add analytic AA separately. With MSAA off the pass renders straight
-    /// into `view`. One owner rather than three loose fields, so "same format,
-    /// same sample count" is structural (#221 §3).
-    msaa: MsaaColor,
+    /// The mesh pass's own attachments: the depth buffer solid meshes z-occlude
+    /// through, and — when MSAA is on — the multisampled color the pass renders
+    /// into and resolves into the caller's `view`, so every front-end gets
+    /// multisampled mesh/arrowhead edges transparently (gizmo lines add analytic
+    /// AA separately). Both are sized to the viewport by `encode_pass`.
+    attachments: MeshAttachments,
     /// The shared GPU context. Retained so `encode` can grow GPU resources and
     /// the setters can upload immediately, without the caller threading handles
     /// through every call. Holding the whole context (rather than a bare device)
@@ -236,16 +230,6 @@ pub struct Renderer {
     /// Everything the object-id picking pass (#141) needs: its pipeline, its
     /// instance buffer and its lazily-created target.
     picking: Picking,
-    /// Whether the per-mesh PBR slot array still matches the meshes' appearance
-    /// (#235 R5).
-    ///
-    /// A slot's contents — material / IBL / tone map / debug view — depend on **no
-    /// per-frame value** (the camera and light rig live in the once-per-frame
-    /// scene uniform, #182), so re-uploading all of them every frame is redundant
-    /// whenever nothing has changed. Appearance is renderer-owned state written
-    /// through the setters below, so "changed" is exactly "a setter ran": each
-    /// flips this, `prepare_frame` clears it after rewriting the slots.
-    slots_dirty: bool,
 }
 
 impl Renderer {
@@ -361,12 +345,9 @@ impl Renderer {
             instances,
             batches: Batches::default(),
             frame_plane,
-            depth: None,
-            msaa: MsaaColor::new(format, sample_count),
+            attachments: MeshAttachments::new(format, sample_count),
             gpu,
             picking,
-            // Nothing has been uploaded yet, so the first frame writes them all.
-            slots_dirty: true,
         })
     }
 
@@ -502,8 +483,6 @@ impl Renderer {
         let mesh_id = self.meshes.push(uploaded);
         self.uniforms
             .grow_pbr_slots(&self.gpu.device, self.meshes.len());
-        // Reallocating the slot buffer discards every slot, not just the new one.
-        self.slots_dirty = true;
         mesh_id
     }
 
@@ -535,7 +514,7 @@ impl Renderer {
             self.gpu.queue.submit([]);
             // The freed slot keeps its stale contents; the next frame rewrites
             // every live one.
-            self.slots_dirty = true;
+            self.uniforms.mark_slots_dirty();
         }
         removed
     }
@@ -589,8 +568,8 @@ impl Renderer {
     }
 
     /// **The one path that mutates per-mesh appearance, and therefore the one
-    /// place `slots_dirty` is set.** An out-of-range [`MeshTarget::One`] edits
-    /// nothing and leaves the slots clean.
+    /// place the PBR slots are marked stale.** An out-of-range
+    /// [`MeshTarget::One`] edits nothing and leaves the slots clean.
     ///
     /// The texture setters above deliberately do *not* come through here: they
     /// upload a bind group immediately and feed no PBR slot.
@@ -607,7 +586,7 @@ impl Renderer {
                 edit(mesh.appearance_mut());
             }
         }
-        self.slots_dirty = true;
+        self.uniforms.mark_slots_dirty();
     }
 
     /// Replaces `target`'s whole [`MeshAppearance`] — what most callers want,
@@ -1060,14 +1039,16 @@ impl Renderer {
         self.encode_pass(encoder, view, camera, scene, true);
     }
 
-    /// Everything a frame needs **written and sized** before a pass can start:
-    /// the camera and PBR uniforms, the batched instances, the depth/MSAA
-    /// attachments, and the two background settings (#235 R8).
+    /// Everything a frame needs **written** before a pass can start: the camera
+    /// and PBR uniforms, the batched instances, and the two background settings
+    /// (#235 R8).
     ///
     /// Split out of `encode_pass` so the encode half reads as what it is — a
     /// dispatch over batched commands — instead of ~150 lines where the
-    /// preparation and the recording are interleaved. It is also the whole of
-    /// the `&mut self` work: everything after it borrows immutably.
+    /// preparation and the recording are interleaved. The pass attachments are
+    /// deliberately *not* sized here: `encode_pass` sizes them itself, so its
+    /// descriptor takes the views straight from the call that allocated them
+    /// (#363).
     fn prepare_frame(&mut self, camera: Camera, scene: &Scene) {
         // 1. Camera P·V for this frame.
         self.uniforms.write_camera(&self.gpu.queue, camera);
@@ -1084,9 +1065,7 @@ impl Renderer {
             self.meshes.all(),
             scene.lighting(),
             self.environment.has_env(),
-            self.slots_dirty,
         );
-        self.slots_dirty = false;
 
         // 2. Walk the scene's objects once into per-geometry instance batches,
         //    then upload the flattened instance models (growing the buffer if
@@ -1104,20 +1083,13 @@ impl Renderer {
         });
         self.instances.upload(&self.gpu, &self.batches.instances);
 
-        // 3. Match the depth + (when MSAA is on) color attachments to the viewport
-        //    (solid meshes z-occlude; the multisampled color, if any, is resolved
-        //    into `view`).
-        self.ensure_depth(viewport);
-        self.msaa
-            .ensure(&self.gpu.device, viewport.width, viewport.height);
-
-        // 4. Background frame-plane fit for this viewport (no-op if the scene
+        // 3. Background frame-plane fit for this viewport (no-op if the scene
         //    asks for no frame plane or no frame texture is bound yet).
         if let Some(fit) = background.frame {
             self.frame_plane.write_fit(&self.gpu.queue, fit, viewport);
         }
 
-        // 5. Bind groups for each mesh's own albedo (#141) and material maps, and
+        // 4. Bind groups for each mesh's own albedo (#141) and material maps, and
         //    for the HDR environment map. Nothing is uploaded here: now that the
         //    renderer holds the &self.gpu.queue, every setter uploads immediately and the
         //    constructors upload their fallbacks, so `encode` only *reads* bind
@@ -1139,42 +1111,6 @@ impl Renderer {
         }
     }
 
-    /// The mesh pass's color attachment for this frame: with MSAA
-    /// (`sample_count > 1`) the pass renders into the multisampled attachment
-    /// and **resolves** into the caller's single-sample `view`, so every
-    /// front-end (offscreen CLI, native window, wasm canvas) gets multisampled
-    /// mesh/arrowhead edges; without MSAA (`sample_count == 1`) there is no MSAA
-    /// target and the pass renders straight into `view` (no resolve).
-    ///
-    /// `load` is what happens to the existing contents — `Load` for a layer
-    /// composited over an earlier one, `Clear` for the first.
-    fn color_attachment<'a>(
-        &'a self,
-        view: &'a wgpu::TextureView,
-        load: wgpu::LoadOp<wgpu::Color>,
-    ) -> wgpu::RenderPassColorAttachment<'a> {
-        match self.msaa.target() {
-            Some(msaa) => wgpu::RenderPassColorAttachment {
-                view: &msaa.view,
-                depth_slice: None,
-                resolve_target: Some(view),
-                ops: wgpu::Operations {
-                    load,
-                    store: wgpu::StoreOp::Store,
-                },
-            },
-            None => wgpu::RenderPassColorAttachment {
-                view,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load,
-                    store: wgpu::StoreOp::Store,
-                },
-            },
-        }
-    }
-
     /// Draws one frame of `scene` into `view`: prepare, then dispatch the
     /// batched commands. `load_color` keeps the existing contents (a composited
     /// layer) instead of clearing to black (the first pass).
@@ -1189,34 +1125,36 @@ impl Renderer {
         self.prepare_frame(camera, scene);
 
         let background = *scene.background();
-        let depth_view = &self
-            .depth
-            .as_ref()
-            .expect("prepare_frame sized the depth attachment")
-            .view;
-        let color_attachment = self.color_attachment(
-            view,
-            if load_color {
-                wgpu::LoadOp::Load
-            } else {
-                wgpu::LoadOp::Clear(wgpu::Color::BLACK)
-            },
-        );
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("trd mesh pass"),
-            color_attachments: &[Some(color_attachment)],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: depth_view,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
-                    store: wgpu::StoreOp::Store,
+        // Sizing the attachments here — rather than in `prepare_frame` — is what
+        // lets the descriptor take its views from the call that allocated them,
+        // so there is no moment at which a depth attachment might be missing
+        // (#363). The borrow ends with the block, freeing `self` for the loop.
+        let mut pass = {
+            let views = self.attachments.resize(&self.gpu.device, camera.viewport());
+            let color_attachment = views.color_attachment(
+                view,
+                if load_color {
+                    wgpu::LoadOp::Load
+                } else {
+                    wgpu::LoadOp::Clear(wgpu::Color::BLACK)
+                },
+            );
+            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("trd mesh pass"),
+                color_attachments: &[Some(color_attachment)],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: views.depth_view(),
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
                 }),
-                stencil_ops: None,
-            }),
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            })
+        };
 
         // The two backgrounds are independent slots drawn in a fixed order (#204):
         // the environment probe first, then the frame plane over it — a scene may
@@ -1334,13 +1272,13 @@ impl Renderer {
     fn encode_picking(
         &self,
         encoder: &mut wgpu::CommandEncoder,
-        target: &PickTarget,
+        target: &PickPass<'_>,
         records: &[(usize, u32)],
     ) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("trd picking pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: target.color_view(),
+                view: target.id.view(),
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
@@ -1350,7 +1288,7 @@ impl Renderer {
                 },
             })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: target.depth_view(),
+                view: target.depth.view(),
                 depth_ops: Some(wgpu::Operations {
                     load: wgpu::LoadOp::Clear(1.0),
                     store: wgpu::StoreOp::Store,
@@ -1371,27 +1309,6 @@ impl Renderer {
                 continue;
             };
             draw_indexed(&mut pass, mesh.filled(), slot..slot + 1);
-        }
-    }
-
-    /// Ensures the depth attachment matches `viewport` (each dimension clamped to
-    /// ≥ 1) at the mesh pass's [`sample_count`](MsaaColor::sample_count) (the
-    /// depth sample count must match the color attachment), recreating it only
-    /// when the target size changes.
-    fn ensure_depth(&mut self, viewport: Viewport) {
-        let dw = viewport.width.max(1);
-        let dh = viewport.height.max(1);
-        if self
-            .depth
-            .as_ref()
-            .is_none_or(|d| d.width != dw || d.height != dh)
-        {
-            self.depth = Some(create_depth_target(
-                &self.gpu.device,
-                dw,
-                dh,
-                self.msaa.sample_count(),
-            ));
         }
     }
 
@@ -1423,8 +1340,8 @@ impl Renderer {
         self.picking.ensure_target(&gpu.device, w, h);
         let records = self.prepare_picking(camera, draws);
 
-        let target = self.picking.target()?;
-        if !target.contains(x, y) {
+        let target = self.picking.pass()?;
+        if !target.id.contains(x, y) {
             return None;
         }
 
@@ -1433,17 +1350,17 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("trd pick frame"),
             });
-        self.encode_picking(&mut encoder, target, &records);
+        self.encode_picking(&mut encoder, &target, &records);
         // Copy just the one texel under the cursor into the staging buffer.
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture: target.texture(),
+                texture: target.id.texture(),
                 mip_level: 0,
                 origin: wgpu::Origin3d { x, y, z: 0 },
                 aspect: wgpu::TextureAspect::All,
             },
             wgpu::TexelCopyBufferInfo {
-                buffer: target.staging(),
+                buffer: target.staging,
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT),
@@ -1458,7 +1375,7 @@ impl Renderer {
         );
         gpu.queue.submit(Some(encoder.finish()));
 
-        let slice = target.staging().slice(..4);
+        let slice = target.staging.slice(..4);
         let (sender, receiver) = futures_channel::oneshot::channel();
         slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = sender.send(result);
@@ -1472,7 +1389,7 @@ impl Renderer {
             let rgba = [mapped[0], mapped[1], mapped[2], mapped[3]];
             PickInstanceRaw::decode(rgba)
         };
-        target.staging().unmap();
+        target.staging.unmap();
         id
     }
 }

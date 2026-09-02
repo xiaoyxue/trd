@@ -29,6 +29,7 @@
 //! of them implement `PartialEq`. Treat any PR dropping those derives as removing
 //! the guard.
 
+mod attachments;
 mod bound_material_maps;
 mod bound_texture;
 mod bound_uniform;
@@ -98,6 +99,7 @@ pub use tonemap::{ToneMapping, Tonemap};
 pub(crate) use triangle_renderer::TriangleRenderer;
 
 // Crate-internal items shared across render submodules and sibling modules.
+pub(crate) use attachments::{Attachment, AttachmentSpec, MeshAttachments, ViewportAttachment};
 pub(crate) use bound_uniform::{BoundSceneSlots, BoundUniform};
 pub(crate) use color::upload_texture;
 // The CPU mesh is domain vocabulary and lives at the crate root (#221); it is
@@ -121,12 +123,12 @@ pub(crate) use pbr::{
     compute_smooth_normals, compute_tangents, PbrSceneUniform, PbrUniform, PbrUniformInputs,
 };
 pub(crate) use pipeline::{
-    create_depth_target, create_env_bind_group_layout, create_frame_bind_group_layout,
-    create_frame_plane_pipeline, create_gizmo_bind_group_layout, create_gizmo_binding,
-    create_gizmo_line_pipeline, create_mesh_bind_group_layout, create_mesh_pipeline_with,
-    create_pbr_bind_group_layout, create_pbr_pipeline, create_picking_pipeline,
-    create_quad_fill_pipeline, create_shadow_pipeline, create_texture_bind_group_layout,
-    create_textured_pipeline, create_view_proj_binding, overlay_depth_stencil, solid_depth_stencil,
-    write_gizmo_params, write_view_proj, DepthTarget, MsaaColor, MSAA_SAMPLE_COUNT, PICK_FORMAT,
+    create_env_bind_group_layout, create_frame_bind_group_layout, create_frame_plane_pipeline,
+    create_gizmo_bind_group_layout, create_gizmo_binding, create_gizmo_line_pipeline,
+    create_mesh_bind_group_layout, create_mesh_pipeline_with, create_pbr_bind_group_layout,
+    create_pbr_pipeline, create_picking_pipeline, create_quad_fill_pipeline,
+    create_shadow_pipeline, create_texture_bind_group_layout, create_textured_pipeline,
+    create_view_proj_binding, overlay_depth_stencil, solid_depth_stencil, write_gizmo_params,
+    write_view_proj, DEPTH_FORMAT, MSAA_SAMPLE_COUNT, PICK_FORMAT,
 };
 pub(crate) use render_pipelines::{create_render_pipelines, RenderPipelines, SceneUniforms};
