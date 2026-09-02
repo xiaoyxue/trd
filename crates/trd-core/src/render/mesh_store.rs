@@ -85,7 +85,7 @@ impl MeshGpu {
     }
 
     /// The only way to mutate appearance, so `Renderer::edit_appearance` stays
-    /// the single place `slots_dirty` is set.
+    /// the one place an appearance edit marks the PBR slots stale.
     pub(super) fn appearance_mut(&mut self) -> &mut MeshAppearance {
         &mut self.appearance
     }

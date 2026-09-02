@@ -1879,6 +1879,69 @@ fn picking_resolves_object_ids_and_background() {
     assert_eq!(pick(width, 0), None, "x == width is out of bounds");
 }
 
+/// The pick target tracks the viewport: after a resize both of its attachments
+/// are rebuilt at the new size and picking keeps resolving the same objects —
+/// the path a window drag takes, and the one place `PickTarget`'s two
+/// `ViewportAttachment`s are re-`ensure`d rather than first allocated (#363).
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn picking_tracks_a_resized_viewport() {
+    let quad = Mesh::from_obj(QUAD_OBJ).expect("quad OBJ parses");
+    let mut renderer = single(wgpu::TextureFormat::Rgba8UnormSrgb, &quad);
+
+    // Same two objects as above: 0.35-scaled quads at NDC x = ∓0.5, center gap.
+    let model = |x: f32| {
+        Matrix4::from_glam(
+            Mat4::from_translation(Vec3::new(x, 0.0, 0.0)) * Mat4::from_scale(Vec3::splat(0.35)),
+        )
+    };
+    let draws = [
+        Draw {
+            mesh_id: 0,
+            model: model(-0.5),
+            selection: DrawSelection::INHERIT,
+        },
+        Draw {
+            mesh_id: 0,
+            model: model(0.5),
+            selection: DrawSelection::INHERIT,
+        },
+    ];
+
+    // Square viewports throughout, so a pixel keeps its NDC meaning across the
+    // resize: x = ∓0.5 lands a quarter and three quarters across.
+    let pick_at = |renderer: &mut Renderer, size: u32, x: u32, y: u32| {
+        pollster::block_on(renderer.pick(
+            camera_of(FrameParams::IDENTITY, size, size),
+            &draws,
+            x,
+            y,
+            Viewport {
+                width: size,
+                height: size,
+            },
+        ))
+    };
+
+    assert_eq!(
+        renderer.pick_target_size(),
+        None,
+        "nothing is allocated until the first pick"
+    );
+    assert_eq!(pick_at(&mut renderer, 64, 16, 32), Some(0));
+    assert_eq!(renderer.pick_target_size(), Some((64, 64)));
+
+    // Grown: id and depth are recreated together, the read-back buffer is not.
+    assert_eq!(pick_at(&mut renderer, 128, 32, 64), Some(0), "left, grown");
+    assert_eq!(pick_at(&mut renderer, 128, 96, 64), Some(1), "right, grown");
+    assert_eq!(pick_at(&mut renderer, 128, 64, 64), None, "gap, grown");
+    assert_eq!(renderer.pick_target_size(), Some((128, 128)));
+
+    // Shrunk back, and the same clicks still resolve.
+    assert_eq!(pick_at(&mut renderer, 64, 48, 32), Some(1), "right, shrunk");
+    assert_eq!(renderer.pick_target_size(), Some((64, 64)));
+}
+
 /// `MeshTarget` decides *which* meshes an appearance edit reaches, and the
 /// out-of-range case must be a no-op rather than a silent write elsewhere.
 #[test]
