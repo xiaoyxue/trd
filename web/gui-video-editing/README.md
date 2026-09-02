@@ -16,11 +16,12 @@ an ad-placement quad — for FIBA shot 1 that is frames 0-221 of 288, so the
 - an optional encoded poster, on the first row only;
 - video identity/size/fps/count/digest in schema metadata.
 
-It may be **Arrow IPC or Parquet**: the container is sniffed from the bytes
-(`PAR1` at both ends versus the Arrow IPC continuation marker), never from the
-file name, so a URL without a useful suffix and a mislabelled file both work.
-Parquet keeps schema key-value metadata, so the version and table-kind contract
-is the same either way.
+It is an **Arrow IPC stream**: the container is recognised from the bytes (the
+Arrow IPC continuation marker), never from the file name, so a URL without a
+useful suffix and a mislabelled file both work. Parquet was accepted until #359,
+when it was dropped for costing roughly a megabyte of this bundle; a Parquet file
+is recognised and refused by name, so the fix reads as a conversion rather than a
+corrupt file.
 
 Without a document the editor is a plain player: the timeline comes from the
 video container and the placement UI stays inert. With one, the left pane lists
@@ -29,8 +30,8 @@ first frame, and offers **Show placement quads** and **Show gizmos** toggles —
 the quad outline and its local grid/axes are independent, and both also govern
 what is drawn during playback.
 
-Each Arrow line copies `K` and `ad_quad` directly from the parquet row with the
-same zero-based `present_index`; no additional quad homography is applied.
+Each Arrow line copies `K` and `ad_quad` directly from the calibration row with
+the same zero-based `present_index`; no additional quad homography is applied.
 Rust renders that row's quad/grid/axes in the GPU background pass using the
 shared analytic-AA gizmo pipeline (1.5 px quad stroke). The only overlay drawn
 outside that pass is the `e1`/`e2`/`e3` text at the axis tips, which is egui text

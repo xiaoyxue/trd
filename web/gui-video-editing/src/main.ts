@@ -71,7 +71,7 @@ async function main(): Promise<void> {
   // first, and the document may be cleared without touching the video (#264).
   const documentInput = document.createElement("input");
   documentInput.type = "file";
-  documentInput.accept = ".arrow,.parquet";
+  documentInput.accept = ".arrow";
   documentInput.hidden = true;
   document.body.append(documentInput);
   documentInput.addEventListener("change", () => {

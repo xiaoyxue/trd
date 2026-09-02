@@ -69,6 +69,7 @@ pub async fn start(
                 eframe::WebOptions::default(),
                 // Renderer adopts eframe's WebGPU device to avoid a GPU→CPU→GPU round trip per frame.
                 Box::new(move |context| {
+                    trd_gui::fonts::install(&context.egui_ctx);
                     let state = context
                         .wgpu_render_state
                         .as_ref()
@@ -223,7 +224,10 @@ pub async fn start(
         .start(
             canvas,
             eframe::WebOptions::default(),
-            Box::new(|_cc| Ok(Box::new(app))),
+            Box::new(|cc| {
+                trd_gui::fonts::install(&cc.egui_ctx);
+                Ok(Box::new(app))
+            }),
         )
         .await?;
     Ok(GuiHandle { shared })

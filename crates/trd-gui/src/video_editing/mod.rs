@@ -107,31 +107,19 @@ pub struct PendingSource {
     pub name: String,
 }
 
-/// Annotation-document formats accepted by the Open dialog. Extension is a hint only; the real loader sniffs bytes (#264).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DocumentFormat {
-    ArrowIpc,
-    Parquet,
-}
+/// Annotation-document container accepted by the Open dialog. The extension is
+/// a hint only; the real loader sniffs bytes (#264). Arrow IPC is the one
+/// container — Parquet was dropped in #359.
+pub struct DocumentFormat;
 
 impl DocumentFormat {
-    pub const EXTENSIONS: [&'static str; 2] = ["arrow", "parquet"];
+    pub const EXTENSIONS: [&'static str; 1] = ["arrow"];
+    pub const LABEL: &'static str = "Arrow IPC";
 
-    /// The format an extension suggests, or `None` for anything else.
-    pub fn from_name(name: &str) -> Option<Self> {
-        let extension = name.rsplit_once('.')?.1.to_ascii_lowercase();
-        match extension.as_str() {
-            "arrow" => Some(Self::ArrowIpc),
-            "parquet" => Some(Self::Parquet),
-            _ => None,
-        }
-    }
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::ArrowIpc => "Arrow IPC",
-            Self::Parquet => "Parquet",
-        }
+    /// Whether an extension suggests an annotation document.
+    pub fn accepts_name(name: &str) -> bool {
+        name.rsplit_once('.')
+            .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case(Self::EXTENSIONS[0]))
     }
 }
 
@@ -288,8 +276,8 @@ pub fn document_summary(
     }
 }
 
-/// Validates an annotation-document URL and infers its format from the suffix.
-pub fn document_url_selection(url: &str) -> Result<DocumentFormat, String> {
+/// Validates an annotation-document URL against the one accepted suffix.
+pub fn document_url_selection(url: &str) -> Result<&'static str, String> {
     let url = url.trim();
     if url.is_empty() {
         return Err("enter a document URL, or leave it empty to play without one".to_owned());
@@ -305,19 +293,20 @@ pub fn document_url_selection(url: &str) -> Result<DocumentFormat, String> {
         .rsplit('/')
         .next()
         .unwrap_or(url);
-    DocumentFormat::from_name(path).ok_or_else(|| {
-        format!(
-            "document URL should name a .{} or .{} file",
-            DocumentFormat::EXTENSIONS[0],
-            DocumentFormat::EXTENSIONS[1]
-        )
-    })
+    if DocumentFormat::accepts_name(path) {
+        Ok(DocumentFormat::LABEL)
+    } else {
+        Err(format!(
+            "document URL should name a .{} file",
+            DocumentFormat::EXTENSIONS[0]
+        ))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoEditingCommand {
     OpenLocalVideo,
-    /// Pick a local annotation document (`.arrow` / `.parquet`); optional (#264).
+    /// Pick a local annotation document (`.arrow`); optional (#264).
     OpenLocalDocument,
     /// Load the dialog's selection (video + optional document). Picking alone never loads.
     LoadSelection,
@@ -1115,10 +1104,10 @@ impl VideoEditingApp {
         ui.weak("A URL must allow cross-origin video frame access.");
     }
 
-    /// The optional annotation-document row (`.arrow`/`.parquet`, local or HTTP, plus Clear).
+    /// The optional annotation-document row (`.arrow`, local or HTTP, plus Clear).
     fn document_source_row(&mut self, ui: &mut egui::Ui) {
         ui.heading("Annotation document (optional)");
-        ui.label("Arrow IPC or Parquet rows naming the frames that carry placement data.");
+        ui.label("Arrow IPC rows naming the frames that carry placement data.");
         ui.weak("Without one the video simply plays; with one, those frames become editable.");
 
         ui.horizontal(|ui| {
@@ -1136,19 +1125,19 @@ impl VideoEditingApp {
         ui.label("Document URL");
         let response = ui.add(
             egui::TextEdit::singleline(&mut self.document_url)
-                .hint_text("https://example.com/shot.parquet")
+                .hint_text("https://example.com/shot.arrow")
                 .desired_width(f32::INFINITY),
         );
         let submit = response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
         if ui.button("Use this URL").clicked() || submit {
             let url = self.document_url.trim().to_owned();
             self.document_status = Some(match document_url_selection(&url) {
-                Ok(format) => {
+                Ok(label) => {
                     self.shared.set_pending_document(Some(PendingSource {
                         kind: VideoSourceKind::HttpUrl,
                         name: url.clone(),
                     }));
-                    Ok(format!("{url} · {}", format.label()))
+                    Ok(format!("{url} · {label}"))
                 }
                 Err(error) => Err(error),
             });
@@ -2074,37 +2063,32 @@ pub(super) mod tests {
     #[test]
     fn document_url_selection_names_the_format_or_says_why_not() {
         assert_eq!(
-            document_url_selection("https://example.com/shot.parquet"),
-            Ok(DocumentFormat::Parquet)
-        );
-        assert_eq!(
             document_url_selection("  http://example.com/a/b/shot.ARROW  "),
-            Ok(DocumentFormat::ArrowIpc),
-            "extensions are case-insensitive and the input is trimmed"
+            Ok(DocumentFormat::LABEL),
+            "the extension is case-insensitive and the input is trimmed"
         );
         assert_eq!(
             document_url_selection("https://example.com/shot.arrow?v=2#row"),
-            Ok(DocumentFormat::ArrowIpc),
+            Ok(DocumentFormat::LABEL),
             "a query string is not part of the extension"
         );
 
         assert!(document_url_selection("").is_err());
         assert!(document_url_selection("file:///tmp/shot.arrow").is_err());
         assert!(document_url_selection("https://example.com/shot.mp4").is_err());
+        assert!(
+            document_url_selection("https://example.com/shot.parquet").is_err(),
+            "Parquet is no longer a container trd reads (#359)"
+        );
     }
 
     #[test]
     fn document_format_follows_the_extension_only_as_a_hint() {
-        assert_eq!(
-            DocumentFormat::from_name("fiba-shot1.arrow"),
-            Some(DocumentFormat::ArrowIpc)
-        );
-        assert_eq!(
-            DocumentFormat::from_name("tracks.Parquet"),
-            Some(DocumentFormat::Parquet)
-        );
-        assert_eq!(DocumentFormat::from_name("tracks"), None);
-        assert_eq!(DocumentFormat::from_name("tracks.csv"), None);
+        assert!(DocumentFormat::accepts_name("fiba-shot1.arrow"));
+        assert!(DocumentFormat::accepts_name("tracks.ARROW"));
+        assert!(!DocumentFormat::accepts_name("tracks.parquet"));
+        assert!(!DocumentFormat::accepts_name("tracks"));
+        assert!(!DocumentFormat::accepts_name("tracks.csv"));
     }
 
     #[test]
@@ -2133,7 +2117,7 @@ pub(super) mod tests {
         }));
         shared.set_pending_document(Some(PendingSource {
             kind: VideoSourceKind::HttpUrl,
-            name: "https://example.com/shot.parquet".to_owned(),
+            name: "https://example.com/shot.arrow".to_owned(),
         }));
 
         shared.set_pending_document(None);

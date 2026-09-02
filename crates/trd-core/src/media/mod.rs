@@ -5,7 +5,7 @@
 //! rate, frame count, duration — and there are **two** sources for them:
 //!
 //! * the authoring document ([`video_document`]), `trd.video_edit 0.2.0`, read
-//!   from Arrow IPC or Parquet; and
+//!   from an Arrow IPC stream; and
 //! * the container itself ([`mp4_probe`]), walked for its `moov` box.
 //!
 //! The document is **optional** (#264): without one the editor is a player whose

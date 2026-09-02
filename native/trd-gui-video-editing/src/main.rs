@@ -104,6 +104,7 @@ fn run() -> Result<(), error::NativeVideoEditingError> {
         // per process is what lets the rendered texture be bound straight into
         // egui instead of round-tripping through CPU memory (#229).
         Box::new(move |context| {
+            trd_gui::fonts::install(&context.egui_ctx);
             let gpu = context.wgpu_render_state.as_ref().map(|state| {
                 trd_core::GpuContext::adopt(
                     state.adapter.clone(),

@@ -247,7 +247,7 @@ count, duration — and there are **two** sources for them:
 
 | Source | Location |
 |---|---|
-| `0.2.0` authoring document | `media/video_document/`, read from Arrow IPC or Parquet |
+| `0.2.0` authoring document | `media/video_document/`, read from an Arrow IPC stream |
 | Container metadata | `media/mp4_probe/`, walked for its `moov` box |
 
 They are alternative answers to one question rather than unrelated parsers, so

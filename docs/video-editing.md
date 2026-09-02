@@ -27,7 +27,7 @@ uv run --with pyarrow scripts/protocol_schema.py --check
   - [Sparse rows](#sparse-rows)
   - [Selection and placement state](#selection-and-placement-state)
 - [Generate the document](#generate-the-document)
-  - [The Parquet twin, and the parity test](#the-parquet-twin-and-the-parity-test)
+  - [The real-document test](#the-real-document-test)
 - [Browser/media boundary](#browsermedia-boundary)
   - [Reader boundary](#reader-boundary)
   - [Ranged bytes](#ranged-bytes)
@@ -77,14 +77,17 @@ dimensions, frame rate, frame count, and duration.
 
 ### Container sniffing
 
-**Rule: read Arrow IPC streams or Parquet from the bytes, not from the file
-name.** The container is sniffed (`PAR1` at both ends versus the Arrow IPC
-continuation marker), never taken from the file name — a URL need not carry a
-useful suffix, and a mislabelled file is read for what it is.
+**Rule: recognise the Arrow IPC stream from the bytes, not from the file name.**
+The container is identified by the Arrow IPC continuation marker, never taken
+from the file name — a URL need not carry a useful suffix, and a mislabelled
+file is read for what it is.
 
-Parquet carries schema key-value metadata, so the version and table-kind contract
-above is identical either way. Both readers feed one decoder: the same rows in
-either container produce the same document.
+Arrow IPC is the **only** container (#359). Parquet was accepted until then; the
+reader cost ~1 MB of the browser bundle, which is a poor trade for a conversion
+the producer can do once. A file that still *is* Parquet (`PAR1` at both ends) is
+recognised and refused by name — `Parquet annotation documents are no longer
+supported; convert to an Arrow IPC stream` — rather than reported as an unknown
+format, because the data is fine and only the container is wrong.
 
 ### Sparse rows
 
@@ -94,14 +97,14 @@ Everything else is ordinary video and is played as such:
 | Column | Type | Meaning |
 |---|---|---|
 | `video_frame_index` | `u32` | decoded frame index; **strictly increasing, with gaps** |
-| `present_index` | `u32` | source parquet row |
+| `present_index` | `u32` | source calibration row |
 | `timestamp_us` | `i64` | deterministic media timestamp |
 | `k` | nullable `FixedSizeList<f32>[9]` | row-major OpenCV intrinsics |
 | `placement_quad` | nullable `FixedSizeList<f32>[8]` | TL/TR/BR/BL pixels |
 | `tracked` | `bool` | whether K/quad geometry is valid |
 | `poster_bytes` | nullable `Binary` | optional encoded JPEG, on the first row only |
 
-Every timeline row directly copies the parquet row with the same
+Every timeline row directly copies the calibration row with the same
 `present_index`; there is no frame-zero propagation. The Rust decoder rejects
 unsupported versions and table kinds, partial K/quad geometry, frame indices
 outside the video, out-of-order or duplicated indices, and a misplaced poster.
@@ -174,40 +177,26 @@ uv run --with pyarrow scripts\fiba_video_editing_bundle.py `
 
 The generated Arrow file is ignored; regenerate it from the local MP4.
 
-### The Parquet twin, and the parity test
+### The real-document test
 
-Both containers decode through one code path, and
-`the_real_document_decodes_identically_from_both_containers` pins that on the
-real 222-row document rather than on hand-built rows. Both fixtures are
-generated, so the test is `#[ignore]`d and **skips** when they are absent:
+`the_real_document_decodes` pins the decoder on the real 222-row document rather
+than on hand-built rows. The fixture is generated, so the test is `#[ignore]`d and
+**skips** when it is absent:
 
 ```sh
-uv run --with pyarrow scripts/doc_fixtures.py -o /tmp/trd-doc
-TRD_DOC_DIR=/tmp/trd-doc cargo test -p trd-core --lib video_editing -- --ignored --nocapture
+cargo test -p trd-core --lib video_document -- --ignored --nocapture
 ```
 
 ```powershell
-uv run --with pyarrow scripts\doc_fixtures.py -o $env:TEMP\trd-doc
-$env:TRD_DOC_DIR = "$env:TEMP\trd-doc"
-cargo test -p trd-core --lib video_editing -- --ignored --nocapture
+cargo test -p trd-core --lib video_document -- --ignored --nocapture
 ```
 
-`scripts/doc_fixtures.py` converts the generated Arrow document into the Parquet
-twin plus one copy per codec, creating the output directory. Run the two steps
-separately: the first needs the network the first time (`uv` fetches pyarrow),
-and the second may be a cold build, so a stall is otherwise hard to attribute.
-Success prints two `ok` lines and **no** `skipping:` line — a `skipping:` line
-means the test found no fixture and asserted nothing.
-
-`TRD_DOC_DIR` is where the Parquet fixtures are looked for (default: the
-platform temp dir); the Arrow fixture defaults to its generated location in the
-tree, resolved against the repository root rather than the crate directory a
-test binary runs from. `TRD_DOC_ARROW` / `TRD_DOC_PARQUET` override the two
-paths individually. The per-codec copies drive
-`unsupported_compression_says_so_clearly`,
-which pins that `snappy`/uncompressed read and that `zstd`/`gzip` are refused
-with parquet's own "Disabled feature at compile time" — those codecs are C shims
-and are left out so the crate keeps cross-compiling to wasm32.
+The fixture defaults to its generated location in the tree
+(`web/gui-video-editing/data/fiba-shot1.arrow`), resolved against the repository
+root rather than the crate directory a test binary runs from; `TRD_DOC_ARROW`
+overrides the path and `TRD_DOC_DIR` the directory. Success prints an `ok` line
+and **no** `skipping:` line — a `skipping:` line means the test found no fixture
+and asserted nothing.
 
 ## Browser/media boundary
 
@@ -614,7 +603,7 @@ duration before playback.
 
 | Path | Responsibility |
 |---|---|
-| `crates/trd-core/src/media/video_document/` | versioned timeline decoder (`trd.video_edit 0.2.0`, Arrow or Parquet) |
+| `crates/trd-core/src/media/video_document/` | versioned timeline decoder (`trd.video_edit 0.2.0`, Arrow IPC) |
 | `crates/trd-core/src/media/video.rs` | `VideoTiming` / `VideoInfo` — what a clip is, from either source |
 | `crates/trd-core/src/media/mp4_probe/` | `moov` walk for the container's own timeline (#264) |
 | `crates/trd-core/src/media/arrow_columns.rs` | Arrow column/metadata accessors for the document |

@@ -35,15 +35,20 @@
         craneLib = (crane.mkLib pkgs).overrideToolchain (_: rustToolchain);
 
         # Keep `.wgsl` shaders in the build source (trd-core embeds them via
-        # `include_wgsl!`) and the golden e2e fixtures/PNGs
+        # `include_wgsl!`), the subset UI fonts (`trd-gui` embeds them via
+        # `include_bytes!`, #359) and the golden e2e fixtures/PNGs
         # (`crates/trd-core/tests/golden/`, read at test time via
         # `CARGO_MANIFEST_DIR`); crane's default filter would drop non-Rust files.
+        #
+        # A file missing here fails *only* under nix: a plain `cargo build` reads
+        # the working tree and never notices.
         src = lib.cleanSourceWith {
           src = ./.;
           filter =
             path: type:
             (lib.hasSuffix ".wgsl" path)
             || (lib.hasInfix "/crates/trd-core/tests/golden/" path)
+            || (lib.hasInfix "/assets/fonts/" path)
             || (craneLib.filterCargoSources path type);
           name = "source";
         };
