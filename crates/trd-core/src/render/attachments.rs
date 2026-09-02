@@ -9,9 +9,12 @@
 //! pairing wrong.
 //!
 //! **`Attachment`, not `*Target`.** A `*Target` here is *a place a frame lands*
-//! and is read back — [`TextureTarget`](super::TextureTarget),
-//! [`PickTarget`](super::picking::PickTarget) (#203). These are transient pass
-//! scratch nothing samples: `RENDER_ATTACHMENT` only, resolved or discarded.
+//! with a lifecycle a caller drives — [`TextureTarget`](super::TextureTarget),
+//! [`PickTarget`](super::picking::PickTarget) (#203). An attachment is what a
+//! single pass draws into: the mesh pass's two are `RENDER_ATTACHMENT` only and
+//! nothing ever reads them (the color is resolved, the depth discarded), and
+//! even the pick id — which does carry `COPY_SRC` for its one-texel read-back —
+//! is scratch the pass rebuilds whenever the viewport moves.
 
 use super::{Viewport, DEPTH_FORMAT, PICK_FORMAT};
 
@@ -85,8 +88,10 @@ pub(crate) struct AttachmentSpec {
 impl AttachmentSpec {
     /// The mesh pass's multisampled color: resolved into the caller's
     /// single-sample view and never sampled or copied, hence
-    /// `RENDER_ATTACHMENT` alone.
-    pub(crate) fn color(format: wgpu::TextureFormat, sample_count: u32) -> Self {
+    /// `RENDER_ATTACHMENT` alone. Named for the only kind trd owns — with MSAA
+    /// off the pass renders straight into the caller's view and allocates
+    /// nothing.
+    pub(crate) fn msaa_color(format: wgpu::TextureFormat, sample_count: u32) -> Self {
         Self {
             label: "trd msaa color texture",
             format,
@@ -140,18 +145,20 @@ impl ViewportAttachment {
     /// Matches the attachment to `width` × `height` (each clamped to ≥ 1),
     /// recreating it only when the size changed. Returns a reference, so no
     /// call site unwraps.
+    ///
+    /// The replacement is built *before* the old one drops — as the assignments
+    /// it replaces did — so a failed allocation leaves the previous attachment
+    /// in place rather than nothing at all.
     pub(crate) fn ensure(&mut self, device: &wgpu::Device, width: u32, height: u32) -> &Attachment {
         let width = width.max(1);
         let height = height.max(1);
-        if self
+        let current = self
             .current
-            .as_ref()
-            .is_some_and(|current| current.width != width || current.height != height)
-        {
-            self.current = None;
+            .get_or_insert_with(|| Attachment::new(device, &self.spec, width, height));
+        if current.width != width || current.height != height {
+            *current = Attachment::new(device, &self.spec, width, height);
         }
-        self.current
-            .get_or_insert_with(|| Attachment::new(device, &self.spec, width, height))
+        current
     }
 
     /// The allocated attachment, or `None` before the first
@@ -164,12 +171,17 @@ impl ViewportAttachment {
 /// The mesh pass's attachment set: the multisampled color it *may* own, and the
 /// depth buffer it always has.
 ///
-/// One owner, so "same format, same sample count as the pipelines" is written
-/// once rather than kept by three doc comments (#221 §3). The two meanings the
-/// old `MsaaColor::target` carried in a single `Option` are now separate:
-/// [`color`](Self::color) being `None` means **MSAA is off**, decided at
-/// construction from `sample_count`, while "not allocated yet" is the `Option`
-/// inside [`ViewportAttachment`].
+/// One owner, so the format and sample count are stated once instead of by
+/// three doc comments saying they must agree (#221 §3): both specs are built
+/// from the one [`new`](Self::new) call and never mutated, so nothing can move
+/// the depth attachment off the color attachment's sample count. Matching the
+/// *pipelines* is still the caller's job — `Renderer` builds them from the same
+/// two arguments.
+///
+/// The two meanings the old `MsaaColor::target` carried in a single `Option`
+/// are now separate: [`color`](Self::color) being `None` means **MSAA is off**,
+/// decided at construction from `sample_count`, while "not allocated yet" is the
+/// `Option` inside [`ViewportAttachment`].
 pub(crate) struct MeshAttachments {
     color: Option<ViewportAttachment>,
     depth: ViewportAttachment,
@@ -182,7 +194,7 @@ impl MeshAttachments {
     pub(crate) fn new(format: wgpu::TextureFormat, sample_count: u32) -> Self {
         Self {
             color: (sample_count > 1)
-                .then(|| ViewportAttachment::new(AttachmentSpec::color(format, sample_count))),
+                .then(|| ViewportAttachment::new(AttachmentSpec::msaa_color(format, sample_count))),
             depth: ViewportAttachment::new(AttachmentSpec::depth(sample_count)),
         }
     }

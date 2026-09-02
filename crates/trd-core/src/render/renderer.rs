@@ -96,7 +96,8 @@ use thiserror::Error;
 ///
 /// A value rather than a pair of setters per field: "which meshes" and "what to
 /// change" are independent questions, and keeping them apart is what lets
-/// [`Renderer::edit_appearance`] be the single writer of `slots_dirty`.
+/// [`Renderer::edit_appearance`] be the one place an *appearance* edit marks the
+/// PBR slots stale.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MeshTarget {
     /// Every uploaded mesh — the single-mesh and wire-protocol default.
@@ -483,6 +484,10 @@ impl Renderer {
         let mesh_id = self.meshes.push(uploaded);
         self.uniforms
             .grow_pbr_slots(&self.gpu.device, self.meshes.len());
+        // Unconditional: growing reallocates and discards every slot, and when
+        // it does *not* grow the id is a reused hole still holding the previous
+        // occupant's material.
+        self.uniforms.mark_slots_dirty();
         mesh_id
     }
 

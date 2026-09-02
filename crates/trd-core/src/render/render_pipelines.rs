@@ -216,15 +216,18 @@ impl SceneUniforms {
     /// Widens the PBR slot array to one slot per mesh after a runtime mesh add
     /// (#353). The layout is a pure function of the device, so it is rebuilt
     /// here rather than retained — [`create_render_pipelines`] drops its own.
+    ///
+    /// It does **not** mark the slots stale on its own: it is a no-op when the
+    /// capacity already suffices, which is exactly the reused-hole case that
+    /// still needs its slot rewritten. The caller marks the add instead.
     pub(super) fn grow_pbr_slots(&mut self, device: &wgpu::Device, meshes: usize) {
         let layout = create_pbr_bind_group_layout(device);
         self.pbr.grow(device, &layout, meshes);
-        // Reallocating the slot buffer discards every slot, not just the new one.
-        self.slots_dirty = true;
     }
 
-    /// Marks the per-mesh slots stale, so the next frame rewrites them. Called
-    /// whenever a mesh's appearance changes or a slot's contents are discarded.
+    /// Marks the per-mesh slots stale, so the next frame rewrites every live
+    /// one. Every path that changes what a slot should hold — an appearance
+    /// edit, a mesh added into a fresh or reused id, a mesh removed — calls it.
     pub(super) fn mark_slots_dirty(&mut self) {
         self.slots_dirty = true;
     }
@@ -267,7 +270,6 @@ impl SceneUniforms {
         if !self.slots_dirty {
             return;
         }
-        self.slots_dirty = false;
         // A removed mesh leaves a hole whose slot nothing draws; skipping it
         // keeps every surviving mesh on the slot its id names.
         for (slot, mesh) in meshes.iter().enumerate() {
@@ -283,5 +285,7 @@ impl SceneUniforms {
             });
             self.pbr.write_slot(queue, slot, &uniform);
         }
+        // Cleared only once every live slot has been rewritten.
+        self.slots_dirty = false;
     }
 }
