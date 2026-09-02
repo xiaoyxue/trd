@@ -51,7 +51,15 @@ the GPU context, pipelines, materials, and mesh store, with the render **target*
 passed as a plain per-call argument rather than a type parameter or an owned
 field (#203).
 
-`render/render_target.rs` holds only the resources a frame lands in:
+`renderer.rs` holds the struct, the constructors, the render entry points and the
+frame loop. The rest of `impl Renderer` lives in the `render/` module that owns
+the resource each group drives — picking in `picking.rs`, the target lifecycle in
+`render_target.rs`, the per-primitive `record` bodies in `draw_command.rs`, the
+mesh surface in `mesh_store.rs`, and one forward each into `environment.rs` and
+`frame_plane.rs` (#363). `renderer.rs`'s module doc carries the locator table.
+
+`render/render_target.rs` holds the resources a frame lands in — plus the
+lifecycle done *to* them:
 
 | Type | Holds | Used by |
 |---|---|---|

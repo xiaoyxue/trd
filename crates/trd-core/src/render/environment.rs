@@ -17,6 +17,8 @@
 //! [`ImageBasedLighting`], and the CPU precompute this file uploads — is in
 //! `env_map.rs`.
 
+use super::Renderer;
+
 use super::env_map::{
     build_irradiance_map, f32_to_f16_bits, fit_environment, integrate_brdf,
     prefilter_environment_level,
@@ -422,4 +424,17 @@ fn upload_brdf_lut(gpu: &GpuContext) -> (wgpu::TextureView, wgpu::Sampler) {
         ..Default::default()
     });
     (view, sampler)
+}
+
+/// The environment probe's one renderer-level setter (#363): a forward into
+/// [`Environment::set`], kept beside the subsystem it writes.
+impl Renderer {
+    /// Binds `env` as the equirectangular HDR environment map reflected by
+    /// [`RenderMode::Shaded`](super::RenderMode::Shaded) draws. The probe is
+    /// (re)uploaded lazily on the next [`render`](Renderer::render). Until set,
+    /// PBR draws use no environment reflection (a 1×1 black probe keeps the bind
+    /// group valid).
+    pub fn set_env_map(&mut self, env: EnvMapData) {
+        self.environment.set(&self.gpu, env);
+    }
 }

@@ -3,10 +3,9 @@
 //!
 //! [`Picking`] is the pass's own state — its pipeline (`picking.wgsl`), its
 //! per-instance buffer, and its lazily allocated [`PickTarget`]. The three are
-//! used only by [`Renderer::pick`](super::Renderer::pick) and are
-//! meaningless apart, so they travel together rather than as three loose
-//! renderer fields, and they live here beside the target they create rather
-//! than in `renderer.rs` (#221 §4).
+//! used only by [`Renderer::pick`](super::Renderer::pick) — which lives here too
+//! (#363) — and are meaningless apart, so they travel together rather than as
+//! three loose renderer fields (#221 §4).
 //!
 //! [`PickTarget`] is the target itself: a single-sample **linear**
 //! [`PICK_FORMAT`](super::PICK_FORMAT) color attachment + a depth attachment,
@@ -19,12 +18,18 @@
 //! (so the id bytes round-trip exactly) — both pinned by
 //! [`AttachmentSpec::id_color`].
 //!
-//! Like every other target, it is **pure data** (#203, #235 R4): the pass that
-//! fills it and the read-back that decodes it are [`Renderer`](super::Renderer) methods, because
-//! a texture + staging buffer knows nothing about pipelines, uniforms or the
-//! mesh store. That also retires the `take_target`/`restore_target` dance the
-//! old `PickTarget::pick(&self, renderer: &mut Renderer, …)` needed to dodge the
+//! Like every other target, it is **pure data** (#203, #235 R4): a texture +
+//! staging buffer knows nothing about pipelines, uniforms or the mesh store, so
+//! the pass that fills it and the read-back that decodes it are
+//! [`Renderer`](super::Renderer) methods — in the `impl Renderer` block at the
+//! bottom of this file, beside the state they drive (#363). That also retires
+//! the `take_target`/`restore_target` dance the old
+//! `PickTarget::pick(&self, renderer: &mut Renderer, …)` needed to dodge the
 //! borrow checker — the renderer now splits the borrow in time instead.
+
+use super::buffer::draw_indexed;
+use super::{Draw, Renderer, Viewport};
+use crate::Camera;
 
 use super::GpuContext;
 
@@ -176,4 +181,218 @@ pub(super) struct PickPass<'a> {
     pub(super) depth: &'a Attachment,
     /// The `MAP_READ` buffer the picked texel is copied into.
     pub(super) staging: &'a wgpu::Buffer,
+}
+
+/// The object-id picking **pass**, beside the pipeline, instance buffer and
+/// target it drives (#363). The state stays in [`Picking`]; the sequence — ensure
+/// the target, stage, encode, read back — needs the renderer's uniforms and mesh
+/// store, so it is [`Renderer`] behaviour living in the file that owns what it
+/// touches.
+impl Renderer {
+    /// The size of the object-id pick target, or `None` if nothing has been
+    /// picked yet (it is allocated on the first [`pick`](Self::pick)). Diagnostic
+    /// only — front-ends surface it in their debug panels.
+    pub fn pick_target_size(&self) -> Option<(u32, u32)> {
+        self.picking.target_size()
+    }
+
+    /// Stages the **object-id picking pass** (#141) for `draws`: writes the frame
+    /// camera and uploads one id instance per pickable draw, returning the
+    /// `(mesh_id, instance slot)` records [`encode_picking`](Self::encode_picking)
+    /// then draws. Out-of-range mesh ids and `Shadow` draws are skipped, but the
+    /// index mapping is preserved (a skipped draw's index simply never appears),
+    /// so a decoded id maps straight back to `draws[index]`.
+    ///
+    /// Split from the encode half so the pass's two borrows never overlap: this
+    /// is the `&mut self` work (uniform write + instance upload), and encoding
+    /// then needs only `&self` — which is what lets [`pick`](Self::pick) render
+    /// into a target the renderer still *owns*, instead of moving it out of
+    /// `self` and handing it back (#235 R4).
+    ///
+    /// Private: a front-end reaches it through [`pick`](Self::pick), which owns
+    /// the whole sequence — ensure target, prepare, encode, read back (#235 R4).
+    ///
+    /// **It keeps its own traversal on purpose** (#204). It does *not* batch a
+    /// [`Scene`] and does not go through the per-primitive `record` bodies: this
+    /// is a different pass with different attachments (single-sampled, flat id
+    /// colors, no MSAA resolve) drawing only mesh geometry through the
+    /// [`Picking`](super::picking::Picking) pipeline instead of the visual ones,
+    /// and it needs an
+    /// instance per *object* — never grouped — because the whole point is that
+    /// each one carries a distinct id. Sharing the walk would mean threading a
+    /// pass-kind through every `record` body to couple two loops that agree on
+    /// almost nothing, for little gain.
+    fn prepare_picking(&mut self, camera: Camera, draws: &[Draw]) -> Vec<(usize, u32)> {
+        // Camera P·V for this frame (writes the shared camera uniform bound by
+        // `uniforms.camera`, which is layout-compatible with the pick pipeline).
+        self.uniforms.write_camera(&self.gpu.queue, camera);
+
+        // Build one pick instance per drawable object, carrying its index color.
+        let mut instances: Vec<PickInstanceRaw> = Vec::with_capacity(draws.len());
+        let mut records: Vec<(usize, u32)> = Vec::with_capacity(draws.len());
+        // A shadow blob has no mesh geometry to hit-test, so it is not pickable.
+        for (index, draw) in draws.iter().enumerate() {
+            if !draw.selection.is_mesh() {
+                continue;
+            }
+            let Some(mesh) = self.meshes.get(draw.mesh_id as usize) else {
+                continue;
+            };
+            let effective = draw.model * mesh.geometry.base_model;
+            let slot = instances.len() as u32;
+            instances.push(PickInstanceRaw::new(effective, index as u32));
+            records.push((draw.mesh_id as usize, slot));
+        }
+
+        // Grow + upload the pick instance buffer.
+        self.picking.upload_instances(&self.gpu, &instances);
+        records
+    }
+
+    /// Encodes the **object-id picking pass** for the records staged by
+    /// [`prepare_picking`](Self::prepare_picking): each pickable draw's mesh is
+    /// rasterized in a flat color encoding its **index**, single-sampled and
+    /// depth-tested into `target`'s id-color attachment (cleared to id `0` =
+    /// background) and its depth attachment. No lighting, no texture, no MSAA —
+    /// so the pixel under the cursor reads back to an exact id via
+    /// [`PickInstanceRaw::decode`].
+    ///
+    /// Takes `&self`: with the staging already done, the pass borrows the
+    /// pipeline, the camera bind group and the mesh geometry immutably — the same
+    /// way it borrows the `target`, which is why that target can live in
+    /// `self.picking` for the whole call (#235 R4).
+    ///
+    /// **It keeps its own traversal on purpose** (#204). It does *not* batch a
+    /// [`Scene`] and does not go through the per-primitive `record` bodies: this
+    /// is a different pass with different attachments (single-sampled, flat id
+    /// colors, no MSAA resolve) drawing only mesh geometry through the
+    /// [`Picking`](super::picking::Picking) pipeline instead of the visual ones,
+    /// and it needs an
+    /// instance per *object* — never grouped — because the whole point is that
+    /// each one carries a distinct id. Sharing the walk would mean threading a
+    /// pass-kind through every `record` body to couple two loops that agree on
+    /// almost nothing, for little gain.
+    fn encode_picking(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &PickPass<'_>,
+        records: &[(usize, u32)],
+    ) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("trd picking pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target.id.view(),
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    // Clear to id 0 (background).
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: target.depth.view(),
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+
+        self.picking
+            .bind(&mut pass, self.uniforms.camera.bind_group());
+        for &(mesh_id, slot) in records {
+            // `prepare_picking` already dropped out-of-range ids, but the store is
+            // the only thing that can prove it — so ask it, don't index it (#235 R7).
+            let Some(mesh) = self.meshes.get(mesh_id) else {
+                continue;
+            };
+            draw_indexed(&mut pass, mesh.filled(), slot..slot + 1);
+        }
+    }
+
+    /// **Object-id picking** (#141): renders `draws` through the flat id-color
+    /// pass at `viewport`'s size and returns the **0-based index into `draws`**
+    /// of the object under pixel `(x, y)`, or `None` for the background (or an
+    /// out-of-bounds coordinate). The pass is single-sampled and depth-tested, so
+    /// the nearest object wins and ids are never blended — the "color index"
+    /// method, no ray-marching. The lazily-created pick target tracks `viewport`,
+    /// which the caller passes on every call (#203): the harness no longer owns a
+    /// render target of its own to read a size from, so a shell reports its
+    /// current display size the same way it would to `render_params`.
+    pub async fn pick(
+        &mut self,
+        camera: Camera,
+        draws: &[Draw],
+        x: u32,
+        y: u32,
+        viewport: Viewport,
+    ) -> Option<u32> {
+        let gpu = self.gpu.clone();
+        let Viewport {
+            width: w,
+            height: h,
+        } = viewport;
+        // The target stays owned by `self.picking` for the whole call (#235 R4).
+        // The borrows are separated in *time* instead of by moving it out: the
+        // `&mut self` staging first, then an all-immutable encode + read-back.
+        self.picking.ensure_target(&gpu.device, w, h);
+        let records = self.prepare_picking(camera, draws);
+
+        let target = self.picking.pass()?;
+        if !target.id.contains(x, y) {
+            return None;
+        }
+
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("trd pick frame"),
+            });
+        self.encode_picking(&mut encoder, &target, &records);
+        // Copy just the one texel under the cursor into the staging buffer.
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: target.id.texture(),
+                mip_level: 0,
+                origin: wgpu::Origin3d { x, y, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: target.staging,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT),
+                    rows_per_image: Some(1),
+                },
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+        gpu.queue.submit(Some(encoder.finish()));
+
+        let slice = target.staging.slice(..4);
+        let (sender, receiver) = futures_channel::oneshot::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
+        // Same wait as the offscreen readback; see `platform::poll_for_map`.
+        super::platform::poll_for_map(&gpu.device).ok()?;
+        receiver.await.ok()?.ok()?;
+
+        let id = {
+            let mapped = slice.get_mapped_range().ok()?;
+            let rgba = [mapped[0], mapped[1], mapped[2], mapped[3]];
+            PickInstanceRaw::decode(rgba)
+        };
+        target.staging.unmap();
+        id
+    }
 }

@@ -12,13 +12,14 @@
 //! its only remaining job. So there is one `Renderer`, and the render
 //! **target** is a plain argument to the call that needs it (#203).
 //!
-//! **All the render behaviour is here.** The targets used to carry it —
-//! `OffscreenTarget::render`/`draw_layers`/`read_pixels`, `OnscreenTarget::
-//! present`/`acquire`/`reconfigure` — with this harness forwarding to them,
-//! which had the ownership backwards: a swapchain handle knows nothing about
-//! pipelines, materials or the mesh store, and everything it "did" immediately
-//! borrowed the renderer straight back. Now a target is pure data
-//! ([`RenderTarget`], [`SurfaceTarget`], [`TextureTarget`]), and drawing is:
+//! **The render behaviour is all on `Renderer`, but not all in this file.**
+//! The targets used to carry it — `OffscreenTarget::render`/`draw_layers`/
+//! `read_pixels`, `OnscreenTarget::present`/`acquire`/`reconfigure` — with this
+//! harness forwarding to them, which had the ownership backwards: a swapchain
+//! handle knows nothing about pipelines, materials or the mesh store, and
+//! everything it "did" immediately borrowed the renderer straight back. Now a
+//! target is pure data ([`RenderTarget`], [`SurfaceTarget`], [`TextureTarget`]),
+//! and drawing is:
 //!
 //! - [`render`](Renderer::render) — the **one** public entry, a match over
 //!   [`RenderTarget`]: `render_surface` presents, `render_texture` encodes +
@@ -30,11 +31,27 @@
 //!   [`render_layers`](Renderer::render_layers) — the multi-camera composited
 //!   draw the video editor needs, texture-only for the same reason.
 //!
-//! Target lifecycle (create / resize / reconfigure / replace) lives here too,
-//! for the same reason: it is something *done to* a target, not something a
-//! target does. The surface ones are associated functions taking a
-//! `&wgpu::Device`, because a window is resized and repaired long before the
-//! stream has delivered a mesh to build a `Renderer` from.
+//! # Where the rest of `impl Renderer` lives (#363)
+//!
+//! `render/` is organised **by resource**, and almost every remaining method is
+//! a *driver of one of those resources* — so each group sits in the file that
+//! owns what it touches, rather than 900 lines below the struct. The `Renderer`
+//! fields are `pub(super)` for exactly this reason: the impl is spread across
+//! `render/`, and nowhere wider. rustdoc still lists every method in one place;
+//! this table is for reading the source.
+//!
+//! | Group | Lives in |
+//! |---|---|
+//! | `pick`, `prepare_picking`, `encode_picking`, `pick_target_size` | `picking.rs` |
+//! | target lifecycle — `create_*_target`, `resize_*`, `reconfigure_surface`, `replace_surface`, `read_pixels`, `read_back` | `render_target.rs` |
+//! | the per-[`Primitive`] `record` bodies + `bind_instances` | `draw_command.rs` |
+//! | [`MeshTarget`], `add_mesh`, `remove_mesh`, `mesh_count`, the texture setters, `edit_appearance` + the appearance setters | `mesh_store.rs` |
+//! | `set_env_map` | `environment.rs` |
+//! | `update_frame_texture*`, `has_frame_texture` | `frame_plane.rs` |
+//!
+//! **What stays here** is what has no other owner: the errors, the struct, the
+//! constructors, the render entry points, and the frame loop — `prepare_frame`,
+//! `encode`/`encode_overlay` and `encode_pass`.
 //!
 //! Internally it is still a composition of a few cohesive parts, each with a
 //! single job, so no one struct is a grab-bag of wgpu handles:
@@ -44,26 +61,28 @@
 //!   *what draws* and *what it reads* are different questions (#203); both live
 //!   in `render_pipelines.rs` because both are `f(format, sample_count)` rather
 //!   than a function of any one scene (#221 §2).
-//! - [`MeshStore`] — the uploaded [`MeshGpu`]s (each owning its albedo, material
-//!   maps, material, IBL, tone-map and debug view), the shared axes gizmo, and
-//!   the growable per-instance model buffer; also walks a [`Scene`] into draw
-//!   batches.
+//! - [`MeshStore`] — the uploaded [`MeshGpu`](super::mesh_store::MeshGpu)s (each
+//!   owning its albedo, material maps, material, IBL, tone-map and debug view),
+//!   the shared axes gizmo, and the growable per-instance model buffer; also
+//!   walks a [`Scene`] into draw batches.
 //! - [`BoundTexture`](super::BoundTexture) — the mesh albedo sampled by textured
 //!   draws (#20).
 //! - [`FramePlane`] — the background video frame plane (#63).
+//! - [`MeshAttachments`] — the mesh pass's own depth and (with MSAA) color
+//!   attachments, in `attachments.rs` (#363).
 //! - [`Picking`](super::picking::Picking) — the object-id picking pipeline, its
 //!   instance buffer and its `PickTarget` (#141), all three in `picking.rs`
 //!   beside the target they create; the target is allocated lazily on the first
-//!   [`pick`](Self::pick) call so a headless CLI stream never pays for it. Like
-//!   every other target it is **data**: staging, encoding and reading it back are
-//!   `Renderer` methods, so no target drives the renderer (#235 R4).
+//!   `pick` call so a headless CLI stream never pays for it. Like every other
+//!   target it is **data**: staging, encoding and reading it back are `Renderer`
+//!   methods, so no target drives the renderer (#235 R4).
 //!
 //! **The draw loop is a dispatch, not a state machine** (#204). `encode_pass`
 //! walks the batched commands and hands each to the `record` body of its
 //! [`Primitive`] — one line per arm — and every body sets its own pipeline and
 //! bind groups at entry while restoring nothing at exit, so no body may depend
-//! on pass state another one left behind. The bodies and that rule are on the
-//! second `impl Renderer` block below.
+//! on pass state another one left behind. The bodies and that rule are in
+//! `draw_command.rs`, beside the batcher they are in lockstep with.
 //!
 //! Formerly `BatchRenderer`. "Batch" there meant *batch-mode headless output* and
 //! described nothing about the type — instanced batching lives entirely in
@@ -71,40 +90,21 @@
 //! name now belongs to one concept: grouping draws into instanced commands
 //! (#180).
 
-use std::ops::Range;
 use std::sync::Arc;
 
 use super::bound_material_maps::BoundMaterialMaps;
-use super::buffer::{draw_indexed, draw_vertices, InstanceBuffer, VertexBuffer};
+use super::buffer::InstanceBuffer;
 use super::draw_command::{build_batches, Batches};
 use super::environment::{EnvBackgroundSettings, Environment};
 use super::frame_plane::FramePlane;
 use super::gizmo::GizmoGeometry;
-use super::mesh_store::{upload_mesh, MeshGpu, MeshStore};
-use super::picking::{PickPass, Picking};
+use super::mesh_store::MeshStore;
+use super::picking::Picking;
 use super::*;
-use super::{Draw, GridPlane, Primitive, RenderMode, Scene};
-use crate::material::DisneyMaterial;
+use super::{Primitive, Scene};
 use crate::math::Matrix4;
-use crate::protocol::tightly_pack_rgba;
-use crate::texture::Texture;
 use crate::Camera;
-use futures_channel::oneshot;
 use thiserror::Error;
-
-/// Which meshes one appearance edit applies to.
-///
-/// A value rather than a pair of setters per field: "which meshes" and "what to
-/// change" are independent questions, and keeping them apart is what lets
-/// [`Renderer::edit_appearance`] be the one place an *appearance* edit marks the
-/// PBR slots stale.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MeshTarget {
-    /// Every uploaded mesh — the single-mesh and wire-protocol default.
-    All,
-    /// One mesh by id. Out-of-range ids change nothing.
-    One(usize),
-}
 
 /// Errors constructing or driving a [`Renderer`].
 ///
@@ -194,43 +194,43 @@ pub(crate) fn check_dimensions(width: u32, height: u32) -> Result<u32, RenderErr
 /// owns. Uploads, materials, lighting, mesh count and picking are shared by
 /// every caller regardless of target.
 pub struct Renderer {
-    pipelines: RenderPipelines,
+    pub(super) pipelines: RenderPipelines,
     /// The group-0 uniforms every pass binds: the camera `P·V`, the gizmo
     /// viewport params, and the per-mesh PBR slot array.
-    uniforms: SceneUniforms,
+    pub(super) uniforms: SceneUniforms,
     /// The HDR environment subsystem: the probe reflected by
     /// [`RenderMode::Shaded`] draws **and** the pipeline drawing it as the
     /// background sky. One type, like its sibling `FramePlane` (#221 §5).
-    environment: Environment,
+    pub(super) environment: Environment,
     /// The caller's uploaded meshes, fixed at construction.
-    meshes: MeshStore,
+    pub(super) meshes: MeshStore,
     /// The constant overlay geometry (axes, grids, quad outlines, shadow quad):
     /// a function of nothing, built once.
-    gizmos: GizmoGeometry,
+    pub(super) gizmos: GizmoGeometry,
     /// The per-frame model matrices every draw kind is instanced through,
     /// rewritten each `encode` and grown on demand (#222).
-    instances: InstanceBuffer<InstanceRaw>,
+    pub(super) instances: InstanceBuffer<InstanceRaw>,
     /// The batcher's scratch, reused across frames (#235 R6): `build_batches`
     /// clears and refills it, so a steady-state frame reuses the capacity of the
     /// previous one instead of allocating three vectors per frame. It is scratch,
     /// not state — nothing outside `encode_pass` reads it between frames.
-    batches: Batches,
-    frame_plane: FramePlane,
+    pub(super) batches: Batches,
+    pub(super) frame_plane: FramePlane,
     /// The mesh pass's own attachments: the depth buffer solid meshes z-occlude
     /// through, and — when MSAA is on — the multisampled color the pass renders
     /// into and resolves into the caller's `view`, so every front-end gets
     /// multisampled mesh/arrowhead edges transparently (gizmo lines add analytic
     /// AA separately). Both are sized to the viewport by `encode_pass`.
-    attachments: MeshAttachments,
+    pub(super) attachments: MeshAttachments,
     /// The shared GPU context. Retained so `encode` can grow GPU resources and
     /// the setters can upload immediately, without the caller threading handles
     /// through every call. Holding the whole context (rather than a bare device)
     /// is what lets the &self.gpu.queue live here too, which is why uploads no longer have
     /// to be deferred to `encode` (#180).
-    gpu: Arc<GpuContext>,
+    pub(super) gpu: Arc<GpuContext>,
     /// Everything the object-id picking pass (#141) needs: its pipeline, its
     /// instance buffer and its lazily-created target.
-    picking: Picking,
+    pub(super) picking: Picking,
 }
 
 impl Renderer {
@@ -447,83 +447,6 @@ impl Renderer {
         Ok((renderer, target))
     }
 
-    /// The number of meshes this renderer can draw; valid mesh ids in a
-    /// [`Primitive::Mesh`]/[`Primitive::AabbBox`] are in
-    /// `0..mesh_count()`.
-    pub fn mesh_count(&self) -> usize {
-        self.meshes.len()
-    }
-
-    /// Uploads `mesh` as a new drawable and returns its mesh id — the runtime
-    /// twin of the constructor's mesh set (#353).
-    ///
-    /// The renderer's mesh set used to be fixed at construction, so loading a
-    /// model meant rebuilding the whole renderer and losing the scene. This
-    /// grows the store **and** the PBR slot array together, which is the part
-    /// that cannot be a plain `Vec` push: a slot is chosen by a dynamic offset
-    /// validated against the slot buffer, so the buffer and its bind group are
-    /// reallocated. Every existing mesh keeps its appearance — the slots are
-    /// re-uploaded from the meshes that own them on the next frame.
-    ///
-    /// The new mesh gets [`Mesh::preview_transform`]
-    /// ([`crate::DEFAULT_PREVIEW_TARGET`]) as its base model, exactly like
-    /// [`auto_fit`](Self::auto_fit), and starts with the 1×1 white albedo and a
-    /// default appearance; bind its textures and material through the setters
-    /// above.
-    pub fn add_mesh(&mut self, mesh: &Mesh) -> usize {
-        let texture_layout = create_texture_bind_group_layout(&self.gpu.device);
-        let material_maps_layout = BoundMaterialMaps::create_layout(&self.gpu.device);
-        let uploaded = upload_mesh(
-            &self.gpu,
-            mesh,
-            mesh.preview_transform(crate::DEFAULT_PREVIEW_TARGET)
-                .matrix(),
-            &texture_layout,
-            &material_maps_layout,
-        );
-        let mesh_id = self.meshes.push(uploaded);
-        self.uniforms
-            .grow_pbr_slots(&self.gpu.device, self.meshes.len());
-        // Unconditional: growing reallocates and discards every slot, and when
-        // it does *not* grow the id is a reused hole still holding the previous
-        // occupant's material.
-        self.uniforms.mark_slots_dirty();
-        mesh_id
-    }
-
-    /// Removes mesh `mesh_id`, freeing its GPU memory, and reports whether one
-    /// was there (#353).
-    ///
-    /// Surviving meshes **keep their ids**: the slot becomes a hole rather than
-    /// the `Vec` compacting, because compacting would renumber every mesh after
-    /// it and silently repoint any scene holding an id. A later
-    /// [`add_mesh`](Self::add_mesh) reuses the hole. Drawing a removed id is
-    /// skipped like any other unknown id, not an error.
-    ///
-    /// **What the release does and does not guarantee.** The mesh's buffers and
-    /// textures are destroyed explicitly and the queue is flushed, so no later
-    /// render is needed to get the memory back — which is the bug this replaced,
-    /// where a delete freed nothing until something else happened to draw. It is
-    /// not a synchronous free: wgpu defers the physical deallocation of anything
-    /// still referenced by an in-flight submission until that submission
-    /// completes, so loading another large model immediately afterwards can
-    /// briefly hold both.
-    pub fn remove_mesh(&mut self, mesh_id: usize) -> bool {
-        let removed = self.meshes.remove(mesh_id);
-        if removed {
-            // `MeshStore::remove` destroyed the resources; this hands wgpu a
-            // submission to service that destruction on. Dropping alone frees
-            // nothing here on two counts: the handles are refcounted, and
-            // reclamation happens while servicing a submission rather than on
-            // drop or on poll.
-            self.gpu.queue.submit([]);
-            // The freed slot keeps its stale contents; the next frame rewrites
-            // every live one.
-            self.uniforms.mark_slots_dirty();
-        }
-        removed
-    }
-
     /// The GPU context this harness renders on.
     ///
     /// Exposed so a shell can build further resources — or bind the rendered
@@ -533,158 +456,6 @@ impl Renderer {
         &self.gpu
     }
 
-    /// Binds `texture` as the albedo of **mesh 0** — the single-mesh /
-    /// wire-protocol default sampled by [`RenderMode::Textured`]/[`RenderMode::Shaded`]
-    /// draws (#20). For a multi-object scene, skin each object with
-    /// [`set_mesh_texture`](Self::set_mesh_texture). The image is (re)uploaded
-    /// lazily on the next [`render`](Self::render); until set it is
-    /// 1×1 white.
-    pub fn set_texture(&mut self, texture: &dyn Texture) {
-        self.set_mesh_texture(0, texture);
-    }
-
-    /// Binds `texture` as the albedo of mesh `mesh_id` — so a multi-object scene
-    /// skins each object with its **own** diffuse (#141). Out-of-range ids are
-    /// ignored. The image uploads lazily on the next
-    /// [`render`](Self::render).
-    pub fn set_mesh_texture(&mut self, mesh_id: usize, texture: &dyn Texture) {
-        if let Some(mesh) = self.meshes.get_mut(mesh_id) {
-            mesh.textures.albedo.set(&self.gpu, texture);
-        }
-    }
-
-    /// Binds a glTF metallic-roughness map (G=roughness, B=metallic) for mesh
-    /// `mesh_id`, sampled by [`RenderMode::Shaded`] in place of the scalar
-    /// material values. Out-of-range ids are ignored.
-    pub fn set_mesh_metallic_roughness_texture(&mut self, mesh_id: usize, texture: &dyn Texture) {
-        if let Some(mesh) = self.meshes.get_mut(mesh_id) {
-            mesh.textures
-                .maps
-                .set_metallic_roughness(&self.gpu, texture);
-        }
-    }
-
-    /// Binds mesh `mesh_id`'s tangent-space glTF normal map, perturbing the
-    /// shading normal in [`RenderMode::Shaded`]. Out-of-range ids are ignored.
-    pub fn set_mesh_normal_texture(&mut self, mesh_id: usize, texture: &dyn Texture) {
-        if let Some(mesh) = self.meshes.get_mut(mesh_id) {
-            mesh.textures.maps.set_normal(&self.gpu, texture);
-        }
-    }
-
-    /// **The one path that mutates per-mesh appearance, and therefore the one
-    /// place the PBR slots are marked stale.** An out-of-range
-    /// [`MeshTarget::One`] edits nothing and leaves the slots clean.
-    ///
-    /// The texture setters above deliberately do *not* come through here: they
-    /// upload a bind group immediately and feed no PBR slot.
-    fn edit_appearance(&mut self, target: MeshTarget, edit: impl Fn(&mut MeshAppearance)) {
-        match target {
-            MeshTarget::All => self
-                .meshes
-                .iter_mut()
-                .for_each(|mesh| edit(mesh.appearance_mut())),
-            MeshTarget::One(mesh_id) => {
-                let Some(mesh) = self.meshes.get_mut(mesh_id) else {
-                    return;
-                };
-                edit(mesh.appearance_mut());
-            }
-        }
-        self.uniforms.mark_slots_dirty();
-    }
-
-    /// Replaces `target`'s whole [`MeshAppearance`] — what most callers want,
-    /// since material, IBL, tone map and debug view are set together.
-    pub fn set_appearance(&mut self, target: MeshTarget, appearance: MeshAppearance) {
-        self.edit_appearance(target, |current| *current = appearance.clone());
-    }
-
-    /// The current appearance of mesh `mesh_id`, or `None` if out of range.
-    pub fn mesh_appearance(&self, mesh_id: usize) -> Option<&MeshAppearance> {
-        self.meshes.get(mesh_id).map(MeshGpu::appearance)
-    }
-
-    /// Sets the [`DisneyMaterial`] of `target`. Takes effect on the next
-    /// [`render`](Self::render).
-    pub fn set_disney_material(&mut self, target: MeshTarget, material: DisneyMaterial) {
-        self.edit_appearance(target, |appearance| {
-            appearance.material = material.clone();
-        });
-    }
-
-    /// Sets the environment-reflection gain of `target`.
-    pub fn set_image_based_lighting(&mut self, target: MeshTarget, ibl: ImageBasedLighting) {
-        self.edit_appearance(target, |appearance| appearance.ibl = ibl);
-    }
-
-    /// Sets the output transform (exposure + curve) of `target`.
-    pub fn set_tone_mapping(&mut self, target: MeshTarget, tone_mapping: ToneMapping) {
-        self.edit_appearance(target, |appearance| appearance.tone_mapping = tone_mapping);
-    }
-
-    /// Selects a diagnostic PBR output for `target`.
-    pub fn set_pbr_debug_view(&mut self, target: MeshTarget, debug_view: PbrDebugView) {
-        self.edit_appearance(target, |appearance| appearance.debug_view = debug_view);
-    }
-
-    /// Binds `env` as the equirectangular HDR environment map reflected by
-    /// [`RenderMode::Shaded`] draws. The probe is (re)uploaded lazily on the next
-    /// [`render`](Self::render). Until set, PBR draws use no
-    /// environment reflection (a 1×1 black probe keeps the bind group valid).
-    pub fn set_env_map(&mut self, env: EnvMapData) {
-        self.environment.set(&self.gpu, env);
-    }
-
-    /// Uploads `rgba` (tightly-packed, row-major `height`×`width`×4) as the
-    /// **background frame texture** (#63) sampled by a scene whose
-    /// [`Background::frame`](crate::Background::frame) is set. Delegates to
-    /// [`FramePlane::upload_rgba`],
-    /// which reuses the GPU texture across same-resolution frames.
-    ///
-    /// Panics if `rgba.len() != width * height * 4` or either dimension is zero.
-    pub fn update_frame_texture_rgba(&mut self, rgba: &[u8], width: u32, height: u32) {
-        self.frame_plane.upload_rgba(&self.gpu, rgba, width, height);
-    }
-
-    /// Copies a frame the delivery surface kept on the GPU into the **background
-    /// frame texture**, without its pixels entering CPU memory (#229).
-    ///
-    /// The counterpart of
-    /// [`update_frame_texture_rgba`](Self::update_frame_texture_rgba) for an
-    /// already-decoded source: the browser's `VideoDecoder` puts the frame in
-    /// GPU memory, so downloading it only to re-upload costs a whole frame of
-    /// traffic at source resolution. The `frame` supplies both its size and the
-    /// copy — see [`ExternalFrame`](crate::ExternalFrame) for why the copy
-    /// cannot live in this crate.
-    ///
-    /// Panics if the frame reports a zero dimension.
-    pub fn update_frame_texture_external(&mut self, frame: &dyn crate::ExternalFrame) {
-        self.frame_plane.copy_external(&self.gpu, frame);
-    }
-
-    /// Uploads `image` as the **background frame texture** (#63) sampled by a
-    /// scene whose [`Background::frame`](crate::Background::frame) is set. The
-    /// GPU texture is reused across frames (grown only on a resolution change).
-    /// Call before a [`render`](Self::render) of such a scene to composite the
-    /// image beneath the mesh scene.
-    pub fn update_frame_texture(&mut self, image: &crate::texture::ImageData) {
-        self.update_frame_texture_rgba(&image.rgba, image.width, image.height);
-    }
-
-    /// Whether a background frame texture is currently bound (so a scene with a
-    /// [`Background::frame`](crate::Background::frame) would render one).
-    pub fn has_frame_texture(&self) -> bool {
-        self.frame_plane.is_bound()
-    }
-
-    /// The size of the object-id pick target, or `None` if nothing has been
-    /// picked yet (it is allocated on the first [`pick`](Self::pick)). Diagnostic
-    /// only — front-ends surface it in their debug panels.
-    pub fn pick_target_size(&self) -> Option<(u32, u32)> {
-        self.picking.target_size()
-    }
-
     // -----------------------------------------------------------------------
     // Render targets — creation, drawing, readback, lifecycle (#203).
     //
@@ -692,35 +463,6 @@ impl Renderer {
     // a frame lands, and everything one could "do" needs the pipelines, the mesh
     // store and the GPU context this harness owns.
     // -----------------------------------------------------------------------
-
-    /// Allocates a [`TextureTarget`] of `width` × `height` on this harness's
-    /// device.
-    ///
-    /// A texture target is always [`TEXTURE_TARGET_FORMAT`], so this is only
-    /// valid for a harness built for that format (every offscreen front-end); a
-    /// harness built for a surface's sRGB view format renders to that surface.
-    pub fn create_texture_target(
-        &self,
-        width: u32,
-        height: u32,
-    ) -> Result<TextureTarget, RenderError> {
-        Ok(TextureTarget::new(&self.gpu.device, width, height)?)
-    }
-
-    /// Wraps an already-created `surface` + `config` as a [`SurfaceTarget`],
-    /// registering its sRGB view format and configuring it.
-    ///
-    /// Both live-surface shells create their surface *before* the stream has
-    /// delivered a mesh, i.e. before a `Renderer` exists, so
-    /// [`SurfaceTarget::new`] stays available for that case; this is the
-    /// convenience for a shell that already has a harness.
-    pub fn create_surface_target(
-        &self,
-        surface: wgpu::Surface<'static>,
-        config: wgpu::SurfaceConfiguration,
-    ) -> SurfaceTarget {
-        SurfaceTarget::new(&self.gpu.device, surface, config)
-    }
 
     /// Draws `scene` under `camera` into `target` — **the** render entry point,
     /// and the one place the two kinds of target are told apart (#203).
@@ -849,77 +591,6 @@ impl Renderer {
         }
     }
 
-    /// Reads `target`'s **current contents** back as tightly-packed row-major
-    /// RGBA (`width * height * 4` bytes).
-    ///
-    /// Takes the concrete [`TextureTarget`] rather than a [`RenderTarget`]:
-    /// a swapchain frame is gone once presented, so "read the pixels of a
-    /// surface" is a mistake the type system should catch instead of a runtime
-    /// arm returning `None` (#203).
-    ///
-    /// `async` because the buffer map only resolves while the device is polled —
-    /// which this does itself, natively by blocking and on wasm by yielding, so a
-    /// caller cannot hang by forgetting to drive it. Reads whatever is in the
-    /// texture, so calling it without a preceding draw yields the cleared (or
-    /// stale) target rather than failing.
-    pub async fn read_pixels(&self, target: &TextureTarget) -> Result<Vec<u8>, RenderError> {
-        Ok(self.read_back(target).await?)
-    }
-
-    async fn read_back(&self, target: &TextureTarget) -> Result<Vec<u8>, TargetError> {
-        let (device, queue) = (&self.gpu.device, &self.gpu.queue);
-        let (width, height) = target.size();
-        let padded_bytes_per_row = target.padded_bytes_per_row();
-        let staging = target.staging();
-
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("trd texture target readback"),
-        });
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: target.texture(),
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: staging,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded_bytes_per_row),
-                    rows_per_image: Some(height),
-                },
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
-        queue.submit(Some(encoder.finish()));
-
-        let slice = staging.slice(..);
-        let (sender, receiver) = oneshot::channel();
-        slice.map_async(wgpu::MapMode::Read, move |result| {
-            let _ = sender.send(result);
-        });
-        // Native blocks until the mapping completes; the browser kicks the queue
-        // and lets the `.await` below yield. See `platform::poll_for_map`.
-        super::platform::poll_for_map(device).map_err(|e| TargetError::Gpu(e.to_string()))?;
-        receiver
-            .await
-            .map_err(|_| TargetError::Gpu("readback callback cancelled".to_owned()))?
-            .map_err(|e| TargetError::Gpu(e.to_string()))?;
-
-        let packed = match slice.get_mapped_range() {
-            Ok(mapped) => tightly_pack_rgba(&mapped, width, height, padded_bytes_per_row)
-                .map_err(TargetError::Output),
-            Err(e) => Err(TargetError::Gpu(e.to_string())),
-        };
-        staging.unmap();
-        packed
-    }
-
     /// Renders `layers` back-to-front into `target`, then reads it back as
     /// tightly-packed row-major RGBA — [`draw_layers`](Self::draw_layers)
     /// followed by [`read_pixels`](Self::read_pixels).
@@ -953,60 +624,6 @@ impl Renderer {
         let camera = params.to_camera(target.viewport())?;
         self.render_layers(&[SceneLayer::new(camera, scene)], target)
             .await
-    }
-
-    /// Reallocates `target` at `width` × `height`.
-    ///
-    /// A texture target is a fixed-size allocation (texture + padded staging
-    /// buffer), so resizing means rebuilding it — which re-runs
-    /// [`TextureTarget::new`]'s zero / `max_texture_dimension_2d` checks.
-    pub fn resize_texture_target(
-        &self,
-        target: &mut TextureTarget,
-        width: u32,
-        height: u32,
-    ) -> Result<(), RenderError> {
-        *target = self.create_texture_target(width, height)?;
-        Ok(())
-    }
-
-    /// Updates `target`'s configured size and reconfigures its surface. Ignores a
-    /// zero width or height (e.g. a minimized window).
-    ///
-    /// Associated rather than a method: a window is resized long before the
-    /// stream has delivered a mesh to build a `Renderer` from, so requiring one
-    /// here would silently skip the reconfigure and leave the surface stale
-    /// (#203).
-    pub fn resize_surface(
-        device: &wgpu::Device,
-        target: &mut SurfaceTarget,
-        width: u32,
-        height: u32,
-    ) {
-        if width > 0 && height > 0 {
-            target.set_size(width, height);
-            Self::reconfigure_surface(device, target);
-        }
-    }
-
-    /// Reapplies `target`'s current configuration to its surface — the recovery
-    /// step after an outdated/lost/suboptimal acquire
-    /// ([`SurfaceRepair::Reconfigure`]).
-    pub fn reconfigure_surface(device: &wgpu::Device, target: &SurfaceTarget) {
-        target.surface().configure(device, target.config());
-    }
-
-    /// Swaps a freshly created surface into `target` and reconfigures it —
-    /// [`SurfaceRepair::Recreate`], e.g. after the browser reports the canvas
-    /// surface *lost*. The new surface must target the same canvas/window as the
-    /// original.
-    pub fn replace_surface(
-        device: &wgpu::Device,
-        target: &mut SurfaceTarget,
-        surface: wgpu::Surface<'static>,
-    ) {
-        target.set_surface(surface);
-        Self::reconfigure_surface(device, target);
     }
 
     /// Encodes one frame's [`Scene`] — an ordered list of [`DrawableObject`]s —
@@ -1196,401 +813,6 @@ impl Renderer {
                 Primitive::CoordinateAxes => self.record_coordinate_axes(&mut pass, range),
             }
         }
-    }
-
-    /// Stages the **object-id picking pass** (#141) for `draws`: writes the frame
-    /// camera and uploads one id instance per pickable draw, returning the
-    /// `(mesh_id, instance slot)` records [`encode_picking`](Self::encode_picking)
-    /// then draws. Out-of-range mesh ids and `Shadow` draws are skipped, but the
-    /// index mapping is preserved (a skipped draw's index simply never appears),
-    /// so a decoded id maps straight back to `draws[index]`.
-    ///
-    /// Split from the encode half so the pass's two borrows never overlap: this
-    /// is the `&mut self` work (uniform write + instance upload), and encoding
-    /// then needs only `&self` — which is what lets [`pick`](Self::pick) render
-    /// into a target the renderer still *owns*, instead of moving it out of
-    /// `self` and handing it back (#235 R4).
-    ///
-    /// Private: a front-end reaches it through [`pick`](Self::pick), which owns
-    /// the whole sequence — ensure target, prepare, encode, read back (#235 R4).
-    ///
-    /// **It keeps its own traversal on purpose** (#204). It does *not* batch a
-    /// [`Scene`] and does not go through the per-primitive `record` bodies: this
-    /// is a different pass with different attachments (single-sampled, flat id
-    /// colors, no MSAA resolve) drawing only mesh geometry through the
-    /// [`Picking`](super::picking::Picking) pipeline instead of the visual ones,
-    /// and it needs an
-    /// instance per *object* — never grouped — because the whole point is that
-    /// each one carries a distinct id. Sharing the walk would mean threading a
-    /// pass-kind through every `record` body to couple two loops that agree on
-    /// almost nothing, for little gain.
-    fn prepare_picking(&mut self, camera: Camera, draws: &[Draw]) -> Vec<(usize, u32)> {
-        // Camera P·V for this frame (writes the shared camera uniform bound by
-        // `uniforms.camera`, which is layout-compatible with the pick pipeline).
-        self.uniforms.write_camera(&self.gpu.queue, camera);
-
-        // Build one pick instance per drawable object, carrying its index color.
-        let mut instances: Vec<PickInstanceRaw> = Vec::with_capacity(draws.len());
-        let mut records: Vec<(usize, u32)> = Vec::with_capacity(draws.len());
-        // A shadow blob has no mesh geometry to hit-test, so it is not pickable.
-        for (index, draw) in draws.iter().enumerate() {
-            if !draw.selection.is_mesh() {
-                continue;
-            }
-            let Some(mesh) = self.meshes.get(draw.mesh_id as usize) else {
-                continue;
-            };
-            let effective = draw.model * mesh.geometry.base_model;
-            let slot = instances.len() as u32;
-            instances.push(PickInstanceRaw::new(effective, index as u32));
-            records.push((draw.mesh_id as usize, slot));
-        }
-
-        // Grow + upload the pick instance buffer.
-        self.picking.upload_instances(&self.gpu, &instances);
-        records
-    }
-
-    /// Encodes the **object-id picking pass** for the records staged by
-    /// [`prepare_picking`](Self::prepare_picking): each pickable draw's mesh is
-    /// rasterized in a flat color encoding its **index**, single-sampled and
-    /// depth-tested into `target`'s id-color attachment (cleared to id `0` =
-    /// background) and its depth attachment. No lighting, no texture, no MSAA —
-    /// so the pixel under the cursor reads back to an exact id via
-    /// [`PickInstanceRaw::decode`].
-    ///
-    /// Takes `&self`: with the staging already done, the pass borrows the
-    /// pipeline, the camera bind group and the mesh geometry immutably — the same
-    /// way it borrows the `target`, which is why that target can live in
-    /// `self.picking` for the whole call (#235 R4).
-    ///
-    /// **It keeps its own traversal on purpose** (#204). It does *not* batch a
-    /// [`Scene`] and does not go through the per-primitive `record` bodies: this
-    /// is a different pass with different attachments (single-sampled, flat id
-    /// colors, no MSAA resolve) drawing only mesh geometry through the
-    /// [`Picking`](super::picking::Picking) pipeline instead of the visual ones,
-    /// and it needs an
-    /// instance per *object* — never grouped — because the whole point is that
-    /// each one carries a distinct id. Sharing the walk would mean threading a
-    /// pass-kind through every `record` body to couple two loops that agree on
-    /// almost nothing, for little gain.
-    fn encode_picking(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        target: &PickPass<'_>,
-        records: &[(usize, u32)],
-    ) {
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("trd picking pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: target.id.view(),
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    // Clear to id 0 (background).
-                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: target.depth.view(),
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
-                    store: wgpu::StoreOp::Store,
-                }),
-                stencil_ops: None,
-            }),
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-
-        self.picking
-            .bind(&mut pass, self.uniforms.camera.bind_group());
-        for &(mesh_id, slot) in records {
-            // `prepare_picking` already dropped out-of-range ids, but the store is
-            // the only thing that can prove it — so ask it, don't index it (#235 R7).
-            let Some(mesh) = self.meshes.get(mesh_id) else {
-                continue;
-            };
-            draw_indexed(&mut pass, mesh.filled(), slot..slot + 1);
-        }
-    }
-
-    /// **Object-id picking** (#141): renders `draws` through the flat id-color
-    /// pass at `viewport`'s size and returns the **0-based index into `draws`**
-    /// of the object under pixel `(x, y)`, or `None` for the background (or an
-    /// out-of-bounds coordinate). The pass is single-sampled and depth-tested, so
-    /// the nearest object wins and ids are never blended — the "color index"
-    /// method, no ray-marching. The lazily-created pick target tracks `viewport`,
-    /// which the caller passes on every call (#203): the harness no longer owns a
-    /// render target of its own to read a size from, so a shell reports its
-    /// current display size the same way it would to `render_params`.
-    pub async fn pick(
-        &mut self,
-        camera: Camera,
-        draws: &[Draw],
-        x: u32,
-        y: u32,
-        viewport: Viewport,
-    ) -> Option<u32> {
-        let gpu = self.gpu.clone();
-        let Viewport {
-            width: w,
-            height: h,
-        } = viewport;
-        // The target stays owned by `self.picking` for the whole call (#235 R4).
-        // The borrows are separated in *time* instead of by moving it out: the
-        // `&mut self` staging first, then an all-immutable encode + read-back.
-        self.picking.ensure_target(&gpu.device, w, h);
-        let records = self.prepare_picking(camera, draws);
-
-        let target = self.picking.pass()?;
-        if !target.id.contains(x, y) {
-            return None;
-        }
-
-        let mut encoder = gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("trd pick frame"),
-            });
-        self.encode_picking(&mut encoder, &target, &records);
-        // Copy just the one texel under the cursor into the staging buffer.
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: target.id.texture(),
-                mip_level: 0,
-                origin: wgpu::Origin3d { x, y, z: 0 },
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: target.staging,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT),
-                    rows_per_image: Some(1),
-                },
-            },
-            wgpu::Extent3d {
-                width: 1,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
-        );
-        gpu.queue.submit(Some(encoder.finish()));
-
-        let slice = target.staging.slice(..4);
-        let (sender, receiver) = futures_channel::oneshot::channel();
-        slice.map_async(wgpu::MapMode::Read, move |result| {
-            let _ = sender.send(result);
-        });
-        // Same wait as the offscreen readback; see `platform::poll_for_map`.
-        super::platform::poll_for_map(&gpu.device).ok()?;
-        receiver.await.ok()?.ok()?;
-
-        let id = {
-            let mapped = slice.get_mapped_range().ok()?;
-            let rgba = [mapped[0], mapped[1], mapped[2], mapped[3]];
-            PickInstanceRaw::decode(rgba)
-        };
-        target.staging.unmap();
-        id
-    }
-}
-
-/// **The `record` bodies: one per [`Primitive`], each self-contained** (#204).
-///
-/// `encode_pass`'s loop is a dispatch — one line per arm — and every case's GPU
-/// command sequence lives in its own body here. They are methods on `Renderer`
-/// rather than on [`Primitive`] because everything a body binds (pipelines,
-/// group-0 uniforms, the mesh store's geometry) is renderer-owned state: a
-/// per-primitive type would carry nothing of its own and would only borrow the
-/// renderer straight back — and [`Primitive`] is *public*, so hanging GPU code
-/// off it would drag `wgpu` into the API of a type whose whole point is to be
-/// pure data. (A `DrawDescriptor` value applied by one issuing helper was
-/// considered and rejected in #204: it would have to express a mesh's four bind
-/// groups plus a dynamic offset, a gizmo's one, and the shadow's vertex-buffer
-/// swap at once, degenerating into a union of every case.)
-///
-/// **The rule has two halves, and the second is load-bearing:**
-///
-/// > *No `record` may depend on pass state another `record` set* — **and
-/// > therefore every `record` sets what it needs at entry.**
-///
-/// Nothing restores anything at exit. That is what let the trailing
-/// `set_bind_group(0, camera)` "restore" lines go: they existed only so the
-/// *next* arm's assumptions held, which made the loop a hand-maintained pass
-/// state machine (and forced the matching hand-hoisted binds before it). With
-/// every body binding its own group 0, there is nothing left to undo.
-///
-/// Dropping the restores without adding the entry binds would be a wgpu
-/// validation error, not a subtle diff:
-/// [`PlaneGrid`](Primitive::PlaneGrid) and
-/// [`QuadOutline`](Primitive::QuadOutline) swap group 0 to the *gizmo* uniform,
-/// and wireframe meshes are submitted **after** them (layers 2/3 before 4 — see
-/// [`Primitive::sort_key`]), so a mesh body that assumed group 0 was still the
-/// camera binding would hand its pipeline a group-0 layout it was not built for.
-///
-/// Eliding a redundant state change is allowed only *inside* an issuing helper,
-/// where it is provably safe — never by hoisting a bind out to the caller.
-/// Within a single body, later commands may of course rely on what that same
-/// body set ([`record_coordinate_axes`](Self::record_coordinate_axes) draws
-/// twice off one instance binding); the rule is about *cross-body* state.
-impl Renderer {
-    /// Binds the per-frame instance-model buffer at vertex slot 1 — the one piece
-    /// of pass state *every* pipeline in the mesh pass reads.
-    ///
-    /// It used to be bound once before the loop, which is precisely the coupling
-    /// this restructure removes, so each body binds it at entry instead. It is
-    /// the same buffer every time and there is one such call per *batch* (a
-    /// handful per frame, not per object), so the repetition is free next to the
-    /// draw it precedes.
-    fn bind_instances(&self, pass: &mut wgpu::RenderPass<'_>) {
-        pass.set_vertex_buffer(1, self.instances.slice());
-    }
-
-    /// Records one instanced batch of mesh `mesh_id` drawn in `mode` — the one
-    /// place a primitive's mode selects a pipeline, because [`Primitive::Mesh`]
-    /// is the only variant carrying one (#204).
-    ///
-    /// Each mode binds its own group 0: the camera `P·V` for the unlit modes, or
-    /// this mesh's [`PbrUniform`] slot (a dynamic offset into the slot array) for
-    /// [`Shaded`](RenderMode::Shaded).
-    fn record_mesh(
-        &self,
-        pass: &mut wgpu::RenderPass<'_>,
-        mesh_id: u32,
-        mode: RenderMode,
-        range: Range<u32>,
-    ) {
-        // The batcher already dropped out-of-range ids, but nothing in the types
-        // says so — ask the store rather than index it, so a future caller that
-        // skips the batcher draws nothing instead of panicking (#235 R7).
-        let Some(mesh) = self.meshes.get(mesh_id as usize) else {
-            return;
-        };
-        self.bind_instances(pass);
-        match mode {
-            RenderMode::Filled => {
-                pass.set_pipeline(&self.pipelines.filled);
-                pass.set_bind_group(0, self.uniforms.camera.bind_group(), &[]);
-                draw_indexed(pass, mesh.filled(), range);
-            }
-            RenderMode::Textured => {
-                pass.set_pipeline(&self.pipelines.textured);
-                pass.set_bind_group(0, self.uniforms.camera.bind_group(), &[]);
-                pass.set_bind_group(1, mesh.textures.albedo.bind_group(), &[]);
-                draw_indexed(pass, mesh.filled(), range);
-            }
-            RenderMode::Shaded => {
-                // group 0 = this mesh's PbrUniform slot (selected by a dynamic
-                // offset), group 1 = this mesh's albedo, group 2 = the HDR env
-                // map, group 3 = its material maps.
-                pass.set_pipeline(&self.pipelines.pbr);
-                let offset = self.uniforms.pbr.offset(mesh_id as usize);
-                pass.set_bind_group(0, self.uniforms.pbr.bind_group(), &[offset]);
-                pass.set_bind_group(1, mesh.textures.albedo.bind_group(), &[]);
-                pass.set_bind_group(2, self.environment.bind_group(), &[]);
-                pass.set_bind_group(3, mesh.textures.maps.bind_group(), &[]);
-                // Slot 2 carries this mesh's derived normals/tangents; the
-                // geometry at slot 0 is the same buffer every other mode draws
-                // (#247 S7).
-                pass.set_vertex_buffer(2, mesh.geometry.shading.slice());
-                draw_indexed(pass, mesh.filled(), range);
-            }
-            RenderMode::Wireframe => {
-                pass.set_pipeline(&self.pipelines.wireframe);
-                pass.set_bind_group(0, self.uniforms.camera.bind_group(), &[]);
-                draw_indexed(pass, mesh.wireframe(), range);
-            }
-        }
-    }
-
-    /// The shared body of every **screen-space-expanded line gizmo**: the
-    /// analytic-AA line pipeline plus the viewport-aware gizmo uniform at group 0
-    /// (its own layout, *not* the camera one), then `geometry` over `range`.
-    ///
-    /// The AABB box, the plane grid, the quad outline and the axes' shafts differ
-    /// only in which vertex geometry they draw, so they issue through one helper
-    /// instead of repeating the same three lines four times (#204).
-    fn record_gizmo_lines(
-        &self,
-        pass: &mut wgpu::RenderPass<'_>,
-        geometry: &VertexBuffer<GizmoLineVertex>,
-        range: Range<u32>,
-    ) {
-        pass.set_pipeline(&self.pipelines.gizmo_line);
-        pass.set_bind_group(0, self.uniforms.gizmo.bind_group(), &[]);
-        self.bind_instances(pass);
-        draw_vertices(pass, geometry, range);
-    }
-
-    /// Records the AABB outline of mesh `mesh_id` (#42) from that mesh's own
-    /// precomputed corner geometry.
-    fn record_aabb_box(&self, pass: &mut wgpu::RenderPass<'_>, mesh_id: u32, range: Range<u32>) {
-        // Same as `record_mesh`: the id is checked, not assumed (#235 R7).
-        let Some(mesh) = self.meshes.get(mesh_id as usize) else {
-            return;
-        };
-        self.record_gizmo_lines(pass, &mesh.geometry.aabb, range);
-    }
-
-    /// Records the coordinate-plane grid lattice on `plane`, resolving the plane
-    /// to its shared line buffer.
-    fn record_plane_grid(
-        &self,
-        pass: &mut wgpu::RenderPass<'_>,
-        plane: GridPlane,
-        range: Range<u32>,
-    ) {
-        self.record_gizmo_lines(pass, &self.gizmos.grid_lines[plane.index()], range);
-    }
-
-    /// Records the tracked placement-quad outline; `selected` picks the
-    /// highlight-colored line buffer.
-    fn record_quad_outline(
-        &self,
-        pass: &mut wgpu::RenderPass<'_>,
-        selected: bool,
-        range: Range<u32>,
-    ) {
-        self.record_gizmo_lines(pass, &self.gizmos.quad_lines[usize::from(selected)], range);
-    }
-
-    /// Records the contact / blob grounding shadow: its own alpha-blended,
-    /// depth-write-off pipeline over the shared shadow quad at vertex slot 0,
-    /// reading the camera `P·V` at group 0.
-    fn record_blob_shadow(&self, pass: &mut wgpu::RenderPass<'_>, range: Range<u32>) {
-        pass.set_pipeline(&self.pipelines.shadow);
-        pass.set_bind_group(0, self.uniforms.camera.bind_group(), &[]);
-        self.bind_instances(pass);
-        // The quad's own count, not a constant kept in step with it by hand.
-        draw_vertices(pass, &self.gizmos.shadow_vertex_buffer, range);
-    }
-
-    /// Records the placement quad's highlight wash. Identical staging to the blob
-    /// shadow — same geometry buffer, same bind group — with the fill pipeline,
-    /// so the two differ only in their fragment shader.
-    fn record_quad_fill(&self, pass: &mut wgpu::RenderPass<'_>, range: Range<u32>) {
-        pass.set_pipeline(&self.pipelines.quad_fill);
-        pass.set_bind_group(0, self.uniforms.camera.bind_group(), &[]);
-        self.bind_instances(pass);
-        draw_vertices(pass, &self.gizmos.shadow_vertex_buffer, range);
-    }
-
-    /// Records the world-orientation gizmo (#42) as two draws over the same
-    /// instances: the expanded shafts through the shared gizmo-line body, then
-    /// the arrowheads, which are ordinary unlit overlay triangles and so read the
-    /// **camera** uniform at group 0 rather than the gizmo one.
-    ///
-    /// The second draw reuses the instance binding the first made — same body, so
-    /// the rule above is not in play.
-    fn record_coordinate_axes(&self, pass: &mut wgpu::RenderPass<'_>, range: Range<u32>) {
-        self.record_gizmo_lines(pass, &self.gizmos.axes_lines, range.clone());
-        pass.set_pipeline(&self.pipelines.gizmo_solid);
-        pass.set_bind_group(0, self.uniforms.camera.bind_group(), &[]);
-        draw_vertices(pass, &self.gizmos.axes_heads, range);
     }
 }
 

@@ -6,14 +6,13 @@
 //! a surface that can be outdated or lost) and what happens after submission
 //! (copy + map + read the pixels back, versus present the frame).
 //!
-//! **Nothing in this module renders.** Every `render`/`present`/`read_back`/
-//! `acquire` used to hang off the targets while [`Renderer`](super::Renderer)
-//! merely forwarded to them, which had the ownership backwards: the harness owns
-//! the pipelines, the mesh store and the GPU context, so it — not a swapchain
-//! handle — is what knows how to draw. #203 moved all of it onto the renderer as
-//! private per-variant functions behind one public
-//! [`Renderer::render`](super::Renderer::render) match, and left the target
-//! types holding only the resources a frame lands in:
+//! **A target holds no behaviour of its own.** Every `render`/`present`/
+//! `read_back`/`acquire` used to hang off the targets while
+//! [`Renderer`](super::Renderer) merely forwarded to them, which had the
+//! ownership backwards: the harness owns the pipelines, the mesh store and the
+//! GPU context, so it — not a swapchain handle — is what knows how to draw. #203
+//! moved all of it onto the renderer, and left the target types holding only the
+//! resources a frame lands in:
 //!
 //! - [`TextureTarget`] — an owned [`TEXTURE_TARGET_FORMAT`] texture plus its
 //!   `MAP_READ` staging buffer. The common case: the headless CLI, the golden
@@ -39,6 +38,18 @@
 //!
 //! Note the picking target is deliberately **not** here: it is a second pass
 //! producing ids, not a place a frame is rendered to (see `picking.rs`).
+//!
+//! The target **lifecycle** — create, resize, reconfigure, replace, read back —
+//! is at the bottom of this file as an `impl Renderer` block (#363). It is
+//! something *done to* a target rather than something a target does, so it stays
+//! renderer behaviour; it reads here because this is where the data it is about
+//! lives. The surface ones are associated functions taking a `&wgpu::Device`,
+//! because a window is resized and repaired long before the stream has delivered
+//! a mesh to build a `Renderer` from.
+
+use super::{RenderError, Renderer};
+use crate::protocol::tightly_pack_rgba;
+use futures_channel::oneshot;
 
 use thiserror::Error;
 
@@ -460,5 +471,167 @@ impl From<SurfaceTarget> for RenderTarget {
 impl From<TextureTarget> for RenderTarget {
     fn from(target: TextureTarget) -> Self {
         Self::texture(target)
+    }
+}
+
+/// The render-target **lifecycle**, beside the targets it acts on (#363).
+///
+/// A target is a place, not an actor (#203): creating, resizing, repairing and
+/// reading one back all need the GPU context and the pipelines a [`Renderer`]
+/// owns, so the behaviour stays on the renderer — but it reads next to the data
+/// it is about.
+impl Renderer {
+    /// Allocates a [`TextureTarget`] of `width` × `height` on this harness's
+    /// device.
+    ///
+    /// A texture target is always [`TEXTURE_TARGET_FORMAT`], so this is only
+    /// valid for a harness built for that format (every offscreen front-end); a
+    /// harness built for a surface's sRGB view format renders to that surface.
+    pub fn create_texture_target(
+        &self,
+        width: u32,
+        height: u32,
+    ) -> Result<TextureTarget, RenderError> {
+        Ok(TextureTarget::new(&self.gpu.device, width, height)?)
+    }
+
+    /// Wraps an already-created `surface` + `config` as a [`SurfaceTarget`],
+    /// registering its sRGB view format and configuring it.
+    ///
+    /// Both live-surface shells create their surface *before* the stream has
+    /// delivered a mesh, i.e. before a `Renderer` exists, so
+    /// [`SurfaceTarget::new`] stays available for that case; this is the
+    /// convenience for a shell that already has a harness.
+    pub fn create_surface_target(
+        &self,
+        surface: wgpu::Surface<'static>,
+        config: wgpu::SurfaceConfiguration,
+    ) -> SurfaceTarget {
+        SurfaceTarget::new(&self.gpu.device, surface, config)
+    }
+
+    /// Reads `target`'s **current contents** back as tightly-packed row-major
+    /// RGBA (`width * height * 4` bytes).
+    ///
+    /// Takes the concrete [`TextureTarget`] rather than a [`RenderTarget`]:
+    /// a swapchain frame is gone once presented, so "read the pixels of a
+    /// surface" is a mistake the type system should catch instead of a runtime
+    /// arm returning `None` (#203).
+    ///
+    /// `async` because the buffer map only resolves while the device is polled —
+    /// which this does itself, natively by blocking and on wasm by yielding, so a
+    /// caller cannot hang by forgetting to drive it. Reads whatever is in the
+    /// texture, so calling it without a preceding draw yields the cleared (or
+    /// stale) target rather than failing.
+    pub async fn read_pixels(&self, target: &TextureTarget) -> Result<Vec<u8>, RenderError> {
+        Ok(self.read_back(target).await?)
+    }
+
+    async fn read_back(&self, target: &TextureTarget) -> Result<Vec<u8>, TargetError> {
+        let (device, queue) = (&self.gpu.device, &self.gpu.queue);
+        let (width, height) = target.size();
+        let padded_bytes_per_row = target.padded_bytes_per_row();
+        let staging = target.staging();
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("trd texture target readback"),
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: target.texture(),
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: staging,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_bytes_per_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit(Some(encoder.finish()));
+
+        let slice = staging.slice(..);
+        let (sender, receiver) = oneshot::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
+        // Native blocks until the mapping completes; the browser kicks the queue
+        // and lets the `.await` below yield. See `platform::poll_for_map`.
+        super::platform::poll_for_map(device).map_err(|e| TargetError::Gpu(e.to_string()))?;
+        receiver
+            .await
+            .map_err(|_| TargetError::Gpu("readback callback cancelled".to_owned()))?
+            .map_err(|e| TargetError::Gpu(e.to_string()))?;
+
+        let packed = match slice.get_mapped_range() {
+            Ok(mapped) => tightly_pack_rgba(&mapped, width, height, padded_bytes_per_row)
+                .map_err(TargetError::Output),
+            Err(e) => Err(TargetError::Gpu(e.to_string())),
+        };
+        staging.unmap();
+        packed
+    }
+
+    /// Reallocates `target` at `width` × `height`.
+    ///
+    /// A texture target is a fixed-size allocation (texture + padded staging
+    /// buffer), so resizing means rebuilding it — which re-runs
+    /// [`TextureTarget::new`]'s zero / `max_texture_dimension_2d` checks.
+    pub fn resize_texture_target(
+        &self,
+        target: &mut TextureTarget,
+        width: u32,
+        height: u32,
+    ) -> Result<(), RenderError> {
+        *target = self.create_texture_target(width, height)?;
+        Ok(())
+    }
+
+    /// Updates `target`'s configured size and reconfigures its surface. Ignores a
+    /// zero width or height (e.g. a minimized window).
+    ///
+    /// Associated rather than a method: a window is resized long before the
+    /// stream has delivered a mesh to build a `Renderer` from, so requiring one
+    /// here would silently skip the reconfigure and leave the surface stale
+    /// (#203).
+    pub fn resize_surface(
+        device: &wgpu::Device,
+        target: &mut SurfaceTarget,
+        width: u32,
+        height: u32,
+    ) {
+        if width > 0 && height > 0 {
+            target.set_size(width, height);
+            Self::reconfigure_surface(device, target);
+        }
+    }
+
+    /// Reapplies `target`'s current configuration to its surface — the recovery
+    /// step after an outdated/lost/suboptimal acquire
+    /// ([`SurfaceRepair::Reconfigure`](super::SurfaceRepair::Reconfigure)).
+    pub fn reconfigure_surface(device: &wgpu::Device, target: &SurfaceTarget) {
+        target.surface().configure(device, target.config());
+    }
+
+    /// Swaps a freshly created surface into `target` and reconfigures it —
+    /// [`SurfaceRepair::Recreate`](super::SurfaceRepair::Recreate), e.g. after
+    /// the browser reports the canvas surface *lost*. The new surface must
+    /// target the same canvas/window as the original.
+    pub fn replace_surface(
+        device: &wgpu::Device,
+        target: &mut SurfaceTarget,
+        surface: wgpu::Surface<'static>,
+    ) {
+        target.set_surface(surface);
+        Self::reconfigure_surface(device, target);
     }
 }
