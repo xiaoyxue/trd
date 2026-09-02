@@ -9,6 +9,8 @@
 //! of the old `update_frame_texture_rgba` machinery lives here so `Renderer`
 //! only has to delegate to it.
 
+use super::Renderer;
+
 use super::GpuContext;
 use super::{create_frame_bind_group_layout, create_frame_plane_pipeline, Viewport};
 use super::{frame_fit_uv_scale, FrameFit};
@@ -235,5 +237,51 @@ impl FramePlane {
             pass.set_bind_group(0, &ft.bind_group, &[]);
             pass.draw(0..3, 0..1);
         }
+    }
+}
+
+/// The background frame plane's renderer-level setters (#363): forwards into
+/// [`FramePlane`], kept beside the plane they upload to.
+impl Renderer {
+    /// Uploads `rgba` (tightly-packed, row-major `height`×`width`×4) as the
+    /// **background frame texture** (#63) sampled by a scene whose
+    /// [`Background::frame`](crate::Background::frame) is set. Delegates to
+    /// [`FramePlane::upload_rgba`],
+    /// which reuses the GPU texture across same-resolution frames.
+    ///
+    /// Panics if `rgba.len() != width * height * 4` or either dimension is zero.
+    pub fn update_frame_texture_rgba(&mut self, rgba: &[u8], width: u32, height: u32) {
+        self.frame_plane.upload_rgba(&self.gpu, rgba, width, height);
+    }
+
+    /// Copies a frame the delivery surface kept on the GPU into the **background
+    /// frame texture**, without its pixels entering CPU memory (#229).
+    ///
+    /// The counterpart of
+    /// [`update_frame_texture_rgba`](Self::update_frame_texture_rgba) for an
+    /// already-decoded source: the browser's `VideoDecoder` puts the frame in
+    /// GPU memory, so downloading it only to re-upload costs a whole frame of
+    /// traffic at source resolution. The `frame` supplies both its size and the
+    /// copy — see [`ExternalFrame`](crate::ExternalFrame) for why the copy
+    /// cannot live in this crate.
+    ///
+    /// Panics if the frame reports a zero dimension.
+    pub fn update_frame_texture_external(&mut self, frame: &dyn crate::ExternalFrame) {
+        self.frame_plane.copy_external(&self.gpu, frame);
+    }
+
+    /// Uploads `image` as the **background frame texture** (#63) sampled by a
+    /// scene whose [`Background::frame`](crate::Background::frame) is set. The
+    /// GPU texture is reused across frames (grown only on a resolution change).
+    /// Call before a [`render`](Self::render) of such a scene to composite the
+    /// image beneath the mesh scene.
+    pub fn update_frame_texture(&mut self, image: &crate::texture::ImageData) {
+        self.update_frame_texture_rgba(&image.rgba, image.width, image.height);
+    }
+
+    /// Whether a background frame texture is currently bound (so a scene with a
+    /// [`Background::frame`](crate::Background::frame) would render one).
+    pub fn has_frame_texture(&self) -> bool {
+        self.frame_plane.is_bound()
     }
 }
