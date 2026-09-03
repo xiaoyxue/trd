@@ -1014,23 +1014,12 @@ impl VideoEditingApp {
     }
 
     pub fn set_arrow_scene(&mut self, scene: Option<Rc<ArrowScene>>) {
-        if let Some(scene) = scene.as_ref() {
-            let stored = self.video.frame_count as usize;
-            let allowed_tail = self
-                .video
-                .unpresented_tail
-                .map_or(1, |tail| tail.samples.max(1)) as usize;
-            let missing_tail = stored.saturating_sub(scene.frames.len());
-            if scene.frames.is_empty() || scene.frames.len() > stored || missing_tail > allowed_tail
+        if self.shared.video_loaded.get() {
+            if let Some(error) = scene
+                .as_deref()
+                .and_then(|scene| self.arrow_scene_validation_error(scene))
             {
-                self.shared.set_error(
-                    ErrorScope::Document,
-                    format!(
-                        "protocol scene has {} params rows, but the video stores {stored} frames \
-                         (at most {allowed_tail} trailing unpresented frame(s) may be omitted)",
-                        scene.frames.len(),
-                    ),
-                );
+                self.shared.set_error(ErrorScope::Document, error);
                 return;
             }
         }
@@ -1076,6 +1065,31 @@ impl VideoEditingApp {
         self.current_frame_index = self.current_frame_index.min(last);
         self.displayed_frame_index = self.displayed_frame_index.min(last);
         self.pending_seek = None;
+        if let Some(error) = self
+            .arrow_scene
+            .as_deref()
+            .and_then(|scene| self.arrow_scene_validation_error(scene))
+        {
+            self.arrow_scene = None;
+            self.shared.set_error(ErrorScope::Document, error);
+        }
+    }
+
+    fn arrow_scene_validation_error(&self, scene: &ArrowScene) -> Option<String> {
+        let stored = self.video.frame_count as usize;
+        let allowed_tail = self
+            .video
+            .unpresented_tail
+            .map_or(1, |tail| tail.samples.max(1)) as usize;
+        let missing_tail = stored.saturating_sub(scene.frames.len());
+        (scene.frames.is_empty() || scene.frames.len() > stored || missing_tail > allowed_tail)
+            .then(|| {
+                format!(
+                    "protocol scene has {} params rows, but the video stores {stored} frames \
+                     (at most {allowed_tail} trailing unpresented frame(s) may be omitted)",
+                    scene.frames.len(),
+                )
+            })
     }
 
     /// Registers the render texture directly in egui (no readback) when sharing a device.

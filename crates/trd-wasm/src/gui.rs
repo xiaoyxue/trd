@@ -48,10 +48,19 @@ pub async fn start(
 
         console_error_panic_hook::set_once();
         let _ = eframe::WebLogger::init(log::LevelFilter::Warn);
-        let document = document_bytes
-            .map(|bytes| trd_core::decode_video_editing_document(&bytes))
+        let input = document_bytes
+            .map(|bytes| trd_gui::video_editing::decode_video_editing_input(&bytes))
             .transpose()
-            .map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()))?;
+            .map_err(|error| wasm_bindgen::JsValue::from_str(&error))?;
+        let (document, scene) = match input {
+            Some(trd_gui::video_editing::VideoEditingInput::Annotation(document)) => {
+                (Some(document), None)
+            }
+            Some(trd_gui::video_editing::VideoEditingInput::Scene(scene)) => {
+                (None, Some(Rc::new(scene)))
+            }
+            None => (None, None),
+        };
         let shared = Rc::new(trd_gui::video_editing::VideoEditingShared::default());
         let handle = match document.as_ref() {
             Some(document) => VideoEditingHandle::new(document, shared.clone()),
@@ -63,6 +72,7 @@ pub async fn start(
             (document.video.width, document.video.height)
         });
         let creator_shared = shared.clone();
+        let creator_scene = scene.clone();
         eframe::WebRunner::new()
             .start(
                 canvas,
@@ -78,21 +88,34 @@ pub async fn start(
                         state.device.clone(),
                         state.queue.clone(),
                     );
-                    let renderer =
-                        trd_gui::video_editing_renderer::VideoPlacementRenderer::new_empty_with_gpu(
-                            gpu.clone(), width, height,
-                        )?;
+                    let renderer = match creator_scene.as_ref() {
+                        Some(scene) => {
+                            trd_gui::video_editing_renderer::VideoPlacementRenderer::
+                                new_scene_with_gpu(
+                                    gpu.clone(),
+                                    &scene.meshes,
+                                    scene.texture.as_ref(),
+                                    width,
+                                    height,
+                                )?
+                        }
+                        None => trd_gui::video_editing_renderer::VideoPlacementRenderer::
+                            new_empty_with_gpu(gpu.clone(), width, height)?,
+                    };
                     creator_shared.set_renderer(renderer);
                     creator_shared.set_shared_gpu(gpu);
-                    Ok(match document {
-                        Some(document) => Box::new(trd_gui::video_editing::VideoEditingApp::new(
-                            document,
-                            creator_shared,
-                        )),
-                        None => Box::new(trd_gui::video_editing::VideoEditingApp::player(
-                            player_timeline(width, height),
-                            creator_shared,
-                        )),
+                    Ok(match (document, creator_scene) {
+                        (Some(document), _) => Box::new(
+                            trd_gui::video_editing::VideoEditingApp::new(document, creator_shared),
+                        ),
+                        (None, scene) => {
+                            let mut app = trd_gui::video_editing::VideoEditingApp::player(
+                                player_timeline(width, height),
+                                creator_shared,
+                            );
+                            app.set_arrow_scene(scene);
+                            Box::new(app)
+                        }
                     })
                 }),
             )
