@@ -18,7 +18,7 @@ use arrow::ipc::reader::StreamDecoder;
 
 use crate::session_state::SessionState;
 use crate::texture::ImageTexture;
-use crate::{InlineFrame, Mesh};
+use crate::{InlineFrame, Mesh, MeshAsset, MeshReference, MeshResource};
 
 use super::{
     decode_frame_batch, frame_rate_from_metadata, is_stream_boundary, table_kind, FrameBatch,
@@ -30,9 +30,9 @@ use crate::protocol::arrow_decode::validate_schema;
 /// Incremental decoder for the trd input protocol, mirroring the native
 /// [`crate::run_stream`] multi-stream framing but push-based for wasm. A `0.0.6`
 /// stream is `[mesh][texture?][frames?][params]`: a leading **mesh** table
-/// (one row = one mesh) decoded via [`Mesh::from_arrow_all`] and exposed through
-/// [`InputSession::meshes`], an optional **texture** table decoded via
-/// [`ImageTexture::from_arrow`] and exposed through [`InputSession::texture`],
+/// (one row = embedded geometry or a glTF reference), an optional embedded-mesh
+/// **texture** table, and the resolved assets exposed through
+/// [`InputSession::mesh_assets`],
 /// then the terminal **params** stream driving per-frame rendering. Like the
 /// native decoder this is a pure framing decoder — it accepts a params-only
 /// stream; enforcing the mesh-first contract (a scene needs ≥1 mesh) is the
@@ -43,10 +43,11 @@ pub struct InputSession {
     /// schema is available (or just after a sub-stream boundary, before the next
     /// schema arrives).
     current_kind: Option<StreamKind>,
+    mesh_resources: Vec<MeshResource>,
+    mesh_assets: Vec<MeshAsset>,
     meshes: Vec<Mesh>,
-    /// The image decoded from an optional leading **texture** table (`0.0.4`),
-    /// bound as the sampled albedo. `None` for streams without a texture table.
-    texture: Option<ImageTexture>,
+    /// A texture-table payload waiting for embedded mesh row 0 to resolve.
+    pending_texture: Option<ImageTexture>,
     frames: Vec<InlineFrame>,
     frames_table_present: bool,
     mesh_table_present: bool,
@@ -62,8 +63,10 @@ impl InputSession {
         Self {
             decoder: StreamDecoder::new(),
             current_kind: None,
+            mesh_resources: Vec::new(),
+            mesh_assets: Vec::new(),
             meshes: Vec::new(),
-            texture: None,
+            pending_texture: None,
             frames: Vec::new(),
             frames_table_present: false,
             mesh_table_present: false,
@@ -110,6 +113,46 @@ impl InputSession {
         &self.meshes
     }
 
+    pub fn mesh_assets(&self) -> &[MeshAsset] {
+        &self.mesh_assets
+    }
+
+    pub fn mesh_resources(&self) -> &[MeshResource] {
+        &self.mesh_resources
+    }
+
+    pub fn mesh_resource_count(&self) -> usize {
+        self.mesh_resources.len()
+    }
+
+    pub fn unresolved_mesh_references(&self) -> Vec<(u32, MeshReference)> {
+        self.mesh_resources
+            .iter()
+            .enumerate()
+            .filter_map(|(index, resource)| match resource {
+                MeshResource::Gltf(reference) => Some((index as u32, reference.clone())),
+                MeshResource::Resolved(_) => None,
+            })
+            .collect()
+    }
+
+    pub fn resolve_gltf(&mut self, index: u32, bytes: &[u8]) -> Result<(), ProtocolError> {
+        let mesh_count = self.mesh_resources.len();
+        let resource = self
+            .mesh_resources
+            .get_mut(index as usize)
+            .ok_or(ProtocolError::MeshReferenceIndex { index, mesh_count })?;
+        if !matches!(resource, MeshResource::Gltf(_)) {
+            return Err(ProtocolError::MeshReferenceExpected { index });
+        }
+        let asset = crate::import_glb(bytes)
+            .map(MeshAsset::from)
+            .map_err(|source| ProtocolError::GltfImport { index, source })?;
+        *resource = MeshResource::Resolved(Box::new(asset));
+        self.refresh_resolved_meshes();
+        Ok(())
+    }
+
     /// Whether the stream carried a leading mesh table (required by the protocol).
     pub fn has_meshes(&self) -> bool {
         !self.meshes.is_empty()
@@ -119,12 +162,18 @@ impl InputSession {
     /// bound as the sampled albedo for [`crate::RenderMode::Textured`] meshes.
     /// `None` for streams without a texture table.
     pub fn texture(&self) -> Option<&ImageTexture> {
-        self.texture.as_ref()
+        self.texture_table_present
+            .then(|| {
+                self.mesh_assets
+                    .first()
+                    .and_then(|asset| asset.base_color_texture.as_ref())
+            })
+            .flatten()
     }
 
     /// Whether the stream carried a leading texture table (`0.0.4`).
     pub fn has_texture(&self) -> bool {
-        self.texture.is_some()
+        self.texture_table_present
     }
 
     /// Inline background resources in frames-table row order.
@@ -163,7 +212,9 @@ impl InputSession {
                     if let Some(batch) = decoded {
                         match self.current_kind {
                             Some(StreamKind::Mesh) => {
-                                self.meshes.extend(Mesh::from_arrow_all(&batch)?)
+                                self.mesh_resources
+                                    .extend(Mesh::decode_mesh_resources(&batch)?);
+                                self.refresh_resolved_meshes();
                             }
                             Some(StreamKind::Texture) => self.decode_texture(&batch)?,
                             Some(StreamKind::Frames) => {
@@ -287,10 +338,49 @@ impl InputSession {
     /// texture per stream). Later rows/batches of the same texture stream are
     /// ignored (a texture table is one row = one image).
     fn decode_texture(&mut self, batch: &RecordBatch) -> Result<(), ProtocolError> {
-        if self.texture.is_none() && batch.num_rows() > 0 {
-            self.texture = Some(ImageTexture::from_arrow(batch)?);
+        if self
+            .mesh_resources
+            .first()
+            .is_some_and(|resource| matches!(resource, MeshResource::Gltf(_)))
+        {
+            return Err(ProtocolError::TextureWithGltfReference);
+        }
+        let texture_missing = self.pending_texture.is_none() && self.texture().is_none();
+        if texture_missing && batch.num_rows() > 0 {
+            self.pending_texture = Some(ImageTexture::from_arrow(batch)?);
+            self.refresh_resolved_meshes();
         }
         Ok(())
+    }
+
+    fn refresh_resolved_meshes(&mut self) {
+        if self
+            .mesh_resources
+            .iter()
+            .any(|resource| matches!(resource, MeshResource::Gltf(_)))
+        {
+            self.mesh_assets.clear();
+            self.meshes.clear();
+            return;
+        }
+        if let Some(texture) = self.pending_texture.take() {
+            if let Some(MeshResource::Resolved(asset)) = self.mesh_resources.first_mut() {
+                asset.base_color_texture = Some(texture);
+            }
+        }
+        self.mesh_assets = self
+            .mesh_resources
+            .iter()
+            .filter_map(|resource| match resource {
+                MeshResource::Resolved(asset) => Some(asset.as_ref().clone()),
+                MeshResource::Gltf(_) => None,
+            })
+            .collect();
+        self.meshes = self
+            .mesh_assets
+            .iter()
+            .map(|asset| asset.mesh.clone())
+            .collect();
     }
 }
 

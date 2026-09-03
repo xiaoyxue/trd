@@ -172,10 +172,11 @@ frames into Arrow. Replaying therefore uses the same video as a sidecar. The
 exported protocol `0.0.6` scene. Annotation input enables editing; scene input
 replays its decoded mesh and per-frame draws over the selected video.
 
-Protocol `0.0.6` carries geometry, one base-color texture, render mode, camera,
-and placement. It does not carry Disney material scalars, metallic-roughness or
-normal maps, or the IBL environment, so those runtime PBR settings are not part
-of the round trip.
+Protocol `0.0.6` uses two asset forms. Coca-Cola/beer OBJ assets embed geometry,
+the albedo texture, and the complete edited `DisneyMaterial` JSON. Dragon
+exports only its GLB path/URL; replay resolves that file and imports its geometry,
+base-color, metallic-roughness and normal maps, and material. Both paths bind
+`assets/envmap/uffizi-large.hdr` as the video editor's default IBL probe.
 
 ### Canonical acceptance workflow
 
@@ -192,9 +193,9 @@ Record at least the first, middle, and last tracked frames plus one untracked
 gap. The three tracked replays must match their snapshots within the existing
 pixel tolerance; the gap must remain video-only. Decoder/matrix round-trip tests
 are supporting coverage, not a substitute for this visible comparison.
-`Shaded`/PBR replay is checked for geometry and placement rather than pixel
-equality because its material maps, Disney values, and IBL environment are not
-part of protocol `0.0.6`.
+The required PBR cases are Coca-Cola with edited metallic, roughness, and at
+least one additional Disney value, and Dragon through its reference-only GLB.
+Both are replayed with the Uffizi probe and compared at the same frames.
 
 ## Generate the document
 
@@ -686,5 +687,5 @@ duration before playback.
 - add temporal pose smoothing;
 - add automated browser coverage for local-video playback and editing.
 
-PBR material state remains runtime asset state because render protocol `0.0.6`
-does not serialize PBR fields.
+OBJ material edits are serialized in the protocol mesh row. GLB/glTF material
+state remains in the referenced file and is not duplicated in Arrow.

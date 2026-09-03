@@ -43,7 +43,7 @@ fn run() -> Result<(), error::NativeVideoEditingError> {
     let cli = cli::Cli::parse();
     // Arrow input is optional: without one the editor is a plain player and the
     // container supplies the timeline (#264).
-    let input = cli
+    let mut input = cli
         .document
         .as_ref()
         .map(|path| {
@@ -56,6 +56,9 @@ fn run() -> Result<(), error::NativeVideoEditingError> {
                 .map_err(error::NativeVideoEditingError::Input)
         })
         .transpose()?;
+    if let Some(trd_gui::video_editing::VideoEditingInput::Scene(scene)) = input.as_mut() {
+        app::resolve_arrow_scene(scene).map_err(error::NativeVideoEditingError::Input)?;
+    }
     let video_source = cli
         .video
         .map(media::NativeVideoSource::Local)
@@ -104,7 +107,7 @@ fn run() -> Result<(), error::NativeVideoEditingError> {
             ),
             (None, Some(trd_gui::video_editing::VideoEditingInput::Scene(scene))) => println!(
                 "protocol scene validated: {} mesh row(s), {} params row(s); no video source supplied",
-                scene.meshes.len(),
+                scene.mesh_resources.len(),
                 scene.frames.len()
             ),
             (None, None) => println!("nothing to probe: pass --video and/or --document"),

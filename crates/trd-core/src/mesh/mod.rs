@@ -22,9 +22,12 @@ mod gltf;
 #[allow(clippy::module_inception)]
 mod mesh;
 mod obj;
+mod resource;
 
+pub(crate) use arrow::{GLTF_PATH_COLUMN, GLTF_URL_COLUMN, MATERIAL_COLUMN};
 pub use gltf::{import_glb, import_gltf_materials, GltfAsset, GltfImportError};
 pub use mesh::{Mesh, MeshShading};
+pub use resource::{MeshAsset, MeshReference, MeshResource};
 
 // `::arrow` (leading `::`) is the external Arrow crate, not this module's
 // sibling `arrow` submodule.
@@ -69,6 +72,15 @@ pub enum MeshError {
     /// cannot be a triangle list.
     #[error("non-indexed mesh has {vertex_count} vertices, not a multiple of 3")]
     NonTriangleList { vertex_count: usize },
+    /// A mesh row mixes embedded geometry and a glTF reference, or contains neither.
+    #[error("mesh row {row} must contain exactly one source: embedded geometry or glTF reference")]
+    InvalidSource { row: usize },
+    /// A material JSON column could not be decoded.
+    #[error("mesh row {row} has invalid material JSON: {message}")]
+    InvalidMaterial { row: usize, message: String },
+    /// An API that requires embedded geometry received a reference row.
+    #[error("mesh row {row} is a glTF reference, not embedded geometry")]
+    ExternalReference { row: usize },
 }
 
 impl Mesh {

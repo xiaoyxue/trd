@@ -3,7 +3,7 @@
 //! Reads an Arrow IPC scene stream on stdin and writes an Arrow
 //! IPC stream of rendered images on stdout (trd protocol 0.0.6).
 
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::PathBuf;
 
 use clap::{Parser, ValueEnum};
@@ -180,7 +180,7 @@ fn main() -> Result<(), trd_core::StreamError> {
     // `--env-background` also needs it: the probe drawn as the sky is the same
     // bound environment map the shaded surfaces reflect (#235 R2), so a filled or
     // wireframe scene asking for a sky gets the config too.
-    let pbr = if cli.pbr || cli.env_background {
+    let pbr = if cli.pbr || cli.env_background || cli.env.is_some() {
         let material = trd_core::DisneyMaterial {
             metallic: cli.metallic,
             roughness: cli.roughness,
@@ -244,7 +244,9 @@ fn main() -> Result<(), trd_core::StreamError> {
         .as_ref()
         .map(|r| r as &dyn Fn(&str) -> Option<trd_core::ImageData>);
 
-    trd_core::run_stream(
+    let mesh_resolver = |reference: &trd_core::MeshReference| load_mesh_reference(reference);
+
+    trd_core::run_stream_with_mesh_resolver(
         stdin,
         stdout,
         cli.width,
@@ -277,9 +279,37 @@ fn main() -> Result<(), trd_core::StreamError> {
             },
         },
         frame_resolver,
+        Some(&mesh_resolver),
     )?;
     io::stdout().flush()?;
     Ok(())
+}
+
+fn load_mesh_reference(reference: &trd_core::MeshReference) -> Result<Vec<u8>, String> {
+    if let Some(path) = reference.path.as_ref() {
+        match std::fs::read(path) {
+            Ok(bytes) => return Ok(bytes),
+            Err(error) if reference.url.is_none() => {
+                return Err(format!("failed to read {path}: {error}"));
+            }
+            Err(_) => {}
+        }
+    }
+    let url = reference
+        .url
+        .as_deref()
+        .ok_or_else(|| "glTF reference has neither a readable path nor a URL".to_owned())?;
+    let mut response = ureq::get(url)
+        .call()
+        .map_err(|error| format!("{url}: {error}"))?;
+    let mut bytes = Vec::new();
+    response
+        .body_mut()
+        .as_reader()
+        .take(256 * 1024 * 1024)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("{url}: {error}"))?;
+    Ok(bytes)
 }
 
 /// Decodes an equirectangular Radiance `.hdr` file into a linear-RGBA f32

@@ -14,8 +14,7 @@ use std::io::Read;
 
 use crate::protocol::FrameBatch;
 use crate::stream_filter::StreamError;
-use crate::texture::ImageTexture;
-use crate::{InlineFrame, InputSession, Mesh};
+use crate::{InlineFrame, InputSession, Mesh, MeshAsset, MeshReference};
 
 /// How many bytes are pulled from the source per read.
 const CHUNK: usize = 64 * 1024;
@@ -26,12 +25,14 @@ const CHUNK: usize = 64 * 1024;
 /// Reaching this is what makes the accessors meaningful, so it is a value rather
 /// than a set of "only valid once ready" getters: holding a `Prologue` **is** the
 /// proof that the params schema arrived.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Prologue<'a> {
     /// The required leading mesh table, in stream order (mesh id = index).
     pub meshes: &'a [Mesh],
-    /// The optional bound albedo texture.
-    pub texture: Option<&'a ImageTexture>,
+    /// Resolved material and glTF texture resources, parallel to `meshes`.
+    pub mesh_assets: &'a [MeshAsset],
+    /// References that must be resolved before `meshes` becomes available.
+    pub mesh_references: Vec<(u32, MeshReference)>,
     /// The optional inline background resources, indexed by a frame's `frame_id`.
     pub frames: &'a [InlineFrame],
     /// The declared playback rate, defaulted when the stream omits it.
@@ -84,7 +85,8 @@ impl<R: Read> InputStream<R> {
         }
         Ok(Prologue {
             meshes: self.session.meshes(),
-            texture: self.session.texture(),
+            mesh_assets: self.session.mesh_assets(),
+            mesh_references: self.session.unresolved_mesh_references(),
             frames: self.session.frames(),
             frame_rate: self
                 .session
@@ -101,6 +103,11 @@ impl<R: Read> InputStream<R> {
     /// [`next_batch`](Self::next_batch) instead and reads them here.
     pub fn frames(&self) -> &[InlineFrame] {
         self.session.frames()
+    }
+
+    pub fn resolve_gltf(&mut self, index: u32, bytes: &[u8]) -> Result<(), StreamError> {
+        self.session.resolve_gltf(index, bytes)?;
+        Ok(())
     }
 
     /// The next decoded batch, or `None` at end of stream.
@@ -143,7 +150,7 @@ impl<R: Read> InputStream<R> {
         self.pending.extend(self.session.push(&self.buf[..n])?);
         if !self.ready && self.session.has_schema() {
             // The protocol is mesh-first; a params-only stream is rejected.
-            if self.session.meshes().is_empty() {
+            if self.session.mesh_resource_count() == 0 {
                 return Err(StreamError::MissingMeshStream);
             }
             self.ready = true;

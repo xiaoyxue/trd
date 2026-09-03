@@ -36,17 +36,18 @@ pub use math::{
 // crate root beside `texture`/`camera`/`material` while their GPU residency
 // stays in `render/` (#221/#224). Public paths are unchanged.
 pub use mesh::{
-    import_glb, import_gltf_materials, GltfAsset, GltfImportError, Mesh, MeshError, MeshShading,
-    DEFAULT_PREVIEW_TARGET,
+    import_glb, import_gltf_materials, GltfAsset, GltfImportError, Mesh, MeshAsset, MeshError,
+    MeshReference, MeshResource, MeshShading, DEFAULT_PREVIEW_TARGET,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use io::{InputStream, Prologue};
 pub use io::{OutputStream, SharedBuffer};
 pub use protocol::{
-    encode_scene, frame_rate_from_metadata, output_schema, read_image_stream, DecodedFrame,
-    FrameBatch, InputSession, OutputError, OutputSession, ProtocolError, SceneEncodeError,
-    DEFAULT_FRAME_RATE, FRAME_RATE_KEY, PROTOCOL_VERSION, PROTOCOL_VERSION_KEY, TABLE_KIND_KEY,
+    encode_scene, encode_scene_resources, frame_rate_from_metadata, output_schema,
+    read_image_stream, DecodedFrame, FrameBatch, InputSession, OutputError, OutputSession,
+    ProtocolError, SceneEncodeError, SceneMesh, DEFAULT_FRAME_RATE, FRAME_RATE_KEY,
+    PROTOCOL_VERSION, PROTOCOL_VERSION_KEY, TABLE_KIND_KEY,
 };
 // Material models are plain data (no wgpu, no bytemuck), so they sit beside
 // `mesh`/`texture`/`camera` at the crate root rather than inside the render
@@ -82,7 +83,10 @@ pub use texture::{
 #[cfg(not(target_arch = "wasm32"))]
 mod stream_filter;
 #[cfg(not(target_arch = "wasm32"))]
-pub use stream_filter::{decode_frames, run_stream, FrameResolver, StreamError};
+pub use stream_filter::{
+    decode_frames, run_stream, run_stream_with_mesh_resolver, FrameResolver, MeshResolver,
+    StreamError,
+};
 
 /// Returns the project greeting used by the CLI and web entry points.
 pub fn greeting() -> String {

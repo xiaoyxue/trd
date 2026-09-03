@@ -54,9 +54,10 @@ the same video and select the exported `.scene.arrow` through **Arrow input** to
 replay it. The browser downloads the bytes as an Arrow-stream Blob; native uses
 a save dialog.
 
-Protocol `0.0.6` preserves the mesh, optional base-color texture, render mode,
-camera, and placement. Disney material values, auxiliary PBR maps, and the IBL
-environment remain runtime state because the protocol does not serialize them.
+For OBJ assets, protocol `0.0.6` preserves embedded geometry, albedo, and the
+complete edited Disney material. GLB/glTF 2.0 exports only a path/URL reference;
+replay fetches the file and imports its geometry, maps, and material. Both paths
+use `assets/envmap/uffizi-large.hdr` as the default IBL probe.
 
 ### Export round-trip check
 
@@ -68,9 +69,9 @@ environment remain runtime state because the protocol does not serialize them.
 4. Reopen the same video with that exported Arrow and compare the same frames.
 
 The tracked frames must match the recorded snapshots within the existing pixel
-tolerance. The untracked frame must remain video-only. For `Shaded`/PBR, compare
-geometry and placement only; the protocol does not carry enough material/IBL
-state for pixel equality.
+tolerance and the untracked frame must remain video-only. Run the workflow once
+with the Coca-Cola OBJ after editing its PBR values and once with the Dragon GLB
+reference.
 
 ## Generate the FIBA document
 

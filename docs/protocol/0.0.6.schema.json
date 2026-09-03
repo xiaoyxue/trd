@@ -47,37 +47,64 @@
     "mesh": {
       "trd.table.kind": "mesh",
       "required": true,
-      "row_meaning": "one row is one mesh; its 0-based ordinal is the id params draw lists use",
-      "reference_producer": "scripts/obj_to_arrow.py",
+      "row_meaning": "one row is one mesh source: embedded OBJ-style geometry plus optional material JSON, or a reference-only GLB/glTF 2.0 path/URL",
+      "reference_producer": "scripts/obj_to_arrow.py or scripts/gltf_ref_to_arrow.py",
       "columns": [
         {
           "name": "position",
           "arrow_type": "list<item: fixed_size_list<item: float>[3]>",
-          "required": true,
-          "doc": "vertex positions"
+          "required": false,
+          "doc": "embedded vertex positions",
+          "nullable": true
         },
         {
           "name": "color",
           "arrow_type": "list<item: fixed_size_list<item: float>[3]>",
           "required": false,
-          "doc": "vertex RGB; absent means white"
+          "doc": "embedded vertex RGB; absent means white",
+          "nullable": true
         },
         {
           "name": "uv",
           "arrow_type": "list<item: fixed_size_list<item: float>[2]>",
           "required": false,
-          "doc": "top-left-origin texture coordinates"
+          "doc": "embedded top-left-origin texture coordinates",
+          "nullable": true
         },
         {
           "name": "index",
           "arrow_type": "list<item: uint32>",
           "required": false,
-          "doc": "triangle indices; absent means sequential"
+          "doc": "embedded triangle indices; absent means sequential",
+          "nullable": true
+        },
+        {
+          "name": "gltf_path",
+          "arrow_type": "string",
+          "required": false,
+          "doc": "native/local GLB or glTF 2.0 reference",
+          "nullable": true
+        },
+        {
+          "name": "gltf_url",
+          "arrow_type": "string",
+          "required": false,
+          "doc": "HTTP(S) or browser GLB/glTF 2.0 reference",
+          "nullable": true
+        },
+        {
+          "name": "material",
+          "arrow_type": "string",
+          "required": false,
+          "doc": "DisneyMaterial JSON for embedded OBJ geometry; null for glTF references",
+          "nullable": true
         }
       ],
       "constraints": [
+        "each row has exactly one logical source: non-null position or non-empty gltf_path/gltf_url",
+        "glTF rows carry no embedded geometry, texture table, or material JSON",
+        "embedded rows without material decode to DisneyMaterial defaults",
         "color and uv, when present, carry one value per vertex",
-        "null values in any present column are rejected",
         "a zero-row table is an error"
       ]
     },
@@ -98,6 +125,7 @@
         }
       ],
       "constraints": [
+        "valid only for embedded geometry; glTF references own their textures",
         "shape is field metadata, so every row shares H, W and 4 channels"
       ]
     },

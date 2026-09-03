@@ -46,6 +46,10 @@
             (lib.hasSuffix ".wgsl" path)
             || (lib.hasInfix "/crates/trd-core/tests/golden/" path)
             || (lib.hasSuffix "/assets/videos/fiba/fiba-shot1.arrow" path)
+            || (lib.hasSuffix "/assets/meshes/can/coke.obj" path)
+            || (lib.hasSuffix "/assets/meshes/can/can_around.jpg" path)
+            || (lib.hasSuffix "/assets/meshes/glb/Meshy_AI_Dragon_0804104424_texture.glb" path)
+            || (lib.hasSuffix "/assets/envmap/uffizi-large.hdr" path)
             || (craneLib.filterCargoSources path type);
           name = "source";
         };

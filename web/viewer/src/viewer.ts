@@ -184,6 +184,20 @@ async function preloadBackgrounds(
   }
 }
 
+async function resolveMeshResources(
+  renderer: CanvasRenderer | OffscreenRenderer,
+): Promise<void> {
+  for (let index = 0; index < renderer.meshResourceCount(); index++) {
+    const reference = renderer.gltfUrl(index) ?? renderer.gltfPath(index);
+    if (!reference) {
+      continue;
+    }
+    setStatus(`loading glTF mesh ${index + 1}/${renderer.meshResourceCount()}…`);
+    const url = new URL(reference, location.href);
+    renderer.resolveGltf(index, await fetchBytes(url.href));
+  }
+}
+
 async function runCanvas(
   canvas: HTMLCanvasElement,
   config: RenderConfig,
@@ -193,6 +207,7 @@ async function runCanvas(
   const renderer = await CanvasRenderer.create(canvas);
   await applyMode(renderer, config);
   const total = renderer.loadIpc(stream);
+  await resolveMeshResources(renderer);
   if (total === 0) {
     fail("stream carried no frames");
   }
@@ -235,6 +250,7 @@ async function runOffscreen(
   const renderer = await OffscreenRenderer.create(config.width, config.height);
   await applyMode(renderer, config);
   const total = renderer.loadIpc(stream);
+  await resolveMeshResources(renderer);
   if (total === 0) {
     fail("stream carried no frames");
   }
@@ -300,10 +316,10 @@ async function applyMode(
       pbr.ambient,
       pbr.tonemap,
     );
-    if (config.env) {
-      setStatus("loading environment map…");
-      renderer.setEnvMapHdr(await fetchBytes(config.env));
-    }
+  }
+  if (config.env) {
+    setStatus("loading environment map…");
+    renderer.setEnvMapHdr(await fetchBytes(config.env));
   }
   // The HDR sky is a scene background, not a material, so it is applied after
   // the material (whose tone mapping it follows) and independently of it.

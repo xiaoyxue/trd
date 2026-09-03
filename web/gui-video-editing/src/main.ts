@@ -11,7 +11,7 @@ import beerTextureUrl from "../../../assets/meshes/qd_beer/textures/3d66-export-
   type: "file",
 };
 import editingDocumentUrl from "../data/fiba-shot1.arrow" with { type: "file" };
-import init, { startVideoEditing } from "../pkg/trd_wasm.js";
+import init, { startVideoEditing, videoEditingGltfReferences } from "../pkg/trd_wasm.js";
 import wasmUrl from "../pkg/trd_wasm_bg.wasm" with { type: "file" };
 import { byteSourceFor, MediabunnyReader, type MediaInput } from "./media/mediabunny-reader.ts";
 import { VideoPlayer } from "./media/player.ts";
@@ -47,7 +47,47 @@ async function main(): Promise<void> {
     }
     documentBytes = new Uint8Array(await response.arrayBuffer());
   }
-  const editor = await startVideoEditing(canvas, documentBytes);
+  const envResponse = await fetch(uffiziEnvUrl);
+  if (!envResponse.ok) {
+    throw new Error(`failed to fetch Uffizi environment: ${envResponse.status}`);
+  }
+  const defaultEnvBytes = new Uint8Array(await envResponse.arrayBuffer());
+  const initialGltf = documentBytes ? await resolveGltfReferences(documentBytes) : [];
+  const editor = await startVideoEditing(
+    canvas,
+    documentBytes,
+    initialGltf,
+    defaultEnvBytes,
+  );
+
+  async function resolveGltfReferences(bytes: Uint8Array): Promise<Uint8Array[]> {
+    const references = videoEditingGltfReferences(bytes) as Array<{
+      index: number;
+      path?: string;
+      url?: string;
+    }>;
+    return Promise.all(
+      references.map(async (reference) => {
+        const target = reference.url ?? reference.path;
+        if (!target) {
+          throw new Error(`glTF mesh row ${reference.index} has no path or URL`);
+        }
+        const response = await fetch(new URL(target, location.href));
+        if (!response.ok) {
+          throw new Error(`failed to fetch glTF mesh row ${reference.index}: ${response.status}`);
+        }
+        return new Uint8Array(await response.arrayBuffer());
+      }),
+    );
+  }
+
+  async function loadArrowInput(bytes: Uint8Array): Promise<void> {
+    await editor.loadDocumentWithGltf(
+      bytes,
+      await resolveGltfReferences(bytes),
+      defaultEnvBytes,
+    );
+  }
 
   /// Surfaces a failure. The editor's UI is a canvas, so an error drawn there
   /// can be read but not selected, copied or scrolled back to — logging it as
@@ -60,10 +100,33 @@ async function main(): Promise<void> {
     editor.setError(errorScopes[scope], message);
   }
 
-  const catalog = new Map<number, { modelUrl: string; textureUrl?: string }>([
-    [1, { modelUrl: cokeObjUrl, textureUrl: cokeTextureUrl }],
-    [2, { modelUrl: beerObjUrl, textureUrl: beerTextureUrl }],
-    [3, { modelUrl: dragonUrl }],
+  const catalog = new Map<
+    number,
+    { modelPath: string; modelUrl: string; textureUrl?: string }
+  >([
+    [
+      1,
+      {
+        modelPath: "assets/meshes/can/coke.obj",
+        modelUrl: cokeObjUrl,
+        textureUrl: cokeTextureUrl,
+      },
+    ],
+    [
+      2,
+      {
+        modelPath: "assets/meshes/qd_beer/source/3d66.com_JDH5455878326.obj",
+        modelUrl: beerObjUrl,
+        textureUrl: beerTextureUrl,
+      },
+    ],
+    [
+      3,
+      {
+        modelPath: "assets/meshes/glb/Meshy_AI_Dragon_0804104424_texture.glb",
+        modelUrl: dragonUrl,
+      },
+    ],
   ]);
   const input = document.createElement("input");
   input.type = "file";
@@ -112,17 +175,17 @@ async function main(): Promise<void> {
       if (!response.ok) {
         throw new Error(`failed to fetch document: ${response.status} ${response.statusText}`);
       }
-      await editor.loadDocument(new Uint8Array(await response.arrayBuffer()));
+      await loadArrowInput(new Uint8Array(await response.arrayBuffer()));
       return;
     }
     if (editor.hasPendingDocument() && pendingDocumentFile) {
-      await editor.loadDocument(new Uint8Array(await pendingDocumentFile.arrayBuffer()));
+      await loadArrowInput(new Uint8Array(await pendingDocumentFile.arrayBuffer()));
       return;
     }
     editor.clearDocument();
   }
   let loadingAsset = false;
-  let envBytesPromise: Promise<Uint8Array> | undefined;
+  let envBytesPromise: Promise<Uint8Array> | undefined = Promise.resolve(defaultEnvBytes);
   let sourceReady = false;
   let sourceGeneration = 0;
 
@@ -358,7 +421,14 @@ async function main(): Promise<void> {
         envBytesPromise,
       ])
         .then(([modelBytes, textureBytes, envBytes]) =>
-          editor.loadCatalogAsset(assetCode, modelBytes, textureBytes, envBytes),
+          editor.loadCatalogAsset(
+            assetCode,
+            entry.modelPath,
+            entry.modelUrl,
+            modelBytes,
+            textureBytes,
+            envBytes,
+          ),
         )
         .catch((error: unknown) => reportError("catalog", String(error)))
         .finally(() => {

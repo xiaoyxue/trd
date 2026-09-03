@@ -2,10 +2,53 @@ use super::{ErrorScope, VideoEditingApp, VideoEditingShared, COMMAND_EXPORT_ARRO
 
 #[derive(Debug, Clone)]
 pub struct ArrowScene {
-    pub meshes: Vec<trd_core::Mesh>,
-    pub texture: Option<trd_core::ImageTexture>,
+    pub mesh_resources: Vec<trd_core::MeshResource>,
     pub frames: Vec<trd_core::DecodedFrame>,
     pub frame_rate: f64,
+}
+
+impl ArrowScene {
+    pub fn unresolved_mesh_references(&self) -> Vec<(u32, trd_core::MeshReference)> {
+        self.mesh_resources
+            .iter()
+            .enumerate()
+            .filter_map(|(index, resource)| match resource {
+                trd_core::MeshResource::Gltf(reference) => Some((index as u32, reference.clone())),
+                trd_core::MeshResource::Resolved(_) => None,
+            })
+            .collect()
+    }
+
+    pub fn resolve_gltf(&mut self, index: u32, bytes: &[u8]) -> Result<(), String> {
+        let count = self.mesh_resources.len();
+        let resource = self
+            .mesh_resources
+            .get_mut(index as usize)
+            .ok_or_else(|| format!("mesh reference index {index} is out of range ({count})"))?;
+        if !matches!(resource, trd_core::MeshResource::Gltf(_)) {
+            return Err(format!("mesh row {index} is already resolved"));
+        }
+        *resource = trd_core::MeshResource::Resolved(Box::new(
+            trd_core::import_glb(bytes)
+                .map(trd_core::MeshAsset::from)
+                .map_err(|error| error.to_string())?,
+        ));
+        Ok(())
+    }
+
+    pub fn mesh_assets(&self) -> Result<Vec<trd_core::MeshAsset>, String> {
+        self.mesh_resources
+            .iter()
+            .enumerate()
+            .map(|(index, resource)| match resource {
+                trd_core::MeshResource::Resolved(asset) => Ok(asset.as_ref().clone()),
+                trd_core::MeshResource::Gltf(reference) => Err(format!(
+                    "mesh row {index} reference `{}` is unresolved",
+                    reference.display()
+                )),
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -41,14 +84,14 @@ fn decode_arrow_scene(bytes: &[u8]) -> Result<ArrowScene, String> {
     let mut session = trd_core::InputSession::new();
     let batches = session.push(bytes).map_err(|error| error.to_string())?;
     session.finish().map_err(|error| error.to_string())?;
-    if !session.has_meshes() {
+    if session.mesh_resource_count() == 0 {
         return Err("scene has no mesh table".to_owned());
     }
     let frames: Vec<_> = batches.into_iter().flatten().collect();
     if frames.is_empty() {
         return Err("scene has no params rows".to_owned());
     }
-    let mesh_count = session.meshes().len();
+    let mesh_count = session.mesh_resource_count();
     if let Some(draw) = frames
         .iter()
         .filter_map(|frame| frame.draws.as_ref())
@@ -61,8 +104,7 @@ fn decode_arrow_scene(bytes: &[u8]) -> Result<ArrowScene, String> {
         ));
     }
     Ok(ArrowScene {
-        meshes: session.meshes().to_vec(),
-        texture: session.texture().cloned(),
+        mesh_resources: session.mesh_resources().to_vec(),
         frames,
         frame_rate: session.frame_rate().unwrap_or(trd_core::DEFAULT_FRAME_RATE),
     })
@@ -251,13 +293,25 @@ impl VideoEditingApp {
             return Err(ArrowExportError::NoPlacedFrames);
         }
 
-        let texture = asset
-            .texture
-            .as_ref()
-            .map(|texture| texture as &dyn trd_core::Texture);
+        let material = self
+            .controller
+            .state
+            .materials
+            .first()
+            .ok_or(ArrowExportError::NoLoadedAsset)?;
+        let (scene_mesh, texture): (trd_core::SceneMesh<'_>, Option<&dyn trd_core::Texture>) =
+            match asset.as_ref() {
+                crate::video_editing_renderer::VideoExportAsset::Embedded { mesh, texture } => (
+                    trd_core::SceneMesh::Embedded { mesh, material },
+                    Some(texture),
+                ),
+                crate::video_editing_renderer::VideoExportAsset::Gltf(reference) => {
+                    (trd_core::SceneMesh::Gltf(reference), None)
+                }
+            };
         let frame_rate = f64::from(self.video.fps_num) / f64::from(self.video.fps_den);
-        let bytes = trd_core::encode_scene(
-            std::slice::from_ref(&asset.mesh),
+        let bytes = trd_core::encode_scene_resources(
+            std::slice::from_ref(&scene_mesh),
             texture,
             &params,
             Some(&draws),
@@ -355,10 +409,12 @@ mod tests {
         app.selected_quad = true;
         app.controller.state.modes[0] = trd_core::RenderMode::Wireframe;
         shared.video_loaded.set(true);
-        shared.export_asset.replace(Some(Rc::new(VideoExportAsset {
-            mesh: trd_core::Mesh::from_obj("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n").unwrap(),
-            texture: None,
-        })));
+        shared
+            .export_asset
+            .replace(Some(Rc::new(VideoExportAsset::Embedded {
+                mesh: trd_core::Mesh::from_obj("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n").unwrap(),
+                texture: trd_core::ImageTexture::from_rgba(1, 1, vec![255; 4]).unwrap(),
+            })));
         app
     }
 
@@ -428,6 +484,83 @@ mod tests {
     }
 
     #[test]
+    fn coca_obj_exports_edited_material_and_albedo() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mesh = trd_core::Mesh::from_obj(
+            &std::fs::read_to_string(root.join("assets/meshes/can/coke.obj")).unwrap(),
+        )
+        .unwrap();
+        let texture = crate::assets::decode_texture(
+            &std::fs::read(root.join("assets/meshes/can/can_around.jpg")).unwrap(),
+        )
+        .unwrap();
+        let mut app = export_ready_app();
+        let material = trd_core::DisneyMaterial {
+            metallic: 0.33,
+            roughness: 0.61,
+            clearcoat: 0.27,
+            specular: 0.72,
+            auxiliary: trd_core::Auxiliary {
+                textures: trd_core::MaterialTextures {
+                    base_color: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..trd_core::DisneyMaterial::default()
+        };
+        app.controller.state.materials[0] = material.clone();
+        app.controller.state.modes[0] = trd_core::RenderMode::Shaded;
+        app.shared
+            .export_asset
+            .replace(Some(Rc::new(VideoExportAsset::Embedded {
+                mesh,
+                texture: texture.clone(),
+            })));
+
+        let export = app.build_arrow_export().unwrap();
+        let VideoEditingInput::Scene(scene) = decode_video_editing_input(&export.bytes).unwrap()
+        else {
+            panic!("OBJ export must decode as a scene");
+        };
+        let assets = scene.mesh_assets().unwrap();
+
+        assert_eq!(assets.len(), 1);
+        assert_eq!(assets[0].material, material);
+        assert_eq!(assets[0].base_color_texture.as_ref(), Some(&texture));
+    }
+
+    #[test]
+    fn dragon_exports_only_a_reference_then_imports_all_glb_maps() {
+        let relative = "assets/meshes/glb/Meshy_AI_Dragon_0804104424_texture.glb";
+        let reference = trd_core::MeshReference::new(Some(relative.to_owned()), None).unwrap();
+        let app = export_ready_app();
+        app.shared
+            .export_asset
+            .replace(Some(Rc::new(VideoExportAsset::Gltf(reference.clone()))));
+
+        let export = app.build_arrow_export().unwrap();
+        let VideoEditingInput::Scene(mut scene) =
+            decode_video_editing_input(&export.bytes).unwrap()
+        else {
+            panic!("Dragon export must decode as a scene");
+        };
+        assert_eq!(
+            scene.mesh_resources,
+            vec![trd_core::MeshResource::Gltf(reference)]
+        );
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        scene
+            .resolve_gltf(0, &std::fs::read(root.join(relative)).unwrap())
+            .unwrap();
+        let assets = scene.mesh_assets().unwrap();
+        assert!(assets[0].base_color_texture.is_some());
+        assert!(assets[0].metallic_roughness_texture.is_some());
+        assert!(assets[0].normal_texture.is_some());
+    }
+
+    #[test]
     fn real_annotation_input_is_not_misclassified_as_a_scene() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../assets/videos/fiba/fiba-shot1.arrow");
@@ -443,8 +576,12 @@ mod tests {
     fn replay_rejects_a_scene_for_a_different_timeline() {
         let mut app = export_ready_app();
         app.set_arrow_scene(Some(Rc::new(ArrowScene {
-            meshes: vec![trd_core::Mesh::from_obj("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n").unwrap()],
-            texture: None,
+            mesh_resources: vec![trd_core::MeshResource::Resolved(Box::new(
+                trd_core::MeshAsset::embedded(
+                    trd_core::Mesh::from_obj("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n").unwrap(),
+                    trd_core::DisneyMaterial::default(),
+                ),
+            ))],
             frames: vec![trd_core::DecodedFrame {
                 params: trd_core::FrameParams::IDENTITY,
                 draws: Some(Vec::new()),
@@ -466,8 +603,12 @@ mod tests {
         assert!(shared.take_incoming_scene().is_none());
 
         shared.queue_arrow_scene(Rc::new(ArrowScene {
-            meshes: vec![trd_core::Mesh::from_obj("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n").unwrap()],
-            texture: None,
+            mesh_resources: vec![trd_core::MeshResource::Resolved(Box::new(
+                trd_core::MeshAsset::embedded(
+                    trd_core::Mesh::from_obj("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n").unwrap(),
+                    trd_core::DisneyMaterial::default(),
+                ),
+            ))],
             frames: vec![trd_core::DecodedFrame {
                 params: trd_core::FrameParams::IDENTITY,
                 draws: Some(Vec::new()),

@@ -3,48 +3,115 @@
 //!
 //! Because Arrow requires every column in a record batch to have the same
 //! length — while a mesh has a different number of vertices and indices — each
-//! row of the table is **one whole mesh**, with the per-vertex and per-index
-//! data nested inside list columns: `position`
-//! `List<FixedSizeList<Float32>[3]>` (required), an optional `color`
+//! row of the table is one embedded mesh or one glTF reference. Embedded
+//! per-vertex and per-index data uses `position`
+//! `List<FixedSizeList<Float32>[3]>`, an optional `color`
 //! `List<FixedSizeList<Float32>[3]>`, an optional `uv`
 //! `List<FixedSizeList<Float32>[2]>`, and an optional `index` `List<UInt32>`
-//! (absent ⇒ a non-indexed triangle list). [`Mesh::from_arrow_all`] decodes
-//! every row (one mesh each) for multi-mesh scenes; [`Mesh::from_arrow`] decodes
-//! just the first row. It yields the same canonical [`Mesh`] as the OBJ path, so
-//! both authoring routes agree.
+//! (absent ⇒ a non-indexed triangle list), plus optional material JSON.
+//! Reference rows use `gltf_path`/`gltf_url` and are resolved by the shell.
 
-use arrow::array::{Array, FixedSizeListArray, Float32Array, ListArray, RecordBatch, UInt32Array};
+use arrow::array::{
+    Array, FixedSizeListArray, Float32Array, ListArray, RecordBatch, StringArray, UInt32Array,
+};
 use arrow::datatypes::DataType;
 
-use super::{Mesh, MeshError, DEFAULT_COLOR};
+use super::{Mesh, MeshAsset, MeshError, MeshReference, MeshResource, DEFAULT_COLOR};
 use crate::render::Vertex;
+use crate::DisneyMaterial;
+
+pub const GLTF_PATH_COLUMN: &str = "gltf_path";
+pub const GLTF_URL_COLUMN: &str = "gltf_url";
+pub const MATERIAL_COLUMN: &str = "material";
 
 impl Mesh {
     /// Decodes a columnar **Arrow mesh table** into the canonical [`Mesh`] (#37).
     ///
-    /// Each row of the table is one mesh (see the module docs): a required
-    /// `position` `List<FixedSizeList<Float32>[3]>` column, an optional `color`
+    /// Embedded rows use a required `position`
+    /// `List<FixedSizeList<Float32>[3]>` column, an optional `color`
     /// `List<FixedSizeList<Float32>[3]>` (defaults to white), and an optional
     /// `index` `List<UInt32>` (absent ⇒ the vertices are a non-indexed triangle
     /// list, so their count must be a multiple of three). The **first row** is
     /// decoded; use [`Mesh::from_arrow_all`] to decode every row. Produces the
-    /// same [`Mesh`] as [`Mesh::from_obj`] for equivalent geometry.
+    /// same [`Mesh`] as [`Mesh::from_obj`] for equivalent geometry. Reference
+    /// rows return [`MeshError::ExternalReference`].
     pub fn from_arrow(batch: &RecordBatch) -> Result<Mesh, MeshError> {
-        if batch.num_rows() == 0 {
-            return Err(MeshError::Empty);
+        match Self::decode_mesh_resources(batch)?.into_iter().next() {
+            Some(MeshResource::Resolved(asset)) => Ok(asset.mesh),
+            Some(MeshResource::Gltf(_)) => Err(MeshError::ExternalReference { row: 0 }),
+            None => Err(MeshError::Empty),
         }
-        Self::from_arrow_row(batch, 0)
     }
 
     /// Decodes **every** row of an Arrow mesh table into one [`Mesh`] each,
     /// preserving row order so a stream's draw list can reference meshes by row
     /// index. Returns [`MeshError::Empty`] for a zero-row table.
     pub fn from_arrow_all(batch: &RecordBatch) -> Result<Vec<Mesh>, MeshError> {
+        Self::decode_mesh_resources(batch)?
+            .into_iter()
+            .enumerate()
+            .map(|(row, resource)| match resource {
+                MeshResource::Resolved(asset) => Ok(asset.mesh),
+                MeshResource::Gltf(_) => Err(MeshError::ExternalReference { row }),
+            })
+            .collect()
+    }
+
+    pub(crate) fn decode_mesh_resources(
+        batch: &RecordBatch,
+    ) -> Result<Vec<MeshResource>, MeshError> {
         if batch.num_rows() == 0 {
             return Err(MeshError::Empty);
         }
+        let path = optional_string(batch, GLTF_PATH_COLUMN)?;
+        let url = optional_string(batch, GLTF_URL_COLUMN)?;
+        let material = optional_string(batch, MATERIAL_COLUMN)?;
+        let geometry = ["position", "color", "uv", "index"]
+            .into_iter()
+            .map(|name| {
+                batch
+                    .column_by_name(name)
+                    .map(|column| as_list(column, name))
+                    .transpose()
+                    .map(|column| (name, column))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
         (0..batch.num_rows())
-            .map(|row| Self::from_arrow_row(batch, row))
+            .map(|row| {
+                let reference = MeshReference::new(
+                    nonempty_string(path, row).map(str::to_owned),
+                    nonempty_string(url, row).map(str::to_owned),
+                );
+                let has_geometry = geometry
+                    .iter()
+                    .filter_map(|(_, column)| *column)
+                    .any(|column| !column.is_null(row));
+                let material_json = nonempty_string(material, row);
+                match (has_geometry, reference) {
+                    (true, None) => {
+                        let material = material_json
+                            .map(|json| {
+                                serde_json::from_str::<DisneyMaterial>(json).map_err(|error| {
+                                    MeshError::InvalidMaterial {
+                                        row,
+                                        message: error.to_string(),
+                                    }
+                                })
+                            })
+                            .transpose()?
+                            .unwrap_or_default();
+                        Ok(MeshResource::Resolved(Box::new(MeshAsset::embedded(
+                            Mesh::from_arrow_row(batch, row)?,
+                            material,
+                        ))))
+                    }
+                    (false, Some(reference)) if material_json.is_none() => {
+                        Ok(MeshResource::Gltf(reference))
+                    }
+                    _ => Err(MeshError::InvalidSource { row }),
+                }
+            })
             .collect()
     }
 
@@ -227,6 +294,29 @@ fn require_list<'a>(
         .column_by_name(name)
         .ok_or(MeshError::MissingColumn(name))?;
     as_list(column, name)
+}
+
+fn optional_string<'a>(
+    batch: &'a RecordBatch,
+    name: &'static str,
+) -> Result<Option<&'a StringArray>, MeshError> {
+    let Some(column) = batch.column_by_name(name) else {
+        return Ok(None);
+    };
+    column
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .map(Some)
+        .ok_or_else(|| MeshError::ColumnType {
+            column: name,
+            expected: "Utf8",
+            actual: column.data_type().clone(),
+        })
+}
+
+fn nonempty_string(column: Option<&StringArray>, row: usize) -> Option<&str> {
+    let column = column?;
+    (!column.is_null(row) && !column.value(row).is_empty()).then(|| column.value(row))
 }
 
 /// Downcasts `column` to a [`ListArray`].

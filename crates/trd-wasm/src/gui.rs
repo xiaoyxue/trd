@@ -3,6 +3,61 @@
 
 use std::rc::Rc;
 
+#[wasm_bindgen::prelude::wasm_bindgen(js_name = videoEditingGltfReferences)]
+pub fn video_editing_gltf_references(
+    bytes: Vec<u8>,
+) -> Result<js_sys::Array, wasm_bindgen::JsValue> {
+    let input = trd_gui::video_editing::decode_video_editing_input(&bytes)
+        .map_err(|error| wasm_bindgen::JsValue::from_str(&error))?;
+    let result = js_sys::Array::new();
+    if let trd_gui::video_editing::VideoEditingInput::Scene(scene) = input {
+        for (index, reference) in scene.unresolved_mesh_references() {
+            let value = js_sys::Object::new();
+            js_sys::Reflect::set(
+                &value,
+                &wasm_bindgen::JsValue::from_str("index"),
+                &wasm_bindgen::JsValue::from_f64(f64::from(index)),
+            )?;
+            if let Some(path) = reference.path {
+                js_sys::Reflect::set(
+                    &value,
+                    &wasm_bindgen::JsValue::from_str("path"),
+                    &wasm_bindgen::JsValue::from_str(&path),
+                )?;
+            }
+            if let Some(url) = reference.url {
+                js_sys::Reflect::set(
+                    &value,
+                    &wasm_bindgen::JsValue::from_str("url"),
+                    &wasm_bindgen::JsValue::from_str(&url),
+                )?;
+            }
+            result.push(&value);
+        }
+    }
+    Ok(result)
+}
+
+fn resolve_video_editing_scene(
+    scene: &mut trd_gui::video_editing::ArrowScene,
+    gltf_bytes: &js_sys::Array,
+) -> Result<(), wasm_bindgen::JsValue> {
+    let references = scene.unresolved_mesh_references();
+    if references.len() != gltf_bytes.length() as usize {
+        return Err(wasm_bindgen::JsValue::from_str(&format!(
+            "expected {} resolved glTF resource(s), got {}",
+            references.len(),
+            gltf_bytes.length()
+        )));
+    }
+    for ((index, _), bytes) in references.into_iter().zip(gltf_bytes.iter()) {
+        scene
+            .resolve_gltf(index, &js_sys::Uint8Array::new(&bytes).to_vec())
+            .map_err(|error| wasm_bindgen::JsValue::from_str(&error))?;
+    }
+    Ok(())
+}
+
 /// Runs the GUI viewer on `canvas`. OBJ/GLB bytes from `?mesh=`, texture from `?texture=`,
 /// HDR probe from `?env=` (enables PBR mode); absent parameters fall back to built-in defaults.
 ///
@@ -43,6 +98,8 @@ pub async fn start(
     pub async fn start_video_editing(
         canvas: web_sys::HtmlCanvasElement,
         document_bytes: Option<Vec<u8>>,
+        gltf_bytes: js_sys::Array,
+        env_bytes: Vec<u8>,
     ) -> Result<VideoEditingHandle, wasm_bindgen::JsValue> {
         use std::rc::Rc;
 
@@ -56,7 +113,8 @@ pub async fn start(
             Some(trd_gui::video_editing::VideoEditingInput::Annotation(document)) => {
                 (Some(document), None)
             }
-            Some(trd_gui::video_editing::VideoEditingInput::Scene(scene)) => {
+            Some(trd_gui::video_editing::VideoEditingInput::Scene(mut scene)) => {
+                resolve_video_editing_scene(&mut scene, &gltf_bytes)?;
                 (None, Some(Rc::new(scene)))
             }
             None => (None, None),
@@ -90,11 +148,12 @@ pub async fn start(
                     );
                     let renderer = match creator_scene.as_ref() {
                         Some(scene) => {
+                            let assets = scene.mesh_assets()?;
                             trd_gui::video_editing_renderer::VideoPlacementRenderer::
                                 new_scene_with_gpu(
                                     gpu.clone(),
-                                    &scene.meshes,
-                                    scene.texture.as_ref(),
+                                    &assets,
+                                    &env_bytes,
                                     width,
                                     height,
                                 )?
@@ -600,28 +659,43 @@ impl VideoEditingHandle {
     /// Loads an annotation document or exported protocol scene from bytes.
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = loadDocument)]
     pub async fn load_document(&self, bytes: Vec<u8>) -> Result<(), wasm_bindgen::JsValue> {
+        self.load_document_with_gltf(bytes, js_sys::Array::new(), Vec::new())
+            .await
+    }
+
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = loadDocumentWithGltf)]
+    pub async fn load_document_with_gltf(
+        &self,
+        bytes: Vec<u8>,
+        gltf_bytes: js_sys::Array,
+        env_bytes: Vec<u8>,
+    ) -> Result<(), wasm_bindgen::JsValue> {
         match trd_gui::video_editing::decode_video_editing_input(&bytes)
             .map_err(|error| wasm_bindgen::JsValue::from_str(&error))?
         {
             trd_gui::video_editing::VideoEditingInput::Annotation(document) => {
                 self.shared.queue_annotation_document(document);
             }
-            trd_gui::video_editing::VideoEditingInput::Scene(scene) => {
+            trd_gui::video_editing::VideoEditingInput::Scene(mut scene) => {
+                resolve_video_editing_scene(&mut scene, &gltf_bytes)?;
+                let assets = scene
+                    .mesh_assets()
+                    .map_err(|error| wasm_bindgen::JsValue::from_str(&error))?;
                 let timeline = self.timeline.get();
                 let renderer = match self.shared.shared_gpu() {
                     Some(gpu) => {
                         trd_gui::video_editing_renderer::VideoPlacementRenderer::new_scene_with_gpu(
                             gpu,
-                            &scene.meshes,
-                            scene.texture.as_ref(),
+                            &assets,
+                            &env_bytes,
                             timeline.width,
                             timeline.height,
                         )
                     }
                     None => {
                         trd_gui::video_editing_renderer::VideoPlacementRenderer::new_scene(
-                            &scene.meshes,
-                            scene.texture.as_ref(),
+                            &assets,
+                            &env_bytes,
                             timeline.width,
                             timeline.height,
                         )
@@ -701,17 +775,22 @@ impl VideoEditingHandle {
     pub async fn load_catalog_asset(
         &self,
         asset_code: u8,
+        source_path: String,
+        source_url: String,
         model_bytes: Vec<u8>,
         texture_bytes: Vec<u8>,
         env_bytes: Vec<u8>,
     ) -> Result<(), wasm_bindgen::JsValue> {
         let asset = trd_gui::video_editing::CatalogAsset::from_code(asset_code)
             .ok_or_else(|| wasm_bindgen::JsValue::from_str("unknown catalog asset"))?;
+        let source = trd_core::MeshReference::new(Some(source_path), Some(source_url))
+            .ok_or_else(|| wasm_bindgen::JsValue::from_str("catalog asset reference is empty"))?;
         // Must use the same device egui samples — a different device yields an unusable texture.
         let renderer = match self.shared.shared_gpu() {
             Some(gpu) => trd_gui::video_editing_renderer::VideoPlacementRenderer::new_with_gpu(
                 gpu,
                 asset,
+                source.clone(),
                 &model_bytes,
                 &texture_bytes,
                 &env_bytes,
@@ -721,6 +800,7 @@ impl VideoEditingHandle {
             None => {
                 trd_gui::video_editing_renderer::VideoPlacementRenderer::new(
                     asset,
+                    source,
                     &model_bytes,
                     &texture_bytes,
                     &env_bytes,

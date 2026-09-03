@@ -168,6 +168,36 @@ impl OffscreenRenderer {
         };
     }
 
+    #[wasm_bindgen(js_name = meshResourceCount)]
+    pub fn mesh_resource_count(&self) -> u32 {
+        u32::try_from(self.input.mesh_resource_count()).unwrap_or(u32::MAX)
+    }
+
+    #[wasm_bindgen(js_name = gltfPath)]
+    pub fn gltf_path(&self, index: u32) -> Option<String> {
+        self.input
+            .unresolved_mesh_references()
+            .into_iter()
+            .find(|(row, _)| *row == index)
+            .and_then(|(_, reference)| reference.path)
+    }
+
+    #[wasm_bindgen(js_name = gltfUrl)]
+    pub fn gltf_url(&self, index: u32) -> Option<String> {
+        self.input
+            .unresolved_mesh_references()
+            .into_iter()
+            .find(|(row, _)| *row == index)
+            .and_then(|(_, reference)| reference.url)
+    }
+
+    #[wasm_bindgen(js_name = resolveGltf)]
+    pub fn resolve_gltf(&mut self, index: u32, bytes: &[u8]) -> Result<(), JsValue> {
+        self.input
+            .resolve_gltf(index, bytes)
+            .map_err(|error| crate::js_error(format!("glTF resolution failed: {error}")))
+    }
+
     /// Sets the Disney PBR material for shaded draws. `tonemap`: `"aces"` or anything
     /// else for Reinhard. Non-forwarded Disney parameters keep their defaults.
     #[wasm_bindgen(js_name = setPbrMaterial)]
@@ -376,12 +406,21 @@ impl OffscreenRenderer {
             self.renderer = Some(renderer);
             self.target = Some(target);
 
-            // Bind stream texture; absent ⇒ 1×1 white.
-            if let Some(texture) = self.input.texture() {
-                self.renderer
-                    .as_mut()
-                    .expect("renderer just built")
-                    .set_texture(texture);
+            for (mesh_id, asset) in self.input.mesh_assets().iter().enumerate() {
+                let renderer = self.renderer.as_mut().expect("renderer just built");
+                renderer.set_disney_material(
+                    trd_core::MeshTarget::One(mesh_id),
+                    asset.material.clone(),
+                );
+                if let Some(texture) = asset.base_color_texture.as_ref() {
+                    renderer.set_mesh_texture(mesh_id, texture);
+                }
+                if let Some(texture) = asset.metallic_roughness_texture.as_ref() {
+                    renderer.set_mesh_metallic_roughness_texture(mesh_id, texture);
+                }
+                if let Some(texture) = asset.normal_texture.as_ref() {
+                    renderer.set_mesh_normal_texture(mesh_id, texture);
+                }
             }
 
             if let Some(pbr) = &self.pbr {

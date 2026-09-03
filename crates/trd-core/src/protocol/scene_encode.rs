@@ -22,11 +22,10 @@ use std::sync::Arc;
 #[cfg(test)]
 use arrow::array::BinaryArray;
 use arrow::array::{
-    ArrayRef, FixedSizeListArray, Float32Array, ListArray, RecordBatch, UInt32Array, UInt8Array,
+    ArrayRef, FixedSizeListArray, Float32Array, ListArray, RecordBatch, StringArray, UInt32Array,
+    UInt8Array,
 };
-use arrow::buffer::OffsetBuffer;
-#[cfg(test)]
-use arrow::buffer::{BooleanBuffer, NullBuffer};
+use arrow::buffer::{BooleanBuffer, NullBuffer, OffsetBuffer};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use thiserror::Error;
@@ -42,6 +41,7 @@ use crate::math::Matrix4;
 use crate::render::{Draw, DrawSelection, RenderMode};
 use crate::render::{FrameParams, Mesh};
 use crate::texture::{Texture, TEXTURE_COLUMN};
+use crate::{DisneyMaterial, MeshReference};
 #[cfg(test)]
 use crate::{InlineFrame, FRAME_BYTES_COLUMN, FRAME_PIXELS_COLUMN};
 
@@ -57,6 +57,12 @@ pub enum SceneEncodeError {
     /// Playback rate metadata must name a finite positive rate.
     #[error("frame rate must be finite and positive, got {0}")]
     InvalidFrameRate(f64),
+    /// A Disney material could not be represented as JSON.
+    #[error("material JSON encode failed: {0}")]
+    Material(#[from] serde_json::Error),
+    /// A reference-only mesh must name at least one path or URL.
+    #[error("glTF mesh row {0} has neither a path nor a URL")]
+    MissingGltfReference(usize),
     /// A params stream would have no columns (no camera/model fields and no
     /// draws), so its row count is undefined.
     #[error("params batch has no columns")]
@@ -105,6 +111,15 @@ pub enum SceneEncodeError {
     FrameIdOutOfRange { frame_id: u32, frame_count: usize },
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum SceneMesh<'a> {
+    Embedded {
+        mesh: &'a Mesh,
+        material: &'a DisneyMaterial,
+    },
+    Gltf(&'a MeshReference),
+}
+
 /// The `FixedSizeList<Float32>[stride]` element type of a geometry column.
 fn fsl_type(stride: i32) -> DataType {
     DataType::FixedSizeList(
@@ -141,6 +156,51 @@ fn list_of_u32_column(per_row: &[Vec<u32>]) -> ArrayRef {
         offsets,
         Arc::new(UInt32Array::from(flat)),
         None,
+    ))
+}
+
+fn nullable_list_of_fixed_column(per_row_flat: &[Option<Vec<f32>>], stride: i32) -> ArrayRef {
+    let flat: Vec<f32> = per_row_flat
+        .iter()
+        .filter_map(Option::as_ref)
+        .flatten()
+        .copied()
+        .collect();
+    let fsl = FixedSizeListArray::new(
+        Arc::new(Field::new("item", DataType::Float32, false)),
+        stride,
+        Arc::new(Float32Array::from(flat)),
+        None,
+    );
+    let offsets = OffsetBuffer::from_lengths(
+        per_row_flat
+            .iter()
+            .map(|row| row.as_ref().map_or(0, |row| row.len() / stride as usize)),
+    );
+    let valid = per_row_flat.iter().map(Option::is_some).collect::<Vec<_>>();
+    Arc::new(ListArray::new(
+        Arc::new(Field::new("item", fsl_type(stride), false)),
+        offsets,
+        Arc::new(fsl),
+        Some(NullBuffer::new(BooleanBuffer::from(valid))),
+    ))
+}
+
+fn nullable_list_of_u32_column(per_row: &[Option<Vec<u32>>]) -> ArrayRef {
+    let flat: Vec<u32> = per_row
+        .iter()
+        .filter_map(Option::as_ref)
+        .flatten()
+        .copied()
+        .collect();
+    let offsets =
+        OffsetBuffer::from_lengths(per_row.iter().map(|row| row.as_ref().map_or(0, Vec::len)));
+    let valid = per_row.iter().map(Option::is_some).collect::<Vec<_>>();
+    Arc::new(ListArray::new(
+        Arc::new(Field::new("item", DataType::UInt32, false)),
+        offsets,
+        Arc::new(UInt32Array::from(flat)),
+        Some(NullBuffer::new(BooleanBuffer::from(valid))),
     ))
 }
 
@@ -193,42 +253,123 @@ fn write_ipc(schema: &Schema, batch: &RecordBatch) -> Result<Vec<u8>, SceneEncod
 /// `position`/`color` `List<FixedSizeList<Float32>[3]>`, `uv`
 /// `List<FixedSizeList<Float32>[2]>`, and `index` `List<UInt32>` columns, tagged
 /// with the `0.0.6` protocol version. Decodes back via `Mesh::from_arrow_all`.
+#[cfg(test)]
 pub fn encode_mesh_stream(meshes: &[Mesh]) -> Result<Vec<u8>, SceneEncodeError> {
-    let positions: Vec<Vec<f32>> = meshes
+    let materials = vec![DisneyMaterial::default(); meshes.len()];
+    let resources = meshes
         .iter()
-        .map(|m| m.vertices.iter().flat_map(|v| v.position).collect())
-        .collect();
-    let colors: Vec<Vec<f32>> = meshes
+        .zip(&materials)
+        .map(|(mesh, material)| SceneMesh::Embedded { mesh, material })
+        .collect::<Vec<_>>();
+    encode_mesh_resources(&resources)
+}
+
+pub fn encode_mesh_resources(meshes: &[SceneMesh<'_>]) -> Result<Vec<u8>, SceneEncodeError> {
+    if meshes.is_empty() {
+        return Err(SceneEncodeError::EmptyMeshes);
+    }
+    if let Some(index) = meshes.iter().position(|resource| {
+        matches!(
+            resource,
+            SceneMesh::Gltf(MeshReference {
+                path: None,
+                url: None
+            })
+        )
+    }) {
+        return Err(SceneEncodeError::MissingGltfReference(index));
+    }
+    let positions = meshes
         .iter()
-        .map(|m| m.vertices.iter().flat_map(|v| v.color).collect())
-        .collect();
-    let uvs: Vec<Vec<f32>> = meshes
+        .map(|resource| match resource {
+            SceneMesh::Embedded { mesh, .. } => Some(
+                mesh.vertices
+                    .iter()
+                    .flat_map(|vertex| vertex.position)
+                    .collect(),
+            ),
+            SceneMesh::Gltf(_) => None,
+        })
+        .collect::<Vec<_>>();
+    let colors = meshes
         .iter()
-        .map(|m| m.vertices.iter().flat_map(|v| v.uv).collect())
-        .collect();
-    let indices: Vec<Vec<u32>> = meshes.iter().map(|m| m.indices.clone()).collect();
+        .map(|resource| match resource {
+            SceneMesh::Embedded { mesh, .. } => Some(
+                mesh.vertices
+                    .iter()
+                    .flat_map(|vertex| vertex.color)
+                    .collect(),
+            ),
+            SceneMesh::Gltf(_) => None,
+        })
+        .collect::<Vec<_>>();
+    let uvs = meshes
+        .iter()
+        .map(|resource| match resource {
+            SceneMesh::Embedded { mesh, .. } => {
+                Some(mesh.vertices.iter().flat_map(|vertex| vertex.uv).collect())
+            }
+            SceneMesh::Gltf(_) => None,
+        })
+        .collect::<Vec<_>>();
+    let indices = meshes
+        .iter()
+        .map(|resource| match resource {
+            SceneMesh::Embedded { mesh, .. } => Some(mesh.indices.clone()),
+            SceneMesh::Gltf(_) => None,
+        })
+        .collect::<Vec<_>>();
+    let paths = meshes
+        .iter()
+        .map(|resource| match resource {
+            SceneMesh::Embedded { .. } => None,
+            SceneMesh::Gltf(reference) => reference.path.as_deref(),
+        })
+        .collect::<Vec<_>>();
+    let urls = meshes
+        .iter()
+        .map(|resource| match resource {
+            SceneMesh::Embedded { .. } => None,
+            SceneMesh::Gltf(reference) => reference.url.as_deref(),
+        })
+        .collect::<Vec<_>>();
+    let materials = meshes
+        .iter()
+        .map(|resource| match resource {
+            SceneMesh::Embedded { material, .. } => serde_json::to_string(material).map(Some),
+            SceneMesh::Gltf(_) => Ok(None),
+        })
+        .collect::<Result<Vec<_>, serde_json::Error>>()?;
 
     let list_of_fsl =
         |stride: i32| DataType::List(Arc::new(Field::new("item", fsl_type(stride), false)));
     let schema = Schema::new(vec![
-        Field::new("position", list_of_fsl(3), false),
-        Field::new("color", list_of_fsl(3), false),
-        Field::new("uv", list_of_fsl(2), false),
+        Field::new("position", list_of_fsl(3), true),
+        Field::new("color", list_of_fsl(3), true),
+        Field::new("uv", list_of_fsl(2), true),
         Field::new(
             "index",
             DataType::List(Arc::new(Field::new("item", DataType::UInt32, false))),
-            false,
+            true,
         ),
+        Field::new(crate::mesh::GLTF_PATH_COLUMN, DataType::Utf8, true),
+        Field::new(crate::mesh::GLTF_URL_COLUMN, DataType::Utf8, true),
+        Field::new(crate::mesh::MATERIAL_COLUMN, DataType::Utf8, true),
     ])
     .with_metadata(table_metadata(MESH_TABLE_KIND));
 
     let batch = RecordBatch::try_new(
         Arc::new(schema.clone()),
         vec![
-            list_of_fixed_column(&positions, 3),
-            list_of_fixed_column(&colors, 3),
-            list_of_fixed_column(&uvs, 2),
-            list_of_u32_column(&indices),
+            nullable_list_of_fixed_column(&positions, 3),
+            nullable_list_of_fixed_column(&colors, 3),
+            nullable_list_of_fixed_column(&uvs, 2),
+            nullable_list_of_u32_column(&indices),
+            Arc::new(StringArray::from(paths)) as ArrayRef,
+            Arc::new(StringArray::from(urls)) as ArrayRef,
+            Arc::new(StringArray::from(
+                materials.iter().map(Option::as_deref).collect::<Vec<_>>(),
+            )) as ArrayRef,
         ],
     )?;
     write_ipc(&schema, &batch)
@@ -587,10 +728,23 @@ pub fn encode_scene(
     draws: Option<&[Vec<Draw>]>,
     frame_rate: Option<f64>,
 ) -> Result<Vec<u8>, SceneEncodeError> {
-    if meshes.is_empty() {
-        return Err(SceneEncodeError::EmptyMeshes);
-    }
-    let mut bytes = encode_mesh_stream(meshes)?;
+    let materials = vec![DisneyMaterial::default(); meshes.len()];
+    let resources = meshes
+        .iter()
+        .zip(&materials)
+        .map(|(mesh, material)| SceneMesh::Embedded { mesh, material })
+        .collect::<Vec<_>>();
+    encode_scene_resources(&resources, texture, frames, draws, frame_rate)
+}
+
+pub fn encode_scene_resources(
+    meshes: &[SceneMesh<'_>],
+    texture: Option<&dyn Texture>,
+    frames: &[FrameParams],
+    draws: Option<&[Vec<Draw>]>,
+    frame_rate: Option<f64>,
+) -> Result<Vec<u8>, SceneEncodeError> {
+    let mut bytes = encode_mesh_resources(meshes)?;
     if let Some(texture) = texture {
         bytes.extend(encode_texture_stream(texture)?);
     }
@@ -635,6 +789,7 @@ mod tests {
     use super::*;
     use crate::protocol::{decode_params_stream, InputSession};
     use crate::render::Vertex;
+    use arrow::array::Array;
 
     fn tri_mesh() -> Mesh {
         Mesh {
@@ -669,6 +824,80 @@ mod tests {
         let batch = reader.into_iter().next().unwrap().unwrap();
         let decoded = Mesh::from_arrow_all(&batch).unwrap();
         assert_eq!(decoded, meshes);
+    }
+
+    #[test]
+    fn embedded_mesh_roundtrips_every_disney_material_field() {
+        let mesh = tri_mesh();
+        let mut material = DisneyMaterial {
+            name: Some("edited can".to_owned()),
+            base_color: [0.8, 0.7, 0.6],
+            metallic: 0.25,
+            subsurface: 0.1,
+            specular: 0.65,
+            roughness: 0.42,
+            specular_tint: 0.2,
+            anisotropic: 0.3,
+            sheen: 0.15,
+            sheen_tint: 0.75,
+            clearcoat: 0.4,
+            clearcoat_gloss: 0.9,
+            auxiliary: crate::Auxiliary {
+                opacity: 0.95,
+                alpha_mode: crate::AlphaMode::Mask,
+                alpha_cutoff: Some(0.45),
+                double_sided: true,
+                emissive: [0.1, 0.2, 0.3],
+                emissive_strength: 2.0,
+                ior: 1.45,
+                transmission: 0.2,
+                textures: crate::MaterialTextures {
+                    base_color: true,
+                    metallic_roughness: false,
+                    normal: false,
+                    occlusion: false,
+                    emissive: false,
+                },
+            },
+            ..DisneyMaterial::default()
+        };
+        material.sources.insert("roughness".into(), "editor".into());
+        let bytes = encode_mesh_resources(&[SceneMesh::Embedded {
+            mesh: &mesh,
+            material: &material,
+        }])
+        .unwrap();
+        let reader =
+            arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(bytes), None).unwrap();
+        let batch = reader.into_iter().next().unwrap().unwrap();
+        let decoded = Mesh::decode_mesh_resources(&batch).unwrap();
+
+        assert_eq!(
+            decoded,
+            vec![crate::MeshResource::Resolved(Box::new(
+                crate::MeshAsset::embedded(mesh, material)
+            ))]
+        );
+    }
+
+    #[test]
+    fn gltf_mesh_row_contains_only_its_reference() {
+        let reference = crate::MeshReference::new(
+            Some("assets/meshes/glb/dragon.glb".to_owned()),
+            Some("https://example.com/dragon.glb".to_owned()),
+        )
+        .unwrap();
+        let bytes = encode_mesh_resources(&[SceneMesh::Gltf(&reference)]).unwrap();
+        let reader =
+            arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(bytes), None).unwrap();
+        let batch = reader.into_iter().next().unwrap().unwrap();
+
+        assert!(batch.column_by_name("position").unwrap().is_null(0));
+        assert!(batch.column_by_name("material").unwrap().is_null(0));
+        assert_eq!(
+            Mesh::decode_mesh_resources(&batch).unwrap(),
+            vec![crate::MeshResource::Gltf(reference)]
+        );
     }
 
     #[test]

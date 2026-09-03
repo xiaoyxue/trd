@@ -45,6 +45,14 @@ violate without anything noticing:
 - **The video-editing document (`trd.video_edit.version = 0.2.0`) is deliberately
   independent of `PROTOCOL_VERSION`** — no editor columns in `0.0.6`, no protocol
   bump for editor state.
+- **Protocol `0.0.6` asset rule:** embedded OBJ geometry uses the mesh columns,
+  the optional texture table is its albedo, and the mesh row carries the complete
+  current Disney material scalar/enum state. GLB/glTF 2.0 is reference-only
+  (`gltf_path` / `gltf_url`): do not duplicate its geometry or material columns,
+  because the glTF file is authoritative. Every native and browser consumer must
+  resolve the reference before rendering and must report an unresolved resource
+  as an error rather than substituting a placeholder. Mesh rendering and protocol
+  acceptance tests use `assets/envmap/uffizi-large.hdr` as the default IBL probe.
 - **Comments say *why*, not *what*, and stay short enough to see what they attach
   to.** Guidance rather than a gate, with the reasoning and a measuring script in
   [`docs/comments.md`](docs/comments.md) — run
@@ -90,6 +98,12 @@ PR page with no red X means only that nobody has looked yet. Run the smallest
 command that covers the change while iterating, but a task is not complete until
 every gate its **test level** requires has passed on **both** platforms — and
 **the results are recorded on the PR**.
+
+For GPT-driven work, run long builds and test suites through test subagents so
+the main session stays responsive. The parent agent still selects the test level,
+supplies the exact commands, reviews every result, and ensures no required gate
+is omitted. Use GPT-5.6 Sol Fast (Internal only) with `high` reasoning for test
+subagents; do not use Terra.
 
 ### Test levels — L1 / L2 / L3
 

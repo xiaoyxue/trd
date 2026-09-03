@@ -164,6 +164,36 @@ impl CanvasRenderer {
         u32::try_from(self.frames.len()).unwrap_or(u32::MAX)
     }
 
+    #[wasm_bindgen(js_name = meshResourceCount)]
+    pub fn mesh_resource_count(&self) -> u32 {
+        u32::try_from(self.input.mesh_resource_count()).unwrap_or(u32::MAX)
+    }
+
+    #[wasm_bindgen(js_name = gltfPath)]
+    pub fn gltf_path(&self, index: u32) -> Option<String> {
+        self.input
+            .unresolved_mesh_references()
+            .into_iter()
+            .find(|(row, _)| *row == index)
+            .and_then(|(_, reference)| reference.path)
+    }
+
+    #[wasm_bindgen(js_name = gltfUrl)]
+    pub fn gltf_url(&self, index: u32) -> Option<String> {
+        self.input
+            .unresolved_mesh_references()
+            .into_iter()
+            .find(|(row, _)| *row == index)
+            .and_then(|(_, reference)| reference.url)
+    }
+
+    #[wasm_bindgen(js_name = resolveGltf)]
+    pub fn resolve_gltf(&mut self, index: u32, bytes: &[u8]) -> Result<(), JsValue> {
+        self.input
+            .resolve_gltf(index, bytes)
+            .map_err(|error| js_error(format!("glTF resolution failed: {error}")))
+    }
+
     /// The frame's external background reference, which the JS shell resolves to
     /// RGBA and uploads before rendering. `None` when out of range or the frame
     /// has no background.
@@ -556,13 +586,21 @@ impl CanvasRenderer {
                 .map_err(crate::js_error)?;
             self.renderer = Some(renderer);
 
-            // Bind the stream's texture (0.0.4) as the sampled albedo so
-            // RenderMode::Textured meshes show it; absent ⇒ the default 1×1 white.
-            if let Some(texture) = self.input.texture() {
-                self.renderer
-                    .as_mut()
-                    .expect("renderer just built")
-                    .set_texture(texture);
+            for (mesh_id, asset) in self.input.mesh_assets().iter().enumerate() {
+                let renderer = self.renderer.as_mut().expect("renderer just built");
+                renderer.set_disney_material(
+                    trd_core::MeshTarget::One(mesh_id),
+                    asset.material.clone(),
+                );
+                if let Some(texture) = asset.base_color_texture.as_ref() {
+                    renderer.set_mesh_texture(mesh_id, texture);
+                }
+                if let Some(texture) = asset.metallic_roughness_texture.as_ref() {
+                    renderer.set_mesh_metallic_roughness_texture(mesh_id, texture);
+                }
+                if let Some(texture) = asset.normal_texture.as_ref() {
+                    renderer.set_mesh_normal_texture(mesh_id, texture);
+                }
             }
 
             // Apply the Disney PBR material + HDR environment probe staged by the

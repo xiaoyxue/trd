@@ -23,7 +23,7 @@ pub(crate) use image_encode::tightly_pack_rgba;
 pub use image_encode::{output_schema, read_image_stream, OutputError};
 pub use input_session::InputSession;
 pub use output_session::OutputSession;
-pub use scene_encode::{encode_scene, SceneEncodeError};
+pub use scene_encode::{encode_scene, encode_scene_resources, SceneEncodeError, SceneMesh};
 
 pub const PROTOCOL_VERSION: &str = "0.0.6";
 pub const PROTOCOL_VERSION_KEY: &str = "trd.protocol.version";
@@ -186,6 +186,18 @@ pub enum ProtocolError {
     },
     #[error("draw_mode byte {value} is not a valid render mode (0/1/2/255)")]
     InvalidDrawMode { value: u8 },
+    #[error("mesh reference index {index} is out of range ({mesh_count} mesh row(s))")]
+    MeshReferenceIndex { index: u32, mesh_count: usize },
+    #[error("mesh row {index} is embedded geometry, not an unresolved glTF reference")]
+    MeshReferenceExpected { index: u32 },
+    #[error("glTF reference at mesh row {index} failed to import: {source}")]
+    GltfImport {
+        index: u32,
+        #[source]
+        source: crate::GltfImportError,
+    },
+    #[error("a glTF reference row cannot be combined with a separate texture table")]
+    TextureWithGltfReference,
 }
 
 /// Which kind of concatenated IPC sub-stream the session is currently decoding.

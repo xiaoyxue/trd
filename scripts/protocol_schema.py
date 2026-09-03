@@ -225,17 +225,33 @@ def build():
             "mesh": {
                 "trd.table.kind": "mesh",
                 "required": True,
-                "row_meaning": "one row is one mesh; its 0-based ordinal is the id params draw lists use",
-                "reference_producer": "scripts/obj_to_arrow.py",
+                "row_meaning": (
+                    "one row is one mesh source: embedded OBJ-style geometry plus optional "
+                    "material JSON, or a reference-only GLB/glTF 2.0 path/URL"
+                ),
+                "reference_producer": (
+                    "scripts/obj_to_arrow.py or scripts/gltf_ref_to_arrow.py"
+                ),
                 "columns": [
-                    column("position", LIST_F32_3, True, "vertex positions"),
-                    column("color", LIST_F32_3, False, "vertex RGB; absent means white"),
-                    column("uv", LIST_F32_2, False, "top-left-origin texture coordinates"),
-                    column("index", "list<item: uint32>", False, "triangle indices; absent means sequential"),
+                    column("position", LIST_F32_3, False, "embedded vertex positions", nullable=True),
+                    column("color", LIST_F32_3, False, "embedded vertex RGB; absent means white", nullable=True),
+                    column("uv", LIST_F32_2, False, "embedded top-left-origin texture coordinates", nullable=True),
+                    column("index", "list<item: uint32>", False, "embedded triangle indices; absent means sequential", nullable=True),
+                    column("gltf_path", "string", False, "native/local GLB or glTF 2.0 reference", nullable=True),
+                    column("gltf_url", "string", False, "HTTP(S) or browser GLB/glTF 2.0 reference", nullable=True),
+                    column(
+                        "material",
+                        "string",
+                        False,
+                        "DisneyMaterial JSON for embedded OBJ geometry; null for glTF references",
+                        nullable=True,
+                    ),
                 ],
                 "constraints": [
+                    "each row has exactly one logical source: non-null position or non-empty gltf_path/gltf_url",
+                    "glTF rows carry no embedded geometry, texture table, or material JSON",
+                    "embedded rows without material decode to DisneyMaterial defaults",
                     "color and uv, when present, carry one value per vertex",
-                    "null values in any present column are rejected",
                     "a zero-row table is an error",
                 ],
             },
@@ -255,7 +271,8 @@ def build():
                         nullable=False,
                     ),
                 ],
-                "constraints": ["shape is field metadata, so every row shares H, W and 4 channels"],
+                "constraints": [
+                    "valid only for embedded geometry; glTF references own their textures","shape is field metadata, so every row shares H, W and 4 channels"],
             },
             "frames": {
                 "trd.table.kind": "frames",

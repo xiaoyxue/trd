@@ -334,7 +334,8 @@ impl VideoEditingApp {
                     ui.weak("Protocol 0.0.6 scene; the source video remains a sidecar.");
                 }
             }
-            ui.weak("PBR export keeps geometry and base color, not material maps or IBL.");
+            ui.weak("OBJ embeds albedo + material; GLB exports only its path/URL reference.");
+            ui.weak("Replay uses uffizi-large.hdr as the default IBL probe.");
         });
     }
 

@@ -4085,6 +4085,7 @@ dependencies = [
  "pollster 0.4.0",
  "thiserror 2.0.18",
  "trd-core",
+ "ureq",
  "wgpu",
  "winit",
 ]
@@ -4098,6 +4099,7 @@ dependencies = [
  "image",
  "log",
  "trd-core",
+ "ureq",
 ]
 
 [[package]]
@@ -4117,6 +4119,8 @@ dependencies = [
  "parquet",
  "pollster 0.4.0",
  "proptest",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tobj",
  "wgpu",

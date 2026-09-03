@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use trd_core::{
-    EnvMapData, FrameFit, ImageData, ImageTexture, Lighting, Mesh, RenderError, RenderOptions,
+    EnvMapData, FrameFit, ImageData, Lighting, Mesh, MeshAsset, RenderError, RenderOptions,
     RenderTarget, Renderer, Scene, SurfaceTarget,
 };
 use winit::dpi::PhysicalSize;
@@ -120,12 +120,23 @@ impl WindowRenderer {
         Ok(())
     }
 
-    /// Binds `texture` as the albedo sampled by [`RenderMode::Textured`](trd_core::RenderMode::Textured) meshes
-    /// (`0.0.4`). No-op until the renderer is built; re-uploaded lazily on the
-    /// next `render`.
-    pub(crate) fn set_texture(&mut self, texture: &ImageTexture) {
+    pub(crate) fn set_mesh_assets(&mut self, assets: &[MeshAsset]) {
         if let Some(renderer) = self.renderer.as_mut() {
-            renderer.set_texture(texture);
+            for (mesh_id, asset) in assets.iter().enumerate() {
+                renderer.set_disney_material(
+                    trd_core::MeshTarget::One(mesh_id),
+                    asset.material.clone(),
+                );
+                if let Some(texture) = asset.base_color_texture.as_ref() {
+                    renderer.set_mesh_texture(mesh_id, texture);
+                }
+                if let Some(texture) = asset.metallic_roughness_texture.as_ref() {
+                    renderer.set_mesh_metallic_roughness_texture(mesh_id, texture);
+                }
+                if let Some(texture) = asset.normal_texture.as_ref() {
+                    renderer.set_mesh_normal_texture(mesh_id, texture);
+                }
+            }
         }
     }
 

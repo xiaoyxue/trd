@@ -1,12 +1,13 @@
 //! The stdin Arrow-stream reader thread and the messages it forwards: the
 //! decoded mesh table, optional bound texture, playback rate, and each frame.
 
+use std::io::Read;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::Arc;
 
 use trd_core::{
-    Draw, FrameParams, ImageData, ImageTexture, InlineFrameCache, InputStream, Mesh, SceneError,
+    Draw, FrameParams, ImageData, InlineFrameCache, InputStream, Mesh, MeshAsset, SceneError,
 };
 
 /// A message from the stdin reader thread: the decoded mesh table (sent once,
@@ -15,9 +16,7 @@ use trd_core::{
 /// then each decoded frame.
 pub(crate) enum StreamMsg {
     Meshes(Vec<Mesh>),
-    // Only sent when the stream carries a texture table; small (width/height +
-    // an RGBA byte buffer), so it needs no boxing.
-    Texture(ImageTexture),
+    MeshAssets(Vec<MeshAsset>),
     Rate(f64),
     // Boxed: `FrameData` embeds the large `FrameParams` (camera columns), so an
     // unboxed variant would dwarf `Rate` (clippy::large_enum_variant).
@@ -72,12 +71,21 @@ fn read_stdin(
     frames_base: Option<PathBuf>,
 ) -> Result<(), trd_core::StreamError> {
     let mut input = InputStream::new(std::io::stdin().lock());
+    let references = input.prologue()?.mesh_references;
+    for (index, reference) in references {
+        let bytes = load_mesh_reference(&reference).map_err(|message| {
+            trd_core::StreamError::MeshResolve {
+                index,
+                reference: reference.display().to_owned(),
+                message,
+            }
+        })?;
+        input.resolve_gltf(index, &bytes)?;
+    }
     let prologue = input.prologue()?;
     let mesh_count = prologue.meshes.len();
     let _ = tx.send(StreamMsg::Meshes(prologue.meshes.to_vec()));
-    if let Some(texture) = prologue.texture {
-        let _ = tx.send(StreamMsg::Texture(texture.clone()));
-    }
+    let _ = tx.send(StreamMsg::MeshAssets(prologue.mesh_assets.to_vec()));
     let _ = tx.send(StreamMsg::Rate(prologue.frame_rate));
 
     let mut inline_cache = InlineFrameCache::default();
@@ -110,6 +118,33 @@ fn read_stdin(
         }
     }
     input.finish()
+}
+
+fn load_mesh_reference(reference: &trd_core::MeshReference) -> Result<Vec<u8>, String> {
+    if let Some(path) = reference.path.as_ref() {
+        match std::fs::read(path) {
+            Ok(bytes) => return Ok(bytes),
+            Err(error) if reference.url.is_none() => {
+                return Err(format!("failed to read {path}: {error}"));
+            }
+            Err(_) => {}
+        }
+    }
+    let url = reference
+        .url
+        .as_deref()
+        .ok_or_else(|| "glTF reference has neither a readable path nor a URL".to_owned())?;
+    let mut response = ureq::get(url)
+        .call()
+        .map_err(|error| format!("{url}: {error}"))?;
+    let mut bytes = Vec::new();
+    response
+        .body_mut()
+        .as_reader()
+        .take(256 * 1024 * 1024)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("{url}: {error}"))?;
+    Ok(bytes)
 }
 
 /// Decodes a background frame image file (PNG/JPEG) to RGBA at its full source

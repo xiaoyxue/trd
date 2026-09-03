@@ -105,6 +105,8 @@ impl NativeVideoEditingApp {
                 (Some(document), None)
             }
             Some(trd_gui::video_editing::VideoEditingInput::Scene(scene)) => {
+                let mut scene = scene;
+                resolve_arrow_scene(&mut scene).map_err(NativeVideoEditingError::Input)?;
                 (None, Some(Rc::new(scene)))
             }
             None => (None, None),
@@ -138,6 +140,16 @@ impl NativeVideoEditingApp {
         if let Some(video) = &mut video {
             video.stop();
         }
+        let assets_root =
+            std::env::current_dir().map_err(|source| NativeVideoEditingError::Read {
+                path: "current working directory".to_owned(),
+                source,
+            })?;
+        let replay_env = arrow_scene
+            .as_ref()
+            .map(|_| read_asset(&assets_root, Path::new("assets/envmap/uffizi-large.hdr")))
+            .transpose()
+            .map_err(NativeVideoEditingError::Renderer)?;
 
         let shared = Rc::new(VideoEditingShared::default());
         // With eframe's device the rendered texture is bound straight into egui;
@@ -145,14 +157,18 @@ impl NativeVideoEditingApp {
         let renderer = match (gpu.clone(), arrow_scene.as_ref()) {
             (Some(gpu), Some(scene)) => VideoPlacementRenderer::new_scene_with_gpu(
                 gpu,
-                &scene.meshes,
-                scene.texture.as_ref(),
+                &scene
+                    .mesh_assets()
+                    .map_err(NativeVideoEditingError::Input)?,
+                replay_env.as_deref().expect("scene env loaded above"),
                 render_size.0,
                 render_size.1,
             ),
             (None, Some(scene)) => pollster::block_on(VideoPlacementRenderer::new_scene(
-                &scene.meshes,
-                scene.texture.as_ref(),
+                &scene
+                    .mesh_assets()
+                    .map_err(NativeVideoEditingError::Input)?,
+                replay_env.as_deref().expect("scene env loaded above"),
                 render_size.0,
                 render_size.1,
             )),
@@ -187,12 +203,7 @@ impl NativeVideoEditingApp {
             frame_index: 0,
             playback: None,
             pending_frame: None,
-            assets_root: std::env::current_dir().map_err(|source| {
-                NativeVideoEditingError::Read {
-                    path: "current working directory".to_owned(),
-                    source,
-                }
-            })?,
+            assets_root,
             env_bytes: None,
             picked_video: None,
             picked_document: None,
@@ -467,24 +478,27 @@ impl NativeVideoEditingApp {
                 Ok("annotation document")
             }
             trd_gui::video_editing::VideoEditingInput::Scene(scene) => {
+                let mut scene = scene;
+                resolve_arrow_scene(&mut scene)?;
+                let assets = scene.mesh_assets()?;
+                if self.env_bytes.is_none() {
+                    self.env_bytes = Some(read_asset(
+                        &self.assets_root,
+                        Path::new("assets/envmap/uffizi-large.hdr"),
+                    )?);
+                }
+                let env = self.env_bytes.as_deref().expect("loaded above");
                 let (width, height) = self
                     .video
                     .as_ref()
                     .map(|video| (video.width, video.height))
                     .unwrap_or_else(|| preview_size(&self.video_info, self.preview_width));
                 let renderer = match self.shared.shared_gpu() {
-                    Some(gpu) => VideoPlacementRenderer::new_scene_with_gpu(
-                        gpu,
-                        &scene.meshes,
-                        scene.texture.as_ref(),
-                        width,
-                        height,
-                    ),
+                    Some(gpu) => {
+                        VideoPlacementRenderer::new_scene_with_gpu(gpu, &assets, env, width, height)
+                    }
                     None => pollster::block_on(VideoPlacementRenderer::new_scene(
-                        &scene.meshes,
-                        scene.texture.as_ref(),
-                        width,
-                        height,
+                        &assets, env, width, height,
                     )),
                 }?;
                 self.document = None;
@@ -605,6 +619,11 @@ impl NativeVideoEditingApp {
 
     fn load_catalog_asset(&mut self, asset: CatalogAsset) -> Result<(), String> {
         let (model_path, texture_path) = catalog_paths(asset);
+        let source = trd_core::MeshReference::new(
+            Some(model_path.to_string_lossy().replace('\\', "/")),
+            None,
+        )
+        .expect("catalog path is non-empty");
         let model_bytes = read_asset(&self.assets_root, model_path)?;
         let texture_bytes = texture_path
             .map(|path| read_asset(&self.assets_root, path))
@@ -628,6 +647,7 @@ impl NativeVideoEditingApp {
             Some(gpu) => VideoPlacementRenderer::new_with_gpu(
                 gpu,
                 asset,
+                source.clone(),
                 &model_bytes,
                 &texture_bytes,
                 self.env_bytes.as_deref().expect("loaded above"),
@@ -636,6 +656,7 @@ impl NativeVideoEditingApp {
             ),
             None => pollster::block_on(VideoPlacementRenderer::new(
                 asset,
+                source,
                 &model_bytes,
                 &texture_bytes,
                 self.env_bytes.as_deref().expect("loaded above"),
@@ -705,6 +726,33 @@ fn replay_start(current_frame: u32, last_frame: u32) -> u32 {
     } else {
         current_frame
     }
+}
+
+pub(crate) fn resolve_arrow_scene(
+    scene: &mut trd_gui::video_editing::ArrowScene,
+) -> Result<(), String> {
+    for (index, reference) in scene.unresolved_mesh_references() {
+        let bytes = load_mesh_reference(&reference)?;
+        scene.resolve_gltf(index, &bytes)?;
+    }
+    Ok(())
+}
+
+fn load_mesh_reference(reference: &trd_core::MeshReference) -> Result<Vec<u8>, String> {
+    if let Some(path) = reference.path.as_ref() {
+        match std::fs::read(path) {
+            Ok(bytes) => return Ok(bytes),
+            Err(error) if reference.url.is_none() => {
+                return Err(format!("failed to read {path}: {error}"));
+            }
+            Err(_) => {}
+        }
+    }
+    let url = reference
+        .url
+        .as_deref()
+        .ok_or_else(|| "glTF reference has neither a readable path nor a URL".to_owned())?;
+    fetch_document(url)
 }
 
 fn catalog_paths(asset: CatalogAsset) -> (&'static Path, Option<&'static Path>) {

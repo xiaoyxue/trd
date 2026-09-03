@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 use trd_core::{
-    DisneyMaterial, EnvMapData, ImageBasedLighting, ImageTexture, Lighting, Mesh, PbrConfig,
+    DisneyMaterial, EnvMapData, ImageBasedLighting, Lighting, Mesh, MeshAsset, PbrConfig,
     RenderMode, RenderOptions, ToneMapping,
 };
 use winit::application::ApplicationHandler;
@@ -36,13 +36,8 @@ struct App {
     /// The stream's mesh table (or the legacy built-in fallback), held until the
     /// GPU surface exists so the renderer can be built.
     pending_meshes: Option<Vec<Mesh>>,
-    /// The stream's bound texture (`0.0.4`), held until the renderer is built so
-    /// it can be uploaded; `None` for streams without a texture table.
-    pending_texture: Option<ImageTexture>,
-    /// Whether `pending_texture` has been applied to the built renderer (so it is
-    /// uploaded exactly once, even though it can arrive before or after the mesh
-    /// table triggers the renderer build).
-    texture_applied: bool,
+    pending_mesh_assets: Option<Vec<MeshAsset>>,
+    mesh_assets_applied: bool,
     /// Every frame received so far, retained so playback can loop.
     frames: Vec<FrameData>,
     /// The frame currently on screen (none until the first arrives).
@@ -88,8 +83,8 @@ impl App {
             gpu: None,
             rx,
             pending_meshes: None,
-            pending_texture: None,
-            texture_applied: false,
+            pending_mesh_assets: None,
+            mesh_assets_applied: false,
             frames: Vec::new(),
             current: None,
             rate_override,
@@ -117,7 +112,7 @@ impl App {
         loop {
             match self.rx.try_recv() {
                 Ok(StreamMsg::Meshes(meshes)) => self.pending_meshes = Some(meshes),
-                Ok(StreamMsg::Texture(texture)) => self.pending_texture = Some(texture),
+                Ok(StreamMsg::MeshAssets(assets)) => self.pending_mesh_assets = Some(assets),
                 Ok(StreamMsg::Rate(rate)) => self.stream_rate = rate,
                 Ok(StreamMsg::Frame(frame)) => self.frames.push(*frame),
                 Err(TryRecvError::Empty) => break,
@@ -264,12 +259,10 @@ impl ApplicationHandler for App {
                     }
                 }
             }
-            // Upload the stream's bound texture once the renderer exists (the
-            // texture can arrive before or after the mesh table).
-            if !self.texture_applied && gpu.renderer.is_some() {
-                if let Some(texture) = self.pending_texture.as_ref() {
-                    gpu.set_texture(texture);
-                    self.texture_applied = true;
+            if !self.mesh_assets_applied && gpu.renderer.is_some() {
+                if let Some(assets) = self.pending_mesh_assets.as_ref() {
+                    gpu.set_mesh_assets(assets);
+                    self.mesh_assets_applied = true;
                     gpu.window.request_redraw();
                 }
             }
@@ -277,12 +270,14 @@ impl ApplicationHandler for App {
             if !self.pbr_applied && gpu.renderer.is_some() {
                 if let Some(pbr) = self.pbr_config.take() {
                     gpu.set_lighting(pbr.lighting);
-                    gpu.set_appearance(trd_core::MeshAppearance {
-                        material: pbr.material,
-                        ibl: pbr.ibl,
-                        tone_mapping: pbr.tone_mapping,
-                        ..Default::default()
-                    });
+                    if self.options.mode == RenderMode::Shaded {
+                        gpu.set_appearance(trd_core::MeshAppearance {
+                            material: pbr.material,
+                            ibl: pbr.ibl,
+                            tone_mapping: pbr.tone_mapping,
+                            ..Default::default()
+                        });
+                    }
                     if let Some(env) = pbr.env_map {
                         gpu.set_env_map(env);
                     }
@@ -335,7 +330,7 @@ pub fn run() -> Result<(), AppError> {
     // The `.hdr` is decoded here so trd-core does no file/codec I/O, and
     // downscaled to the renderer's portable 2048px limit. `--env-background`
     // needs it too: the sky is the same probe the surfaces reflect.
-    let pbr_config = if cli.pbr || cli.env_background {
+    let pbr_config = if cli.pbr || cli.env_background || cli.env.is_some() {
         let material = DisneyMaterial {
             metallic: cli.metallic,
             roughness: cli.roughness,
