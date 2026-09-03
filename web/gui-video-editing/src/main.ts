@@ -53,12 +53,7 @@ async function main(): Promise<void> {
   }
   const defaultEnvBytes = new Uint8Array(await envResponse.arrayBuffer());
   const initialGltf = documentBytes ? await resolveGltfReferences(documentBytes) : [];
-  const editor = await startVideoEditing(
-    canvas,
-    documentBytes,
-    initialGltf,
-    defaultEnvBytes,
-  );
+  const editor = await startVideoEditing(canvas, documentBytes, initialGltf, defaultEnvBytes);
 
   async function resolveGltfReferences(bytes: Uint8Array): Promise<Uint8Array[]> {
     const references = videoEditingGltfReferences(bytes) as Array<{
@@ -82,11 +77,7 @@ async function main(): Promise<void> {
   }
 
   async function loadArrowInput(bytes: Uint8Array): Promise<void> {
-    await editor.loadDocumentWithGltf(
-      bytes,
-      await resolveGltfReferences(bytes),
-      defaultEnvBytes,
-    );
+    await editor.loadDocumentWithGltf(bytes, await resolveGltfReferences(bytes), defaultEnvBytes);
   }
 
   /// Surfaces a failure. The editor's UI is a canvas, so an error drawn there
@@ -100,10 +91,7 @@ async function main(): Promise<void> {
     editor.setError(errorScopes[scope], message);
   }
 
-  const catalog = new Map<
-    number,
-    { modelPath: string; modelUrl: string; textureUrl?: string }
-  >([
+  const catalog = new Map<number, { modelPath: string; modelUrl: string; textureUrl?: string }>([
     [
       1,
       {
