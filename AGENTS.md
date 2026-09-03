@@ -112,11 +112,13 @@ subagents; do not use Terra.
 
 For GPT-driven UI e2e, capture screenshots only at named acceptance milestones,
 not after every click, hover, scroll, readiness check, or coordinate adjustment.
-Set a small evidence budget before the run (normally no more than 10 screenshots
-per asset/case, plus at most one failure screenshot). Use the UI's **Copy
-details** action, the clipboard, logs, and exported-file audits for intermediate
-diagnostics. If the UI is still blocked after two informed attempts, stop and
-report the exact blocker instead of accumulating debug screenshots.
+Derive the minimum useful screenshot set from that specific case before the run;
+do not impose a fixed count or reuse one universal capture list across different
+workflows. Use the UI's **Copy details** action, the clipboard, logs, and
+exported-file audits for intermediate diagnostics. Record measured wall-clock
+time for setup, UI readiness, the case's major phases, cleanup, and the complete
+run. If the UI is still blocked after two informed attempts, stop and report the
+exact blocker instead of accumulating debug screenshots.
 
 For Windows browser e2e, default to a 1920x1080 physical Chrome window using
 the current native Windows display scaling. Set the window geometry once before
