@@ -120,6 +120,12 @@ time for setup, UI readiness, the case's major phases, cleanup, and the complete
 run. If the UI is still blocked after two informed attempts, stop and report the
 exact blocker instead of accumulating debug screenshots.
 
+Treat every UI e2e case as a process-isolation boundary. Record the exact
+Chrome, native-app, server, and helper PIDs started for the case; on pass, fail,
+or cancellation, stop those process trees and verify their ports and PIDs are
+gone. Do not leave a process alive for reuse, and do not start the next case
+until the previous case's cleanup gate is complete.
+
 For Windows browser e2e, default to a 1920x1080 physical Chrome window using
 the current native Windows display scaling. Set the window geometry once before
 the test and keep it fixed; do not force a device scale factor or use CDP device
