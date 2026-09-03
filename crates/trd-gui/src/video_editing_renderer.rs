@@ -177,17 +177,23 @@ impl VideoPlacementRenderer {
         } else {
             trd_core::Lighting::default()
         };
+        let default_material = assets
+            .first()
+            .map_or_else(trd_core::DisneyMaterial::default, |asset| {
+                asset.material.clone()
+            });
+        let asset_diagnostics = assets.first().map(replay_asset_diagnostics);
         Ok(Self {
             renderer,
             target,
             default_mode: trd_core::RenderMode::Filled,
-            default_material: trd_core::DisneyMaterial::default(),
+            default_material,
             identity: Rc::new(RendererIdentity {
                 adapter_name: facts.name,
                 backend: facts.backend,
                 device_type: facts.device_type,
             }),
-            asset_diagnostics: None,
+            asset_diagnostics,
             export_asset: None,
             replay_lighting,
             transfers: TransferCounts::default(),
@@ -289,6 +295,10 @@ impl VideoPlacementRenderer {
 
     pub(crate) fn export_asset(&self) -> Option<Rc<VideoExportAsset>> {
         self.export_asset.clone()
+    }
+
+    pub(crate) fn replay_defaults(&self) -> (trd_core::DisneyMaterial, trd_core::Lighting) {
+        (self.default_material.clone(), self.replay_lighting)
     }
 
     pub fn size(&self) -> (u32, u32) {
@@ -568,6 +578,29 @@ fn configure_mesh_assets(renderer: &mut trd_core::Renderer, assets: &[trd_core::
         if let Some(texture) = asset.normal_texture.as_ref() {
             renderer.set_mesh_normal_texture(mesh_id, texture);
         }
+    }
+}
+
+fn replay_asset_diagnostics(asset: &trd_core::MeshAsset) -> ImportedAssetDiagnostics {
+    let aabb = asset.mesh.aabb();
+    let size = aabb.size();
+    let max_extent = size.x().max(size.y()).max(size.z());
+    ImportedAssetDiagnostics {
+        source_format: if asset.metallic_roughness_texture.is_some()
+            || asset.normal_texture.is_some()
+        {
+            "GLB"
+        } else {
+            "OBJ"
+        },
+        aabb_min: aabb.min().to_array(),
+        aabb_max: aabb.max().to_array(),
+        preview_scale: if max_extent > trd_core::EPSILON {
+            trd_core::DEFAULT_PREVIEW_TARGET / max_extent
+        } else {
+            1.0
+        },
+        imported_material: asset.material.clone(),
     }
 }
 

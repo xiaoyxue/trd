@@ -1024,6 +1024,26 @@ impl VideoEditingApp {
             }
         }
         self.document = None;
+        if let Some(scene) = scene.as_ref() {
+            if let Some(mode) = scene
+                .frames
+                .iter()
+                .filter_map(|frame| frame.draws.as_ref())
+                .flatten()
+                .find_map(|draw| match draw.selection {
+                    trd_core::DrawSelection::Mesh(Some(mode)) => Some(mode),
+                    _ => None,
+                })
+            {
+                self.controller.state.modes[0] = mode;
+            }
+            if let Some(renderer) = self.shared.renderer.borrow().as_ref() {
+                let (material, lighting) = renderer.replay_defaults();
+                self.controller.state.materials[0] = material;
+                self.controller.state.lighting = lighting;
+                self.controller.state.environment_available = true;
+            }
+        }
         self.arrow_scene = scene;
         self.selected_quad = false;
         self.hovered_quad = false;
