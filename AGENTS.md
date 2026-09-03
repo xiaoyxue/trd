@@ -126,10 +126,11 @@ or cancellation, stop those process trees and verify their ports and PIDs are
 gone. Do not leave a process alive for reuse, and do not start the next case
 until the previous case's cleanup gate is complete.
 
-For Windows browser e2e, default to a 1920x1080 physical Chrome window using
-the current native Windows display scaling. Set the window geometry once before
-the test and keep it fixed; do not force a device scale factor or use CDP device
-metrics to emulate another viewport or DPI.
+For Windows browser e2e, use 1920x1080 as the default source-video/render
+resolution. Let the normal headed Chrome window use the current native Windows
+display scaling and available desktop geometry; do not force its window or CSS
+viewport to 1920x1080, force a device scale factor, or use CDP device metrics to
+emulate another viewport or DPI.
 
 ### Test levels — L1 / L2 / L3
 
