@@ -53,6 +53,11 @@ violate without anything noticing:
   resolve the reference before rendering and must report an unresolved resource
   as an error rather than substituting a placeholder. Mesh rendering and protocol
   acceptance tests use `assets/envmap/uffizi-large.hdr` as the default IBL probe.
+- **Video scene export stays sparse.** Export only tracked placement rows and
+  carry their strictly increasing `video_frame_index`; do not pad the params
+  stream with empty rows. Video replay looks up this key, and a missing row means
+  video-only playback. Keep `k` and `draw_model` as separate columns—never
+  serialize a combined MVP matrix.
 - **Comments say *why*, not *what*, and stay short enough to see what they attach
   to.** Guidance rather than a gate, with the reasoning and a measuring script in
   [`docs/comments.md`](docs/comments.md) — run

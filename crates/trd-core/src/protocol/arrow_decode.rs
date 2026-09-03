@@ -309,6 +309,15 @@ pub(crate) fn validate_schema(schema: &Schema) -> Result<(), ProtocolError> {
             validate_f32_field(field, static_name(name))?;
         }
     }
+    if let Ok(field) = schema.field_with_name("video_frame_index") {
+        if field.data_type() != &DataType::UInt32 || field.is_nullable() {
+            return Err(ProtocolError::ColumnType {
+                column: "video_frame_index",
+                expected: "non-null UInt32",
+                actual: field.data_type().clone(),
+            });
+        }
+    }
     if let Ok(field) = schema.field_with_name("frame_id") {
         if field.data_type() != &DataType::UInt32 {
             return Err(ProtocolError::ColumnType {

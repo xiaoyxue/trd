@@ -2,7 +2,7 @@
   "protocol_version": "0.0.6",
   "generated_by": "scripts/protocol_schema.py",
   "prose_spec": "docs/protocol/0.0.6.md",
-  "row_model": "dense — one params row is one rendered frame, and the output image stream is 1:1 with the params rows. The sparse, per-annotated-frame table is a different schema: docs/video-editing.schema.json",
+  "row_model": "one params row is one rendered scene sample. Rows may be sparse when video_frame_index keys them to a sidecar video; output is 1:1 with the params rows",
   "compatibility": "none — the renderer accepts exactly this version and hard-rejects any other or missing one",
   "stream": {
     "container": "concatenated Apache Arrow IPC streams on one byte channel",
@@ -167,6 +167,12 @@
       "all_columns_optional": true,
       "columns": [
         {
+          "name": "video_frame_index",
+          "arrow_type": "uint32",
+          "required": false,
+          "doc": "strictly increasing sidecar-video frame key for sparse params"
+        },
+        {
           "name": "model",
           "arrow_type": "fixed_size_list<item: float>[16]",
           "required": false,
@@ -281,6 +287,7 @@
         }
       ],
       "constraints": [
+        "video_frame_index, when present, is non-null and strictly increasing across all batches",
         "draw_mesh and draw_model are present together or not at all; one without the other is an error",
         "no draw columns renders mesh 0 using model; an explicit empty draw list renders no meshes",
         "CV (k/pose) and CG (eye/target/direction/up/fovy/aspect/znear/zfar) camera forms are mutually exclusive",

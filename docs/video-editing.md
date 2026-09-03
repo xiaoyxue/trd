@@ -160,11 +160,14 @@ Arrow...** writes the finished placement as render protocol `0.0.6`:
 
 Rust writes every table and matrix. The browser bridge only downloads the
 returned bytes; the native shell only chooses a path and writes them. The params
-table is dense over the video's presentable frames, even though the annotation
-document is sparse. A tracked frame carries the camera `K`, mesh row `0`, final
-`draw_model`, and selected render mode. An unannotated or untracked frame carries
-an explicit empty draw list, so a later placement cannot shift earlier in time.
-A known unpresented container tail is excluded.
+table stays sparse: one row per tracked placement, keyed by the required
+`video_frame_index`. Each row carries camera `K`, mesh row `0`, final
+`draw_model`, and selected render mode. Replay binary-searches this key; a video
+frame with no matching row is video-only.
+
+`K` and `draw_model` are stored as separate columns, matching the existing
+render protocol. No `K * draw_model`, MVP, projection, or clip-space matrix is
+serialized. Rust combines camera and model state only at render time.
 
 The export is deliberately scene-only: it does not copy the MP4 or decoded video
 frames into Arrow. Replaying therefore uses the same video as a sidecar. The
@@ -669,7 +672,7 @@ duration before playback.
 | `crates/trd-placement/src/lib.rs` | K/quad frame and placement math |
 | `crates/trd-gui/src/video_editing/mod.rs` | editor state and typed scheduler |
 | `crates/trd-gui/src/video_editing/editing_ui.rs` | editor panels, quad/catalog wiring, player footer |
-| `crates/trd-gui/src/video_editing/export.rs` | protocol scene encode/decode and dense timeline mapping |
+| `crates/trd-gui/src/video_editing/export.rs` | protocol scene encode/decode and sparse frame-index mapping |
 | `crates/trd-gui/src/video_editing/diagnostics.rs` | immutable Details snapshot + pure calculations |
 | `crates/trd-gui/src/video_editing/details_ui.rs` | Details inspector presentation |
 | `crates/trd-gui/src/video_editing_renderer.rs` | shared native/wasm composition and picking |

@@ -63,6 +63,9 @@ pub enum SceneEncodeError {
     /// A reference-only mesh must name at least one path or URL.
     #[error("glTF mesh row {0} has neither a path nor a URL")]
     MissingGltfReference(usize),
+    /// glTF owns its textures; a separate texture table would duplicate state.
+    #[error("a scene containing a glTF reference cannot carry a texture table")]
+    TextureWithGltfReference,
     /// A params stream would have no columns (no camera/model fields and no
     /// draws), so its row count is undefined.
     #[error("params batch has no columns")]
@@ -73,6 +76,12 @@ pub enum SceneEncodeError {
     /// The `frame_id` list length disagrees with the params row count.
     #[error("frame_ids has {frame_ids} rows but there are {frames} frames")]
     FrameIdsLengthMismatch { frame_ids: usize, frames: usize },
+    /// Sparse sidecar-video frame keys must parallel the params rows.
+    #[error("video_frame_indices has {indices} rows but there are {frames} frames")]
+    VideoFrameIndicesLengthMismatch { indices: usize, frames: usize },
+    /// Sparse sidecar-video frame keys must be strictly increasing.
+    #[error("video_frame_indices must be strictly increasing: {current} follows {previous}")]
+    NonIncreasingVideoFrameIndex { previous: u32, current: u32 },
     /// An explicit frames table must contain at least one resource.
     #[error("frames table is empty")]
     EmptyFrames,
@@ -459,7 +468,7 @@ pub fn encode_params_stream(
     frames: &[FrameParams],
     draws: Option<&[Vec<Draw>]>,
 ) -> Result<Vec<u8>, SceneEncodeError> {
-    encode_params_stream_with_frame_ids_and_rate(frames, draws, None, None)
+    encode_params_stream_with_frame_ids_and_rate(frames, draws, None, None, None)
 }
 
 /// Authors params with optional nullable `frame_id` references into a preceding
@@ -470,13 +479,14 @@ pub fn encode_params_stream_with_frame_ids(
     draws: Option<&[Vec<Draw>]>,
     frame_ids: Option<&[Option<u32>]>,
 ) -> Result<Vec<u8>, SceneEncodeError> {
-    encode_params_stream_with_frame_ids_and_rate(frames, draws, frame_ids, None)
+    encode_params_stream_with_frame_ids_and_rate(frames, draws, frame_ids, None, None)
 }
 
 fn encode_params_stream_with_frame_ids_and_rate(
     frames: &[FrameParams],
     draws: Option<&[Vec<Draw>]>,
     frame_ids: Option<&[Option<u32>]>,
+    video_frame_indices: Option<&[u32]>,
     frame_rate: Option<f64>,
 ) -> Result<Vec<u8>, SceneEncodeError> {
     if let Some(draws) = draws {
@@ -495,9 +505,27 @@ fn encode_params_stream_with_frame_ids_and_rate(
             });
         }
     }
+    if let Some(indices) = video_frame_indices {
+        if indices.len() != frames.len() {
+            return Err(SceneEncodeError::VideoFrameIndicesLengthMismatch {
+                indices: indices.len(),
+                frames: frames.len(),
+            });
+        }
+        if let Some(pair) = indices.windows(2).find(|pair| pair[1] <= pair[0]) {
+            return Err(SceneEncodeError::NonIncreasingVideoFrameIndex {
+                previous: pair[0],
+                current: pair[1],
+            });
+        }
+    }
 
     let mut fields: Vec<Field> = Vec::new();
     let mut columns: Vec<ArrayRef> = Vec::new();
+    if let Some(indices) = video_frame_indices {
+        fields.push(Field::new("video_frame_index", DataType::UInt32, false));
+        columns.push(Arc::new(UInt32Array::from(indices.to_vec())));
+    }
 
     let mut push_fixed = |name: &str, len: i32, flat: Option<Vec<f32>>| {
         if let Some(flat) = flat {
@@ -744,14 +772,48 @@ pub fn encode_scene_resources(
     draws: Option<&[Vec<Draw>]>,
     frame_rate: Option<f64>,
 ) -> Result<Vec<u8>, SceneEncodeError> {
+    reject_gltf_texture(meshes, texture)?;
     let mut bytes = encode_mesh_resources(meshes)?;
     if let Some(texture) = texture {
         bytes.extend(encode_texture_stream(texture)?);
     }
     bytes.extend(encode_params_stream_with_frame_ids_and_rate(
-        frames, draws, None, frame_rate,
+        frames, draws, None, None, frame_rate,
     )?);
     Ok(bytes)
+}
+
+pub fn encode_scene_resources_with_frame_indices(
+    meshes: &[SceneMesh<'_>],
+    texture: Option<&dyn Texture>,
+    video_frame_indices: &[u32],
+    frames: &[FrameParams],
+    draws: Option<&[Vec<Draw>]>,
+    frame_rate: Option<f64>,
+) -> Result<Vec<u8>, SceneEncodeError> {
+    reject_gltf_texture(meshes, texture)?;
+    let mut bytes = encode_mesh_resources(meshes)?;
+    if let Some(texture) = texture {
+        bytes.extend(encode_texture_stream(texture)?);
+    }
+    bytes.extend(encode_params_stream_with_frame_ids_and_rate(
+        frames,
+        draws,
+        None,
+        Some(video_frame_indices),
+        frame_rate,
+    )?);
+    Ok(bytes)
+}
+
+fn reject_gltf_texture(
+    meshes: &[SceneMesh<'_>],
+    texture: Option<&dyn Texture>,
+) -> Result<(), SceneEncodeError> {
+    if texture.is_some() && meshes.iter().any(|mesh| matches!(mesh, SceneMesh::Gltf(_))) {
+        return Err(SceneEncodeError::TextureWithGltfReference);
+    }
+    Ok(())
 }
 
 /// Authors a complete scene with inline frame resources.
@@ -1076,6 +1138,86 @@ mod tests {
         // Frame 1: explicit empty ⇒ no meshes (not a default instance).
         assert_eq!(decoded[1].draws, Some(Vec::new()));
         assert!(decoded[1].resolved_draws().is_empty());
+    }
+
+    #[test]
+    fn sparse_video_frame_indices_roundtrip_without_placeholder_rows() {
+        let mesh = tri_mesh();
+        let indices = [3, 10];
+        let frames = [
+            FrameParams {
+                k: Some([1.0; 9]),
+                ..FrameParams::IDENTITY
+            },
+            FrameParams {
+                k: Some([2.0; 9]),
+                ..FrameParams::IDENTITY
+            },
+        ];
+        let draws = vec![
+            vec![Draw {
+                mesh_id: 0,
+                model: Matrix4::IDENTITY,
+                selection: DrawSelection::INHERIT,
+            }],
+            vec![Draw {
+                mesh_id: 0,
+                model: Matrix4::IDENTITY,
+                selection: DrawSelection::INHERIT,
+            }],
+        ];
+        let material = DisneyMaterial::default();
+        let scene_mesh = SceneMesh::Embedded {
+            mesh: &mesh,
+            material: &material,
+        };
+        let bytes = encode_scene_resources_with_frame_indices(
+            &[scene_mesh],
+            None,
+            &indices,
+            &frames,
+            Some(&draws),
+            Some(24.0),
+        )
+        .unwrap();
+        let mut session = InputSession::new();
+        let decoded: Vec<_> = session
+            .push(&bytes)
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .collect();
+        session.finish().unwrap();
+
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded[0].video_frame_index, Some(3));
+        assert_eq!(decoded[1].video_frame_index, Some(10));
+    }
+
+    #[test]
+    fn sparse_video_frame_indices_must_increase() {
+        let mesh = tri_mesh();
+        let material = DisneyMaterial::default();
+        let error = encode_scene_resources_with_frame_indices(
+            &[SceneMesh::Embedded {
+                mesh: &mesh,
+                material: &material,
+            }],
+            None,
+            &[10, 3],
+            &[FrameParams::IDENTITY, FrameParams::IDENTITY],
+            Some(&[Vec::new(), Vec::new()]),
+            Some(24.0),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            SceneEncodeError::NonIncreasingVideoFrameIndex {
+                previous: 10,
+                current: 3
+            }
+        ));
     }
 
     #[test]

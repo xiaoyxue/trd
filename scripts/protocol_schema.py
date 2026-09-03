@@ -4,8 +4,8 @@
 Two **independent** versioned schemas live here, and they are deliberately not
 tied to each other (see ``AGENTS.md``):
 
-* ``docs/protocol/0.0.6.schema.json`` — the **stream protocol**. Dense: one
-  params row is one rendered frame, and the output image stream is 1:1 with it.
+* ``docs/protocol/0.0.6.schema.json`` — the **stream protocol**. Params may be
+  sparse when keyed by ``video_frame_index``; output remains 1:1 with params rows.
 * ``docs/video-editing.schema.json`` — the **video-editing document** (0.2.0).
   **Sparse**: a row exists only for a frame that was annotated, so a 288-frame
   video with 222 tracked frames is a 222-row table and the other 66 frames have
@@ -181,9 +181,9 @@ def build():
         "generated_by": "scripts/protocol_schema.py",
         "prose_spec": "docs/protocol/0.0.6.md",
         "row_model": (
-            "dense — one params row is one rendered frame, and the output image "
-            "stream is 1:1 with the params rows. The sparse, per-annotated-frame "
-            "table is a different schema: docs/video-editing.schema.json"
+            "one params row is one rendered scene sample. Rows may be sparse when "
+            "video_frame_index keys them to a sidecar video; output is 1:1 with "
+            "the params rows"
         ),
         "compatibility": (
             "none — the renderer accepts exactly this version and hard-rejects "
@@ -308,6 +308,12 @@ def build():
                 "reference_producer": "scripts/jsonl_to_arrow.py",
                 "all_columns_optional": True,
                 "columns": [
+                    column(
+                        "video_frame_index",
+                        "uint32",
+                        False,
+                        "strictly increasing sidecar-video frame key for sparse params",
+                    ),
                     column("model", F32_16, False, "single-object fallback model matrix"),
                     column("k", F32_9, False, "CV camera intrinsics"),
                     column("pose", F32_16, False, "CV camera-to-world pose"),
@@ -340,6 +346,7 @@ def build():
                     column("frame_id", "uint32", False, "inline background, frames-table row id", nullable=True),
                 ],
                 "constraints": [
+                    "video_frame_index, when present, is non-null and strictly increasing across all batches",
                     "draw_mesh and draw_model are present together or not at all; one without the other is an error",
                     "no draw columns renders mesh 0 using model; an explicit empty draw list renders no meshes",
                     "CV (k/pose) and CG (eye/target/direction/up/fovy/aspect/znear/zfar) camera forms are mutually exclusive",

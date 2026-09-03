@@ -7,6 +7,8 @@ retired and no longer produced or accepted). Each JSON line is one frame.
 
 Emitted params columns (all optional except `model`, which is always emitted):
 
+  * `video_frame_index` (`UInt32`, all-or-nothing): sidecar-video frame key for
+    sparse scene rows. Values must be strictly increasing.
   * `model` (`FixedSizeList<f32>[16]`, column-major, matching glam
     `Mat4::from_cols_array`): the per-frame object transform. A row's explicit
     `"model"` is used verbatim; a row without one gets the identity.
@@ -93,6 +95,13 @@ def main() -> None:
     model_rows = [r.get("model", IDENTITY_MODEL) for r in rows]
     columns = [pa.array(model_rows, type=fsl16)]
     fields = [("model", fsl16)]
+
+    if all("video_frame_index" in row for row in rows):
+        indices = [int(row["video_frame_index"]) for row in rows]
+        if any(current <= previous for previous, current in zip(indices, indices[1:])):
+            raise SystemExit("error: video_frame_index must be strictly increasing")
+        columns.insert(0, pa.array(indices, type=pa.uint32()))
+        fields.insert(0, ("video_frame_index", pa.uint32()))
 
     # Camera columns are all-or-nothing (every row must provide them).
     for name, length in CAMERA_VEC:

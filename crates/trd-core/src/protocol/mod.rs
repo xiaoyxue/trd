@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use arrow::array::RecordBatch;
+use arrow::array::{Array, RecordBatch};
 use arrow::datatypes::{DataType, Schema};
 use arrow::error::ArrowError;
 
@@ -23,7 +23,10 @@ pub(crate) use image_encode::tightly_pack_rgba;
 pub use image_encode::{output_schema, read_image_stream, OutputError};
 pub use input_session::InputSession;
 pub use output_session::OutputSession;
-pub use scene_encode::{encode_scene, encode_scene_resources, SceneEncodeError, SceneMesh};
+pub use scene_encode::{
+    encode_scene, encode_scene_resources, encode_scene_resources_with_frame_indices,
+    SceneEncodeError, SceneMesh,
+};
 
 pub const PROTOCOL_VERSION: &str = "0.0.6";
 pub const PROTOCOL_VERSION_KEY: &str = "trd.protocol.version";
@@ -79,6 +82,8 @@ pub type FrameBatch = Vec<DecodedFrame>;
 /// `frame_id` is an optional index into the preceding inline frames table.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecodedFrame {
+    /// Optional sidecar-video frame key for sparse scene streams.
+    pub video_frame_index: Option<u32>,
     pub params: FrameParams,
     pub draws: Option<Vec<Draw>>,
     pub frame_ref: Option<String>,
@@ -198,6 +203,13 @@ pub enum ProtocolError {
     },
     #[error("a glTF reference row cannot be combined with a separate texture table")]
     TextureWithGltfReference,
+    #[error(
+        "video_frame_index must be strictly increasing across the params stream: \
+         {current} follows {previous}"
+    )]
+    NonIncreasingVideoFrameIndex { previous: u32, current: u32 },
+    #[error("params batches cannot mix indexed and unindexed video_frame_index rows")]
+    MixedVideoFrameIndexMode,
 }
 
 /// Which kind of concatenated IPC sub-stream the session is currently decoding.
@@ -259,6 +271,7 @@ fn decode_frame_batch(
     frame_count: usize,
 ) -> Result<FrameBatch, ProtocolError> {
     let params = decode_batch(batch)?;
+    let video_frame_indices = decode_video_frame_indices(batch)?;
     let draws = decode_draws(batch)?;
     let frame_refs = decode_frame_refs(batch)?;
     let frame_ids = decode_frame_ids(batch, frames_table_present, frame_count)?;
@@ -272,6 +285,7 @@ fn decode_frame_batch(
                 return Err(ProtocolError::ConflictingFrameSources { row });
             }
             Ok(DecodedFrame {
+                video_frame_index: video_frame_indices.as_ref().map(|rows| rows[row]),
                 params,
                 draws: draws.as_ref().map(|rows| rows[row].clone()),
                 frame_ref,
@@ -279,6 +293,24 @@ fn decode_frame_batch(
             })
         })
         .collect()
+}
+
+fn decode_video_frame_indices(batch: &RecordBatch) -> Result<Option<Vec<u32>>, ProtocolError> {
+    let Some(column) = batch.column_by_name("video_frame_index") else {
+        return Ok(None);
+    };
+    let values = column
+        .as_any()
+        .downcast_ref::<arrow::array::UInt32Array>()
+        .ok_or_else(|| ProtocolError::ColumnType {
+            column: "video_frame_index",
+            expected: "UInt32",
+            actual: column.data_type().clone(),
+        })?;
+    if values.null_count() > 0 {
+        return Err(ProtocolError::NullValues("video_frame_index"));
+    }
+    Ok(Some(values.values().to_vec()))
 }
 
 /// Decodes a standalone **params** Arrow IPC stream (the bytes authored by
@@ -386,6 +418,7 @@ mod tests {
         frames
             .into_iter()
             .map(|params| DecodedFrame {
+                video_frame_index: None,
                 params,
                 draws: None,
                 frame_ref: None,
@@ -1153,6 +1186,7 @@ mod tests {
         // Absent draw list (`None`, legacy single-object stream) ⇒ one default
         // instance of mesh 0 placed by the frame's own model.
         let absent = DecodedFrame {
+            video_frame_index: None,
             params: identity_frame(),
             draws: None,
             frame_ref: None,
@@ -1165,6 +1199,7 @@ mod tests {
         // Explicit *empty* draw list ⇒ no meshes: the frame is just its
         // background plate (e.g. an AR frame where tracking dropped out).
         let empty = DecodedFrame {
+            video_frame_index: None,
             params: identity_frame(),
             draws: Some(Vec::new()),
             frame_ref: None,
@@ -1179,6 +1214,7 @@ mod tests {
             selection: DrawSelection::INHERIT,
         };
         let explicit = DecodedFrame {
+            video_frame_index: None,
             params: identity_frame(),
             draws: Some(vec![one]),
             frame_ref: None,

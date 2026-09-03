@@ -8,6 +8,27 @@ pub struct ArrowScene {
 }
 
 impl ArrowScene {
+    pub fn frame(&self, video_frame_index: u32) -> Option<&trd_core::DecodedFrame> {
+        if self
+            .frames
+            .first()
+            .is_some_and(|frame| frame.video_frame_index.is_some())
+        {
+            self.frames
+                .binary_search_by_key(&Some(video_frame_index), |frame| frame.video_frame_index)
+                .ok()
+                .map(|row| &self.frames[row])
+        } else {
+            self.frames.get(video_frame_index as usize)
+        }
+    }
+
+    pub fn is_frame_indexed(&self) -> bool {
+        self.frames
+            .first()
+            .is_some_and(|frame| frame.video_frame_index.is_some())
+    }
+
     pub fn unresolved_mesh_references(&self) -> Vec<(u32, trd_core::MeshReference)> {
         self.mesh_resources
             .iter()
@@ -248,48 +269,44 @@ impl VideoEditingApp {
             .borrow()
             .clone()
             .ok_or(ArrowExportError::NoLoadedAsset)?;
-        let frame_count = self.presentable_frame_count();
-        if frame_count == 0 {
+        let presentable_frame_count = self.presentable_frame_count();
+        if presentable_frame_count == 0 {
             return Err(ArrowExportError::NoPresentableFrames);
         }
         if self.video.fps_num == 0 || self.video.fps_den == 0 {
             return Err(ArrowExportError::InvalidFrameRate);
         }
 
-        let identity_k = trd_core::Matrix3::IDENTITY.to_cols_array();
-        let mut params = Vec::with_capacity(frame_count as usize);
-        let mut draws = Vec::with_capacity(frame_count as usize);
+        let mut video_frame_indices = Vec::new();
+        let mut params = Vec::new();
+        let mut draws = Vec::new();
         let mode = self.controller.state.mode_of(0);
-        let mut placed_frame_count = 0_u32;
 
-        for frame_index in 0..frame_count {
-            let mut frame_params = trd_core::FrameParams {
-                k: Some(identity_k),
+        for frame in document
+            .frames
+            .iter()
+            .filter(|frame| frame.tracked && frame.video_frame_index < presentable_frame_count)
+        {
+            let frame_index = frame.video_frame_index;
+            let k = frame
+                .k
+                .ok_or(ArrowExportError::MissingIntrinsics(frame_index))?;
+            let model = self
+                .placement_model_at(frame_index)
+                .ok_or(ArrowExportError::InvalidPlacement(frame_index))?;
+            video_frame_indices.push(frame_index);
+            params.push(trd_core::FrameParams {
+                k: Some(super::protocol_k_from_row_major(k)),
                 ..trd_core::FrameParams::IDENTITY
-            };
-            let frame_draws = match document.frame(frame_index) {
-                Some(frame) if frame.tracked => {
-                    let k = frame
-                        .k
-                        .ok_or(ArrowExportError::MissingIntrinsics(frame_index))?;
-                    let model = self
-                        .placement_model_at(frame_index)
-                        .ok_or(ArrowExportError::InvalidPlacement(frame_index))?;
-                    frame_params.k = Some(super::protocol_k_from_row_major(k));
-                    placed_frame_count += 1;
-                    vec![trd_core::Draw {
-                        mesh_id: 0,
-                        model,
-                        selection: trd_core::DrawSelection::Mesh(Some(mode)),
-                    }]
-                }
-                _ => Vec::new(),
-            };
-            params.push(frame_params);
-            draws.push(frame_draws);
+            });
+            draws.push(vec![trd_core::Draw {
+                mesh_id: 0,
+                model,
+                selection: trd_core::DrawSelection::Mesh(Some(mode)),
+            }]);
         }
 
-        if placed_frame_count == 0 {
+        if params.is_empty() {
             return Err(ArrowExportError::NoPlacedFrames);
         }
 
@@ -310,9 +327,10 @@ impl VideoEditingApp {
                 }
             };
         let frame_rate = f64::from(self.video.fps_num) / f64::from(self.video.fps_den);
-        let bytes = trd_core::encode_scene_resources(
+        let bytes = trd_core::encode_scene_resources_with_frame_indices(
             std::slice::from_ref(&scene_mesh),
             texture,
+            &video_frame_indices,
             &params,
             Some(&draws),
             Some(frame_rate),
@@ -321,8 +339,8 @@ impl VideoEditingApp {
         Ok(ArrowExport {
             filename: export_filename(&self.video.source_name),
             bytes,
-            frame_count,
-            placed_frame_count,
+            frame_count: params.len() as u32,
+            placed_frame_count: params.len() as u32,
         })
     }
 
@@ -419,14 +437,14 @@ mod tests {
     }
 
     #[test]
-    fn sparse_document_exports_a_dense_presentable_timeline() {
+    fn sparse_document_exports_only_its_tracked_frame_indices() {
         let app = export_ready_app();
         let expected_first = app.placement_model_at(0).unwrap();
         let expected_last = app.placement_model_at(2).unwrap();
         let export = app.build_arrow_export().unwrap();
 
         assert_eq!(export.filename, "shot.scene.arrow");
-        assert_eq!(export.frame_count, 3);
+        assert_eq!(export.frame_count, 2);
         assert_eq!(export.placed_frame_count, 2);
 
         let mut session = trd_core::InputSession::new();
@@ -434,11 +452,17 @@ mod tests {
         session.finish().unwrap();
         let decoded: Vec<_> = batches.into_iter().flatten().collect();
 
-        assert_eq!(decoded.len(), 3);
+        assert_eq!(decoded.len(), 2);
         assert_eq!(session.frame_rate(), Some(24.0));
+        assert_eq!(
+            decoded
+                .iter()
+                .map(|frame| frame.video_frame_index)
+                .collect::<Vec<_>>(),
+            vec![Some(0), Some(2)]
+        );
         assert_eq!(decoded[0].draws.as_ref().unwrap()[0].model, expected_first);
-        assert!(decoded[1].draws.as_ref().unwrap().is_empty());
-        assert_eq!(decoded[2].draws.as_ref().unwrap()[0].model, expected_last);
+        assert_eq!(decoded[1].draws.as_ref().unwrap()[0].model, expected_last);
         assert_eq!(
             decoded[0].draws.as_ref().unwrap()[0].selection,
             trd_core::DrawSelection::Mesh(Some(trd_core::RenderMode::Wireframe))
@@ -471,7 +495,11 @@ mod tests {
         };
         app.set_arrow_scene(Some(Rc::new(scene)));
         assert!(app.document.is_none());
-        assert_eq!(app.arrow_scene.as_ref().unwrap().frames.len(), 3);
+        let scene = app.arrow_scene.as_ref().unwrap();
+        assert_eq!(scene.frames.len(), 2);
+        assert!(scene.frame(0).is_some());
+        assert!(scene.frame(1).is_none());
+        assert!(scene.frame(2).is_some());
     }
 
     #[test]
@@ -583,6 +611,7 @@ mod tests {
                 ),
             ))],
             frames: vec![trd_core::DecodedFrame {
+                video_frame_index: None,
                 params: trd_core::FrameParams::IDENTITY,
                 draws: Some(Vec::new()),
                 frame_ref: None,
@@ -610,6 +639,7 @@ mod tests {
                 ),
             ))],
             frames: vec![trd_core::DecodedFrame {
+                video_frame_index: None,
                 params: trd_core::FrameParams::IDENTITY,
                 draws: Some(Vec::new()),
                 frame_ref: None,

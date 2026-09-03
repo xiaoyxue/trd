@@ -1097,6 +1097,19 @@ impl VideoEditingApp {
 
     fn arrow_scene_validation_error(&self, scene: &ArrowScene) -> Option<String> {
         let stored = self.video.frame_count as usize;
+        if scene.is_frame_indexed() {
+            return scene
+                .frames
+                .iter()
+                .filter_map(|frame| frame.video_frame_index)
+                .find(|index| *index as usize >= stored)
+                .map(|index| {
+                    format!(
+                        "protocol scene references video frame {index}, but the video stores \
+                         {stored} frames"
+                    )
+                });
+        }
         let allowed_tail = self
             .video
             .unpresented_tail
@@ -1383,7 +1396,7 @@ impl VideoEditingApp {
         let replay_frame = self
             .arrow_scene
             .as_ref()
-            .and_then(|scene| scene.frames.get(video.frame_index as usize))
+            .and_then(|scene| scene.frame(video.frame_index))
             .cloned();
         let quad_frame = self.quad_frame_at(video.frame_index);
         // Overlay follows the toggles, not play state (#264).

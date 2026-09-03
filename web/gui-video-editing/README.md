@@ -47,12 +47,12 @@ Rust compose the final model matrices and write the normal render protocol
 [mesh] [texture?] [params]
 ```
 
-The params table has one row per presentable video frame. Sparse gaps become
-explicit empty draw lists, so they stay video-only and later placements keep
-their source frame indices. Video pixels are not copied into the export; reopen
-the same video and select the exported `.scene.arrow` through **Arrow input** to
-replay it. The browser downloads the bytes as an Arrow-stream Blob; native uses
-a save dialog.
+The params table remains sparse and carries `video_frame_index` on every row.
+Only tracked placements are exported. Replay looks up that key against the
+playing video; a frame with no row stays video-only. Video pixels are not copied
+into the export; reopen the same video and select the exported `.scene.arrow`
+through **Arrow input** to replay it. The browser downloads the bytes as an
+Arrow-stream Blob; native uses a save dialog.
 
 For OBJ assets, protocol `0.0.6` preserves embedded geometry, albedo, and the
 complete edited Disney material. GLB/glTF 2.0 exports only a path/URL reference;

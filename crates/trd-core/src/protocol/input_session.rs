@@ -55,6 +55,8 @@ pub struct InputSession {
     /// Whether a **params** schema has been decoded and validated (the terminal
     /// sub-stream). Frames can only be produced once true.
     params_schema_validated: bool,
+    video_frame_indexed: Option<bool>,
+    last_video_frame_index: Option<u32>,
     state: SessionState,
 }
 
@@ -72,6 +74,8 @@ impl InputSession {
             mesh_table_present: false,
             texture_table_present: false,
             params_schema_validated: false,
+            video_frame_indexed: None,
+            last_video_frame_index: None,
             state: SessionState::default(),
         }
     }
@@ -220,11 +224,15 @@ impl InputSession {
                             Some(StreamKind::Frames) => {
                                 self.frames.extend(InlineFrame::from_arrow_all(&batch)?)
                             }
-                            Some(StreamKind::Params) => batches.push(decode_frame_batch(
-                                &batch,
-                                self.frames_table_present,
-                                self.frames.len(),
-                            )?),
+                            Some(StreamKind::Params) => {
+                                let frames = decode_frame_batch(
+                                    &batch,
+                                    self.frames_table_present,
+                                    self.frames.len(),
+                                )?;
+                                self.validate_video_frame_indices(&frames)?;
+                                batches.push(frames);
+                            }
                             // A batch always implies its schema (classified above)
                             // is available, so `current_kind` is set here.
                             None => return Err(ProtocolError::MissingSchema),
@@ -340,8 +348,8 @@ impl InputSession {
     fn decode_texture(&mut self, batch: &RecordBatch) -> Result<(), ProtocolError> {
         if self
             .mesh_resources
-            .first()
-            .is_some_and(|resource| matches!(resource, MeshResource::Gltf(_)))
+            .iter()
+            .any(|resource| matches!(resource, MeshResource::Gltf(_)))
         {
             return Err(ProtocolError::TextureWithGltfReference);
         }
@@ -381,6 +389,37 @@ impl InputSession {
             .iter()
             .map(|asset| asset.mesh.clone())
             .collect();
+    }
+
+    fn validate_video_frame_indices(
+        &mut self,
+        frames: &[crate::DecodedFrame],
+    ) -> Result<(), ProtocolError> {
+        if frames.is_empty() {
+            return Ok(());
+        }
+        let indexed = frames
+            .first()
+            .is_some_and(|frame| frame.video_frame_index.is_some());
+        match self.video_frame_indexed {
+            Some(previous) if previous != indexed => {
+                return Err(ProtocolError::MixedVideoFrameIndexMode);
+            }
+            None => self.video_frame_indexed = Some(indexed),
+            _ => {}
+        }
+        if !indexed {
+            return Ok(());
+        }
+        for current in frames.iter().filter_map(|frame| frame.video_frame_index) {
+            if let Some(previous) = self.last_video_frame_index {
+                if current <= previous {
+                    return Err(ProtocolError::NonIncreasingVideoFrameIndex { previous, current });
+                }
+            }
+            self.last_video_frame_index = Some(current);
+        }
+        Ok(())
     }
 }
 
