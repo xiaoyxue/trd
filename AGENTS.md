@@ -127,10 +127,10 @@ gone. Do not leave a process alive for reuse, and do not start the next case
 until the previous case's cleanup gate is complete.
 
 For Windows browser e2e, use 1920x1080 as the default source-video/render
-resolution. Let the normal headed Chrome window use the current native Windows
-display scaling and available desktop geometry; do not force its window or CSS
-viewport to 1920x1080, force a device scale factor, or use CDP device metrics to
-emulate another viewport or DPI.
+resolution. Run normal headed Chrome maximized/full-screen using the current
+desktop and native Windows display scaling; do not set its window or CSS viewport
+to 1920x1080, force a device scale factor, or use CDP device metrics to emulate
+another viewport or DPI.
 
 ### Test levels — L1 / L2 / L3
 
