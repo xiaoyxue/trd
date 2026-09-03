@@ -184,9 +184,7 @@ async function preloadBackgrounds(
   }
 }
 
-async function resolveMeshResources(
-  renderer: CanvasRenderer | OffscreenRenderer,
-): Promise<void> {
+async function resolveMeshResources(renderer: CanvasRenderer | OffscreenRenderer): Promise<void> {
   for (let index = 0; index < renderer.meshResourceCount(); index++) {
     const reference = renderer.gltfUrl(index) ?? renderer.gltfPath(index);
     if (!reference) {
