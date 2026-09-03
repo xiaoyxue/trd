@@ -114,11 +114,16 @@ For GPT-driven UI e2e, capture screenshots only at named acceptance milestones,
 not after every click, hover, scroll, readiness check, or coordinate adjustment.
 Derive the minimum useful screenshot set from that specific case before the run;
 do not impose a fixed count or reuse one universal capture list across different
-workflows. Use the UI's **Copy details** action, the clipboard, logs, and
-exported-file audits for intermediate diagnostics. Record measured wall-clock
-time for setup, UI readiness, the case's major phases, cleanup, and the complete
-run. If the UI is still blocked after two informed attempts, stop and report the
-exact blocker instead of accumulating debug screenshots.
+workflows. For canvas-rendered UI such as egui, use direct screenshot-based
+visual recognition as the primary way to locate controls: inspect a scaled or
+focused crop from the same screenshot, then act on the visually identified
+control. Do not substitute DOM/accessibility lookup or generated pixel-scanning
+scripts for visual recognition. Use the UI's **Copy details** action, the
+clipboard, logs, and exported-file audits for intermediate diagnostics. Record
+measured wall-clock time for setup, UI readiness, the case's major phases,
+cleanup, and the complete run. If the UI is still blocked after two informed
+attempts, stop and report the exact blocker instead of accumulating debug
+screenshots.
 
 Treat every UI e2e case as a process-isolation boundary. Record the exact
 Chrome, native-app, server, and helper PIDs started for the case; on pass, fail,
