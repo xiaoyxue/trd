@@ -118,6 +118,11 @@ details** action, the clipboard, logs, and exported-file audits for intermediate
 diagnostics. If the UI is still blocked after two informed attempts, stop and
 report the exact blocker instead of accumulating debug screenshots.
 
+For Windows browser e2e, default to a 1920x1080 physical Chrome window using
+the current native Windows display scaling. Set the window geometry once before
+the test and keep it fixed; do not force a device scale factor or use CDP device
+metrics to emulate another viewport or DPI.
+
 ### Test levels — L1 / L2 / L3
 
 Each PR declares a level, and **the level is derived from the diff, not from how
