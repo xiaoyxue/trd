@@ -17,6 +17,9 @@ impl eframe::App for VideoEditingApp {
         if let Some(document) = self.shared.take_incoming_document() {
             self.set_document(document);
         }
+        if let Some(scene) = self.shared.take_incoming_scene() {
+            self.set_arrow_scene(scene);
+        }
         self.consume_video_frame();
         self.consume_rendered_frame();
         self.consume_asset_defaults();
@@ -69,6 +72,7 @@ impl eframe::App for VideoEditingApp {
                     self.shot_controls(ui);
                     self.quad_controls(ui, overlay_frame_index, quad_frame);
                     self.catalog_controls(ui);
+                    self.export_controls(ui);
                     self.details_controls(ui);
                     needs_render |= crate::ui::reset_button(ui, &mut self.controller);
                     if ui
@@ -189,13 +193,13 @@ impl VideoEditingApp {
             ui.label(format!("Source: {}", video.source_name));
             ui.label(match self.shared.pending_document() {
                 Some(source) => match source.kind {
-                    VideoSourceKind::LocalFile => format!("Document: {} (local)", source.name),
-                    VideoSourceKind::HttpUrl => format!("Document: {}", source.name),
+                    VideoSourceKind::LocalFile => format!("Arrow input: {} (local)", source.name),
+                    VideoSourceKind::HttpUrl => format!("Arrow input: {}", source.name),
                 },
-                None => "Document: none — the video plays as-is".to_owned(),
+                None => "Arrow input: none — the video plays as-is".to_owned(),
             });
-            match self.document.as_ref() {
-                Some(document) => {
+            match (self.document.as_ref(), self.arrow_scene.as_ref()) {
+                (Some(document), _) => {
                     let summary = super::document_summary(document, &self.video);
                     ui.label(summary.describes);
                     ui.label(summary.annotated);
@@ -203,7 +207,16 @@ impl VideoEditingApp {
                         ui.colored_label(egui::Color32::from_rgb(240, 180, 80), mismatch);
                     }
                 }
-                None => {
+                (None, Some(scene)) => {
+                    ui.label(format!(
+                        "Protocol {} scene · {} params rows · {:.6} fps",
+                        trd_core::PROTOCOL_VERSION,
+                        scene.frames.len(),
+                        scene.frame_rate
+                    ));
+                    ui.weak("Replay mode: the exported models are rendered over this video.");
+                }
+                (None, None) => {
                     ui.weak("No document loaded: every frame is plain video");
                 }
             }
@@ -297,6 +310,31 @@ impl VideoEditingApp {
         })
         .response
         .on_disabled_hover_text("Select a placement quad first");
+    }
+
+    fn export_controls(&self, ui: &mut egui::Ui) {
+        ui.collapsing("Scene export", |ui| {
+            let disabled = self.arrow_export_disabled_reason();
+            if ui
+                .add_enabled(disabled.is_none(), egui::Button::new("Export Arrow..."))
+                .on_disabled_hover_text(disabled.as_deref().unwrap_or_default())
+                .clicked()
+            {
+                self.request_arrow_export();
+            }
+            match self.arrow_export_status() {
+                Some(Ok(message)) => {
+                    ui.colored_label(egui::Color32::LIGHT_GREEN, message);
+                }
+                Some(Err(error)) => {
+                    ui.colored_label(egui::Color32::LIGHT_RED, error);
+                }
+                None => {
+                    ui.weak("Protocol 0.0.6 scene; the source video remains a sidecar.");
+                }
+            }
+            ui.weak("PBR export keeps geometry and base color, not material maps or IBL.");
+        });
     }
 
     /// The Details inspector.
@@ -425,6 +463,8 @@ impl VideoEditingApp {
         self.controller.state.objects[0] = crate::scene::ObjectTransform::default();
         self.controller.state.selected = Some(0);
         self.controller.target = crate::interaction::InteractionTarget::Object;
+        self.shared.clear_export_asset();
+        self.shared.cancel_arrow_export();
         self.shared.renderer.borrow_mut().take();
         self.shared.asset_request.set(asset.code());
         self.shared.request_overlay();

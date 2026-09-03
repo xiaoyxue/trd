@@ -545,17 +545,72 @@ impl VideoEditingHandle {
         self.shared.take_command_code()
     }
 
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = pendingArrowExportFilename)]
+    pub fn pending_arrow_export_filename(&self) -> Option<String> {
+        self.shared.pending_arrow_export_filename()
+    }
+
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = takeExportArrow)]
+    pub fn take_export_arrow(&self) -> Result<Vec<u8>, wasm_bindgen::JsValue> {
+        self.shared
+            .take_arrow_export()
+            .map(|export| export.bytes)
+            .ok_or_else(|| wasm_bindgen::JsValue::from_str("no Arrow export is queued"))
+    }
+
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = finishArrowExport)]
+    pub fn finish_arrow_export(&self, success: bool, message: String) {
+        self.shared
+            .complete_arrow_export(if success { Ok(message) } else { Err(message) });
+    }
+
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = cancelArrowExport)]
+    pub fn cancel_arrow_export(&self) {
+        self.shared.cancel_arrow_export();
+    }
+
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = takeAssetRequest)]
     pub fn take_asset_request(&self) -> u8 {
         self.shared.take_asset_request_code()
     }
 
-    /// Loads an annotation document from bytes; a failure leaves the current document in place.
+    /// Loads an annotation document or exported protocol scene from bytes.
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = loadDocument)]
-    pub fn load_document(&self, bytes: Vec<u8>) -> Result<(), wasm_bindgen::JsValue> {
-        self.shared
-            .load_document_bytes(&bytes)
-            .map_err(|error| wasm_bindgen::JsValue::from_str(&error))
+    pub async fn load_document(&self, bytes: Vec<u8>) -> Result<(), wasm_bindgen::JsValue> {
+        match trd_gui::video_editing::decode_video_editing_input(&bytes)
+            .map_err(|error| wasm_bindgen::JsValue::from_str(&error))?
+        {
+            trd_gui::video_editing::VideoEditingInput::Annotation(document) => {
+                self.shared.queue_annotation_document(document);
+            }
+            trd_gui::video_editing::VideoEditingInput::Scene(scene) => {
+                let timeline = self.timeline.get();
+                let renderer = match self.shared.shared_gpu() {
+                    Some(gpu) => {
+                        trd_gui::video_editing_renderer::VideoPlacementRenderer::new_scene_with_gpu(
+                            gpu,
+                            &scene.meshes,
+                            scene.texture.as_ref(),
+                            timeline.width,
+                            timeline.height,
+                        )
+                    }
+                    None => {
+                        trd_gui::video_editing_renderer::VideoPlacementRenderer::new_scene(
+                            &scene.meshes,
+                            scene.texture.as_ref(),
+                            timeline.width,
+                            timeline.height,
+                        )
+                        .await
+                    }
+                }
+                .map_err(|error| wasm_bindgen::JsValue::from_str(&error))?;
+                self.shared.set_renderer(renderer);
+                self.shared.queue_arrow_scene(Rc::new(scene));
+            }
+        }
+        Ok(())
     }
 
     /// Drops the current annotation document; video keeps playing.

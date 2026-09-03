@@ -18,8 +18,13 @@ import { VideoPlayer } from "./media/player.ts";
 
 /// Which path an error came from. Mirrors Rust's `ErrorScope` codes, which the
 /// editor uses to keep one path's success from clearing another's failure.
-type ErrorScope = "media" | "catalog" | "document";
-const errorScopes: Record<ErrorScope, number> = { media: 1, catalog: 2, document: 3 };
+type ErrorScope = "media" | "catalog" | "document" | "export";
+const errorScopes: Record<ErrorScope, number> = {
+  media: 1,
+  catalog: 2,
+  document: 3,
+  export: 6,
+};
 
 async function main(): Promise<void> {
   await init({ module_or_path: wasmUrl });
@@ -107,11 +112,11 @@ async function main(): Promise<void> {
       if (!response.ok) {
         throw new Error(`failed to fetch document: ${response.status} ${response.statusText}`);
       }
-      editor.loadDocument(new Uint8Array(await response.arrayBuffer()));
+      await editor.loadDocument(new Uint8Array(await response.arrayBuffer()));
       return;
     }
     if (editor.hasPendingDocument() && pendingDocumentFile) {
-      editor.loadDocument(new Uint8Array(await pendingDocumentFile.arrayBuffer()));
+      await editor.loadDocument(new Uint8Array(await pendingDocumentFile.arrayBuffer()));
       return;
     }
     editor.clearDocument();
@@ -120,6 +125,22 @@ async function main(): Promise<void> {
   let envBytesPromise: Promise<Uint8Array> | undefined;
   let sourceReady = false;
   let sourceGeneration = 0;
+
+  function downloadArrow(filename: string, bytes: Uint8Array): void {
+    const url = URL.createObjectURL(
+      new Blob([Uint8Array.from(bytes).buffer], {
+        type: "application/vnd.apache.arrow.stream",
+      }),
+    );
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    link.hidden = true;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30_000);
+  }
 
   /// Receives decoded frames. Ownership arrives with the frame and passes
   /// straight to Rust, which closes it after the GPU copy — no pixels cross the
@@ -258,30 +279,49 @@ async function main(): Promise<void> {
       documentInput.value = "";
       documentInput.click();
     } else if (command === 5) {
-      // The dialog's single commit point: load the picked file, or the URL it
-      // accepted, whichever is pending. Both become a `ByteSource`, so the
-      // decoder path below is identical for the two.
-      const pendingUrl = editor.pendingVideoUrl();
-      if (pendingUrl) {
-        try {
-          const url = new URL(pendingUrl);
-          if (url.protocol !== "http:" && url.protocol !== "https:") {
-            throw new Error("video URL must use http:// or https://");
+      void (async () => {
+        // The video timeline must land before a protocol scene is validated
+        // against it; native follows the same video-then-Arrow ordering.
+        const pendingUrl = editor.pendingVideoUrl();
+        let videoRequested = false;
+        if (pendingUrl) {
+          videoRequested = true;
+          try {
+            const url = new URL(pendingUrl);
+            if (url.protocol !== "http:" && url.protocol !== "https:") {
+              throw new Error("video URL must use http:// or https://");
+            }
+            await loadVideoSource({ kind: "url", url: url.href });
+          } catch (error) {
+            reportError("media", String(error));
+            return;
           }
-          void loadVideoSource({ kind: "url", url: url.href });
-        } catch (error) {
-          reportError("media", String(error));
+        } else if (pendingVideoFile) {
+          videoRequested = true;
+          const file = pendingVideoFile;
+          await loadVideoSource(
+            { kind: "file", file },
+            { filename: file.name, byteLength: file.size },
+          );
         }
-      } else if (pendingVideoFile) {
-        const file = pendingVideoFile;
-        void loadVideoSource(
-          { kind: "file", file },
-          { filename: file.name, byteLength: file.size },
-        );
+        if (!videoRequested || sourceReady) {
+          await loadSelectedDocument();
+        }
+      })().catch((error: unknown) => reportError("document", String(error)));
+    } else if (command === 6) {
+      const filename = editor.pendingArrowExportFilename();
+      try {
+        if (!filename) {
+          throw new Error("the editor requested an export without a filename");
+        }
+        const bytes = editor.takeExportArrow();
+        downloadArrow(filename, bytes);
+        editor.finishArrowExport(true, `Downloaded ${bytes.byteLength} bytes as ${filename}`);
+      } catch (error) {
+        const message = String(error);
+        console.error(`video editing (export): ${message}`);
+        editor.finishArrowExport(false, message);
       }
-      // The document is part of the same commit, and it applies whether or not a
-      // video was loaded above.
-      void loadSelectedDocument().catch((error: unknown) => reportError("document", String(error)));
     }
 
     const seekFrame = editor.takeSeekFrame();

@@ -7,6 +7,8 @@ pub enum NativeVideoEditingError {
     },
     #[error(transparent)]
     Document(#[from] trd_core::VideoEditingError),
+    #[error("invalid Arrow input: {0}")]
+    Input(String),
     #[error(transparent)]
     Gui(#[from] trd_gui::error::GuiError),
     #[error("video editor renderer failed: {0}")]

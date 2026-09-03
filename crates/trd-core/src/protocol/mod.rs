@@ -14,19 +14,16 @@ mod arrow_decode;
 mod image_encode;
 mod input_session;
 mod output_session;
+mod scene_encode;
 
+pub(crate) use arrow_decode::{
+    check_version, decode_batch, decode_draws, decode_frame_ids, decode_frame_refs,
+};
 pub(crate) use image_encode::tightly_pack_rgba;
 pub use image_encode::{output_schema, read_image_stream, OutputError};
 pub use input_session::InputSession;
 pub use output_session::OutputSession;
-/// The encode half of the wire format, compiled for tests only (#202): it
-/// authors the `0.0.6` tables that this module's tests — and its own round-trip
-/// tests — feed back through the real decoders.
-#[cfg(test)]
-mod scene_encode;
-pub(crate) use arrow_decode::{
-    check_version, decode_batch, decode_draws, decode_frame_ids, decode_frame_refs,
-};
+pub use scene_encode::{encode_scene, SceneEncodeError};
 
 pub const PROTOCOL_VERSION: &str = "0.0.6";
 pub const PROTOCOL_VERSION_KEY: &str = "trd.protocol.version";

@@ -1,18 +1,11 @@
-//! Authoring the trd **input** stream in Rust (#97, Slice 3b) — **test-only**.
+//! Authoring the trd **input** stream in Rust.
 //!
 //! `trd-core` decodes the `[mesh][texture?][frames?][params]` input stream
 //! (`Mesh::from_arrow_all`, [`crate::decode_frames`], the wasm
 //! [`super::InputSession`]) and encodes the **image output**
-//! ([`crate::OutputSession`]). The **input** stream is authored by the Python
-//! producers (`scripts/*_to_arrow.py`); this module authors the same `0.0.6`
-//! stream **in Rust**, as the encode half of the protocol's round-trip tests.
-//!
-//! It is compiled `#[cfg(test)]` only (#202): its sole consumers are protocol
-//! tests — this module's own round-trips plus the fixtures in
-//! [`super`]'s test module. It is the executable specification the decoders are
-//! pinned against, which is why it is kept rather than deleted: its tests feed
-//! the encoded bytes back through the **real** decoders, so the wire format
-//! cannot silently drift.
+//! ([`crate::OutputSession`]). This module authors the same `0.0.6` input format
+//! for Rust producers such as the video editor. Its round-trip tests feed the
+//! result through the real decoder so the two halves cannot drift.
 //!
 //! It sits beside [`super::arrow_decode`] as the encode counterpart of the same
 //! wire format: `arrow_decode` turns a `RecordBatch` into [`FrameParams`], this
@@ -26,23 +19,30 @@
 
 use std::sync::Arc;
 
+#[cfg(test)]
+use arrow::array::BinaryArray;
 use arrow::array::{
-    ArrayRef, BinaryArray, FixedSizeListArray, Float32Array, ListArray, RecordBatch, UInt32Array,
-    UInt8Array,
+    ArrayRef, FixedSizeListArray, Float32Array, ListArray, RecordBatch, UInt32Array, UInt8Array,
 };
-use arrow::buffer::{BooleanBuffer, NullBuffer, OffsetBuffer};
+use arrow::buffer::OffsetBuffer;
+#[cfg(test)]
+use arrow::buffer::{BooleanBuffer, NullBuffer};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use thiserror::Error;
 
+#[cfg(test)]
+use super::FRAMES_TABLE_KIND;
 use super::{
-    FRAMES_TABLE_KIND, MESH_TABLE_KIND, PARAMS_TABLE_KIND, PROTOCOL_VERSION, PROTOCOL_VERSION_KEY,
+    FRAME_RATE_KEY, MESH_TABLE_KIND, PARAMS_TABLE_KIND, PROTOCOL_VERSION, PROTOCOL_VERSION_KEY,
     TABLE_KIND_KEY, TEXTURE_TABLE_KIND,
 };
+#[cfg(test)]
 use crate::math::Matrix4;
 use crate::render::{Draw, DrawSelection, RenderMode};
 use crate::render::{FrameParams, Mesh};
 use crate::texture::{Texture, TEXTURE_COLUMN};
+#[cfg(test)]
 use crate::{InlineFrame, FRAME_BYTES_COLUMN, FRAME_PIXELS_COLUMN};
 
 /// A failure authoring an input Arrow stream.
@@ -51,6 +51,12 @@ pub enum SceneEncodeError {
     /// The underlying Arrow builder/writer failed.
     #[error("arrow encode error: {0}")]
     Arrow(#[from] arrow::error::ArrowError),
+    /// The protocol requires at least one leading mesh row.
+    #[error("scene has no meshes")]
+    EmptyMeshes,
+    /// Playback rate metadata must name a finite positive rate.
+    #[error("frame rate must be finite and positive, got {0}")]
+    InvalidFrameRate(f64),
     /// A params stream would have no columns (no camera/model fields and no
     /// draws), so its row count is undefined.
     #[error("params batch has no columns")]
@@ -159,6 +165,19 @@ fn table_metadata(kind: &'static str) -> std::collections::HashMap<String, Strin
     ]
     .into_iter()
     .collect()
+}
+
+fn params_metadata(
+    frame_rate: Option<f64>,
+) -> Result<std::collections::HashMap<String, String>, SceneEncodeError> {
+    let mut metadata = table_metadata(PARAMS_TABLE_KIND);
+    if let Some(frame_rate) = frame_rate {
+        if !frame_rate.is_finite() || frame_rate <= 0.0 {
+            return Err(SceneEncodeError::InvalidFrameRate(frame_rate));
+        }
+        metadata.insert(FRAME_RATE_KEY.to_owned(), frame_rate.to_string());
+    }
+    Ok(metadata)
 }
 
 /// Writes `batch` as a complete single-batch Arrow IPC stream into `buf`.
@@ -294,19 +313,30 @@ fn all_or_none_f32(
 /// given, emits the `draw_mesh`/`draw_model` (+ `draw_mode` when any override is
 /// present) instanced-draw columns. Decodes back via [`crate::decode_frames`]
 /// and the draw decoder. Tagged with the `0.0.6` protocol version.
+#[cfg(test)]
 pub fn encode_params_stream(
     frames: &[FrameParams],
     draws: Option<&[Vec<Draw>]>,
 ) -> Result<Vec<u8>, SceneEncodeError> {
-    encode_params_stream_with_frame_ids(frames, draws, None)
+    encode_params_stream_with_frame_ids_and_rate(frames, draws, None, None)
 }
 
 /// Authors params with optional nullable `frame_id` references into a preceding
 /// frames table.
+#[cfg(test)]
 pub fn encode_params_stream_with_frame_ids(
     frames: &[FrameParams],
     draws: Option<&[Vec<Draw>]>,
     frame_ids: Option<&[Option<u32>]>,
+) -> Result<Vec<u8>, SceneEncodeError> {
+    encode_params_stream_with_frame_ids_and_rate(frames, draws, frame_ids, None)
+}
+
+fn encode_params_stream_with_frame_ids_and_rate(
+    frames: &[FrameParams],
+    draws: Option<&[Vec<Draw>]>,
+    frame_ids: Option<&[Option<u32>]>,
+    frame_rate: Option<f64>,
 ) -> Result<Vec<u8>, SceneEncodeError> {
     if let Some(draws) = draws {
         if draws.len() != frames.len() {
@@ -409,7 +439,7 @@ pub fn encode_params_stream_with_frame_ids(
         return Err(SceneEncodeError::EmptyParams);
     }
 
-    let schema = Schema::new(fields).with_metadata(table_metadata(PARAMS_TABLE_KIND));
+    let schema = Schema::new(fields).with_metadata(params_metadata(frame_rate)?);
     let batch = RecordBatch::try_new(Arc::new(schema.clone()), columns)?;
     write_ipc(&schema, &batch)
 }
@@ -417,6 +447,7 @@ pub fn encode_params_stream_with_frame_ids(
 /// Authors an inline background `frames` resource table. Encoded and raw rows
 /// may coexist through two nullable columns; raw rows share one RGBA tensor
 /// shape, as required by Arrow's field-level fixed-shape metadata.
+#[cfg(test)]
 pub fn encode_frames_stream(frames: &[InlineFrame]) -> Result<Vec<u8>, SceneEncodeError> {
     if frames.is_empty() {
         return Err(SceneEncodeError::EmptyFrames);
@@ -545,19 +576,32 @@ pub fn encode_frames_stream(frames: &[InlineFrame]) -> Result<Vec<u8>, SceneEnco
     write_ipc(&schema, &batch)
 }
 
-/// Authors a complete mesh-first input stream: the mesh table followed by the
-/// params stream, concatenated as [`run_stream`](crate::run_stream) expects.
+/// Authors a complete mesh-first input stream with an optional albedo texture.
+///
+/// The returned bytes are concatenated Arrow IPC streams in protocol order:
+/// `[mesh][texture?][params]`.
 pub fn encode_scene(
     meshes: &[Mesh],
+    texture: Option<&dyn Texture>,
     frames: &[FrameParams],
     draws: Option<&[Vec<Draw>]>,
+    frame_rate: Option<f64>,
 ) -> Result<Vec<u8>, SceneEncodeError> {
+    if meshes.is_empty() {
+        return Err(SceneEncodeError::EmptyMeshes);
+    }
     let mut bytes = encode_mesh_stream(meshes)?;
-    bytes.extend(encode_params_stream(frames, draws)?);
+    if let Some(texture) = texture {
+        bytes.extend(encode_texture_stream(texture)?);
+    }
+    bytes.extend(encode_params_stream_with_frame_ids_and_rate(
+        frames, draws, None, frame_rate,
+    )?);
     Ok(bytes)
 }
 
 /// Authors a complete scene with inline frame resources.
+#[cfg(test)]
 pub fn encode_scene_with_frames(
     meshes: &[Mesh],
     inline_frames: &[InlineFrame],
@@ -646,11 +690,12 @@ mod tests {
             selection: DrawSelection::INHERIT,
         }]];
 
-        let bytes = encode_scene(&meshes, &[frame], Some(&draws)).unwrap();
+        let bytes = encode_scene(&meshes, None, &[frame], Some(&draws), Some(24.0)).unwrap();
 
         let mut session = InputSession::new();
         let batches = session.push(&bytes).unwrap();
         assert_eq!(session.meshes(), meshes.as_slice());
+        assert_eq!(session.frame_rate(), Some(24.0));
 
         let decoded: Vec<_> = batches.into_iter().flatten().collect();
         assert_eq!(decoded.len(), 1);
@@ -674,6 +719,51 @@ mod tests {
         let decoded = ImageTexture::from_arrow(&batch).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (2, 2));
         assert_eq!(decoded.rgba(), rgba.as_slice());
+    }
+
+    #[test]
+    fn complete_scene_carries_its_texture_and_frame_rate() {
+        use crate::texture::ImageTexture;
+
+        let meshes = vec![tri_mesh()];
+        let texture = ImageTexture::from_rgba(1, 1, vec![10, 20, 30, 255]).unwrap();
+        let frames = [FrameParams {
+            model: Some(Matrix4::IDENTITY.to_cols_array()),
+            ..FrameParams::IDENTITY
+        }];
+
+        let bytes = encode_scene(
+            &meshes,
+            Some(&texture),
+            &frames,
+            None,
+            Some(30000.0 / 1001.0),
+        )
+        .unwrap();
+        let mut session = InputSession::new();
+        let batches = session.push(&bytes).unwrap();
+        session.finish().unwrap();
+
+        assert_eq!(session.meshes(), meshes.as_slice());
+        assert_eq!(session.texture(), Some(&texture));
+        assert_eq!(session.frame_rate(), Some(30000.0 / 1001.0));
+        assert_eq!(batches.into_iter().flatten().count(), 1);
+    }
+
+    #[test]
+    fn complete_scene_rejects_missing_meshes_and_invalid_rate() {
+        let frame = FrameParams {
+            model: Some(Matrix4::IDENTITY.to_cols_array()),
+            ..FrameParams::IDENTITY
+        };
+        assert!(matches!(
+            encode_scene(&[], None, &[frame], None, Some(24.0)),
+            Err(SceneEncodeError::EmptyMeshes)
+        ));
+        assert!(matches!(
+            encode_scene(&[tri_mesh()], None, &[frame], None, Some(0.0)),
+            Err(SceneEncodeError::InvalidFrameRate(0.0))
+        ));
     }
 
     #[test]

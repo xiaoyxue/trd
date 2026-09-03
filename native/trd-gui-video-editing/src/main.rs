@@ -41,9 +41,9 @@ fn run() -> Result<(), error::NativeVideoEditingError> {
     .init();
 
     let cli = cli::Cli::parse();
-    // The document is optional: without one the editor is a plain player and the
+    // Arrow input is optional: without one the editor is a plain player and the
     // container supplies the timeline (#264).
-    let document = cli
+    let input = cli
         .document
         .as_ref()
         .map(|path| {
@@ -52,26 +52,41 @@ fn run() -> Result<(), error::NativeVideoEditingError> {
                     path: path.display().to_string(),
                     source,
                 })?;
-            trd_core::decode_video_editing_document(&bytes)
-                .map_err(error::NativeVideoEditingError::from)
+            trd_gui::video_editing::decode_video_editing_input(&bytes)
+                .map_err(error::NativeVideoEditingError::Input)
         })
         .transpose()?;
     let video_source = cli
         .video
         .map(media::NativeVideoSource::Local)
         .or_else(|| cli.video_url.map(media::NativeVideoSource::Url));
+    if !cli.probe_only
+        && video_source.is_none()
+        && matches!(
+            input.as_ref(),
+            Some(trd_gui::video_editing::VideoEditingInput::Scene(_))
+        )
+    {
+        return Err(error::NativeVideoEditingError::Input(
+            "an exported protocol scene requires --video or --video-url".to_owned(),
+        ));
+    }
     if cli.probe_only {
         let wanted = cli.probe_frame;
-        match (video_source, document.as_ref()) {
-            (Some(source), Some(document)) => {
-                let video = media::NativeVideo::open(source, &document.video, cli.preview_width)?;
+        match (video_source, input.as_ref()) {
+            (
+                Some(source),
+                Some(trd_gui::video_editing::VideoEditingInput::Annotation(document)),
+            ) => {
+                let (video, _) =
+                    media::NativeVideo::open(source, &document.video, cli.preview_width)?;
                 let frame = video.decode_one(wanted)?;
                 println!(
                     "native video-editing source validated; {}",
                     describe(wanted, &frame)
                 );
             }
-            (Some(source), None) => {
+            (Some(source), _) => {
                 let (video, info) = media::NativeVideo::probe(source, cli.preview_width)?;
                 let frame = video.decode_one(wanted)?;
                 println!(
@@ -84,9 +99,14 @@ fn run() -> Result<(), error::NativeVideoEditingError> {
                     describe(wanted, &frame)
                 );
             }
-            (None, Some(_)) => {
-                println!("native video-editing document validated; no video source supplied")
-            }
+            (None, Some(trd_gui::video_editing::VideoEditingInput::Annotation(_))) => println!(
+                "native video-editing annotation document validated; no video source supplied"
+            ),
+            (None, Some(trd_gui::video_editing::VideoEditingInput::Scene(scene))) => println!(
+                "protocol scene validated: {} mesh row(s), {} params row(s); no video source supplied",
+                scene.meshes.len(),
+                scene.frames.len()
+            ),
             (None, None) => println!("nothing to probe: pass --video and/or --document"),
         }
         return Ok(());
@@ -114,7 +134,7 @@ fn run() -> Result<(), error::NativeVideoEditingError> {
             if gpu.is_none() {
                 log::warn!("eframe has no wgpu render state; falling back to a private device");
             }
-            let app = app::NativeVideoEditingApp::new(document, video_source, preview_width, gpu)?;
+            let app = app::NativeVideoEditingApp::new(input, video_source, preview_width, gpu)?;
             Ok(Box::new(app))
         }),
     )?;

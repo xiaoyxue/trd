@@ -6,10 +6,11 @@ Canonical user/developer documentation lives in
 [`docs/video-editing.md`](../../docs/video-editing.md); this package README keeps
 the local generation and launch recipe close to the bootstrap.
 
-The editor loads an **optional**, separate `trd.video_edit.version = 0.2.0`
-authoring document. It is **sparse**: a row exists only for a frame that carries
-an ad-placement quad — for FIBA shot 1 that is frames 0-221 of 288, so the
-222-287 tail has no rows at all and simply plays. Each row contains:
+The optional **Arrow input** may be a
+`trd.video_edit.version = 0.2.0` authoring document or a finished render-protocol
+`0.0.6` scene. An authoring document is **sparse**: a row exists only for a frame
+that carries an ad-placement quad — for FIBA shot 1 that is frames 0-221 of 288,
+so the 222-287 tail has no rows at all and simply plays. Each row contains:
 
 - `video_frame_index` and source `present_index` (strictly increasing, with gaps);
 - `K`, placement quad, and tracked state;
@@ -22,8 +23,8 @@ file name, so a URL without a useful suffix and a mislabelled file both work.
 Parquet keeps schema key-value metadata, so the version and table-kind contract
 is the same either way.
 
-Without a document the editor is a plain player: the timeline comes from the
-video container and the placement UI stays inert. With one, the left pane lists
+Without an input the editor is a plain player: the timeline comes from the video
+container and the placement UI stays inert. With an authoring document, the left pane lists
 the derived **shots** (runs of consecutive annotated frames), jumps to a shot's
 first frame, and offers **Show placement quads** and **Show gizmos** toggles —
 the quad outline and its local grid/axes are independent, and both also govern
@@ -38,15 +39,38 @@ positioned by projecting each tip through the same `K` — `trd-core` has no gly
 rendering, and a font atlas is a bigger thing than three labels.
 
 The initial document contains no 3D model resources. After a user selects a
-quad, chooses an asset, and edits it, Rust will compose the final model matrix
-and export the normal render protocol `0.0.6` stream:
+quad, chooses an asset, and edits it, **Scene export → Export Arrow...** makes
+Rust compose the final model matrices and write the normal render protocol
+`0.0.6` stream:
 
 ```text
-[mesh] [texture?] [frames] [params]
+[mesh] [texture?] [params]
 ```
 
-PBR material state remains attached to the imported/catalog asset in this
-simple slice because protocol `0.0.6` does not serialize PBR material fields.
+The params table has one row per presentable video frame. Sparse gaps become
+explicit empty draw lists, so they stay video-only and later placements keep
+their source frame indices. Video pixels are not copied into the export; reopen
+the same video and select the exported `.scene.arrow` through **Arrow input** to
+replay it. The browser downloads the bytes as an Arrow-stream Blob; native uses
+a save dialog.
+
+Protocol `0.0.6` preserves the mesh, optional base-color texture, render mode,
+camera, and placement. Disney material values, auxiliary PBR maps, and the IBL
+environment remain runtime state because the protocol does not serialize them.
+
+### Export round-trip check
+
+1. Open the video and annotation Arrow/Parquet document.
+2. Place and edit the 3D model, switch to `Filled`, `Wireframe`, or `Textured`,
+   and record snapshots at the first, middle, and last tracked frames and at one
+   untracked gap.
+3. Export a new protocol `0.0.6` Arrow scene.
+4. Reopen the same video with that exported Arrow and compare the same frames.
+
+The tracked frames must match the recorded snapshots within the existing pixel
+tolerance. The untracked frame must remain video-only. For `Shaded`/PBR, compare
+geometry and placement only; the protocol does not carry enough material/IBL
+state for pixel equality.
 
 ## Generate the FIBA document
 
