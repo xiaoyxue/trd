@@ -110,6 +110,14 @@ supplies the exact commands, reviews every result, and ensures no required gate
 is omitted. Use GPT-5.6 Sol Fast (Internal only) with `high` reasoning for test
 subagents; do not use Terra.
 
+For GPT-driven UI e2e, capture screenshots only at named acceptance milestones,
+not after every click, hover, scroll, readiness check, or coordinate adjustment.
+Set a small evidence budget before the run (normally no more than 10 screenshots
+per asset/case, plus at most one failure screenshot). Use the UI's **Copy
+details** action, the clipboard, logs, and exported-file audits for intermediate
+diagnostics. If the UI is still blocked after two informed attempts, stop and
+report the exact blocker instead of accumulating debug screenshots.
+
 ### Test levels — L1 / L2 / L3
 
 Each PR declares a level, and **the level is derived from the diff, not from how
