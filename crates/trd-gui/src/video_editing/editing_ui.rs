@@ -313,7 +313,8 @@ impl VideoEditingApp {
     }
 
     fn export_controls(&self, ui: &mut egui::Ui) {
-        ui.collapsing("Scene export", |ui| {
+        ui.group(|ui| {
+            ui.strong("Scene export");
             let disabled = self.arrow_export_disabled_reason();
             if ui
                 .add_enabled(disabled.is_none(), egui::Button::new("Export Arrow..."))
