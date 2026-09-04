@@ -419,7 +419,8 @@ impl OffscreenRenderer {
             self.renderer = Some(renderer);
             self.target = Some(target);
 
-            for (mesh_id, asset) in self.input.mesh_assets().iter().enumerate() {
+            for (index, asset) in self.input.mesh_assets().iter().enumerate() {
+                let mesh_id = asset.mesh_id_or(index as u32) as usize;
                 let renderer = self.renderer.as_mut().expect("renderer just built");
                 renderer.set_disney_material(
                     trd_core::MeshTarget::One(mesh_id),

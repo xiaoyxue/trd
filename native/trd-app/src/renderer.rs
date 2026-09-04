@@ -122,7 +122,8 @@ impl WindowRenderer {
 
     pub(crate) fn set_mesh_assets(&mut self, assets: &[MeshAsset]) {
         if let Some(renderer) = self.renderer.as_mut() {
-            for (mesh_id, asset) in assets.iter().enumerate() {
+            for (index, asset) in assets.iter().enumerate() {
+                let mesh_id = asset.mesh_id_or(index as u32) as usize;
                 renderer.set_disney_material(
                     trd_core::MeshTarget::One(mesh_id),
                     asset.material.clone(),

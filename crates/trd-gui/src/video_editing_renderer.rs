@@ -572,7 +572,8 @@ fn scale_protocol_k(k: [f32; 9], sx: f32, sy: f32) -> [f32; 9] {
 }
 
 fn configure_mesh_assets(renderer: &mut trd_core::Renderer, assets: &[trd_core::MeshAsset]) {
-    for (mesh_id, asset) in assets.iter().enumerate() {
+    for (index, asset) in assets.iter().enumerate() {
+        let mesh_id = asset.mesh_id_or(index as u32) as usize;
         renderer.set_disney_material(trd_core::MeshTarget::One(mesh_id), asset.material.clone());
         if let Some(texture) = asset.base_color_texture.as_ref() {
             renderer.set_mesh_texture(mesh_id, texture);
@@ -591,12 +592,9 @@ fn replay_asset_diagnostics(asset: &trd_core::MeshAsset) -> ImportedAssetDiagnos
     let size = aabb.size();
     let max_extent = size.x().max(size.y()).max(size.z());
     ImportedAssetDiagnostics {
-        source_format: if asset.metallic_roughness_texture.is_some()
-            || asset.normal_texture.is_some()
-        {
-            "GLB"
-        } else {
-            "OBJ"
+        source_format: match asset.source {
+            trd_core::MeshAssetSource::Embedded => "OBJ",
+            trd_core::MeshAssetSource::Gltf => "GLB",
         },
         aabb_min: aabb.min().to_array(),
         aabb_max: aabb.max().to_array(),

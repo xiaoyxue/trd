@@ -101,10 +101,13 @@ impl Mesh {
                             })
                             .transpose()?
                             .unwrap_or_default();
-                        Ok(MeshResource::Resolved(Box::new(MeshAsset::embedded(
-                            Mesh::from_arrow_row(batch, row)?,
-                            material,
-                        ))))
+                        Ok(MeshResource::Resolved(Box::new(
+                            MeshAsset::embedded_with_id(
+                                row as u32,
+                                Mesh::from_arrow_row(batch, row)?,
+                                material,
+                            ),
+                        )))
                     }
                     (false, Some(reference)) if material_json.is_none() => {
                         Ok(MeshResource::Gltf(reference))

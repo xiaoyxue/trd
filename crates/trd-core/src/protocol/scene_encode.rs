@@ -20,8 +20,8 @@
 use std::sync::Arc;
 
 use arrow::array::{
-    ArrayRef, FixedSizeListArray, Float32Array, ListArray, RecordBatch, StringArray, UInt32Array,
-    UInt8Array,
+    ArrayRef, BinaryArray, FixedSizeListArray, Float32Array, ListArray, RecordBatch, StringArray,
+    UInt32Array, UInt8Array,
 };
 use arrow::buffer::{BooleanBuffer, NullBuffer, OffsetBuffer};
 use arrow::datatypes::{DataType, Field, Schema};
@@ -34,7 +34,7 @@ use super::{
 };
 use crate::render::{Draw, DrawSelection, RenderMode};
 use crate::render::{FrameParams, Mesh};
-use crate::texture::{Texture, TEXTURE_COLUMN};
+use crate::texture::Texture;
 use crate::{DisneyMaterial, MeshReference, Tonemap};
 
 #[cfg(test)]
@@ -42,7 +42,7 @@ mod test_support;
 #[cfg(test)]
 pub(crate) use test_support::{
     encode_frames_stream, encode_mesh_stream, encode_params_stream,
-    encode_params_stream_with_frame_ids, encode_scene_with_frames,
+    encode_params_stream_with_frame_ids, encode_scene_with_frames, encode_texture_stream,
 };
 
 /// A failure authoring an input Arrow stream.
@@ -63,9 +63,15 @@ pub enum SceneEncodeError {
     /// A reference-only mesh must name at least one path or URL.
     #[error("glTF mesh row {0} has neither a path nor a URL")]
     MissingGltfReference(usize),
-    /// glTF owns its textures; a separate texture table would duplicate state.
-    #[error("a scene containing a glTF reference cannot carry a texture table")]
+    /// glTF owns its textures; an external row cannot target that mesh ID.
+    #[error("a texture row cannot target a glTF reference")]
     TextureWithGltfReference,
+    #[error("texture mesh_id {mesh_id} is out of range ({mesh_count} mesh row(s))")]
+    TextureMeshIdOutOfRange { mesh_id: u32, mesh_count: usize },
+    #[error("texture table contains duplicate mesh_id {0}")]
+    DuplicateTextureMeshId(u32),
+    #[error("texture asset list is empty")]
+    EmptyTextures,
     /// A params stream would have no columns (no camera/model fields and no
     /// draws), so its row count is undefined.
     #[error("params batch has no columns")]
@@ -127,6 +133,12 @@ pub enum SceneMesh<'a> {
         material: &'a DisneyMaterial,
     },
     Gltf(&'a MeshReference),
+}
+
+#[derive(Clone, Copy)]
+pub struct SceneTexture<'a> {
+    pub mesh_id: u32,
+    pub texture: &'a dyn Texture,
 }
 
 /// The `FixedSizeList<Float32>[stride]` element type of a geometry column.
@@ -369,24 +381,82 @@ pub fn encode_mesh_resources(meshes: &[SceneMesh<'_>]) -> Result<Vec<u8>, SceneE
     write_ipc(&schema, &batch)
 }
 
-/// Authors an optional **texture table** IPC stream: a one-row `rgba`
-/// `FixedSizeList<UInt8>[H*W*4]` column bearing the `arrow.fixed_shape_tensor`
-/// extension with shape `[H, W, 4]` (interleaved RGBA), tagged with the `0.0.6`
-/// protocol version. Placed between the mesh and params sub-streams
-/// (`[mesh][texture][params]`), it binds the albedo `run_stream` samples in
-/// [`RenderMode::Textured`]. Decodes back via `ImageTexture::from_arrow`.
-pub fn encode_texture_stream(texture: &dyn Texture) -> Result<Vec<u8>, SceneEncodeError> {
-    let image = texture.to_image();
-    let (width, height) = (image.width as usize, image.height as usize);
-    let list_size = (width * height * 4) as i32;
-
-    let storage = DataType::FixedSizeList(
+pub fn encode_texture_assets(textures: &[SceneTexture<'_>]) -> Result<Vec<u8>, SceneEncodeError> {
+    if textures.is_empty() {
+        return Err(SceneEncodeError::EmptyTextures);
+    }
+    let mut textures = textures.to_vec();
+    textures.sort_by_key(|asset| asset.mesh_id);
+    if let Some(pair) = textures
+        .windows(2)
+        .find(|pair| pair[0].mesh_id == pair[1].mesh_id)
+    {
+        return Err(SceneEncodeError::DuplicateTextureMeshId(pair[0].mesh_id));
+    }
+    let mesh_ids = textures
+        .iter()
+        .map(|asset| asset.mesh_id)
+        .collect::<Vec<_>>();
+    let images = textures
+        .iter()
+        .map(|asset| asset.texture.to_image())
+        .collect::<Vec<_>>();
+    for (asset, image) in textures.iter().zip(&images) {
+        let expected = (image.width as usize)
+            .checked_mul(image.height as usize)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or_else(|| {
+                SceneEncodeError::Arrow(arrow::error::ArrowError::InvalidArgumentError(format!(
+                    "texture mesh_id {} has invalid dimensions {}x{}",
+                    asset.mesh_id, image.width, image.height
+                )))
+            })?;
+        if image.width == 0 || image.height == 0 || image.rgba.len() != expected {
+            return Err(SceneEncodeError::Arrow(
+                arrow::error::ArrowError::InvalidArgumentError(format!(
+                    "texture mesh_id {} has {} RGBA bytes; expected {} for {}x{}",
+                    asset.mesh_id,
+                    image.rgba.len(),
+                    expected,
+                    image.width,
+                    image.height
+                )),
+            ));
+        }
+    }
+    let widths = images.iter().map(|image| image.width).collect::<Vec<_>>();
+    let heights = images.iter().map(|image| image.height).collect::<Vec<_>>();
+    let rgba = images
+        .iter()
+        .map(|image| image.rgba.as_slice())
+        .collect::<Vec<_>>();
+    let compatibility = textures
+        .iter()
+        .position(|asset| asset.mesh_id == 0)
+        .map_or_else(
+            || crate::ImageData {
+                width: 1,
+                height: 1,
+                rgba: vec![255; 4],
+            },
+            |index| images[index].clone(),
+        );
+    let compatibility_size = i32::try_from(compatibility.rgba.len()).map_err(|_| {
+        SceneEncodeError::Arrow(arrow::error::ArrowError::InvalidArgumentError(
+            "mesh 0 compatibility texture is too large".to_owned(),
+        ))
+    })?;
+    let compatibility_type = DataType::FixedSizeList(
         Arc::new(Field::new("item", DataType::UInt8, false)),
-        list_size,
+        compatibility_size,
     );
-    let extension = arrow_schema::extension::FixedShapeTensor::try_new(
+    let compatibility_extension = arrow_schema::extension::FixedShapeTensor::try_new(
         DataType::UInt8,
-        vec![height, width, 4],
+        vec![
+            compatibility.height as usize,
+            compatibility.width as usize,
+            4,
+        ],
         Some(vec![
             "height".to_string(),
             "width".to_string(),
@@ -394,16 +464,49 @@ pub fn encode_texture_stream(texture: &dyn Texture) -> Result<Vec<u8>, SceneEnco
         ]),
         None,
     )?;
-    let field = Field::new(TEXTURE_COLUMN, storage, false).with_extension_type(extension);
-    let array = FixedSizeListArray::new(
-        Arc::new(Field::new("item", DataType::UInt8, false)),
-        list_size,
-        Arc::new(UInt8Array::from(image.rgba)),
-        None,
-    );
-
-    let schema = Schema::new(vec![field]).with_metadata(table_metadata(TEXTURE_TABLE_KIND));
-    let batch = RecordBatch::try_new(Arc::new(schema.clone()), vec![Arc::new(array) as ArrayRef])?;
+    let fields = vec![
+        Field::new(crate::TEXTURE_COLUMN, compatibility_type, false)
+            .with_extension_type(compatibility_extension),
+        Field::new(
+            crate::TEXTURE_MESH_ID_COLUMN,
+            DataType::List(Arc::new(Field::new("item", DataType::UInt32, false))),
+            false,
+        ),
+        Field::new(
+            crate::TEXTURE_WIDTH_COLUMN,
+            DataType::List(Arc::new(Field::new("item", DataType::UInt32, false))),
+            false,
+        ),
+        Field::new(
+            crate::TEXTURE_HEIGHT_COLUMN,
+            DataType::List(Arc::new(Field::new("item", DataType::UInt32, false))),
+            false,
+        ),
+        Field::new(
+            crate::TEXTURE_RGBA_BYTES_COLUMN,
+            DataType::List(Arc::new(Field::new("item", DataType::Binary, false))),
+            false,
+        ),
+    ];
+    let columns: Vec<ArrayRef> = vec![
+        Arc::new(FixedSizeListArray::new(
+            Arc::new(Field::new("item", DataType::UInt8, false)),
+            compatibility_size,
+            Arc::new(UInt8Array::from(compatibility.rgba)),
+            None,
+        )),
+        list_of_u32_column(&[mesh_ids]),
+        list_of_u32_column(&[widths]),
+        list_of_u32_column(&[heights]),
+        Arc::new(ListArray::new(
+            Arc::new(Field::new("item", DataType::Binary, false)),
+            OffsetBuffer::from_lengths([rgba.len()]),
+            Arc::new(BinaryArray::from_iter_values(rgba)),
+            None,
+        )),
+    ];
+    let schema = Schema::new(fields).with_metadata(table_metadata(TEXTURE_TABLE_KIND));
+    let batch = RecordBatch::try_new(Arc::new(schema.clone()), columns)?;
     write_ipc(&schema, &batch)
 }
 
@@ -633,10 +736,29 @@ pub fn encode_scene_resources_with_tonemap(
     frame_rate: Option<f64>,
     tonemap: Option<Tonemap>,
 ) -> Result<Vec<u8>, SceneEncodeError> {
-    reject_gltf_texture(meshes, texture)?;
+    let textures = texture
+        .map(|texture| {
+            vec![SceneTexture {
+                mesh_id: 0,
+                texture,
+            }]
+        })
+        .unwrap_or_default();
+    encode_scene_assets_with_tonemap(meshes, &textures, frames, draws, frame_rate, tonemap)
+}
+
+pub fn encode_scene_assets_with_tonemap(
+    meshes: &[SceneMesh<'_>],
+    textures: &[SceneTexture<'_>],
+    frames: &[FrameParams],
+    draws: Option<&[Vec<Draw>]>,
+    frame_rate: Option<f64>,
+    tonemap: Option<Tonemap>,
+) -> Result<Vec<u8>, SceneEncodeError> {
+    validate_scene_textures(meshes, textures)?;
     let mut bytes = encode_mesh_resources(meshes)?;
-    if let Some(texture) = texture {
-        bytes.extend(encode_texture_stream(texture)?);
+    if !textures.is_empty() {
+        bytes.extend(encode_texture_assets(textures)?);
     }
     bytes.extend(encode_params_stream_with_frame_ids_and_rate(
         frames, draws, None, None, frame_rate, tonemap,
@@ -672,10 +794,38 @@ pub fn encode_scene_resources_with_frame_indices_and_tonemap(
     frame_rate: Option<f64>,
     tonemap: Option<Tonemap>,
 ) -> Result<Vec<u8>, SceneEncodeError> {
-    reject_gltf_texture(meshes, texture)?;
+    let textures = texture
+        .map(|texture| {
+            vec![SceneTexture {
+                mesh_id: 0,
+                texture,
+            }]
+        })
+        .unwrap_or_default();
+    encode_scene_assets_with_frame_indices_and_tonemap(
+        meshes,
+        &textures,
+        video_frame_indices,
+        frames,
+        draws,
+        frame_rate,
+        tonemap,
+    )
+}
+
+pub fn encode_scene_assets_with_frame_indices_and_tonemap(
+    meshes: &[SceneMesh<'_>],
+    textures: &[SceneTexture<'_>],
+    video_frame_indices: &[u32],
+    frames: &[FrameParams],
+    draws: Option<&[Vec<Draw>]>,
+    frame_rate: Option<f64>,
+    tonemap: Option<Tonemap>,
+) -> Result<Vec<u8>, SceneEncodeError> {
+    validate_scene_textures(meshes, textures)?;
     let mut bytes = encode_mesh_resources(meshes)?;
-    if let Some(texture) = texture {
-        bytes.extend(encode_texture_stream(texture)?);
+    if !textures.is_empty() {
+        bytes.extend(encode_texture_assets(textures)?);
     }
     bytes.extend(encode_params_stream_with_frame_ids_and_rate(
         frames,
@@ -688,12 +838,25 @@ pub fn encode_scene_resources_with_frame_indices_and_tonemap(
     Ok(bytes)
 }
 
-fn reject_gltf_texture(
+fn validate_scene_textures(
     meshes: &[SceneMesh<'_>],
-    texture: Option<&dyn Texture>,
+    textures: &[SceneTexture<'_>],
 ) -> Result<(), SceneEncodeError> {
-    if texture.is_some() && meshes.iter().any(|mesh| matches!(mesh, SceneMesh::Gltf(_))) {
+    if !textures.is_empty() && meshes.iter().any(|mesh| matches!(mesh, SceneMesh::Gltf(_))) {
         return Err(SceneEncodeError::TextureWithGltfReference);
+    }
+    let mut seen = std::collections::HashSet::new();
+    for texture in textures {
+        let Some(mesh) = meshes.get(texture.mesh_id as usize) else {
+            return Err(SceneEncodeError::TextureMeshIdOutOfRange {
+                mesh_id: texture.mesh_id,
+                mesh_count: meshes.len(),
+            });
+        };
+        if !seen.insert(texture.mesh_id) {
+            return Err(SceneEncodeError::DuplicateTextureMeshId(texture.mesh_id));
+        }
+        debug_assert!(matches!(mesh, SceneMesh::Embedded { .. }));
     }
     Ok(())
 }
@@ -791,7 +954,7 @@ mod tests {
         assert_eq!(
             decoded,
             vec![crate::MeshResource::Resolved(Box::new(
-                crate::MeshAsset::embedded(mesh, material)
+                crate::MeshAsset::embedded_with_id(0, mesh, material)
             ))]
         );
     }
@@ -892,9 +1055,177 @@ mod tests {
 
         assert_eq!(session.meshes(), meshes.as_slice());
         assert_eq!(session.texture(), Some(&texture));
+        assert_eq!(session.mesh_assets()[0].mesh_id, Some(0));
         assert_eq!(session.frame_rate(), Some(30000.0 / 1001.0));
         assert_eq!(session.tonemap_override(), Some(Tonemap::Aces));
         assert_eq!(batches.into_iter().flatten().count(), 1);
+    }
+
+    #[test]
+    fn multi_model_assets_join_materials_and_textures_by_mesh_id() {
+        use crate::texture::ImageTexture;
+
+        let meshes = [tri_mesh(), tri_mesh()];
+        let materials = [
+            DisneyMaterial {
+                metallic: 0.2,
+                ..DisneyMaterial::default()
+            },
+            DisneyMaterial {
+                roughness: 0.8,
+                ..DisneyMaterial::default()
+            },
+        ];
+        let resources = [
+            SceneMesh::Embedded {
+                mesh: &meshes[0],
+                material: &materials[0],
+            },
+            SceneMesh::Embedded {
+                mesh: &meshes[1],
+                material: &materials[1],
+            },
+        ];
+        let texture0 = ImageTexture::from_rgba(1, 1, vec![255, 0, 0, 255]).unwrap();
+        let texture1 = ImageTexture::from_rgba(2, 1, vec![0, 255, 0, 255, 0, 0, 255, 255]).unwrap();
+        let textures = [
+            SceneTexture {
+                mesh_id: 0,
+                texture: &texture0,
+            },
+            SceneTexture {
+                mesh_id: 1,
+                texture: &texture1,
+            },
+        ];
+        let texture_bytes = encode_texture_assets(&textures).unwrap();
+        let reader =
+            arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(texture_bytes), None)
+                .unwrap();
+        let texture_batch = reader.into_iter().next().unwrap().unwrap();
+        assert_eq!(
+            ImageTexture::from_arrow(&texture_batch).unwrap(),
+            texture0,
+            "legacy 0.0.6 consumers still read mesh 0"
+        );
+        assert_eq!(
+            ImageTexture::from_arrow_assets(&texture_batch).unwrap(),
+            vec![(0, texture0.clone()), (1, texture1.clone())]
+        );
+        let frame = FrameParams {
+            model: Some(Matrix4::IDENTITY.to_cols_array()),
+            ..FrameParams::IDENTITY
+        };
+        let draws = vec![vec![
+            Draw {
+                mesh_id: 0,
+                model: Matrix4::IDENTITY,
+                selection: DrawSelection::INHERIT,
+            },
+            Draw {
+                mesh_id: 1,
+                model: Matrix4::IDENTITY,
+                selection: DrawSelection::INHERIT,
+            },
+        ]];
+
+        let bytes = encode_scene_assets_with_tonemap(
+            &resources,
+            &textures,
+            &[frame],
+            Some(&draws),
+            Some(24.0),
+            Some(Tonemap::Aces),
+        )
+        .unwrap();
+        let mut session = InputSession::new();
+        let decoded = session.push(&bytes).unwrap();
+        session.finish().unwrap();
+
+        let assets = session.mesh_assets();
+        assert_eq!(assets.len(), 2);
+        assert_eq!(assets[0].mesh_id, Some(0));
+        assert_eq!(assets[0].material, materials[0]);
+        assert_eq!(assets[0].base_color_texture.as_ref(), Some(&texture0));
+        assert_eq!(assets[1].mesh_id, Some(1));
+        assert_eq!(assets[1].material, materials[1]);
+        assert_eq!(assets[1].base_color_texture.as_ref(), Some(&texture1));
+        assert_eq!(session.tonemap_override(), Some(Tonemap::Aces));
+        assert_eq!(
+            decoded.into_iter().flatten().next().unwrap().draws,
+            Some(draws[0].clone())
+        );
+    }
+
+    #[test]
+    fn keyed_texture_ids_are_validated() {
+        use crate::texture::ImageTexture;
+
+        let mesh = tri_mesh();
+        let material = DisneyMaterial::default();
+        let embedded = [SceneMesh::Embedded {
+            mesh: &mesh,
+            material: &material,
+        }];
+        let texture = ImageTexture::from_rgba(1, 1, vec![255; 4]).unwrap();
+        let duplicate = [
+            SceneTexture {
+                mesh_id: 0,
+                texture: &texture,
+            },
+            SceneTexture {
+                mesh_id: 0,
+                texture: &texture,
+            },
+        ];
+        assert!(matches!(
+            encode_scene_assets_with_tonemap(
+                &embedded,
+                &duplicate,
+                &[FrameParams::IDENTITY],
+                Some(&[Vec::new()]),
+                Some(24.0),
+                None
+            ),
+            Err(SceneEncodeError::DuplicateTextureMeshId(0))
+        ));
+        assert!(matches!(
+            encode_scene_assets_with_tonemap(
+                &embedded,
+                &[SceneTexture {
+                    mesh_id: 1,
+                    texture: &texture
+                }],
+                &[FrameParams::IDENTITY],
+                Some(&[Vec::new()]),
+                Some(24.0),
+                None
+            ),
+            Err(SceneEncodeError::TextureMeshIdOutOfRange {
+                mesh_id: 1,
+                mesh_count: 1
+            })
+        ));
+
+        let reference = MeshReference::new(Some("dragon.glb".to_owned()), None).unwrap();
+        assert!(matches!(
+            encode_scene_assets_with_tonemap(
+                &[SceneMesh::Gltf(&reference)],
+                &[SceneTexture {
+                    mesh_id: 0,
+                    texture: &texture
+                }],
+                &[FrameParams::IDENTITY],
+                Some(&[Vec::new()]),
+                Some(24.0),
+                None
+            ),
+            Err(SceneEncodeError::TextureWithGltfReference)
+        ));
+        assert!(matches!(
+            encode_texture_assets(&[]),
+            Err(SceneEncodeError::EmptyTextures)
+        ));
     }
 
     #[test]

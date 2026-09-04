@@ -36,20 +36,22 @@ pub use math::{
 // crate root beside `texture`/`camera`/`material` while their GPU residency
 // stays in `render/` (#221/#224). Public paths are unchanged.
 pub use mesh::{
-    import_glb, import_gltf_materials, GltfAsset, GltfImportError, Mesh, MeshAsset, MeshError,
-    MeshReference, MeshResource, MeshShading, DEFAULT_PREVIEW_TARGET,
+    import_glb, import_gltf_materials, GltfAsset, GltfImportError, Mesh, MeshAsset,
+    MeshAssetSource, MeshError, MeshReference, MeshResource, MeshShading, DEFAULT_PREVIEW_TARGET,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use io::{InputStream, Prologue};
 pub use io::{OutputStream, SharedBuffer};
 pub use protocol::{
-    encode_scene, encode_scene_resources, encode_scene_resources_with_frame_indices,
+    encode_scene, encode_scene_assets_with_frame_indices_and_tonemap,
+    encode_scene_assets_with_tonemap, encode_scene_resources,
+    encode_scene_resources_with_frame_indices,
     encode_scene_resources_with_frame_indices_and_tonemap, encode_scene_resources_with_tonemap,
-    encode_scene_with_tonemap, frame_rate_from_metadata, output_schema, read_image_stream,
-    DecodedFrame, FrameBatch, InputSession, OutputError, OutputSession, ProtocolError,
-    SceneEncodeError, SceneMesh, DEFAULT_FRAME_RATE, FRAME_RATE_KEY, PROTOCOL_VERSION,
-    PROTOCOL_VERSION_KEY, TABLE_KIND_KEY,
+    encode_scene_with_tonemap, encode_texture_assets, frame_rate_from_metadata, output_schema,
+    read_image_stream, DecodedFrame, FrameBatch, InputSession, OutputError, OutputSession,
+    ProtocolError, SceneEncodeError, SceneMesh, SceneTexture, DEFAULT_FRAME_RATE, FRAME_RATE_KEY,
+    PROTOCOL_VERSION, PROTOCOL_VERSION_KEY, TABLE_KIND_KEY,
 };
 // Material models are plain data (no wgpu, no bytemuck), so they sit beside
 // `mesh`/`texture`/`camera` at the crate root rather than inside the render
@@ -80,6 +82,7 @@ pub use media::{probe_moov, UnpresentedTail, UnpresentedTailEvidence, VideoInfo,
 pub use render::{RenderError, Renderer};
 pub use texture::{
     ConstantTexture, ImageData, ImageTexture, Texture, TextureError, TEXTURE_COLUMN,
+    TEXTURE_HEIGHT_COLUMN, TEXTURE_MESH_ID_COLUMN, TEXTURE_RGBA_BYTES_COLUMN, TEXTURE_WIDTH_COLUMN,
 };
 
 #[cfg(not(target_arch = "wasm32"))]

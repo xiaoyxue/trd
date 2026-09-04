@@ -56,7 +56,8 @@ select the exported `.scene.arrow` through **Arrow input** to replay it. The
 browser downloads the bytes as an Arrow-stream Blob; native uses a save dialog.
 
 For OBJ assets, protocol `0.0.6` preserves embedded geometry, albedo, and the
-complete edited Disney material. GLB/glTF 2.0 exports only a path/URL reference;
+complete edited Disney material. `mesh_id` (the dense mesh-table row) joins each
+model to its material and keyed texture row. GLB/glTF 2.0 exports only a path/URL reference;
 replay fetches the file and imports its geometry, maps, and material. Both paths
 use `assets/envmap/uffizi-large.hdr` as the default IBL probe.
 

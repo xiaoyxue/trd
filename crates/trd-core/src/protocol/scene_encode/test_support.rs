@@ -1,6 +1,6 @@
 use super::*;
 use crate::protocol::FRAMES_TABLE_KIND;
-use crate::{InlineFrame, FRAME_BYTES_COLUMN, FRAME_PIXELS_COLUMN};
+use crate::{InlineFrame, FRAME_BYTES_COLUMN, FRAME_PIXELS_COLUMN, TEXTURE_COLUMN};
 use arrow::array::{BinaryArray, FixedSizeListArray, UInt8Array};
 use arrow::buffer::{BooleanBuffer, NullBuffer};
 
@@ -13,6 +13,39 @@ pub(crate) fn encode_mesh_stream(meshes: &[Mesh]) -> Result<Vec<u8>, SceneEncode
         .map(|(mesh, material)| SceneMesh::Embedded { mesh, material })
         .collect::<Vec<_>>();
     encode_mesh_resources(&resources)
+}
+
+/// Authors the legacy one-row fixed-shape texture table for compatibility tests.
+pub(crate) fn encode_texture_stream(texture: &dyn Texture) -> Result<Vec<u8>, SceneEncodeError> {
+    let image = texture.to_image();
+    let (width, height) = (image.width as usize, image.height as usize);
+    let list_size = (width * height * 4) as i32;
+
+    let storage = DataType::FixedSizeList(
+        Arc::new(Field::new("item", DataType::UInt8, false)),
+        list_size,
+    );
+    let extension = arrow_schema::extension::FixedShapeTensor::try_new(
+        DataType::UInt8,
+        vec![height, width, 4],
+        Some(vec![
+            "height".to_string(),
+            "width".to_string(),
+            "channel".to_string(),
+        ]),
+        None,
+    )?;
+    let field = Field::new(TEXTURE_COLUMN, storage, false).with_extension_type(extension);
+    let array = FixedSizeListArray::new(
+        Arc::new(Field::new("item", DataType::UInt8, false)),
+        list_size,
+        Arc::new(UInt8Array::from(image.rgba)),
+        None,
+    );
+
+    let schema = Schema::new(vec![field]).with_metadata(table_metadata(TEXTURE_TABLE_KIND));
+    let batch = RecordBatch::try_new(Arc::new(schema.clone()), vec![Arc::new(array) as ArrayRef])?;
+    write_ipc(&schema, &batch)
 }
 
 /// Authors params without frame-resource or sparse-video references.

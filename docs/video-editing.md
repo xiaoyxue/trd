@@ -177,7 +177,9 @@ exported protocol `0.0.6` scene. Annotation input enables editing; scene input
 replays its decoded mesh and per-frame draws over the selected video.
 
 Protocol `0.0.6` uses two asset forms. Coca-Cola/beer OBJ assets embed geometry,
-the albedo texture, and the complete edited `DisneyMaterial` JSON. Dragon
+the albedo texture, and the complete edited `DisneyMaterial` JSON. The dense
+mesh-table row index is the `mesh_id` joining draws, materials, and keyed texture
+rows, so multi-model scenes retain each model's own assets. Dragon
 exports only its GLB path/URL; replay resolves that file and imports its geometry,
 base-color, metallic-roughness and normal maps, and material. Both paths bind
 `assets/envmap/uffizi-large.hdr` as the video editor's default IBL probe.

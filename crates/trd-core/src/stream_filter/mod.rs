@@ -244,7 +244,8 @@ pub fn run_stream_with_mesh_resolver<R: Read, W: Write>(
         prologue.meshes,
         options.msaa.sample_count(),
     ))?;
-    for (mesh_id, asset) in prologue.mesh_assets.iter().enumerate() {
+    for (index, asset) in prologue.mesh_assets.iter().enumerate() {
+        let mesh_id = asset.mesh_id_or(index as u32) as usize;
         renderer.set_disney_material(crate::MeshTarget::One(mesh_id), asset.material.clone());
         if let Some(texture) = asset.base_color_texture.as_ref() {
             renderer.set_mesh_texture(mesh_id, texture);

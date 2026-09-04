@@ -52,7 +52,7 @@ impl ArrowScene {
         }
         *resource = trd_core::MeshResource::Resolved(Box::new(
             trd_core::import_glb(bytes)
-                .map(trd_core::MeshAsset::from)
+                .map(|asset| trd_core::MeshAsset::from_gltf_with_id(index, asset))
                 .map_err(|error| error.to_string())?,
         ));
         Ok(())

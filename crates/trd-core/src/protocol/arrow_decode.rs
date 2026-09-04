@@ -24,7 +24,7 @@ use crate::math::Matrix4;
 use crate::render::{Draw, DrawSelection};
 use crate::{CameraFormError, FrameParams, Tonemap};
 
-use super::{tonemap_error, ProtocolError, PROTOCOL_VERSION_KEY, SUPPORTED_INPUT_VERSIONS};
+use super::{parse_error, ProtocolError, PROTOCOL_VERSION_KEY, SUPPORTED_INPUT_VERSIONS};
 
 /// Validates a schema's declared protocol version against
 /// [`SUPPORTED_INPUT_VERSIONS`]. The current protocol is deliberately not
@@ -364,23 +364,21 @@ pub(crate) fn decode_tonemap(batch: &RecordBatch) -> Result<Option<Tonemap>, Pro
         return Ok(None);
     };
     let Some(&first) = values.values().first() else {
-        return Err(tonemap_error(
-            "tonemap column must contain at least one row",
-        ));
+        return Err(parse_error("tonemap column must contain at least one row"));
     };
     let operator = Tonemap::from_wire(first).ok_or_else(|| {
-        tonemap_error(format!(
+        parse_error(format!(
             "tonemap byte {first} is not valid (0 = Reinhard, 1 = ACES)"
         ))
     })?;
     for &value in values.values().iter().skip(1) {
         let current = Tonemap::from_wire(value).ok_or_else(|| {
-            tonemap_error(format!(
+            parse_error(format!(
                 "tonemap byte {value} is not valid (0 = Reinhard, 1 = ACES)"
             ))
         })?;
         if current != operator {
-            return Err(tonemap_error(format!(
+            return Err(parse_error(format!(
                 "tonemap must be constant across the params stream (expected {first}, got {value})"
             )));
         }

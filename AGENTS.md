@@ -46,8 +46,9 @@ violate without anything noticing:
   independent of `PROTOCOL_VERSION`** — no editor columns in `0.0.6`, no protocol
   bump for editor state.
 - **Protocol `0.0.6` asset rule:** embedded OBJ geometry uses the mesh columns,
-  the optional texture table is its albedo, and the mesh row carries the complete
-  current Disney material scalar/enum state. GLB/glTF 2.0 is reference-only
+  the mesh row index is its `mesh_id`, the material on that row belongs to that
+  ID, and keyed texture rows carry the same `mesh_id`. A legacy texture table
+  defaults to mesh 0. GLB/glTF 2.0 is reference-only
   (`gltf_path` / `gltf_url`): do not duplicate its geometry or material columns,
   because the glTF file is authoritative. Every native and browser consumer must
   resolve the reference before rendering and must report an unresolved resource

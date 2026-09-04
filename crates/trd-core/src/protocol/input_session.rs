@@ -17,12 +17,11 @@ use arrow::buffer::Buffer;
 use arrow::ipc::reader::StreamDecoder;
 
 use crate::session_state::SessionState;
-use crate::texture::ImageTexture;
 use crate::{InlineFrame, Mesh, MeshAsset, MeshReference, MeshResource, Tonemap};
 
 use super::{
-    decode_frame_batch, decode_tonemap, frame_rate_from_metadata, is_stream_boundary, table_kind,
-    tonemap_error, FrameBatch, ProtocolError, StreamKind,
+    decode_frame_batch, decode_tonemap, frame_rate_from_metadata, is_stream_boundary, parse_error,
+    table_kind, FrameBatch, ProtocolError, StreamKind,
 };
 use crate::frame::validate_schema as validate_frames_schema;
 use crate::protocol::arrow_decode::validate_schema;
@@ -46,8 +45,6 @@ pub struct InputSession {
     mesh_resources: Vec<MeshResource>,
     mesh_assets: Vec<MeshAsset>,
     meshes: Vec<Mesh>,
-    /// A texture-table payload waiting for embedded mesh row 0 to resolve.
-    pending_texture: Option<ImageTexture>,
     frames: Vec<InlineFrame>,
     frames_table_present: bool,
     mesh_table_present: bool,
@@ -71,7 +68,6 @@ impl InputSession {
             mesh_resources: Vec::new(),
             mesh_assets: Vec::new(),
             meshes: Vec::new(),
-            pending_texture: None,
             frames: Vec::new(),
             frames_table_present: false,
             mesh_table_present: false,
@@ -156,7 +152,7 @@ impl InputSession {
             return Err(ProtocolError::MeshReferenceExpected { index });
         }
         let asset = crate::import_glb(bytes)
-            .map(MeshAsset::from)
+            .map(|asset| MeshAsset::from_gltf_with_id(index, asset))
             .map_err(|source| ProtocolError::GltfImport { index, source })?;
         *resource = MeshResource::Resolved(Box::new(asset));
         self.refresh_resolved_meshes();
@@ -168,10 +164,9 @@ impl InputSession {
         !self.meshes.is_empty()
     }
 
-    /// The image decoded from an optional leading **texture** table (`0.0.4`),
-    /// bound as the sampled albedo for [`crate::RenderMode::Textured`] meshes.
-    /// `None` for streams without a texture table.
-    pub fn texture(&self) -> Option<&ImageTexture> {
+    /// Mesh 0's decoded base-color texture, retained for the legacy single-texture
+    /// accessor. Multi-model callers use [`InputSession::mesh_assets`].
+    pub fn texture(&self) -> Option<&crate::ImageTexture> {
         self.texture_table_present
             .then(|| {
                 self.mesh_assets
@@ -181,7 +176,7 @@ impl InputSession {
             .flatten()
     }
 
-    /// Whether the stream carried a leading texture table (`0.0.4`).
+    /// Whether the stream carried a leading texture table.
     pub fn has_texture(&self) -> bool {
         self.texture_table_present
     }
@@ -235,8 +230,14 @@ impl InputSession {
                     if let Some(batch) = decoded {
                         match self.current_kind {
                             Some(StreamKind::Mesh) => {
-                                self.mesh_resources
-                                    .extend(Mesh::decode_mesh_resources(&batch)?);
+                                let base = self.mesh_resources.len() as u32;
+                                let mut resources = Mesh::decode_mesh_resources(&batch)?;
+                                for (row, resource) in resources.iter_mut().enumerate() {
+                                    if let MeshResource::Resolved(asset) = resource {
+                                        asset.mesh_id = Some(base + row as u32);
+                                    }
+                                }
+                                self.mesh_resources.extend(resources);
                                 self.refresh_resolved_meshes();
                             }
                             Some(StreamKind::Texture) => self.decode_texture(&batch)?,
@@ -364,22 +365,63 @@ impl InputSession {
         Ok(())
     }
 
-    /// Decodes the texture table's image (first non-empty row wins — one bound
-    /// texture per stream). Later rows/batches of the same texture stream are
-    /// ignored (a texture table is one row = one image).
+    /// Decodes base-color textures and binds each row to its `mesh_id`.
+    ///
+    /// Legacy fixed-shape texture tables decode as one row for mesh 0.
     fn decode_texture(&mut self, batch: &RecordBatch) -> Result<(), ProtocolError> {
-        if self
-            .mesh_resources
-            .iter()
-            .any(|resource| matches!(resource, MeshResource::Gltf(_)))
-        {
+        if self.mesh_resources.iter().any(|resource| match resource {
+            MeshResource::Gltf(_) => true,
+            MeshResource::Resolved(asset) => asset.source == crate::MeshAssetSource::Gltf,
+        }) {
             return Err(ProtocolError::TextureWithGltfReference);
         }
-        let texture_missing = self.pending_texture.is_none() && self.texture().is_none();
-        if texture_missing && batch.num_rows() > 0 {
-            self.pending_texture = Some(ImageTexture::from_arrow(batch)?);
+        let keyed = [
+            crate::TEXTURE_MESH_ID_COLUMN,
+            crate::TEXTURE_WIDTH_COLUMN,
+            crate::TEXTURE_HEIGHT_COLUMN,
+            crate::TEXTURE_RGBA_BYTES_COLUMN,
+        ]
+        .into_iter()
+        .any(|name| batch.column_by_name(name).is_some());
+        if !keyed {
+            if batch.num_rows() == 0 || self.texture().is_some() {
+                return Ok(());
+            }
+            let texture = crate::ImageTexture::from_arrow(batch)?;
+            let mesh_count = self.mesh_resources.len();
+            let resource =
+                self.mesh_resources
+                    .get_mut(0)
+                    .ok_or(ProtocolError::MeshReferenceIndex {
+                        index: 0,
+                        mesh_count,
+                    })?;
+            let MeshResource::Resolved(asset) = resource else {
+                return Err(ProtocolError::TextureWithGltfReference);
+            };
+            asset.base_color_texture = Some(texture);
             self.refresh_resolved_meshes();
+            return Ok(());
         }
+        for (mesh_id, texture) in crate::ImageTexture::from_arrow_assets(batch)? {
+            let mesh_count = self.mesh_resources.len();
+            let resource = self.mesh_resources.get_mut(mesh_id as usize).ok_or(
+                ProtocolError::MeshReferenceIndex {
+                    index: mesh_id,
+                    mesh_count,
+                },
+            )?;
+            let MeshResource::Resolved(asset) = resource else {
+                return Err(ProtocolError::TextureWithGltfReference);
+            };
+            if asset.base_color_texture.is_some() {
+                return Err(parse_error(format!(
+                    "texture table contains duplicate mesh_id {mesh_id}"
+                )));
+            }
+            asset.base_color_texture = Some(texture);
+        }
+        self.refresh_resolved_meshes();
         Ok(())
     }
 
@@ -392,11 +434,6 @@ impl InputSession {
             self.mesh_assets.clear();
             self.meshes.clear();
             return;
-        }
-        if let Some(texture) = self.pending_texture.take() {
-            if let Some(MeshResource::Resolved(asset)) = self.mesh_resources.first_mut() {
-                asset.base_color_texture = Some(texture);
-            }
         }
         self.mesh_assets = self
             .mesh_resources
@@ -451,7 +488,7 @@ impl InputSession {
         self.tonemap_observed = true;
         if let Some(previous) = self.tonemap_override {
             if previous != operator {
-                return Err(tonemap_error(format!(
+                return Err(parse_error(format!(
                     "tonemap must be constant across the params stream (expected {}, got {})",
                     previous.to_wire(),
                     operator.to_wire()
@@ -467,5 +504,39 @@ impl InputSession {
 impl Default for InputSession {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolved_gltf_still_rejects_external_texture_rows() {
+        let gltf = crate::GltfAsset {
+            mesh: Mesh::hello_triangle(),
+            material: crate::DisneyMaterial::default(),
+            base_color_texture: None,
+            metallic_roughness_texture: None,
+            normal_texture: None,
+        };
+        let mut session = InputSession::new();
+        session.mesh_resources = vec![MeshResource::Resolved(Box::new(
+            MeshAsset::from_gltf_with_id(0, gltf),
+        ))];
+        let texture = crate::ImageTexture::from_rgba(1, 1, vec![255; 4]).unwrap();
+        let bytes = crate::encode_texture_assets(&[crate::SceneTexture {
+            mesh_id: 0,
+            texture: &texture,
+        }])
+        .unwrap();
+        let reader =
+            arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(bytes), None).unwrap();
+        let batch = reader.into_iter().next().unwrap().unwrap();
+
+        assert!(matches!(
+            session.decode_texture(&batch),
+            Err(ProtocolError::TextureWithGltfReference)
+        ));
     }
 }
