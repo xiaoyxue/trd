@@ -14,7 +14,7 @@ use std::io::Read;
 
 use crate::protocol::FrameBatch;
 use crate::stream_filter::StreamError;
-use crate::{InlineFrame, InputSession, Mesh, MeshAsset, MeshReference};
+use crate::{InlineFrame, InputSession, Mesh, MeshAsset, MeshReference, Tonemap};
 
 /// How many bytes are pulled from the source per read.
 const CHUNK: usize = 64 * 1024;
@@ -105,6 +105,11 @@ impl<R: Read> InputStream<R> {
         self.session.frames()
     }
 
+    /// The params stream's explicit tone-map override, if present.
+    pub fn tonemap_override(&self) -> Option<Tonemap> {
+        self.session.tonemap_override()
+    }
+
     pub fn resolve_gltf(&mut self, index: u32, bytes: &[u8]) -> Result<(), StreamError> {
         self.session.resolve_gltf(index, bytes)?;
         Ok(())
@@ -148,7 +153,7 @@ impl<R: Read> InputStream<R> {
             return Ok(false);
         }
         self.pending.extend(self.session.push(&self.buf[..n])?);
-        if !self.ready && self.session.has_schema() {
+        if !self.ready && self.session.has_schema() && self.session.tonemap_ready() {
             // The protocol is mesh-first; a params-only stream is rejected.
             if self.session.mesh_resource_count() == 0 {
                 return Err(StreamError::MissingMeshStream);
@@ -164,5 +169,45 @@ impl<R: Read> Iterator for InputStream<R> {
 
     fn next(&mut self) -> Option<Self::Item> {
         self.next_batch()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    struct OneByteReader(Cursor<Vec<u8>>);
+
+    impl Read for OneByteReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let len = buf.len().min(1);
+            self.0.read(&mut buf[..len])
+        }
+    }
+
+    #[test]
+    fn prologue_waits_for_the_tonemap_value_after_its_schema() {
+        let frame = crate::FrameParams {
+            model: Some(crate::Matrix4::IDENTITY.to_cols_array()),
+            ..crate::FrameParams::IDENTITY
+        };
+        let bytes = crate::encode_scene_with_tonemap(
+            &[crate::Mesh::hello_triangle()],
+            None,
+            &[frame],
+            None,
+            Some(24.0),
+            Some(crate::Tonemap::Aces),
+        )
+        .unwrap();
+        let mut input = InputStream::new(OneByteReader(Cursor::new(bytes)));
+
+        {
+            let prologue = input.prologue().unwrap();
+            assert_eq!(prologue.frame_rate, 24.0);
+        }
+        assert_eq!(input.tonemap_override(), Some(crate::Tonemap::Aces));
+        assert_eq!(input.next().unwrap().unwrap().len(), 1);
     }
 }

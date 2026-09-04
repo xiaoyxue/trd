@@ -7,6 +7,21 @@ pub enum Tonemap {
 }
 
 impl Tonemap {
+    pub(crate) const fn from_wire(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Reinhard),
+            1 => Some(Self::Aces),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn to_wire(self) -> u8 {
+        match self {
+            Self::Reinhard => 0,
+            Self::Aces => 1,
+        }
+    }
+
     pub(crate) const fn to_uniform(self) -> f32 {
         match self {
             Self::Reinhard => 0.0,

@@ -18,11 +18,11 @@ use arrow::ipc::reader::StreamDecoder;
 
 use crate::session_state::SessionState;
 use crate::texture::ImageTexture;
-use crate::{InlineFrame, Mesh, MeshAsset, MeshReference, MeshResource};
+use crate::{InlineFrame, Mesh, MeshAsset, MeshReference, MeshResource, Tonemap};
 
 use super::{
-    decode_frame_batch, frame_rate_from_metadata, is_stream_boundary, table_kind, FrameBatch,
-    ProtocolError, StreamKind,
+    decode_frame_batch, decode_tonemap, frame_rate_from_metadata, is_stream_boundary, table_kind,
+    tonemap_error, FrameBatch, ProtocolError, StreamKind,
 };
 use crate::frame::validate_schema as validate_frames_schema;
 use crate::protocol::arrow_decode::validate_schema;
@@ -55,6 +55,9 @@ pub struct InputSession {
     /// Whether a **params** schema has been decoded and validated (the terminal
     /// sub-stream). Frames can only be produced once true.
     params_schema_validated: bool,
+    tonemap_column_present: bool,
+    tonemap_observed: bool,
+    tonemap_override: Option<Tonemap>,
     video_frame_indexed: Option<bool>,
     last_video_frame_index: Option<u32>,
     state: SessionState,
@@ -74,6 +77,9 @@ impl InputSession {
             mesh_table_present: false,
             texture_table_present: false,
             params_schema_validated: false,
+            tonemap_column_present: false,
+            tonemap_observed: false,
+            tonemap_override: None,
             video_frame_indexed: None,
             last_video_frame_index: None,
             state: SessionState::default(),
@@ -199,6 +205,19 @@ impl InputSession {
             .map(|schema| frame_rate_from_metadata(schema.metadata()))
     }
 
+    /// The params stream's explicit tone-map override, if present.
+    ///
+    /// Absence leaves an explicit consumer setting unchanged; consumers with no
+    /// override use their Reinhard default.
+    pub fn tonemap_override(&self) -> Option<Tonemap> {
+        self.tonemap_override
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn tonemap_ready(&self) -> bool {
+        !self.tonemap_column_present || self.tonemap_observed
+    }
+
     fn require_open(&self) -> Result<(), ProtocolError> {
         self.state
             .ensure_open(ProtocolError::SessionFinished, ProtocolError::SessionFailed)
@@ -225,6 +244,7 @@ impl InputSession {
                                 self.frames.extend(InlineFrame::from_arrow_all(&batch)?)
                             }
                             Some(StreamKind::Params) => {
+                                self.observe_tonemap(&batch)?;
                                 let frames = decode_frame_batch(
                                     &batch,
                                     self.frames_table_present,
@@ -287,6 +307,8 @@ impl InputSession {
             StreamKind::Params => {
                 validate_schema(schema.as_ref())?;
                 self.params_schema_validated = true;
+                self.tonemap_column_present = schema.field_with_name("tonemap").is_ok();
+                self.tonemap_observed = !self.tonemap_column_present;
             }
             StreamKind::Mesh | StreamKind::Texture => {}
         }
@@ -418,6 +440,25 @@ impl InputSession {
                 }
             }
             self.last_video_frame_index = Some(current);
+        }
+        Ok(())
+    }
+
+    fn observe_tonemap(&mut self, batch: &RecordBatch) -> Result<(), ProtocolError> {
+        let Some(operator) = decode_tonemap(batch)? else {
+            return Ok(());
+        };
+        self.tonemap_observed = true;
+        if let Some(previous) = self.tonemap_override {
+            if previous != operator {
+                return Err(tonemap_error(format!(
+                    "tonemap must be constant across the params stream (expected {}, got {})",
+                    previous.to_wire(),
+                    operator.to_wire()
+                )));
+            }
+        } else {
+            self.tonemap_override = Some(operator);
         }
         Ok(())
     }

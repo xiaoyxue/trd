@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use trd_core::{
     Draw, FrameParams, ImageData, InlineFrameCache, InputStream, Mesh, MeshAsset, SceneError,
+    Tonemap,
 };
 
 /// A message from the stdin reader thread: the decoded mesh table (sent once,
@@ -18,6 +19,7 @@ pub(crate) enum StreamMsg {
     Meshes(Vec<Mesh>),
     MeshAssets(Vec<MeshAsset>),
     Rate(f64),
+    Tonemap(Tonemap),
     // Boxed: `FrameData` embeds the large `FrameParams` (camera columns), so an
     // unboxed variant would dwarf `Rate` (clippy::large_enum_variant).
     Frame(Box<FrameData>),
@@ -87,6 +89,9 @@ fn read_stdin(
     let _ = tx.send(StreamMsg::Meshes(prologue.meshes.to_vec()));
     let _ = tx.send(StreamMsg::MeshAssets(prologue.mesh_assets.to_vec()));
     let _ = tx.send(StreamMsg::Rate(prologue.frame_rate));
+    if let Some(operator) = input.tonemap_override() {
+        let _ = tx.send(StreamMsg::Tonemap(operator));
+    }
 
     let mut inline_cache = InlineFrameCache::default();
     while let Some(batch) = input.next_batch() {

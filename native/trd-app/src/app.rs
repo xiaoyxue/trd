@@ -67,6 +67,8 @@ struct App {
     pbr_config: Option<PbrConfig>,
     /// Whether `pbr_config` has been applied to the built renderer (once).
     pbr_applied: bool,
+    stream_tonemap: Option<trd_core::Tonemap>,
+    stream_tonemap_applied: bool,
 }
 
 impl App {
@@ -98,6 +100,8 @@ impl App {
             options,
             pbr_config,
             pbr_applied: false,
+            stream_tonemap: None,
+            stream_tonemap_applied: false,
         }
     }
 
@@ -114,6 +118,13 @@ impl App {
                 Ok(StreamMsg::Meshes(meshes)) => self.pending_meshes = Some(meshes),
                 Ok(StreamMsg::MeshAssets(assets)) => self.pending_mesh_assets = Some(assets),
                 Ok(StreamMsg::Rate(rate)) => self.stream_rate = rate,
+                Ok(StreamMsg::Tonemap(operator)) => {
+                    self.stream_tonemap = Some(operator);
+                    self.stream_tonemap_applied = false;
+                    if let Some(background) = self.options.env_background.as_mut() {
+                        background.tonemap = operator;
+                    }
+                }
                 Ok(StreamMsg::Frame(frame)) => self.frames.push(*frame),
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
@@ -284,6 +295,13 @@ impl ApplicationHandler for App {
                     gpu.window.request_redraw();
                 }
                 self.pbr_applied = true;
+            }
+            if !self.stream_tonemap_applied && gpu.renderer.is_some() {
+                if let Some(operator) = self.stream_tonemap {
+                    gpu.set_tonemap_operator(operator);
+                    gpu.window.request_redraw();
+                }
+                self.stream_tonemap_applied = true;
             }
         }
 

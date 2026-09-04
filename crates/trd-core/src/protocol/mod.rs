@@ -17,7 +17,7 @@ mod output_session;
 mod scene_encode;
 
 pub(crate) use arrow_decode::{
-    check_version, decode_batch, decode_draws, decode_frame_ids, decode_frame_refs,
+    check_version, decode_batch, decode_draws, decode_frame_ids, decode_frame_refs, decode_tonemap,
 };
 pub(crate) use image_encode::tightly_pack_rgba;
 pub use image_encode::{output_schema, read_image_stream, OutputError};
@@ -25,7 +25,8 @@ pub use input_session::InputSession;
 pub use output_session::OutputSession;
 pub use scene_encode::{
     encode_scene, encode_scene_resources, encode_scene_resources_with_frame_indices,
-    SceneEncodeError, SceneMesh,
+    encode_scene_resources_with_frame_indices_and_tonemap, encode_scene_resources_with_tonemap,
+    encode_scene_with_tonemap, SceneEncodeError, SceneMesh,
 };
 
 pub const PROTOCOL_VERSION: &str = "0.0.6";
@@ -212,6 +213,10 @@ pub enum ProtocolError {
     MixedVideoFrameIndexMode,
 }
 
+fn tonemap_error(message: impl Into<String>) -> ProtocolError {
+    ProtocolError::Arrow(ArrowError::ParseError(message.into()))
+}
+
 /// Which kind of concatenated IPC sub-stream the session is currently decoding.
 /// A `0.0.6` stream is `[mesh][texture?][frames?][params]`; the params stream is
 /// terminal.
@@ -341,7 +346,7 @@ mod tests {
 
     use arrow::array::{
         Array, ArrayRef, FixedSizeListArray, Float32Array, Int32Array, RecordBatch, StringArray,
-        UInt32Array,
+        UInt32Array, UInt8Array,
     };
     use arrow::buffer::NullBuffer;
     use arrow::datatypes::{DataType, Field, Schema};
@@ -552,6 +557,76 @@ mod tests {
         assert!(matches!(
             missing.push(&test_stream(&[without_version])),
             Err(ProtocolError::MissingMetadata(PROTOCOL_VERSION_KEY))
+        ));
+    }
+
+    #[test]
+    fn tonemap_decodes_and_rejects_unknown_values() {
+        assert_eq!(crate::Tonemap::default(), crate::Tonemap::Reinhard);
+
+        let schema = schema_with(
+            Some(PROTOCOL_VERSION),
+            vec![Field::new("tonemap", DataType::UInt8, false)],
+        );
+        let aces = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(UInt8Array::from(vec![1])) as ArrayRef],
+        )
+        .unwrap();
+        assert_eq!(decode_tonemap(&aces).unwrap(), Some(crate::Tonemap::Aces));
+
+        let invalid = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(UInt8Array::from(vec![2])) as ArrayRef],
+        )
+        .unwrap();
+        let error = decode_tonemap(&invalid).unwrap_err().to_string();
+        assert!(error.contains("tonemap byte 2 is not valid"));
+
+        let mixed = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(UInt8Array::from(vec![0, 1])) as ArrayRef],
+        )
+        .unwrap();
+        let error = decode_tonemap(&mixed).unwrap_err().to_string();
+        assert!(error.contains("tonemap must be constant"));
+
+        let empty = RecordBatch::try_new(
+            schema_with(
+                Some(PROTOCOL_VERSION),
+                vec![Field::new("tonemap", DataType::UInt8, false)],
+            ),
+            vec![Arc::new(UInt8Array::from(Vec::<u8>::new())) as ArrayRef],
+        )
+        .unwrap();
+        let error = decode_tonemap(&empty).unwrap_err().to_string();
+        assert!(error.contains("tonemap column must contain at least one row"));
+
+        let reinhard = RecordBatch::try_new(
+            schema_with(
+                Some(PROTOCOL_VERSION),
+                vec![Field::new("tonemap", DataType::UInt8, false)],
+            ),
+            vec![Arc::new(UInt8Array::from(vec![0])) as ArrayRef],
+        )
+        .unwrap();
+        let mut session = InputSession::new();
+        let error = session
+            .push(&test_stream(&[reinhard, aces]))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("tonemap must be constant"));
+
+        let nullable_schema = schema_with(
+            Some(PROTOCOL_VERSION),
+            vec![Field::new("tonemap", DataType::UInt8, true)],
+        );
+        assert!(matches!(
+            super::arrow_decode::validate_schema(nullable_schema.as_ref()),
+            Err(ProtocolError::ColumnType {
+                column: "tonemap",
+                ..
+            })
         ));
     }
 

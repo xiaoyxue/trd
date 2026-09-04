@@ -45,9 +45,11 @@ pub use io::{InputStream, Prologue};
 pub use io::{OutputStream, SharedBuffer};
 pub use protocol::{
     encode_scene, encode_scene_resources, encode_scene_resources_with_frame_indices,
-    frame_rate_from_metadata, output_schema, read_image_stream, DecodedFrame, FrameBatch,
-    InputSession, OutputError, OutputSession, ProtocolError, SceneEncodeError, SceneMesh,
-    DEFAULT_FRAME_RATE, FRAME_RATE_KEY, PROTOCOL_VERSION, PROTOCOL_VERSION_KEY, TABLE_KIND_KEY,
+    encode_scene_resources_with_frame_indices_and_tonemap, encode_scene_resources_with_tonemap,
+    encode_scene_with_tonemap, frame_rate_from_metadata, output_schema, read_image_stream,
+    DecodedFrame, FrameBatch, InputSession, OutputError, OutputSession, ProtocolError,
+    SceneEncodeError, SceneMesh, DEFAULT_FRAME_RATE, FRAME_RATE_KEY, PROTOCOL_VERSION,
+    PROTOCOL_VERSION_KEY, TABLE_KIND_KEY,
 };
 // Material models are plain data (no wgpu, no bytemuck), so they sit beside
 // `mesh`/`texture`/`camera` at the crate root rather than inside the render

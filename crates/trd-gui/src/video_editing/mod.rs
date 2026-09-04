@@ -1025,6 +1025,13 @@ impl VideoEditingApp {
         }
         self.document = None;
         if let Some(scene) = scene.as_ref() {
+            if let Some(operator) = scene.tonemap {
+                self.controller.state.tone_mappings[0].operator = operator;
+                self.controller
+                    .state
+                    .environment_background_tone_mapping
+                    .operator = operator;
+            }
             if let Some(mode) = scene
                 .frames
                 .iter()
@@ -1443,6 +1450,7 @@ impl VideoEditingApp {
         let render_size = renderer.size();
         self.shared.needs_overlay.set(false);
         let mut state = self.controller.state.clone();
+        let replay_tonemap = state.tone_mappings[0].operator;
         let rendered_playing = self.shared.video_playing.get();
         if rendered_playing {
             state.selected = None;
@@ -1493,6 +1501,7 @@ impl VideoEditingApp {
                         video.height,
                         (width, height),
                         frame,
+                        replay_tonemap,
                     ),
                     None => renderer.draw(
                         source,
@@ -1517,6 +1526,7 @@ impl VideoEditingApp {
                                 video.height,
                                 (width, height),
                                 frame,
+                                replay_tonemap,
                             )
                             .await
                     }

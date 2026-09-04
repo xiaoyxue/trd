@@ -173,6 +173,17 @@
           "doc": "strictly increasing sidecar-video frame key for sparse params"
         },
         {
+          "name": "tonemap",
+          "arrow_type": "uint8",
+          "required": false,
+          "doc": "tone-map operator for this rendered sample",
+          "default": "reinhard",
+          "values": {
+            "0": "reinhard",
+            "1": "aces"
+          }
+        },
+        {
           "name": "model",
           "arrow_type": "fixed_size_list<item: float>[16]",
           "required": false,
@@ -288,6 +299,7 @@
       ],
       "constraints": [
         "video_frame_index, when present, is non-null and strictly increasing across all batches",
+        "tonemap, when present, is non-null, present on every row, and constant across the params stream",
         "draw_mesh and draw_model are present together or not at all; one without the other is an error",
         "no draw columns renders mesh 0 using model; an explicit empty draw list renders no meshes",
         "CV (k/pose) and CG (eye/target/direction/up/fovy/aspect/znear/zfar) camera forms are mutually exclusive",

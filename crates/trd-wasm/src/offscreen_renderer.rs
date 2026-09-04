@@ -256,6 +256,19 @@ impl OffscreenRenderer {
     fn refresh_env_background(&mut self) {
         self.options.env_background =
             crate::env_background(self.env_background_blur, self.pbr.as_ref());
+        self.apply_stream_tonemap();
+    }
+
+    fn apply_stream_tonemap(&mut self) {
+        let Some(operator) = self.input.tonemap_override() else {
+            return;
+        };
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.set_tonemap_operator(trd_core::MeshTarget::All, operator);
+        }
+        if let Some(background) = self.options.env_background.as_mut() {
+            background.tonemap = operator;
+        }
     }
 
     /// Decodes a Radiance `.hdr` buffer and binds it as the environment probe (downscaled to 2048px).
@@ -433,6 +446,7 @@ impl OffscreenRenderer {
                     .set_env_map(env);
             }
         }
+        self.apply_stream_tonemap();
         Ok(self.renderer.as_mut().expect("renderer just built"))
     }
 

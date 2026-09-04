@@ -1912,6 +1912,35 @@ fn mesh_target_selects_which_meshes_an_appearance_edit_reaches() {
         "All reaches mesh 1"
     );
 
+    renderer.set_tone_mapping(
+        crate::MeshTarget::All,
+        crate::ToneMapping {
+            operator: crate::Tonemap::Reinhard,
+            exposure: 2.5,
+        },
+    );
+    renderer.set_tonemap_operator(crate::MeshTarget::One(0), crate::Tonemap::Aces);
+    assert_eq!(
+        renderer
+            .mesh_appearance(0)
+            .map(|appearance| appearance.tone_mapping),
+        Some(crate::ToneMapping {
+            operator: crate::Tonemap::Aces,
+            exposure: 2.5,
+        }),
+        "the operator changes without resetting exposure"
+    );
+    assert_eq!(
+        renderer
+            .mesh_appearance(1)
+            .map(|appearance| appearance.tone_mapping),
+        Some(crate::ToneMapping {
+            operator: crate::Tonemap::Reinhard,
+            exposure: 2.5,
+        }),
+        "One(0) leaves mesh 1 unchanged"
+    );
+
     let blue = crate::DisneyMaterial {
         base_color: [0.0, 0.0, 1.0],
         ..Default::default()

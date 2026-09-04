@@ -336,6 +336,19 @@ impl CanvasRenderer {
     fn refresh_env_background(&mut self) {
         self.options.env_background =
             crate::env_background(self.env_background_blur, self.pbr.as_ref());
+        self.apply_stream_tonemap();
+    }
+
+    fn apply_stream_tonemap(&mut self) {
+        let Some(operator) = self.input.tonemap_override() else {
+            return;
+        };
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.set_tonemap_operator(trd_core::MeshTarget::All, operator);
+        }
+        if let Some(background) = self.options.env_background.as_mut() {
+            background.tonemap = operator;
+        }
     }
 
     /// Decodes an equirectangular Radiance `.hdr` buffer (downscaled to 2048px)
@@ -542,10 +555,11 @@ impl CanvasRenderer {
         // Wire-decoded params: resolve against the surface's own size, so the
         // camera's viewport cannot disagree with the attachments (#203).
         let camera = params.to_camera(self.target.viewport())?;
-        self.renderer
+        let renderer = self
+            .renderer
             .as_mut()
-            .expect("renderer built before present")
-            .render(camera, scene, &mut self.target)
+            .expect("renderer built before present");
+        renderer.render(camera, scene, &mut self.target)
     }
 
     fn reconfigure(&mut self) {
@@ -615,6 +629,7 @@ impl CanvasRenderer {
                     .set_env_map(env);
             }
         }
+        self.apply_stream_tonemap();
         Ok(self.renderer.as_mut().expect("renderer just built"))
     }
 }

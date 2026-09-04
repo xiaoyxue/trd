@@ -314,6 +314,14 @@ def build():
                         False,
                         "strictly increasing sidecar-video frame key for sparse params",
                     ),
+                    column(
+                        "tonemap",
+                        "uint8",
+                        False,
+                        "tone-map operator for this rendered sample",
+                        default="reinhard",
+                        values={"0": "reinhard", "1": "aces"},
+                    ),
                     column("model", F32_16, False, "single-object fallback model matrix"),
                     column("k", F32_9, False, "CV camera intrinsics"),
                     column("pose", F32_16, False, "CV camera-to-world pose"),
@@ -347,6 +355,7 @@ def build():
                 ],
                 "constraints": [
                     "video_frame_index, when present, is non-null and strictly increasing across all batches",
+                    "tonemap, when present, is non-null, present on every row, and constant across the params stream",
                     "draw_mesh and draw_model are present together or not at all; one without the other is an error",
                     "no draw columns renders mesh 0 using model; an explicit empty draw list renders no meshes",
                     "CV (k/pose) and CG (eye/target/direction/up/fovy/aspect/znear/zfar) camera forms are mutually exclusive",

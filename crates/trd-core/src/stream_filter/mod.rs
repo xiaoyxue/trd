@@ -207,7 +207,7 @@ pub fn run_stream_with_mesh_resolver<R: Read, W: Write>(
     output: W,
     width: u32,
     height: u32,
-    options: RenderOptions,
+    mut options: RenderOptions,
     frame_resolver: Option<FrameResolver>,
     mesh_resolver: Option<MeshResolver>,
 ) -> Result<(), StreamError> {
@@ -270,6 +270,12 @@ pub fn run_stream_with_mesh_resolver<R: Read, W: Write>(
         }
         if let Some(env) = &pbr.env_map {
             renderer.set_env_map(env.clone());
+        }
+    }
+    if let Some(operator) = input.tonemap_override() {
+        renderer.set_tonemap_operator(crate::MeshTarget::All, operator);
+        if let Some(background) = options.env_background.as_mut() {
+            background.tonemap = operator;
         }
     }
     // Opening the stream writes its IPC header straight into `output`.

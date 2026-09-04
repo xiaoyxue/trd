@@ -392,6 +392,7 @@ impl VideoPlacementRenderer {
         frame_height: u32,
         calibration_size: (u32, u32),
         frame: &trd_core::DecodedFrame,
+        tonemap: trd_core::Tonemap,
     ) -> Result<Vec<u8>, String> {
         self.draw_scene_frame(
             FrameSource::Rgba(rgba),
@@ -399,6 +400,7 @@ impl VideoPlacementRenderer {
             frame_height,
             calibration_size,
             frame,
+            tonemap,
         )?;
         let pixels = self
             .renderer
@@ -471,10 +473,13 @@ impl VideoPlacementRenderer {
         frame_height: u32,
         calibration_size: (u32, u32),
         frame: &trd_core::DecodedFrame,
+        tonemap: trd_core::Tonemap,
     ) -> Result<(), String> {
         self.upload_frame(source, frame_width, frame_height);
         let camera = self.protocol_camera(&frame.params, calibration_size)?;
         let draws = frame.resolved_draws();
+        self.renderer
+            .set_tonemap_operator(trd_core::MeshTarget::All, tonemap);
         let (background, foreground) = replay_scenes(&draws, self.replay_lighting);
         self.renderer.draw_layers(
             &[

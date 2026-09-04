@@ -57,7 +57,8 @@ violate without anything noticing:
   carry their strictly increasing `video_frame_index`; do not pad the params
   stream with empty rows. Video replay looks up this key, and a missing row means
   video-only playback. Keep `k` and `draw_model` as separate columns—never
-  serialize a combined MVP matrix.
+  serialize a combined MVP matrix. Export the selected `tonemap` operator on
+  every sparse params row; an absent field defaults to Reinhard.
 - **Comments say *why*, not *what*, and stay short enough to see what they attach
   to.** Guidance rather than a gate, with the reasoning and a measuring script in
   [`docs/comments.md`](docs/comments.md) — run

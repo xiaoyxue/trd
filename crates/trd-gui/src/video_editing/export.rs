@@ -5,6 +5,7 @@ pub struct ArrowScene {
     pub mesh_resources: Vec<trd_core::MeshResource>,
     pub frames: Vec<trd_core::DecodedFrame>,
     pub frame_rate: f64,
+    pub tonemap: Option<trd_core::Tonemap>,
 }
 
 impl ArrowScene {
@@ -128,6 +129,7 @@ fn decode_arrow_scene(bytes: &[u8]) -> Result<ArrowScene, String> {
         mesh_resources: session.mesh_resources().to_vec(),
         frames,
         frame_rate: session.frame_rate().unwrap_or(trd_core::DEFAULT_FRAME_RATE),
+        tonemap: session.tonemap_override(),
     })
 }
 
@@ -281,6 +283,13 @@ impl VideoEditingApp {
         let mut params = Vec::new();
         let mut draws = Vec::new();
         let mode = self.controller.state.mode_of(0);
+        let tonemap = self
+            .controller
+            .state
+            .tone_mappings
+            .first()
+            .ok_or(ArrowExportError::NoLoadedAsset)?
+            .operator;
 
         for frame in document
             .frames
@@ -327,13 +336,14 @@ impl VideoEditingApp {
                 }
             };
         let frame_rate = f64::from(self.video.fps_num) / f64::from(self.video.fps_den);
-        let bytes = trd_core::encode_scene_resources_with_frame_indices(
+        let bytes = trd_core::encode_scene_resources_with_frame_indices_and_tonemap(
             std::slice::from_ref(&scene_mesh),
             texture,
             &video_frame_indices,
             &params,
             Some(&draws),
             Some(frame_rate),
+            Some(tonemap),
         )?;
 
         Ok(ArrowExport {
@@ -426,6 +436,7 @@ mod tests {
         app.selected_asset = Some(CatalogAsset::CocaColaCan);
         app.selected_quad = true;
         app.controller.state.modes[0] = trd_core::RenderMode::Wireframe;
+        app.controller.state.tone_mappings[0].operator = trd_core::Tonemap::Aces;
         shared.video_loaded.set(true);
         shared
             .export_asset
@@ -471,6 +482,7 @@ mod tests {
             decoded[0].params.k,
             Some([1000.0, 0.0, 0.0, 0.0, 1000.0, 0.0, 960.0, 540.0, 1.0])
         );
+        assert_eq!(session.tonemap_override(), Some(trd_core::Tonemap::Aces));
     }
 
     #[test]
@@ -493,6 +505,7 @@ mod tests {
         else {
             panic!("export must decode as a protocol scene");
         };
+        assert_eq!(scene.tonemap, Some(trd_core::Tonemap::Aces));
         app.set_arrow_scene(Some(Rc::new(scene)));
         assert!(app.document.is_none());
         let scene = app.arrow_scene.as_ref().unwrap();
@@ -500,6 +513,34 @@ mod tests {
         assert!(scene.frame(0).is_some());
         assert!(scene.frame(1).is_none());
         assert!(scene.frame(2).is_some());
+    }
+
+    #[test]
+    fn legacy_scene_without_tonemap_preserves_consumer_setting() {
+        let mut app = export_ready_app();
+        app.controller.state.tone_mappings[0].operator = trd_core::Tonemap::Aces;
+        let frame = trd_core::FrameParams {
+            model: Some(trd_core::Matrix4::IDENTITY.to_cols_array()),
+            ..trd_core::FrameParams::IDENTITY
+        };
+        let bytes = trd_core::encode_scene(
+            &[trd_core::Mesh::hello_triangle()],
+            None,
+            &[frame; 3],
+            None,
+            Some(24.0),
+        )
+        .unwrap();
+        let VideoEditingInput::Scene(scene) = decode_video_editing_input(&bytes).unwrap() else {
+            panic!("legacy protocol stream must decode as a scene");
+        };
+
+        assert_eq!(scene.tonemap, None);
+        app.set_arrow_scene(Some(Rc::new(scene)));
+        assert_eq!(
+            app.controller.state.tone_mappings[0].operator,
+            trd_core::Tonemap::Aces
+        );
     }
 
     #[test]
@@ -618,6 +659,7 @@ mod tests {
                 frame_id: None,
             }],
             frame_rate: 24.0,
+            tonemap: None,
         })));
 
         assert!(app.arrow_scene.is_none());
@@ -646,6 +688,7 @@ mod tests {
                 frame_id: None,
             }],
             frame_rate: 24.0,
+            tonemap: None,
         }));
         assert!(shared.take_incoming_scene().unwrap().is_some());
         assert!(shared.take_incoming_document().is_none());

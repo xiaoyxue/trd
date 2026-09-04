@@ -162,8 +162,9 @@ Rust writes every table and matrix. The browser bridge only downloads the
 returned bytes; the native shell only chooses a path and writes them. The params
 table stays sparse: one row per tracked placement, keyed by the required
 `video_frame_index`. Each row carries camera `K`, mesh row `0`, final
-`draw_model`, and selected render mode. Replay binary-searches this key; a video
-frame with no matching row is video-only.
+`draw_model`, selected render mode, and the selected tone-map operator. Replay
+binary-searches this key; a video frame with no matching row is video-only.
+Legacy scenes without `tonemap` use Reinhard.
 
 `K` and `draw_model` are stored as separate columns, matching the existing
 render protocol. No `K * draw_model`, MVP, projection, or clip-space matrix is

@@ -19,8 +19,6 @@
 
 use std::sync::Arc;
 
-#[cfg(test)]
-use arrow::array::BinaryArray;
 use arrow::array::{
     ArrayRef, FixedSizeListArray, Float32Array, ListArray, RecordBatch, StringArray, UInt32Array,
     UInt8Array,
@@ -30,20 +28,22 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use thiserror::Error;
 
-#[cfg(test)]
-use super::FRAMES_TABLE_KIND;
 use super::{
     FRAME_RATE_KEY, MESH_TABLE_KIND, PARAMS_TABLE_KIND, PROTOCOL_VERSION, PROTOCOL_VERSION_KEY,
     TABLE_KIND_KEY, TEXTURE_TABLE_KIND,
 };
-#[cfg(test)]
-use crate::math::Matrix4;
 use crate::render::{Draw, DrawSelection, RenderMode};
 use crate::render::{FrameParams, Mesh};
 use crate::texture::{Texture, TEXTURE_COLUMN};
-use crate::{DisneyMaterial, MeshReference};
+use crate::{DisneyMaterial, MeshReference, Tonemap};
+
 #[cfg(test)]
-use crate::{InlineFrame, FRAME_BYTES_COLUMN, FRAME_PIXELS_COLUMN};
+mod test_support;
+#[cfg(test)]
+pub(crate) use test_support::{
+    encode_frames_stream, encode_mesh_stream, encode_params_stream,
+    encode_params_stream_with_frame_ids, encode_scene_with_frames,
+};
 
 /// A failure authoring an input Arrow stream.
 #[derive(Debug, Error)]
@@ -258,21 +258,6 @@ fn write_ipc(schema: &Schema, batch: &RecordBatch) -> Result<Vec<u8>, SceneEncod
     Ok(buf)
 }
 
-/// Authors the leading **mesh table** IPC stream: one row per mesh with
-/// `position`/`color` `List<FixedSizeList<Float32>[3]>`, `uv`
-/// `List<FixedSizeList<Float32>[2]>`, and `index` `List<UInt32>` columns, tagged
-/// with the `0.0.6` protocol version. Decodes back via `Mesh::from_arrow_all`.
-#[cfg(test)]
-pub fn encode_mesh_stream(meshes: &[Mesh]) -> Result<Vec<u8>, SceneEncodeError> {
-    let materials = vec![DisneyMaterial::default(); meshes.len()];
-    let resources = meshes
-        .iter()
-        .zip(&materials)
-        .map(|(mesh, material)| SceneMesh::Embedded { mesh, material })
-        .collect::<Vec<_>>();
-    encode_mesh_resources(&resources)
-}
-
 pub fn encode_mesh_resources(meshes: &[SceneMesh<'_>]) -> Result<Vec<u8>, SceneEncodeError> {
     if meshes.is_empty() {
         return Err(SceneEncodeError::EmptyMeshes);
@@ -457,38 +442,17 @@ fn all_or_none_f32(
     frames.iter().map(get).collect()
 }
 
-/// Authors the **params** IPC stream from per-frame [`FrameParams`] and an
-/// optional per-frame [`Draw`] list. A camera/model column is emitted only when
-/// **all** frames set that field (Arrow columns are non-null); `draws`, when
-/// given, emits the `draw_mesh`/`draw_model` (+ `draw_mode` when any override is
-/// present) instanced-draw columns. Decodes back via [`crate::decode_frames`]
-/// and the draw decoder. Tagged with the `0.0.6` protocol version.
-#[cfg(test)]
-pub fn encode_params_stream(
-    frames: &[FrameParams],
-    draws: Option<&[Vec<Draw>]>,
-) -> Result<Vec<u8>, SceneEncodeError> {
-    encode_params_stream_with_frame_ids_and_rate(frames, draws, None, None, None)
-}
-
-/// Authors params with optional nullable `frame_id` references into a preceding
-/// frames table.
-#[cfg(test)]
-pub fn encode_params_stream_with_frame_ids(
-    frames: &[FrameParams],
-    draws: Option<&[Vec<Draw>]>,
-    frame_ids: Option<&[Option<u32>]>,
-) -> Result<Vec<u8>, SceneEncodeError> {
-    encode_params_stream_with_frame_ids_and_rate(frames, draws, frame_ids, None, None)
-}
-
 fn encode_params_stream_with_frame_ids_and_rate(
     frames: &[FrameParams],
     draws: Option<&[Vec<Draw>]>,
     frame_ids: Option<&[Option<u32>]>,
     video_frame_indices: Option<&[u32]>,
     frame_rate: Option<f64>,
+    tonemap: Option<Tonemap>,
 ) -> Result<Vec<u8>, SceneEncodeError> {
+    if frames.is_empty() {
+        return Err(SceneEncodeError::EmptyParams);
+    }
     if let Some(draws) = draws {
         if draws.len() != frames.len() {
             return Err(SceneEncodeError::DrawsLengthMismatch {
@@ -525,6 +489,13 @@ fn encode_params_stream_with_frame_ids_and_rate(
     if let Some(indices) = video_frame_indices {
         fields.push(Field::new("video_frame_index", DataType::UInt32, false));
         columns.push(Arc::new(UInt32Array::from(indices.to_vec())));
+    }
+    if let Some(operator) = tonemap {
+        fields.push(Field::new("tonemap", DataType::UInt8, false));
+        columns.push(Arc::new(UInt8Array::from(vec![
+            operator.to_wire();
+            frames.len()
+        ])));
     }
 
     let mut push_fixed = |name: &str, len: i32, flat: Option<Vec<f32>>| {
@@ -613,138 +584,6 @@ fn encode_params_stream_with_frame_ids_and_rate(
     write_ipc(&schema, &batch)
 }
 
-/// Authors an inline background `frames` resource table. Encoded and raw rows
-/// may coexist through two nullable columns; raw rows share one RGBA tensor
-/// shape, as required by Arrow's field-level fixed-shape metadata.
-#[cfg(test)]
-pub fn encode_frames_stream(frames: &[InlineFrame]) -> Result<Vec<u8>, SceneEncodeError> {
-    if frames.is_empty() {
-        return Err(SceneEncodeError::EmptyFrames);
-    }
-
-    let has_encoded = frames
-        .iter()
-        .any(|frame| matches!(frame, InlineFrame::Encoded(_)));
-    let pixel_shape = frames.iter().find_map(|frame| match frame {
-        InlineFrame::Pixels(image) => Some((image.width, image.height)),
-        InlineFrame::Encoded(_) => None,
-    });
-    let mut fields = Vec::new();
-    let mut columns: Vec<ArrayRef> = Vec::new();
-
-    if has_encoded {
-        let rows: Vec<Option<&[u8]>> = frames
-            .iter()
-            .enumerate()
-            .map(|(row, frame)| match frame {
-                InlineFrame::Encoded(bytes) if bytes.is_empty() => {
-                    Err(SceneEncodeError::EmptyEncodedFrame { row })
-                }
-                InlineFrame::Encoded(bytes) => Ok(Some(bytes.as_slice())),
-                InlineFrame::Pixels(_) => Ok(None),
-            })
-            .collect::<Result<_, _>>()?;
-        fields.push(Field::new(FRAME_BYTES_COLUMN, DataType::Binary, true));
-        columns.push(Arc::new(BinaryArray::from_iter(rows)));
-    }
-
-    if let Some((width, height)) = pixel_shape {
-        if width == 0 || height == 0 {
-            let row = frames
-                .iter()
-                .position(|frame| matches!(frame, InlineFrame::Pixels(_)))
-                .expect("pixel_shape came from a pixel frame");
-            return Err(SceneEncodeError::InvalidFrameDimensions { row, width, height });
-        }
-        let expected = (width as usize)
-            .checked_mul(height as usize)
-            .and_then(|pixels| pixels.checked_mul(4))
-            .ok_or(SceneEncodeError::InvalidFramePixels {
-                row: 0,
-                actual: 0,
-                expected: 0,
-                width,
-                height,
-            })?;
-        let list_size =
-            i32::try_from(expected).map_err(|_| SceneEncodeError::InvalidFramePixels {
-                row: 0,
-                actual: expected,
-                expected,
-                width,
-                height,
-            })?;
-        let capacity =
-            expected
-                .checked_mul(frames.len())
-                .ok_or(SceneEncodeError::InvalidFramePixels {
-                    row: 0,
-                    actual: expected,
-                    expected,
-                    width,
-                    height,
-                })?;
-        let mut flat = Vec::with_capacity(capacity);
-        let mut valid = Vec::with_capacity(frames.len());
-        for (row, frame) in frames.iter().enumerate() {
-            match frame {
-                InlineFrame::Encoded(_) => {
-                    valid.push(false);
-                    flat.resize(flat.len() + expected, 0);
-                }
-                InlineFrame::Pixels(image) => {
-                    if (image.width, image.height) != (width, height) {
-                        return Err(SceneEncodeError::MixedFrameDimensions {
-                            row,
-                            width: image.width,
-                            height: image.height,
-                            expected_width: width,
-                            expected_height: height,
-                        });
-                    }
-                    if image.rgba.len() != expected {
-                        return Err(SceneEncodeError::InvalidFramePixels {
-                            row,
-                            actual: image.rgba.len(),
-                            expected,
-                            width,
-                            height,
-                        });
-                    }
-                    valid.push(true);
-                    flat.extend_from_slice(&image.rgba);
-                }
-            }
-        }
-
-        let storage = DataType::FixedSizeList(
-            Arc::new(Field::new("item", DataType::UInt8, false)),
-            list_size,
-        );
-        let extension = arrow_schema::extension::FixedShapeTensor::try_new(
-            DataType::UInt8,
-            vec![height as usize, width as usize, 4],
-            Some(vec![
-                "height".to_string(),
-                "width".to_string(),
-                "channel".to_string(),
-            ]),
-            None,
-        )?;
-        fields.push(Field::new(FRAME_PIXELS_COLUMN, storage, true).with_extension_type(extension));
-        columns.push(Arc::new(FixedSizeListArray::new(
-            Arc::new(Field::new("item", DataType::UInt8, false)),
-            list_size,
-            Arc::new(UInt8Array::from(flat)),
-            Some(NullBuffer::new(BooleanBuffer::from(valid))),
-        )));
-    }
-
-    let schema = Schema::new(fields).with_metadata(table_metadata(FRAMES_TABLE_KIND));
-    let batch = RecordBatch::try_new(Arc::new(schema.clone()), columns)?;
-    write_ipc(&schema, &batch)
-}
-
 /// Authors a complete mesh-first input stream with an optional albedo texture.
 ///
 /// The returned bytes are concatenated Arrow IPC streams in protocol order:
@@ -756,13 +595,24 @@ pub fn encode_scene(
     draws: Option<&[Vec<Draw>]>,
     frame_rate: Option<f64>,
 ) -> Result<Vec<u8>, SceneEncodeError> {
+    encode_scene_with_tonemap(meshes, texture, frames, draws, frame_rate, None)
+}
+
+pub fn encode_scene_with_tonemap(
+    meshes: &[Mesh],
+    texture: Option<&dyn Texture>,
+    frames: &[FrameParams],
+    draws: Option<&[Vec<Draw>]>,
+    frame_rate: Option<f64>,
+    tonemap: Option<Tonemap>,
+) -> Result<Vec<u8>, SceneEncodeError> {
     let materials = vec![DisneyMaterial::default(); meshes.len()];
     let resources = meshes
         .iter()
         .zip(&materials)
         .map(|(mesh, material)| SceneMesh::Embedded { mesh, material })
         .collect::<Vec<_>>();
-    encode_scene_resources(&resources, texture, frames, draws, frame_rate)
+    encode_scene_resources_with_tonemap(&resources, texture, frames, draws, frame_rate, tonemap)
 }
 
 pub fn encode_scene_resources(
@@ -772,13 +622,24 @@ pub fn encode_scene_resources(
     draws: Option<&[Vec<Draw>]>,
     frame_rate: Option<f64>,
 ) -> Result<Vec<u8>, SceneEncodeError> {
+    encode_scene_resources_with_tonemap(meshes, texture, frames, draws, frame_rate, None)
+}
+
+pub fn encode_scene_resources_with_tonemap(
+    meshes: &[SceneMesh<'_>],
+    texture: Option<&dyn Texture>,
+    frames: &[FrameParams],
+    draws: Option<&[Vec<Draw>]>,
+    frame_rate: Option<f64>,
+    tonemap: Option<Tonemap>,
+) -> Result<Vec<u8>, SceneEncodeError> {
     reject_gltf_texture(meshes, texture)?;
     let mut bytes = encode_mesh_resources(meshes)?;
     if let Some(texture) = texture {
         bytes.extend(encode_texture_stream(texture)?);
     }
     bytes.extend(encode_params_stream_with_frame_ids_and_rate(
-        frames, draws, None, None, frame_rate,
+        frames, draws, None, None, frame_rate, tonemap,
     )?);
     Ok(bytes)
 }
@@ -791,6 +652,26 @@ pub fn encode_scene_resources_with_frame_indices(
     draws: Option<&[Vec<Draw>]>,
     frame_rate: Option<f64>,
 ) -> Result<Vec<u8>, SceneEncodeError> {
+    encode_scene_resources_with_frame_indices_and_tonemap(
+        meshes,
+        texture,
+        video_frame_indices,
+        frames,
+        draws,
+        frame_rate,
+        None,
+    )
+}
+
+pub fn encode_scene_resources_with_frame_indices_and_tonemap(
+    meshes: &[SceneMesh<'_>],
+    texture: Option<&dyn Texture>,
+    video_frame_indices: &[u32],
+    frames: &[FrameParams],
+    draws: Option<&[Vec<Draw>]>,
+    frame_rate: Option<f64>,
+    tonemap: Option<Tonemap>,
+) -> Result<Vec<u8>, SceneEncodeError> {
     reject_gltf_texture(meshes, texture)?;
     let mut bytes = encode_mesh_resources(meshes)?;
     if let Some(texture) = texture {
@@ -802,6 +683,7 @@ pub fn encode_scene_resources_with_frame_indices(
         None,
         Some(video_frame_indices),
         frame_rate,
+        tonemap,
     )?);
     Ok(bytes)
 }
@@ -816,41 +698,13 @@ fn reject_gltf_texture(
     Ok(())
 }
 
-/// Authors a complete scene with inline frame resources.
-#[cfg(test)]
-pub fn encode_scene_with_frames(
-    meshes: &[Mesh],
-    inline_frames: &[InlineFrame],
-    frames: &[FrameParams],
-    draws: Option<&[Vec<Draw>]>,
-    frame_ids: &[Option<u32>],
-) -> Result<Vec<u8>, SceneEncodeError> {
-    if let Some(frame_id) = frame_ids
-        .iter()
-        .flatten()
-        .copied()
-        .find(|frame_id| *frame_id as usize >= inline_frames.len())
-    {
-        return Err(SceneEncodeError::FrameIdOutOfRange {
-            frame_id,
-            frame_count: inline_frames.len(),
-        });
-    }
-    let mut bytes = encode_mesh_stream(meshes)?;
-    bytes.extend(encode_frames_stream(inline_frames)?);
-    bytes.extend(encode_params_stream_with_frame_ids(
-        frames,
-        draws,
-        Some(frame_ids),
-    )?);
-    Ok(bytes)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::math::Matrix4;
     use crate::protocol::{decode_params_stream, InputSession};
     use crate::render::Vertex;
+    use crate::InlineFrame;
     use arrow::array::Array;
 
     fn tri_mesh() -> Mesh {
@@ -1023,12 +877,13 @@ mod tests {
             ..FrameParams::IDENTITY
         }];
 
-        let bytes = encode_scene(
+        let bytes = encode_scene_with_tonemap(
             &meshes,
             Some(&texture),
             &frames,
             None,
             Some(30000.0 / 1001.0),
+            Some(Tonemap::Aces),
         )
         .unwrap();
         let mut session = InputSession::new();
@@ -1038,6 +893,7 @@ mod tests {
         assert_eq!(session.meshes(), meshes.as_slice());
         assert_eq!(session.texture(), Some(&texture));
         assert_eq!(session.frame_rate(), Some(30000.0 / 1001.0));
+        assert_eq!(session.tonemap_override(), Some(Tonemap::Aces));
         assert_eq!(batches.into_iter().flatten().count(), 1);
     }
 
@@ -1054,6 +910,17 @@ mod tests {
         assert!(matches!(
             encode_scene(&[tri_mesh()], None, &[frame], None, Some(0.0)),
             Err(SceneEncodeError::InvalidFrameRate(0.0))
+        ));
+        assert!(matches!(
+            encode_scene_with_tonemap(
+                &[tri_mesh()],
+                None,
+                &[],
+                None,
+                Some(24.0),
+                Some(Tonemap::Aces)
+            ),
+            Err(SceneEncodeError::EmptyParams)
         ));
     }
 
@@ -1171,13 +1038,14 @@ mod tests {
             mesh: &mesh,
             material: &material,
         };
-        let bytes = encode_scene_resources_with_frame_indices(
+        let bytes = encode_scene_resources_with_frame_indices_and_tonemap(
             &[scene_mesh],
             None,
             &indices,
             &frames,
             Some(&draws),
             Some(24.0),
+            Some(Tonemap::Aces),
         )
         .unwrap();
         let mut session = InputSession::new();
@@ -1192,6 +1060,7 @@ mod tests {
         assert_eq!(decoded.len(), 2);
         assert_eq!(decoded[0].video_frame_index, Some(3));
         assert_eq!(decoded[1].video_frame_index, Some(10));
+        assert_eq!(session.tonemap_override(), Some(Tonemap::Aces));
     }
 
     #[test]

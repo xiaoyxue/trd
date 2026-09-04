@@ -639,6 +639,13 @@ impl Renderer {
         self.edit_appearance(target, |appearance| appearance.tone_mapping = tone_mapping);
     }
 
+    /// Sets only the tone-map curve of `target`, preserving its exposure.
+    pub fn set_tonemap_operator(&mut self, target: MeshTarget, operator: Tonemap) {
+        self.edit_appearance(target, |appearance| {
+            appearance.tone_mapping.operator = operator;
+        });
+    }
+
     /// Selects a diagnostic PBR output for `target`.
     pub fn set_pbr_debug_view(&mut self, target: MeshTarget, debug_view: PbrDebugView) {
         self.edit_appearance(target, |appearance| appearance.debug_view = debug_view);

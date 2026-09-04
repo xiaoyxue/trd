@@ -147,6 +147,12 @@ impl WindowRenderer {
         }
     }
 
+    pub(crate) fn set_tonemap_operator(&mut self, operator: trd_core::Tonemap) {
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.set_tonemap_operator(trd_core::MeshTarget::All, operator);
+        }
+    }
+
     pub(crate) fn set_lighting(&mut self, lighting: Lighting) {
         self.lighting = lighting;
     }
