@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 
 /// The glTF alpha-compositing mode preserved alongside a Disney material.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AlphaMode {
     #[default]
     Opaque,
@@ -10,7 +11,7 @@ pub enum AlphaMode {
 }
 
 /// Presence flags for the five core glTF material texture slots.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct MaterialTextures {
     pub base_color: bool,
     pub metallic_roughness: bool,
@@ -23,7 +24,7 @@ pub struct MaterialTextures {
 ///
 /// The offline importer preserves these values now so later shading slices do
 /// not need to change the material model or reparse source assets.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Auxiliary {
     pub opacity: f32,
     pub alpha_mode: AlphaMode,
@@ -57,7 +58,7 @@ impl Default for Auxiliary {
 /// Only the eleven surface parameters are consumed by `pbr.wgsl`.
 /// [`Auxiliary`] and [`sources`](Self::sources) remain CPU-side until their
 /// corresponding visual slices land.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DisneyMaterial {
     pub name: Option<String>,
     /// Linear-RGB tint multiplied onto the sampled albedo.

@@ -36,16 +36,21 @@ pub use math::{
 // crate root beside `texture`/`camera`/`material` while their GPU residency
 // stays in `render/` (#221/#224). Public paths are unchanged.
 pub use mesh::{
-    import_glb, import_gltf_materials, GltfAsset, GltfImportError, Mesh, MeshError, MeshShading,
-    DEFAULT_PREVIEW_TARGET,
+    import_glb, import_gltf_materials, GltfAsset, GltfImportError, Mesh, MeshAsset,
+    MeshAssetSource, MeshError, MeshReference, MeshResource, MeshShading, DEFAULT_PREVIEW_TARGET,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use io::{InputStream, Prologue};
 pub use io::{OutputStream, SharedBuffer};
 pub use protocol::{
-    frame_rate_from_metadata, output_schema, read_image_stream, DecodedFrame, FrameBatch,
-    InputSession, OutputError, OutputSession, ProtocolError, DEFAULT_FRAME_RATE, FRAME_RATE_KEY,
+    encode_scene, encode_scene_assets_with_frame_indices_and_tonemap,
+    encode_scene_assets_with_tonemap, encode_scene_resources,
+    encode_scene_resources_with_frame_indices,
+    encode_scene_resources_with_frame_indices_and_tonemap, encode_scene_resources_with_tonemap,
+    encode_scene_with_tonemap, encode_texture_assets, frame_rate_from_metadata, output_schema,
+    read_image_stream, DecodedFrame, FrameBatch, InputSession, OutputError, OutputSession,
+    ProtocolError, SceneEncodeError, SceneMesh, SceneTexture, DEFAULT_FRAME_RATE, FRAME_RATE_KEY,
     PROTOCOL_VERSION, PROTOCOL_VERSION_KEY, TABLE_KIND_KEY,
 };
 // Material models are plain data (no wgpu, no bytemuck), so they sit beside
@@ -77,12 +82,16 @@ pub use media::{probe_moov, UnpresentedTail, UnpresentedTailEvidence, VideoInfo,
 pub use render::{RenderError, Renderer};
 pub use texture::{
     ConstantTexture, ImageData, ImageTexture, Texture, TextureError, TEXTURE_COLUMN,
+    TEXTURE_HEIGHT_COLUMN, TEXTURE_MESH_ID_COLUMN, TEXTURE_RGBA_BYTES_COLUMN, TEXTURE_WIDTH_COLUMN,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
 mod stream_filter;
 #[cfg(not(target_arch = "wasm32"))]
-pub use stream_filter::{decode_frames, run_stream, FrameResolver, StreamError};
+pub use stream_filter::{
+    decode_frames, run_stream, run_stream_with_mesh_resolver, FrameResolver, MeshResolver,
+    StreamError,
+};
 
 /// Returns the project greeting used by the CLI and web entry points.
 pub fn greeting() -> String {

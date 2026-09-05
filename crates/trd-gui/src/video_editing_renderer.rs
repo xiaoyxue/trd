@@ -64,6 +64,15 @@ pub struct VideoRendererDiagnostics {
     pub transfers: TransferCounts,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum VideoExportAsset {
+    Embedded {
+        mesh: trd_core::Mesh,
+        texture: trd_core::ImageTexture,
+    },
+    Gltf(trd_core::MeshReference),
+}
+
 /// Where a frame's pixels come from. `External` keeps the frame on GPU (#229, #302).
 pub enum FrameSource<'a> {
     /// Tightly-packed row-major RGBA8, `width * height * 4` bytes.
@@ -91,6 +100,8 @@ pub struct VideoPlacementRenderer {
     default_material: trd_core::DisneyMaterial,
     identity: Rc<RendererIdentity>,
     asset_diagnostics: Option<ImportedAssetDiagnostics>,
+    export_asset: Option<Rc<VideoExportAsset>>,
+    replay_lighting: trd_core::Lighting,
     /// Transfer counts written at the transfer sites (#229).
     pub transfers: TransferCounts,
 }
@@ -123,6 +134,68 @@ impl VideoPlacementRenderer {
                 device_type: facts.device_type,
             }),
             asset_diagnostics: None,
+            export_asset: None,
+            replay_lighting: trd_core::Lighting::default(),
+            transfers: TransferCounts::default(),
+        })
+    }
+
+    pub async fn new_scene(
+        assets: &[trd_core::MeshAsset],
+        env_bytes: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<Self, String> {
+        let gpu = Self::own_gpu().await?;
+        Self::new_scene_with_gpu(gpu, assets, env_bytes, width, height)
+    }
+
+    pub fn new_scene_with_gpu(
+        gpu: std::sync::Arc<trd_core::GpuContext>,
+        assets: &[trd_core::MeshAsset],
+        env_bytes: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<Self, String> {
+        let facts = gpu.adapter_facts();
+        let meshes = assets
+            .iter()
+            .map(|asset| asset.mesh.clone())
+            .collect::<Vec<_>>();
+        let (mut renderer, target) = trd_core::Renderer::with_gpu(gpu, width, height, &meshes)
+            .map_err(|error| error.to_string())?;
+        configure_mesh_assets(&mut renderer, assets);
+        renderer.set_env_map(assets::decode_env_hdr(env_bytes).map_err(|error| error.to_string())?);
+        let replay_lighting = if assets.iter().any(|asset| {
+            asset.metallic_roughness_texture.is_some() || asset.normal_texture.is_some()
+        }) {
+            trd_core::Lighting {
+                ambient: 0.0,
+                scale: 0.0,
+                ..trd_core::Lighting::default()
+            }
+        } else {
+            trd_core::Lighting::default()
+        };
+        let default_material = assets
+            .first()
+            .map_or_else(trd_core::DisneyMaterial::default, |asset| {
+                asset.material.clone()
+            });
+        let asset_diagnostics = assets.first().map(replay_asset_diagnostics);
+        Ok(Self {
+            renderer,
+            target,
+            default_mode: trd_core::RenderMode::Filled,
+            default_material,
+            identity: Rc::new(RendererIdentity {
+                adapter_name: facts.name,
+                backend: facts.backend,
+                device_type: facts.device_type,
+            }),
+            asset_diagnostics,
+            export_asset: None,
+            replay_lighting,
             transfers: TransferCounts::default(),
         })
     }
@@ -143,6 +216,7 @@ impl VideoPlacementRenderer {
 
     pub async fn new(
         asset: CatalogAsset,
+        source: trd_core::MeshReference,
         model_bytes: &[u8],
         texture_bytes: &[u8],
         env_bytes: &[u8],
@@ -153,6 +227,7 @@ impl VideoPlacementRenderer {
         Self::new_with_gpu(
             gpu,
             asset,
+            source,
             model_bytes,
             texture_bytes,
             env_bytes,
@@ -166,6 +241,7 @@ impl VideoPlacementRenderer {
     pub fn new_with_gpu(
         gpu: std::sync::Arc<trd_core::GpuContext>,
         asset: CatalogAsset,
+        source: trd_core::MeshReference,
         model_bytes: &[u8],
         texture_bytes: &[u8],
         env_bytes: &[u8],
@@ -188,6 +264,7 @@ impl VideoPlacementRenderer {
         };
         let facts = gpu.adapter_facts();
         let asset_diagnostics = imported.diagnostics();
+        let export_asset = Rc::new(imported.export_asset(source));
         let mesh = imported.mesh();
         let (mut renderer, target) =
             trd_core::Renderer::with_gpu(gpu, width, height, std::slice::from_ref(mesh))
@@ -206,12 +283,22 @@ impl VideoPlacementRenderer {
                 device_type: facts.device_type,
             }),
             asset_diagnostics: Some(asset_diagnostics),
+            export_asset: Some(export_asset),
+            replay_lighting: trd_core::Lighting::default(),
             transfers: TransferCounts::default(),
         })
     }
 
     pub fn defaults(&self) -> (trd_core::RenderMode, trd_core::DisneyMaterial) {
         (self.default_mode, self.default_material.clone())
+    }
+
+    pub(crate) fn export_asset(&self) -> Option<Rc<VideoExportAsset>> {
+        self.export_asset.clone()
+    }
+
+    pub(crate) fn replay_defaults(&self) -> (trd_core::DisneyMaterial, trd_core::Lighting) {
+        (self.default_material.clone(), self.replay_lighting)
     }
 
     pub fn size(&self) -> (u32, u32) {
@@ -298,6 +385,33 @@ impl VideoPlacementRenderer {
         Ok(pixels)
     }
 
+    pub async fn render_scene_frame(
+        &mut self,
+        rgba: &[u8],
+        frame_width: u32,
+        frame_height: u32,
+        calibration_size: (u32, u32),
+        frame: &trd_core::DecodedFrame,
+        tonemap: trd_core::Tonemap,
+    ) -> Result<Vec<u8>, String> {
+        self.draw_scene_frame(
+            FrameSource::Rgba(rgba),
+            frame_width,
+            frame_height,
+            calibration_size,
+            frame,
+            tonemap,
+        )?;
+        let pixels = self
+            .renderer
+            .read_pixels(&self.target)
+            .await
+            .map_err(|error| error.to_string())?;
+        self.transfers.readback = pixels.len();
+        self.transfers.ui_upload = pixels.len();
+        Ok(pixels)
+    }
+
     /// Draws the three placement layers without reading them back.
     /// Use [`render`](Self::render) when the shell needs pixels (different device).
     #[allow(clippy::too_many_arguments)]
@@ -313,18 +427,7 @@ impl VideoPlacementRenderer {
         model: Option<trd_core::Matrix4>,
         state: &crate::scene::SceneState,
     ) -> Result<(), String> {
-        self.transfers = TransferCounts {
-            frame_upload: source.upload_bytes(),
-            readback: 0,
-            ui_upload: 0,
-        };
-        match source {
-            FrameSource::Rgba(rgba) => {
-                self.renderer
-                    .update_frame_texture_rgba(rgba, frame_width, frame_height)
-            }
-            FrameSource::External(frame) => self.renderer.update_frame_texture_external(frame),
-        }
+        self.upload_frame(source, frame_width, frame_height);
         let identity_camera = trd_core::FrameParams::IDENTITY
             .to_camera(self.viewport())
             .map_err(|error| error.to_string())?;
@@ -363,6 +466,43 @@ impl VideoPlacementRenderer {
         Ok(())
     }
 
+    pub fn draw_scene_frame(
+        &mut self,
+        source: FrameSource<'_>,
+        frame_width: u32,
+        frame_height: u32,
+        calibration_size: (u32, u32),
+        frame: &trd_core::DecodedFrame,
+        tonemap: trd_core::Tonemap,
+    ) -> Result<(), String> {
+        self.upload_frame(source, frame_width, frame_height);
+        let camera = self.protocol_camera(&frame.params, calibration_size)?;
+        let draws = frame.resolved_draws();
+        self.renderer
+            .set_tonemap_operator(trd_core::MeshTarget::All, tonemap);
+        let (background, foreground) = replay_scenes(&draws, self.replay_lighting);
+        self.renderer.draw_layers(
+            &[
+                trd_core::SceneLayer::new(camera, &background),
+                trd_core::SceneLayer::new(camera, &foreground),
+            ],
+            &self.target,
+        );
+        Ok(())
+    }
+
+    fn upload_frame(&mut self, source: FrameSource<'_>, width: u32, height: u32) {
+        self.transfers = TransferCounts {
+            frame_upload: source.upload_bytes(),
+            readback: 0,
+            ui_upload: 0,
+        };
+        match source {
+            FrameSource::Rgba(rgba) => self.renderer.update_frame_texture_rgba(rgba, width, height),
+            FrameSource::External(frame) => self.renderer.update_frame_texture_external(frame),
+        }
+    }
+
     /// Sampleable view of the rendered target (gamma space).
     pub fn target_view(&self) -> wgpu::TextureView {
         self.target.create_view()
@@ -391,26 +531,79 @@ impl VideoPlacementRenderer {
         source_size: (u32, u32),
     ) -> Result<trd_core::Camera, String> {
         let k = frame.k.ok_or("selected video frame has no quad/K")?;
-        let (width, height) = self.size();
-        let sx = width as f32 / source_size.0 as f32;
-        let sy = height as f32 / source_size.1 as f32;
         let params = trd_core::FrameParams {
-            k: Some([
-                k[0] * sx,
-                k[3] * sy,
-                k[6],
-                k[1] * sx,
-                k[4] * sy,
-                k[7],
-                k[2] * sx,
-                k[5] * sy,
-                k[8],
-            ]),
+            k: Some(crate::video_editing::protocol_k_from_row_major(k)),
             ..trd_core::FrameParams::IDENTITY
         };
+        self.protocol_camera(&params, source_size)
+    }
+
+    fn protocol_camera(
+        &self,
+        params: &trd_core::FrameParams,
+        source_size: (u32, u32),
+    ) -> Result<trd_core::Camera, String> {
+        let mut params = *params;
+        if let Some(k) = params.k {
+            let (width, height) = self.size();
+            let sx = width as f32 / source_size.0.max(1) as f32;
+            let sy = height as f32 / source_size.1.max(1) as f32;
+            params.k = Some(scale_protocol_k(k, sx, sy));
+        }
+
         params
             .to_camera(self.viewport())
             .map_err(|error| error.to_string())
+    }
+}
+
+fn scale_protocol_k(k: [f32; 9], sx: f32, sy: f32) -> [f32; 9] {
+    [
+        k[0] * sx,
+        k[1] * sy,
+        k[2],
+        k[3] * sx,
+        k[4] * sy,
+        k[5],
+        k[6] * sx,
+        k[7] * sy,
+        k[8],
+    ]
+}
+
+fn configure_mesh_assets(renderer: &mut trd_core::Renderer, assets: &[trd_core::MeshAsset]) {
+    for (index, asset) in assets.iter().enumerate() {
+        let mesh_id = asset.mesh_id_or(index as u32) as usize;
+        renderer.set_disney_material(trd_core::MeshTarget::One(mesh_id), asset.material.clone());
+        if let Some(texture) = asset.base_color_texture.as_ref() {
+            renderer.set_mesh_texture(mesh_id, texture);
+        }
+        if let Some(texture) = asset.metallic_roughness_texture.as_ref() {
+            renderer.set_mesh_metallic_roughness_texture(mesh_id, texture);
+        }
+        if let Some(texture) = asset.normal_texture.as_ref() {
+            renderer.set_mesh_normal_texture(mesh_id, texture);
+        }
+    }
+}
+
+fn replay_asset_diagnostics(asset: &trd_core::MeshAsset) -> ImportedAssetDiagnostics {
+    let aabb = asset.mesh.aabb();
+    let size = aabb.size();
+    let max_extent = size.x().max(size.y()).max(size.z());
+    ImportedAssetDiagnostics {
+        source_format: match asset.source {
+            trd_core::MeshAssetSource::Embedded => "OBJ",
+            trd_core::MeshAssetSource::Gltf => "GLB",
+        },
+        aabb_min: aabb.min().to_array(),
+        aabb_max: aabb.max().to_array(),
+        preview_scale: if max_extent > trd_core::EPSILON {
+            trd_core::DEFAULT_PREVIEW_TARGET / max_extent
+        } else {
+            1.0
+        },
+        imported_material: asset.material.clone(),
     }
 }
 
@@ -467,6 +660,16 @@ impl ImportedAsset {
         }
     }
 
+    fn export_asset(&self, source: trd_core::MeshReference) -> VideoExportAsset {
+        match self {
+            Self::Textured { mesh, texture } => VideoExportAsset::Embedded {
+                mesh: mesh.clone(),
+                texture: texture.clone(),
+            },
+            Self::Pbr(_) => VideoExportAsset::Gltf(source),
+        }
+    }
+
     fn configure(
         self,
         renderer: &mut trd_core::Renderer,
@@ -477,6 +680,13 @@ impl ImportedAsset {
                 let material = trd_core::DisneyMaterial {
                     metallic: 0.0,
                     roughness: 0.35,
+                    auxiliary: trd_core::Auxiliary {
+                        textures: trd_core::MaterialTextures {
+                            base_color: true,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
                     ..Default::default()
                 };
                 renderer.set_disney_material(trd_core::MeshTarget::One(0), material.clone());
@@ -533,6 +743,7 @@ pub fn placement_scenes(
         if quad.hovered || quad.selected {
             background.push(trd_core::DrawableObject::quad_fill(quad_model));
         }
+
         background.push(trd_core::DrawableObject::quad_outline(
             quad_model,
             quad.selected,
@@ -586,6 +797,18 @@ pub fn placement_scenes(
     )
 }
 
+fn replay_scenes(
+    draws: &[trd_core::Draw],
+    lighting: trd_core::Lighting,
+) -> (trd_core::Scene, trd_core::Scene) {
+    let options = trd_core::RenderOptions::default();
+    (
+        trd_core::Scene::from_draws(&[], &options, Some(trd_core::FrameFit::Stretch))
+            .with_lighting(lighting),
+        trd_core::Scene::from_draws(draws, &options, None).with_lighting(lighting),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -603,6 +826,41 @@ mod tests {
         assert_eq!(
             background.background().frame,
             Some(trd_core::FrameFit::Stretch)
+        );
+    }
+
+    #[test]
+    fn replay_keeps_video_in_the_background_and_protocol_draws_in_front() {
+        let draw = trd_core::Draw {
+            mesh_id: 0,
+            model: trd_core::Matrix4::IDENTITY,
+            selection: trd_core::DrawSelection::Mesh(Some(trd_core::RenderMode::Wireframe)),
+        };
+        let (background, foreground) = replay_scenes(&[draw], trd_core::Lighting::default());
+
+        assert_eq!(
+            background.background().frame,
+            Some(trd_core::FrameFit::Stretch)
+        );
+        assert!(background.objects().is_empty());
+        assert_eq!(foreground.objects().len(), 1);
+        assert!(matches!(
+            foreground.objects()[0].primitive(),
+            trd_core::Primitive::Mesh {
+                mode: trd_core::RenderMode::Wireframe,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn authoring_and_protocol_k_paths_share_the_same_transpose_and_scale() {
+        let row_major = [1000.0, 0.0, 960.0, 0.0, 900.0, 540.0, 0.0, 0.0, 1.0];
+        let protocol = crate::video_editing::protocol_k_from_row_major(row_major);
+
+        assert_eq!(
+            scale_protocol_k(protocol, 0.5, 0.25),
+            [500.0, 0.0, 0.0, 0.0, 225.0, 0.0, 480.0, 135.0, 1.0]
         );
     }
 

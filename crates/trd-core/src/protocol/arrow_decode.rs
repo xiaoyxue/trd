@@ -22,9 +22,9 @@ use arrow::datatypes::{DataType, Field, Schema};
 
 use crate::math::Matrix4;
 use crate::render::{Draw, DrawSelection};
-use crate::{CameraFormError, FrameParams};
+use crate::{CameraFormError, FrameParams, Tonemap};
 
-use super::{ProtocolError, PROTOCOL_VERSION_KEY, SUPPORTED_INPUT_VERSIONS};
+use super::{parse_error, ProtocolError, PROTOCOL_VERSION_KEY, SUPPORTED_INPUT_VERSIONS};
 
 /// Validates a schema's declared protocol version against
 /// [`SUPPORTED_INPUT_VERSIONS`]. The current protocol is deliberately not
@@ -309,6 +309,24 @@ pub(crate) fn validate_schema(schema: &Schema) -> Result<(), ProtocolError> {
             validate_f32_field(field, static_name(name))?;
         }
     }
+    if let Ok(field) = schema.field_with_name("tonemap") {
+        if field.data_type() != &DataType::UInt8 || field.is_nullable() {
+            return Err(ProtocolError::ColumnType {
+                column: "tonemap",
+                expected: "non-null UInt8",
+                actual: field.data_type().clone(),
+            });
+        }
+    }
+    if let Ok(field) = schema.field_with_name("video_frame_index") {
+        if field.data_type() != &DataType::UInt32 || field.is_nullable() {
+            return Err(ProtocolError::ColumnType {
+                column: "video_frame_index",
+                expected: "non-null UInt32",
+                actual: field.data_type().clone(),
+            });
+        }
+    }
     if let Ok(field) = schema.field_with_name("frame_id") {
         if field.data_type() != &DataType::UInt32 {
             return Err(ProtocolError::ColumnType {
@@ -334,6 +352,38 @@ pub(crate) fn validate_schema(schema: &Schema) -> Result<(), ProtocolError> {
         }
     }
     Ok(())
+}
+
+/// Decodes the optional scene-wide tone-map operator from a params batch.
+///
+/// The video editor exports one operator for the whole scene, repeated on every
+/// sparse row. Requiring one value across the stream keeps it outside the public
+/// camera/model [`FrameParams`] API.
+pub(crate) fn decode_tonemap(batch: &RecordBatch) -> Result<Option<Tonemap>, ProtocolError> {
+    let Some(values) = optional_u8(batch, "tonemap")? else {
+        return Ok(None);
+    };
+    let Some(&first) = values.values().first() else {
+        return Err(parse_error("tonemap column must contain at least one row"));
+    };
+    let operator = Tonemap::from_wire(first).ok_or_else(|| {
+        parse_error(format!(
+            "tonemap byte {first} is not valid (0 = Reinhard, 1 = ACES)"
+        ))
+    })?;
+    for &value in values.values().iter().skip(1) {
+        let current = Tonemap::from_wire(value).ok_or_else(|| {
+            parse_error(format!(
+                "tonemap byte {value} is not valid (0 = Reinhard, 1 = ACES)"
+            ))
+        })?;
+        if current != operator {
+            return Err(parse_error(format!(
+                "tonemap must be constant across the params stream (expected {first}, got {value})"
+            )));
+        }
+    }
+    Ok(Some(operator))
 }
 
 /// Interns a known camera-column name to a `'static str` for error messages
@@ -466,6 +516,27 @@ fn optional_f32<'a>(
         .ok_or_else(|| ProtocolError::ColumnType {
             column: name,
             expected: "Float32",
+            actual: column.data_type().clone(),
+        })?;
+    if array.null_count() > 0 {
+        return Err(ProtocolError::NullValues(name));
+    }
+    Ok(Some(array))
+}
+
+fn optional_u8<'a>(
+    batch: &'a RecordBatch,
+    name: &'static str,
+) -> Result<Option<&'a UInt8Array>, ProtocolError> {
+    let Some(column) = batch.column_by_name(name) else {
+        return Ok(None);
+    };
+    let array = column
+        .as_any()
+        .downcast_ref::<UInt8Array>()
+        .ok_or_else(|| ProtocolError::ColumnType {
+            column: name,
+            expected: "UInt8",
             actual: column.data_type().clone(),
         })?;
     if array.null_count() > 0 {

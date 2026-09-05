@@ -117,12 +117,15 @@ impl NativeVideo {
         source: NativeVideoSource,
         info: &trd_core::VideoInfo,
         preview_width: u32,
-    ) -> Result<Self, NativeVideoEditingError> {
+    ) -> Result<(Self, Option<trd_core::UnpresentedTail>), NativeVideoEditingError> {
         if let NativeVideoSource::Local(path) = &source {
             validate_file(path, info)?;
         }
-        validate_probe(&source, info)?;
-        Ok(Self::with_timeline(source, info, preview_width))
+        let unpresented_tail = validate_probe(&source, info)?;
+        Ok((
+            Self::with_timeline(source, info, preview_width),
+            unpresented_tail,
+        ))
     }
 
     /// Opens without a document (#264): derives the timeline from the container.
@@ -621,7 +624,7 @@ fn probe_video_info(
 fn validate_probe(
     source: &NativeVideoSource,
     info: &trd_core::VideoInfo,
-) -> Result<(), NativeVideoEditingError> {
+) -> Result<Option<trd_core::UnpresentedTail>, NativeVideoEditingError> {
     let output = Command::new("ffprobe")
         .args([
             "-v",
@@ -716,7 +719,7 @@ fn validate_probe(
             "expected {expected_duration:.3}s duration, got {duration:.3}s"
         )));
     }
-    Ok(())
+    Ok(probe_unpresented_tail(source, duration))
 }
 
 #[cfg(test)]

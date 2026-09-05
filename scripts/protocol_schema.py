@@ -4,8 +4,8 @@
 Two **independent** versioned schemas live here, and they are deliberately not
 tied to each other (see ``AGENTS.md``):
 
-* ``docs/protocol/0.0.6.schema.json`` — the **stream protocol**. Dense: one
-  params row is one rendered frame, and the output image stream is 1:1 with it.
+* ``docs/protocol/0.0.6.schema.json`` — the **stream protocol**. Params may be
+  sparse when keyed by ``video_frame_index``; output remains 1:1 with params rows.
 * ``docs/video-editing.schema.json`` — the **video-editing document** (0.2.0).
   **Sparse**: a row exists only for a frame that was annotated, so a 288-frame
   video with 222 tracked frames is a 222-row table and the other 66 frames have
@@ -181,9 +181,9 @@ def build():
         "generated_by": "scripts/protocol_schema.py",
         "prose_spec": "docs/protocol/0.0.6.md",
         "row_model": (
-            "dense — one params row is one rendered frame, and the output image "
-            "stream is 1:1 with the params rows. The sparse, per-annotated-frame "
-            "table is a different schema: docs/video-editing.schema.json"
+            "one params row is one rendered scene sample. Rows may be sparse when "
+            "video_frame_index keys them to a sidecar video; output is 1:1 with "
+            "the params rows"
         ),
         "compatibility": (
             "none — the renderer accepts exactly this version and hard-rejects "
@@ -225,37 +225,66 @@ def build():
             "mesh": {
                 "trd.table.kind": "mesh",
                 "required": True,
-                "row_meaning": "one row is one mesh; its 0-based ordinal is the id params draw lists use",
-                "reference_producer": "scripts/obj_to_arrow.py",
+                "row_meaning": (
+                    "one row is one mesh source: embedded OBJ-style geometry plus optional "
+                    "material JSON, or a reference-only GLB/glTF 2.0 path/URL"
+                ),
+                "reference_producer": (
+                    "scripts/obj_to_arrow.py or scripts/gltf_ref_to_arrow.py"
+                ),
                 "columns": [
-                    column("position", LIST_F32_3, True, "vertex positions"),
-                    column("color", LIST_F32_3, False, "vertex RGB; absent means white"),
-                    column("uv", LIST_F32_2, False, "top-left-origin texture coordinates"),
-                    column("index", "list<item: uint32>", False, "triangle indices; absent means sequential"),
+                    column("position", LIST_F32_3, False, "embedded vertex positions", nullable=True),
+                    column("color", LIST_F32_3, False, "embedded vertex RGB; absent means white", nullable=True),
+                    column("uv", LIST_F32_2, False, "embedded top-left-origin texture coordinates", nullable=True),
+                    column("index", "list<item: uint32>", False, "embedded triangle indices; absent means sequential", nullable=True),
+                    column("gltf_path", "string", False, "native/local GLB or glTF 2.0 reference", nullable=True),
+                    column("gltf_url", "string", False, "HTTP(S) or browser GLB/glTF 2.0 reference", nullable=True),
+                    column(
+                        "material",
+                        "string",
+                        False,
+                        "DisneyMaterial JSON for embedded OBJ geometry; null for glTF references",
+                        nullable=True,
+                    ),
                 ],
                 "constraints": [
+                    "each row has exactly one logical source: non-null position or non-empty gltf_path/gltf_url",
+                    "glTF rows carry no embedded geometry, texture table, or material JSON",
+                    "embedded rows without material decode to DisneyMaterial defaults",
                     "color and uv, when present, carry one value per vertex",
-                    "null values in any present column are rejected",
                     "a zero-row table is an error",
                 ],
             },
             "texture": {
                 "trd.table.kind": "texture",
                 "required": False,
-                "row_meaning": "one row is the mesh albedo; the first non-empty row is bound",
+                "row_meaning": "one row is one mesh_id's base-color texture",
                 "reference_producer": "scripts/texture_to_arrow.py",
+                "all_columns_optional": True,
                 "columns": [
                     column(
                         "rgba",
                         "extension<arrow.fixed_shape_tensor[value_type=uint8, shape=[H,W,4], dim_names=[height,width,channel]]>",
-                        True,
-                        "row-major RGBA8 albedo",
+                        False,
+                        "legacy mesh-0 row-major RGBA8 albedo",
                         storage_type="fixed_size_list<item: uint8>[H*W*4]",
                         extension_name="arrow.fixed_shape_tensor",
                         nullable=False,
                     ),
+                    column("mesh_id", "list<item: uint32>", False, "dense mesh-table rows receiving textures", nullable=False),
+                    column("width", "list<item: uint32>", False, "texture widths parallel to mesh_id", nullable=False),
+                    column("height", "list<item: uint32>", False, "texture heights parallel to mesh_id", nullable=False),
+                    column("rgba_bytes", "list<item: binary>", False, "RGBA8 payloads parallel to mesh_id", nullable=False),
                 ],
-                "constraints": ["shape is field metadata, so every row shares H, W and 4 channels"],
+                "constraints": [
+                    "mesh_id/width/height/rgba_bytes are present together for keyed rows",
+                    "a keyed table has one row whose list columns carry all model textures",
+                    "keyed tables also carry legacy rgba as a mesh-0 compatibility alias",
+                    "an rgba-only legacy table binds mesh 0",
+                    "keyed mesh_id values are unique and in range",
+                    "a scene containing any glTF reference carries no texture table",
+                    "rgba_bytes length equals width*height*4",
+                ],
             },
             "frames": {
                 "trd.table.kind": "frames",
@@ -291,6 +320,20 @@ def build():
                 "reference_producer": "scripts/jsonl_to_arrow.py",
                 "all_columns_optional": True,
                 "columns": [
+                    column(
+                        "video_frame_index",
+                        "uint32",
+                        False,
+                        "strictly increasing sidecar-video frame key for sparse params",
+                    ),
+                    column(
+                        "tonemap",
+                        "uint8",
+                        False,
+                        "tone-map operator for this rendered sample",
+                        default="reinhard",
+                        values={"0": "reinhard", "1": "aces"},
+                    ),
                     column("model", F32_16, False, "single-object fallback model matrix"),
                     column("k", F32_9, False, "CV camera intrinsics"),
                     column("pose", F32_16, False, "CV camera-to-world pose"),
@@ -323,6 +366,8 @@ def build():
                     column("frame_id", "uint32", False, "inline background, frames-table row id", nullable=True),
                 ],
                 "constraints": [
+                    "video_frame_index, when present, is non-null and strictly increasing across all batches",
+                    "tonemap, when present, is non-null, present on every row, and constant across the params stream",
                     "draw_mesh and draw_model are present together or not at all; one without the other is an error",
                     "no draw columns renders mesh 0 using model; an explicit empty draw list renders no meshes",
                     "CV (k/pose) and CG (eye/target/direction/up/fovy/aspect/znear/zfar) camera forms are mutually exclusive",

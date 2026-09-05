@@ -164,6 +164,36 @@ impl CanvasRenderer {
         u32::try_from(self.frames.len()).unwrap_or(u32::MAX)
     }
 
+    #[wasm_bindgen(js_name = meshResourceCount)]
+    pub fn mesh_resource_count(&self) -> u32 {
+        u32::try_from(self.input.mesh_resource_count()).unwrap_or(u32::MAX)
+    }
+
+    #[wasm_bindgen(js_name = gltfPath)]
+    pub fn gltf_path(&self, index: u32) -> Option<String> {
+        self.input
+            .unresolved_mesh_references()
+            .into_iter()
+            .find(|(row, _)| *row == index)
+            .and_then(|(_, reference)| reference.path)
+    }
+
+    #[wasm_bindgen(js_name = gltfUrl)]
+    pub fn gltf_url(&self, index: u32) -> Option<String> {
+        self.input
+            .unresolved_mesh_references()
+            .into_iter()
+            .find(|(row, _)| *row == index)
+            .and_then(|(_, reference)| reference.url)
+    }
+
+    #[wasm_bindgen(js_name = resolveGltf)]
+    pub fn resolve_gltf(&mut self, index: u32, bytes: &[u8]) -> Result<(), JsValue> {
+        self.input
+            .resolve_gltf(index, bytes)
+            .map_err(|error| js_error(format!("glTF resolution failed: {error}")))
+    }
+
     /// The frame's external background reference, which the JS shell resolves to
     /// RGBA and uploads before rendering. `None` when out of range or the frame
     /// has no background.
@@ -306,6 +336,19 @@ impl CanvasRenderer {
     fn refresh_env_background(&mut self) {
         self.options.env_background =
             crate::env_background(self.env_background_blur, self.pbr.as_ref());
+        self.apply_stream_tonemap();
+    }
+
+    fn apply_stream_tonemap(&mut self) {
+        let Some(operator) = self.input.tonemap_override() else {
+            return;
+        };
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.set_tonemap_operator(trd_core::MeshTarget::All, operator);
+        }
+        if let Some(background) = self.options.env_background.as_mut() {
+            background.tonemap = operator;
+        }
     }
 
     /// Decodes an equirectangular Radiance `.hdr` buffer (downscaled to 2048px)
@@ -512,10 +555,11 @@ impl CanvasRenderer {
         // Wire-decoded params: resolve against the surface's own size, so the
         // camera's viewport cannot disagree with the attachments (#203).
         let camera = params.to_camera(self.target.viewport())?;
-        self.renderer
+        let renderer = self
+            .renderer
             .as_mut()
-            .expect("renderer built before present")
-            .render(camera, scene, &mut self.target)
+            .expect("renderer built before present");
+        renderer.render(camera, scene, &mut self.target)
     }
 
     fn reconfigure(&mut self) {
@@ -556,13 +600,22 @@ impl CanvasRenderer {
                 .map_err(crate::js_error)?;
             self.renderer = Some(renderer);
 
-            // Bind the stream's texture (0.0.4) as the sampled albedo so
-            // RenderMode::Textured meshes show it; absent ⇒ the default 1×1 white.
-            if let Some(texture) = self.input.texture() {
-                self.renderer
-                    .as_mut()
-                    .expect("renderer just built")
-                    .set_texture(texture);
+            for (index, asset) in self.input.mesh_assets().iter().enumerate() {
+                let mesh_id = asset.mesh_id_or(index as u32) as usize;
+                let renderer = self.renderer.as_mut().expect("renderer just built");
+                renderer.set_disney_material(
+                    trd_core::MeshTarget::One(mesh_id),
+                    asset.material.clone(),
+                );
+                if let Some(texture) = asset.base_color_texture.as_ref() {
+                    renderer.set_mesh_texture(mesh_id, texture);
+                }
+                if let Some(texture) = asset.metallic_roughness_texture.as_ref() {
+                    renderer.set_mesh_metallic_roughness_texture(mesh_id, texture);
+                }
+                if let Some(texture) = asset.normal_texture.as_ref() {
+                    renderer.set_mesh_normal_texture(mesh_id, texture);
+                }
             }
 
             // Apply the Disney PBR material + HDR environment probe staged by the
@@ -577,6 +630,7 @@ impl CanvasRenderer {
                     .set_env_map(env);
             }
         }
+        self.apply_stream_tonemap();
         Ok(self.renderer.as_mut().expect("renderer just built"))
     }
 }

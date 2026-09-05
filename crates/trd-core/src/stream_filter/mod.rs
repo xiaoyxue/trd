@@ -60,6 +60,14 @@ pub enum StreamError {
     /// streams are no longer accepted.
     #[error("input is missing the required leading mesh table (protocol is mesh-first)")]
     MissingMeshStream,
+    #[error("mesh row {index} reference `{reference}` has no resolver")]
+    UnresolvedMeshReference { index: u32, reference: String },
+    #[error("mesh row {index} reference `{reference}` failed to load: {message}")]
+    MeshResolve {
+        index: u32,
+        reference: String,
+        message: String,
+    },
 }
 
 /// [`TargetError`] reaches [`StreamError`] through
@@ -95,6 +103,7 @@ pub fn decode_frames(batch: &RecordBatch) -> Result<Vec<FrameParams>, StreamErro
 /// Returning `None` for a given reference renders that frame without a
 /// background plane (the shell decides how to report the miss).
 pub type FrameResolver<'a> = &'a dyn Fn(&str) -> Option<crate::texture::ImageData>;
+pub type MeshResolver<'a> = &'a dyn Fn(&crate::MeshReference) -> Result<Vec<u8>, String>;
 
 /// The **external** background reference currently uploaded, so consecutive
 /// frames naming the same `frame_path`/`frame_url` skip the resolver + upload.
@@ -172,9 +181,9 @@ fn render_and_write_batch<W: Write>(
 /// input batches (one batch in flight).
 ///
 /// The protocol is `[mesh][texture?][frames?][params]`: the **required**
-/// leading mesh table is decoded once (via [`Mesh::from_arrow_all`](crate::Mesh::from_arrow_all)) and
-/// uploaded, then an optional texture table is uploaded as the bound albedo,
-/// then the following params stream drives per-frame rendering. A params-only
+/// leading mesh table is decoded once; referenced glTF rows are resolved by the
+/// shell before all mesh assets are uploaded. An optional texture table becomes
+/// embedded mesh row 0's albedo, then the params stream drives rendering. A params-only
 /// stream with no leading mesh table is a [`StreamError::MissingMeshStream`].
 ///
 /// Framing is driven by the single shared [`InputSession`](crate::InputSession)
@@ -190,6 +199,18 @@ pub fn run_stream<R: Read, W: Write>(
     options: RenderOptions,
     frame_resolver: Option<FrameResolver>,
 ) -> Result<(), StreamError> {
+    run_stream_with_mesh_resolver(input, output, width, height, options, frame_resolver, None)
+}
+
+pub fn run_stream_with_mesh_resolver<R: Read, W: Write>(
+    input: R,
+    output: W,
+    width: u32,
+    height: u32,
+    mut options: RenderOptions,
+    frame_resolver: Option<FrameResolver>,
+    mesh_resolver: Option<MeshResolver>,
+) -> Result<(), StreamError> {
     // Validate dimensions up front so schema construction (which multiplies
     // width*height) can't overflow before Renderer's guard runs.
     check_dimensions(width, height)?;
@@ -199,7 +220,23 @@ pub fn run_stream<R: Read, W: Write>(
     // from it eagerly rather than lazily inside the frame loop. The renderer and
     // its texture target are a matched pair (#203): the target is a call
     // argument, not a field, so both are held here.
+    let references = input.prologue()?.mesh_references;
+    for (index, reference) in references {
+        let resolver = mesh_resolver.ok_or_else(|| StreamError::UnresolvedMeshReference {
+            index,
+            reference: reference.display().to_owned(),
+        })?;
+        let bytes = resolver(&reference).map_err(|message| StreamError::MeshResolve {
+            index,
+            reference: reference.display().to_owned(),
+            message,
+        })?;
+        input.resolve_gltf(index, &bytes)?;
+    }
     let prologue = input.prologue()?;
+    if prologue.meshes.is_empty() {
+        return Err(StreamError::MissingMeshStream);
+    }
     let frame_rate = prologue.frame_rate;
     let (mut renderer, target) = pollster::block_on(Renderer::with_meshes_sample_count(
         width,
@@ -207,24 +244,41 @@ pub fn run_stream<R: Read, W: Write>(
         prologue.meshes,
         options.msaa.sample_count(),
     ))?;
+    for (index, asset) in prologue.mesh_assets.iter().enumerate() {
+        let mesh_id = asset.mesh_id_or(index as u32) as usize;
+        renderer.set_disney_material(crate::MeshTarget::One(mesh_id), asset.material.clone());
+        if let Some(texture) = asset.base_color_texture.as_ref() {
+            renderer.set_mesh_texture(mesh_id, texture);
+        }
+        if let Some(texture) = asset.metallic_roughness_texture.as_ref() {
+            renderer.set_mesh_metallic_roughness_texture(mesh_id, texture);
+        }
+        if let Some(texture) = asset.normal_texture.as_ref() {
+            renderer.set_mesh_normal_texture(mesh_id, texture);
+        }
+    }
     if let Some(pbr) = &options.pbr {
-        renderer.set_appearance(
-            crate::MeshTarget::All,
-            crate::MeshAppearance {
-                material: pbr.material.clone(),
-                ibl: pbr.ibl,
-                tone_mapping: pbr.tone_mapping,
-                ..Default::default()
-            },
-        );
+        if options.mode == crate::RenderMode::Shaded {
+            renderer.set_appearance(
+                crate::MeshTarget::All,
+                crate::MeshAppearance {
+                    material: pbr.material.clone(),
+                    ibl: pbr.ibl,
+                    tone_mapping: pbr.tone_mapping,
+                    ..Default::default()
+                },
+            );
+        }
         if let Some(env) = &pbr.env_map {
             renderer.set_env_map(env.clone());
         }
     }
-    if let Some(texture) = prologue.texture {
-        renderer.set_texture(texture);
+    if let Some(operator) = input.tonemap_override() {
+        renderer.set_tonemap_operator(crate::MeshTarget::All, operator);
+        if let Some(background) = options.env_background.as_mut() {
+            background.tonemap = operator;
+        }
     }
-
     // Opening the stream writes its IPC header straight into `output`.
     let mut output = OutputStream::new(output, width, height, Some(frame_rate))?;
     // The background currently uploaded, so consecutive frames sharing it skip
@@ -984,7 +1038,7 @@ mod tests {
             });
             let prologue = stream.prologue().expect("prologue");
             assert_eq!(prologue.meshes, std::slice::from_ref(&mesh));
-            assert!(prologue.texture.is_none());
+            assert!(prologue.mesh_assets[0].base_color_texture.is_none());
 
             let decoded: Vec<FrameParams> = stream
                 .by_ref()

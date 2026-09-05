@@ -11,15 +11,20 @@ import beerTextureUrl from "../../../assets/meshes/qd_beer/textures/3d66-export-
   type: "file",
 };
 import editingDocumentUrl from "../data/fiba-shot1.arrow" with { type: "file" };
-import init, { startVideoEditing } from "../pkg/trd_wasm.js";
+import init, { startVideoEditing, videoEditingGltfReferences } from "../pkg/trd_wasm.js";
 import wasmUrl from "../pkg/trd_wasm_bg.wasm" with { type: "file" };
 import { byteSourceFor, MediabunnyReader, type MediaInput } from "./media/mediabunny-reader.ts";
 import { VideoPlayer } from "./media/player.ts";
 
 /// Which path an error came from. Mirrors Rust's `ErrorScope` codes, which the
 /// editor uses to keep one path's success from clearing another's failure.
-type ErrorScope = "media" | "catalog" | "document";
-const errorScopes: Record<ErrorScope, number> = { media: 1, catalog: 2, document: 3 };
+type ErrorScope = "media" | "catalog" | "document" | "export";
+const errorScopes: Record<ErrorScope, number> = {
+  media: 1,
+  catalog: 2,
+  document: 3,
+  export: 6,
+};
 
 async function main(): Promise<void> {
   await init({ module_or_path: wasmUrl });
@@ -42,7 +47,38 @@ async function main(): Promise<void> {
     }
     documentBytes = new Uint8Array(await response.arrayBuffer());
   }
-  const editor = await startVideoEditing(canvas, documentBytes);
+  const envResponse = await fetch(uffiziEnvUrl);
+  if (!envResponse.ok) {
+    throw new Error(`failed to fetch Uffizi environment: ${envResponse.status}`);
+  }
+  const defaultEnvBytes = new Uint8Array(await envResponse.arrayBuffer());
+  const initialGltf = documentBytes ? await resolveGltfReferences(documentBytes) : [];
+  const editor = await startVideoEditing(canvas, documentBytes, initialGltf, defaultEnvBytes);
+
+  async function resolveGltfReferences(bytes: Uint8Array): Promise<Uint8Array[]> {
+    const references = videoEditingGltfReferences(bytes) as Array<{
+      index: number;
+      path?: string;
+      url?: string;
+    }>;
+    return Promise.all(
+      references.map(async (reference) => {
+        const target = reference.url ?? reference.path;
+        if (!target) {
+          throw new Error(`glTF mesh row ${reference.index} has no path or URL`);
+        }
+        const response = await fetch(new URL(target, location.href));
+        if (!response.ok) {
+          throw new Error(`failed to fetch glTF mesh row ${reference.index}: ${response.status}`);
+        }
+        return new Uint8Array(await response.arrayBuffer());
+      }),
+    );
+  }
+
+  async function loadArrowInput(bytes: Uint8Array): Promise<void> {
+    await editor.loadDocumentWithGltf(bytes, await resolveGltfReferences(bytes), defaultEnvBytes);
+  }
 
   /// Surfaces a failure. The editor's UI is a canvas, so an error drawn there
   /// can be read but not selected, copied or scrolled back to — logging it as
@@ -55,10 +91,30 @@ async function main(): Promise<void> {
     editor.setError(errorScopes[scope], message);
   }
 
-  const catalog = new Map<number, { modelUrl: string; textureUrl?: string }>([
-    [1, { modelUrl: cokeObjUrl, textureUrl: cokeTextureUrl }],
-    [2, { modelUrl: beerObjUrl, textureUrl: beerTextureUrl }],
-    [3, { modelUrl: dragonUrl }],
+  const catalog = new Map<number, { modelPath: string; modelUrl: string; textureUrl?: string }>([
+    [
+      1,
+      {
+        modelPath: "assets/meshes/can/coke.obj",
+        modelUrl: cokeObjUrl,
+        textureUrl: cokeTextureUrl,
+      },
+    ],
+    [
+      2,
+      {
+        modelPath: "assets/meshes/qd_beer/source/3d66.com_JDH5455878326.obj",
+        modelUrl: beerObjUrl,
+        textureUrl: beerTextureUrl,
+      },
+    ],
+    [
+      3,
+      {
+        modelPath: "assets/meshes/glb/Meshy_AI_Dragon_0804104424_texture.glb",
+        modelUrl: dragonUrl,
+      },
+    ],
   ]);
   const input = document.createElement("input");
   input.type = "file";
@@ -107,19 +163,35 @@ async function main(): Promise<void> {
       if (!response.ok) {
         throw new Error(`failed to fetch document: ${response.status} ${response.statusText}`);
       }
-      editor.loadDocument(new Uint8Array(await response.arrayBuffer()));
+      await loadArrowInput(new Uint8Array(await response.arrayBuffer()));
       return;
     }
     if (editor.hasPendingDocument() && pendingDocumentFile) {
-      editor.loadDocument(new Uint8Array(await pendingDocumentFile.arrayBuffer()));
+      await loadArrowInput(new Uint8Array(await pendingDocumentFile.arrayBuffer()));
       return;
     }
     editor.clearDocument();
   }
   let loadingAsset = false;
-  let envBytesPromise: Promise<Uint8Array> | undefined;
+  let envBytesPromise: Promise<Uint8Array> | undefined = Promise.resolve(defaultEnvBytes);
   let sourceReady = false;
   let sourceGeneration = 0;
+
+  function downloadArrow(filename: string, bytes: Uint8Array): void {
+    const url = URL.createObjectURL(
+      new Blob([Uint8Array.from(bytes).buffer], {
+        type: "application/vnd.apache.arrow.stream",
+      }),
+    );
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    link.hidden = true;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30_000);
+  }
 
   /// Receives decoded frames. Ownership arrives with the frame and passes
   /// straight to Rust, which closes it after the GPU copy — no pixels cross the
@@ -258,30 +330,49 @@ async function main(): Promise<void> {
       documentInput.value = "";
       documentInput.click();
     } else if (command === 5) {
-      // The dialog's single commit point: load the picked file, or the URL it
-      // accepted, whichever is pending. Both become a `ByteSource`, so the
-      // decoder path below is identical for the two.
-      const pendingUrl = editor.pendingVideoUrl();
-      if (pendingUrl) {
-        try {
-          const url = new URL(pendingUrl);
-          if (url.protocol !== "http:" && url.protocol !== "https:") {
-            throw new Error("video URL must use http:// or https://");
+      void (async () => {
+        // The video timeline must land before a protocol scene is validated
+        // against it; native follows the same video-then-Arrow ordering.
+        const pendingUrl = editor.pendingVideoUrl();
+        let videoRequested = false;
+        if (pendingUrl) {
+          videoRequested = true;
+          try {
+            const url = new URL(pendingUrl);
+            if (url.protocol !== "http:" && url.protocol !== "https:") {
+              throw new Error("video URL must use http:// or https://");
+            }
+            await loadVideoSource({ kind: "url", url: url.href });
+          } catch (error) {
+            reportError("media", String(error));
+            return;
           }
-          void loadVideoSource({ kind: "url", url: url.href });
-        } catch (error) {
-          reportError("media", String(error));
+        } else if (pendingVideoFile) {
+          videoRequested = true;
+          const file = pendingVideoFile;
+          await loadVideoSource(
+            { kind: "file", file },
+            { filename: file.name, byteLength: file.size },
+          );
         }
-      } else if (pendingVideoFile) {
-        const file = pendingVideoFile;
-        void loadVideoSource(
-          { kind: "file", file },
-          { filename: file.name, byteLength: file.size },
-        );
+        if (!videoRequested || sourceReady) {
+          await loadSelectedDocument();
+        }
+      })().catch((error: unknown) => reportError("document", String(error)));
+    } else if (command === 6) {
+      const filename = editor.pendingArrowExportFilename();
+      try {
+        if (!filename) {
+          throw new Error("the editor requested an export without a filename");
+        }
+        const bytes = editor.takeExportArrow();
+        downloadArrow(filename, bytes);
+        editor.finishArrowExport(true, `Downloaded ${bytes.byteLength} bytes as ${filename}`);
+      } catch (error) {
+        const message = String(error);
+        console.error(`video editing (export): ${message}`);
+        editor.finishArrowExport(false, message);
       }
-      // The document is part of the same commit, and it applies whether or not a
-      // video was loaded above.
-      void loadSelectedDocument().catch((error: unknown) => reportError("document", String(error)));
     }
 
     const seekFrame = editor.takeSeekFrame();
@@ -318,7 +409,14 @@ async function main(): Promise<void> {
         envBytesPromise,
       ])
         .then(([modelBytes, textureBytes, envBytes]) =>
-          editor.loadCatalogAsset(assetCode, modelBytes, textureBytes, envBytes),
+          editor.loadCatalogAsset(
+            assetCode,
+            entry.modelPath,
+            entry.modelUrl,
+            modelBytes,
+            textureBytes,
+            envBytes,
+          ),
         )
         .catch((error: unknown) => reportError("catalog", String(error)))
         .finally(() => {

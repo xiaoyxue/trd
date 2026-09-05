@@ -1,30 +1,19 @@
 #!/usr/bin/env python3
-"""Convert an image (JPEG/PNG/...) to a trd **texture** Arrow IPC stream (0.0.6).
+"""Convert images to a keyed trd **texture** Arrow IPC stream (0.0.6).
 
-A trd texture table is **one row = one image**, carried in a single column
-(matching ``trd_core::texture::ImageTexture::from_arrow``):
-
-  * ``rgba`` — a canonical ``arrow.fixed_shape_tensor<uint8>`` of shape
-    ``[H, W, 4]``: interleaved RGBA8, row-major, **top-left origin**. Concretely
-    the storage is ``FixedSizeList<UInt8>[H*W*4]`` and the field carries the
-    ``ARROW:extension:name = arrow.fixed_shape_tensor`` /
-    ``ARROW:extension:metadata`` (a JSON ``{"shape":[H,W,4], ...}``)
-    canonical-extension metadata that makes the ``[H, W, 4]`` self-describing —
-    height/width come from that shape, not a separate column.
-
-This is the *same* ``fixed_shape_tensor<u8>`` canonical extension family trd
-already emits on its output (a rendered frame,
-``crates/trd-core/src/protocol/output_session.rs``), so a texture input
-is symmetric with a rendered frame — only the layout differs (a texture is one
-interleaved ``[H, W, 4]`` tensor; the output is per-channel planar ``[H, W]``
-tensors). ``ImageTexture::from_arrow`` reads row 0's ``H*W*4`` bytes as row-major
-RGBA and takes the height/width from the tensor shape.
+Each row binds one base-color image to a dense mesh-table ``mesh_id`` and carries
+``width``, ``height``, and variable-length tightly packed ``rgba_bytes``. Rows
+may therefore use different dimensions. The Rust decoder still accepts the
+legacy one-row fixed-shape ``rgba`` table as an implicit texture for mesh 0.
+Keyed output includes a row-0 legacy ``rgba`` compatibility alias.
 
 Run via:
   uv run --with pyarrow --with pillow --with numpy \\
       scripts/texture_to_arrow.py albedo.png -o albedo.tex.arrows
   uv run --with pyarrow --with pillow --with numpy \\
       scripts/texture_to_arrow.py photo.jpg --max-size 2048           # -> stdout
+  uv run --with pyarrow --with pillow --with numpy \\
+      scripts/texture_to_arrow.py mesh0.png mesh1.png --mesh-id 0 --mesh-id 1
 """
 import argparse
 import sys
@@ -38,8 +27,11 @@ PROTOCOL_VERSION_KEY = b"trd.protocol.version"
 PROTOCOL_VERSION = b"0.0.6"
 TABLE_KIND_KEY = b"trd.table.kind"
 
-# The single image column of a trd texture table (see `trd_core::texture`).
-TEXTURE_COLUMN = "rgba"
+MESH_ID_COLUMN = "mesh_id"
+WIDTH_COLUMN = "width"
+HEIGHT_COLUMN = "height"
+RGBA_BYTES_COLUMN = "rgba_bytes"
+LEGACY_RGBA_COLUMN = "rgba"
 
 
 def image_to_rgba(path, max_size=None):
@@ -61,41 +53,71 @@ def image_to_rgba(path, max_size=None):
     return height, width, np.ascontiguousarray(rgba).reshape(-1)
 
 
-def texture_batch(height, width, flat):
-    """Build a one-row texture ``RecordBatch`` from flat row-major RGBA bytes.
-
-    The ``rgba`` column is a canonical ``arrow.fixed_shape_tensor<uint8>`` of
-    shape ``[H, W, 4]`` (storage ``FixedSizeList<UInt8>[H*W*4]``); the field's
-    canonical-extension metadata makes the shape self-describing, exactly as the
-    Rust decoder (``ImageTexture::from_arrow``) expects.
-    """
-    n = height * width * 4
-    if flat.size != n:
-        raise ValueError(f"expected {n} RGBA bytes, got {flat.size}")
-    # Canonical fixed_shape_tensor: storage is FixedSizeList<uint8>[H*W*4] and the
-    # field gains `ARROW:extension:name`/`ARROW:extension:metadata` on IPC. Shape
-    # is [height, width, 4] to match the Rust decoder's `[H, W, 4]` match.
-    tensor_type = pa.fixed_shape_tensor(
-        pa.uint8(), [height, width, 4], dim_names=["height", "width", "channel"]
+def texture_batch(rows):
+    """Build a keyed multi-model texture ``RecordBatch``."""
+    rows = sorted(rows, key=lambda row: row[0])
+    for mesh_id, height, width, flat in rows:
+        expected = height * width * 4
+        if flat.size != expected:
+            raise ValueError(
+                f"mesh {mesh_id}: expected {expected} RGBA bytes, got {flat.size}"
+            )
+    compatibility = next(
+        ((height, width, flat) for mesh_id, height, width, flat in rows if mesh_id == 0),
+        (1, 1, np.array([255, 255, 255, 255], dtype=np.uint8)),
     )
-    storage = pa.FixedSizeListArray.from_arrays(pa.array(flat, type=pa.uint8()), n)
-    array = pa.ExtensionArray.from_storage(tensor_type, storage)
-    field = pa.field(TEXTURE_COLUMN, tensor_type, nullable=False)
+    compatibility_height, compatibility_width, compatibility_flat = compatibility
+    compatibility_size = compatibility_height * compatibility_width * 4
+    tensor_type = pa.fixed_shape_tensor(
+        pa.uint8(),
+        [compatibility_height, compatibility_width, 4],
+        dim_names=["height", "width", "channel"],
+    )
+    legacy_storage = pa.FixedSizeListArray.from_arrays(
+        pa.array(compatibility_flat, type=pa.uint8()),
+        compatibility_size,
+    )
+    legacy_array = pa.ExtensionArray.from_storage(tensor_type, legacy_storage)
     schema = pa.schema(
-        [field],
+        [
+            pa.field(LEGACY_RGBA_COLUMN, tensor_type, nullable=False),
+            pa.field(MESH_ID_COLUMN, pa.list_(pa.uint32()), nullable=False),
+            pa.field(WIDTH_COLUMN, pa.list_(pa.uint32()), nullable=False),
+            pa.field(HEIGHT_COLUMN, pa.list_(pa.uint32()), nullable=False),
+            pa.field(RGBA_BYTES_COLUMN, pa.list_(pa.binary()), nullable=False),
+        ],
         metadata={
             PROTOCOL_VERSION_KEY: PROTOCOL_VERSION,
             TABLE_KIND_KEY: b"texture",
         },
     )
-    return schema, pa.record_batch([array], schema=schema)
+    return schema, pa.record_batch(
+        [
+            legacy_array,
+            pa.array([[row[0] for row in rows]], type=pa.list_(pa.uint32())),
+            pa.array([[row[2] for row in rows]], type=pa.list_(pa.uint32())),
+            pa.array([[row[1] for row in rows]], type=pa.list_(pa.uint32())),
+            pa.array(
+                [[row[3].tobytes() for row in rows]],
+                type=pa.list_(pa.binary()),
+            ),
+        ],
+        schema=schema,
+    )
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Convert an image to a trd texture Arrow IPC stream (0.0.6)."
+        description="Convert images to a keyed trd texture Arrow IPC stream (0.0.6)."
     )
-    ap.add_argument("input", help="input image file (JPEG/PNG/...)")
+    ap.add_argument("input", nargs="+", help="input image file(s) (JPEG/PNG/...)")
+    ap.add_argument(
+        "--mesh-id",
+        action="append",
+        type=int,
+        dest="mesh_ids",
+        help="mesh id for each input; defaults to positional 0,1,...",
+    )
     ap.add_argument("-o", "--output", default="-", help="output path ('-' = stdout)")
     ap.add_argument(
         "--max-size",
@@ -106,8 +128,18 @@ def main() -> None:
     )
     args = ap.parse_args()
 
-    height, width, flat = image_to_rgba(args.input, args.max_size)
-    schema, batch = texture_batch(height, width, flat)
+    mesh_ids = args.mesh_ids if args.mesh_ids is not None else list(range(len(args.input)))
+    if len(mesh_ids) != len(args.input):
+        raise SystemExit("error: --mesh-id count must match the number of input images")
+    if any(mesh_id < 0 for mesh_id in mesh_ids):
+        raise SystemExit("error: mesh ids must be non-negative")
+    if len(set(mesh_ids)) != len(mesh_ids):
+        raise SystemExit("error: mesh ids must be unique")
+    rows = [
+        (mesh_id, *image_to_rgba(path, args.max_size))
+        for mesh_id, path in zip(mesh_ids, args.input)
+    ]
+    schema, batch = texture_batch(rows)
 
     sink = sys.stdout.buffer if args.output == "-" else open(args.output, "wb")
     try:

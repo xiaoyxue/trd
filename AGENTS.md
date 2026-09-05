@@ -45,6 +45,21 @@ violate without anything noticing:
 - **The video-editing document (`trd.video_edit.version = 0.2.0`) is deliberately
   independent of `PROTOCOL_VERSION`** — no editor columns in `0.0.6`, no protocol
   bump for editor state.
+- **Protocol `0.0.6` asset rule:** embedded OBJ geometry uses the mesh columns,
+  the mesh row index is its `mesh_id`, the material on that row belongs to that
+  ID, and keyed texture rows carry the same `mesh_id`. A legacy texture table
+  defaults to mesh 0. GLB/glTF 2.0 is reference-only
+  (`gltf_path` / `gltf_url`): do not duplicate its geometry or material columns,
+  because the glTF file is authoritative. Every native and browser consumer must
+  resolve the reference before rendering and must report an unresolved resource
+  as an error rather than substituting a placeholder. Mesh rendering and protocol
+  acceptance tests use `assets/envmap/uffizi-large.hdr` as the default IBL probe.
+- **Video scene export stays sparse.** Export only tracked placement rows and
+  carry their strictly increasing `video_frame_index`; do not pad the params
+  stream with empty rows. Video replay looks up this key, and a missing row means
+  video-only playback. Keep `k` and `draw_model` as separate columns—never
+  serialize a combined MVP matrix. Export the selected `tonemap` operator on
+  every sparse params row; an absent field defaults to Reinhard.
 - **Comments say *why*, not *what*, and stay short enough to see what they attach
   to.** Guidance rather than a gate, with the reasoning and a measuring script in
   [`docs/comments.md`](docs/comments.md) — run
@@ -90,6 +105,49 @@ PR page with no red X means only that nobody has looked yet. Run the smallest
 command that covers the change while iterating, but a task is not complete until
 every gate its **test level** requires has passed on **both** platforms — and
 **the results are recorded on the PR**.
+
+For GPT-driven work, run long builds and test suites through test subagents so
+the main session stays responsive. The parent agent still selects the test level,
+supplies the exact commands, reviews every result, and ensures no required gate
+is omitted. Use GPT-6 Astra with `high` reasoning for test subagents unless the
+user explicitly selects another model; do not use Terra.
+
+Optimize execution overhead, not acceptance coverage. Reuse audited helpers and
+incremental build outputs after checking source freshness, batch independent
+setup checks and predictable UI actions, and wait for observable readiness with
+bounded timeouts instead of fixed sleeps. Never reuse a previous run's evidence
+as a new result. A targeted rerun names its cases and revision explicitly; it
+does not claim a fresh full-level pass or silently remove outstanding gates.
+
+For GPT-driven UI e2e, capture screenshots only at named acceptance milestones,
+not after every click, hover, scroll, readiness check, or coordinate adjustment.
+Derive the minimum useful screenshot set from that specific case before the run;
+do not impose a fixed count or reuse one universal capture list across different
+workflows. For canvas-rendered UI such as egui, use direct screenshot-based
+visual recognition as the primary way to locate controls: inspect a scaled or
+focused crop from the same screenshot, then act on the visually identified
+control. Do not substitute DOM/accessibility lookup or generated pixel-scanning
+scripts for visual recognition. Use the UI's **Copy details** action, the
+clipboard, logs, and exported-file audits for intermediate diagnostics. Record
+measured wall-clock time for setup, UI readiness, the case's major phases,
+cleanup, and the complete run. If the UI is still blocked after two informed
+attempts, stop and report the exact blocker instead of accumulating debug
+screenshots.
+
+Treat every UI e2e case as a process-isolation boundary. Record the exact
+Chrome, native-app, server, and helper PIDs started for the case; on pass, fail,
+or cancellation, stop those process trees and verify their ports and PIDs are
+gone. Do not leave a process alive for reuse, and do not start the next case
+until the previous case's cleanup gate is complete.
+
+For Windows browser e2e, use 1920x1080 as the default source-video/render
+resolution. Run normal headed Chrome maximized/full-screen using the current
+desktop and native Windows display scaling; do not set its window or CSS viewport
+to 1920x1080, force a device scale factor, or use CDP device metrics to emulate
+another viewport or DPI.
+For native video-editor e2e, pass `--preview-width 1920` for both authoring and
+replay, and confirm the actual render size in **Details**; a 1080p source or
+window alone does not prove a 1080p render target.
 
 ### Test levels — L1 / L2 / L3
 

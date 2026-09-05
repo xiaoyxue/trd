@@ -37,13 +37,19 @@
         # Keep `.wgsl` shaders in the build source (trd-core embeds them via
         # `include_wgsl!`) and the golden e2e fixtures/PNGs
         # (`crates/trd-core/tests/golden/`, read at test time via
-        # `CARGO_MANIFEST_DIR`); crane's default filter would drop non-Rust files.
+        # `CARGO_MANIFEST_DIR`) and the real FIBA annotation fixture used by the
+        # editor input-format test; crane's default filter would drop non-Rust files.
         src = lib.cleanSourceWith {
           src = ./.;
           filter =
             path: type:
             (lib.hasSuffix ".wgsl" path)
             || (lib.hasInfix "/crates/trd-core/tests/golden/" path)
+            || (lib.hasSuffix "/assets/videos/fiba/fiba-shot1.arrow" path)
+            || (lib.hasSuffix "/assets/meshes/can/coke.obj" path)
+            || (lib.hasSuffix "/assets/meshes/can/can_around.jpg" path)
+            || (lib.hasSuffix "/assets/meshes/glb/Meshy_AI_Dragon_0804104424_texture.glb" path)
+            || (lib.hasSuffix "/assets/envmap/uffizi-large.hdr" path)
             || (craneLib.filterCargoSources path type);
           name = "source";
         };

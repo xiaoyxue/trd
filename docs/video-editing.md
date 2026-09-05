@@ -26,6 +26,7 @@ uv run --with pyarrow scripts/protocol_schema.py --check
   - [Container sniffing](#container-sniffing)
   - [Sparse rows](#sparse-rows)
   - [Selection and placement state](#selection-and-placement-state)
+- [Arrow scene export and round-trip](#arrow-scene-export-and-round-trip)
 - [Generate the document](#generate-the-document)
   - [The Parquet twin, and the parity test](#the-parquet-twin-and-the-parity-test)
 - [Browser/media boundary](#browsermedia-boundary)
@@ -146,8 +147,61 @@ timeline comes from the container (ffprobe natively, the `moov` box in the
 browser) and the placement UI stays inert.
 
 The initial timeline embeds no mesh/material/edit resources. The fixed catalog
-is fetched from repository assets at runtime. Exporting edited state as a normal
-`0.0.6` stream is still pending.
+is fetched from repository assets at runtime.
+
+## Arrow scene export and round-trip
+
+After a tracked quad has a loaded catalog object, **Scene export → Export
+Arrow...** writes the finished placement as render protocol `0.0.6`:
+
+```text
+[mesh] [texture?] [params]
+```
+
+Rust writes every table and matrix. The browser bridge only downloads the
+returned bytes; the native shell only chooses a path and writes them. The params
+table stays sparse: one row per tracked placement, keyed by the required
+`video_frame_index`. Each row carries camera `K`, mesh row `0`, final
+`draw_model`, selected render mode, and the selected tone-map operator. Replay
+binary-searches this key; a video frame with no matching row is video-only.
+Legacy scenes without `tonemap` use Reinhard.
+
+`K` and `draw_model` are stored as separate columns, matching the existing
+render protocol. No `K * draw_model`, MVP, projection, or clip-space matrix is
+serialized. Rust combines camera and model state only at render time.
+
+The export is deliberately scene-only: it does not copy the MP4 or decoded video
+frames into Arrow. Replaying therefore uses the same video as a sidecar. The
+**Arrow input** picker sniffs either an annotation Arrow/Parquet document or an
+exported protocol `0.0.6` scene. Annotation input enables editing; scene input
+replays its decoded mesh and per-frame draws over the selected video.
+
+Protocol `0.0.6` uses two asset forms. Coca-Cola/beer OBJ assets embed geometry,
+the albedo texture, and the complete edited `DisneyMaterial` JSON. The dense
+mesh-table row index is the `mesh_id` joining draws, materials, and keyed texture
+rows, so multi-model scenes retain each model's own assets. Dragon
+exports only its GLB path/URL; replay resolves that file and imports its geometry,
+base-color, metallic-roughness and normal maps, and material. Both paths bind
+`assets/envmap/uffizi-large.hdr` as the video editor's default IBL probe.
+
+### Canonical acceptance workflow
+
+Use this exact sequence for native and browser verification:
+
+1. Open the source video and its annotation Arrow/Parquet document.
+2. Place and edit the 3D model, choose `Filled`, `Wireframe`, or `Textured`,
+   then record snapshots at representative frames.
+3. Export a new protocol `0.0.6` Arrow scene.
+4. Reopen the same video with the exported Arrow through **Arrow input**, seek to
+   the recorded frame indices, and compare the rendered frames with step 2.
+
+Record at least the first, middle, and last tracked frames plus one untracked
+gap. The three tracked replays must match their snapshots within the existing
+pixel tolerance; the gap must remain video-only. Decoder/matrix round-trip tests
+are supporting coverage, not a substitute for this visible comparison.
+The required PBR cases are Coca-Cola with edited metallic, roughness, and at
+least one additional Disney value, and Dragon through its reference-only GLB.
+Both are replayed with the Uffizi probe and compared at the same frames.
 
 ## Generate the document
 
@@ -621,6 +675,7 @@ duration before playback.
 | `crates/trd-placement/src/lib.rs` | K/quad frame and placement math |
 | `crates/trd-gui/src/video_editing/mod.rs` | editor state and typed scheduler |
 | `crates/trd-gui/src/video_editing/editing_ui.rs` | editor panels, quad/catalog wiring, player footer |
+| `crates/trd-gui/src/video_editing/export.rs` | protocol scene encode/decode and sparse frame-index mapping |
 | `crates/trd-gui/src/video_editing/diagnostics.rs` | immutable Details snapshot + pure calculations |
 | `crates/trd-gui/src/video_editing/details_ui.rs` | Details inspector presentation |
 | `crates/trd-gui/src/video_editing_renderer.rs` | shared native/wasm composition and picking |
@@ -633,13 +688,10 @@ duration before playback.
 
 ## Remaining work
 
-- export `[mesh][texture?][frames][params]` protocol `0.0.6` with the
-  Rust-computed `draw_model`;
-- reload that export and prove equivalent placement/transforms;
 - add multi-frame Python/Rust matrix and reprojection parity;
 - complete pre-video poster/digest UX;
 - add temporal pose smoothing;
 - add automated browser coverage for local-video playback and editing.
 
-PBR material state remains runtime asset state because render protocol `0.0.6`
-does not serialize PBR fields.
+OBJ material edits are serialized in the protocol mesh row. GLB/glTF material
+state remains in the referenced file and is not duplicated in Arrow.
