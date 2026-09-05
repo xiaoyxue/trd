@@ -219,12 +219,16 @@ pub async fn start(
     let scene = SceneState::seeded(renderer.initial_mesh_ids(), seed).map_err(to_js)?;
     let shared = Rc::new(crate::gui_web_app::GuiShared::new(on_pick_model));
     let app = WebApp::new(InteractionController::new(scene), renderer, shared.clone());
+    let app_shared = shared.clone();
 
     eframe::WebRunner::new()
         .start(
             canvas,
             eframe::WebOptions::default(),
-            Box::new(|_cc| Ok(Box::new(app))),
+            Box::new(move |cc| {
+                app_shared.attach_context(&cc.egui_ctx);
+                Ok(Box::new(app))
+            }),
         )
         .await?;
     Ok(GuiHandle { shared })
