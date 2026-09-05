@@ -280,12 +280,22 @@ unchanged by the identity migration.
 - GUI coverage exercises deleting the middle of three objects, loading another,
   editing/picking the survivors, and catalog replacement without invented IDs.
 - The implementation declares **L3**, runs every required gate on both
-  platforms, and records the full matrix/handoff in the PR and issue. Existing
-  golden outputs must be **bit-identical**, MSAA on/off and PBR ACES/Reinhard;
-  tolerance-based success alone does not establish this stronger requirement.
+  platforms, and records the full matrix/handoff in the PR and issue. The normal
+  golden suite must remain green, and main-to-candidate outputs must be
+  **bit-identical**, MSAA on/off and PBR ACES/Reinhard; tolerance-based success
+  alone does not establish this stronger requirement.
   Do not regenerate goldens to accommodate re-keying.
 
 Use `TRD_STRICT_GOLDENS=1` with the existing golden-render suite to require exact
-RGBA equality rather than the usual cross-driver tolerance. The implementation
-is **L3**; results and any unavailable platform/device cases belong in the
-PR/issue matrix, never inferred from the earlier design-only L1 run.
+RGBA equality to the committed PNGs rather than the usual reference tolerance.
+If unchanged `main` also differs from those references, keep that failure visible
+and use `TRD_DUMP_ACTUAL=1` on both revisions, on the same GPU. Compare the complete
+actual-image sets: identical filenames, counts and bytes establish pixel
+preservation without regenerating references or widening the normal tolerance.
+Repeat this comparison independently on each platform; do not assume the cause
+of a pre-existing reference difference.
+
+The implementation is **L3**, including the explicitly classified CPU
+registration/render-input paths in `AGENTS.md`. Results and any unavailable
+platform/device cases belong in the PR/issue matrix, never inferred from the
+earlier design-only L1 run.
