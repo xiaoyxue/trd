@@ -109,8 +109,15 @@ every gate its **test level** requires has passed on **both** platforms — and
 For GPT-driven work, run long builds and test suites through test subagents so
 the main session stays responsive. The parent agent still selects the test level,
 supplies the exact commands, reviews every result, and ensures no required gate
-is omitted. Use GPT-5.6 Sol Fast (Internal only) with `high` reasoning for test
-subagents; do not use Terra.
+is omitted. Use GPT-6 Astra with `high` reasoning for test subagents unless the
+user explicitly selects another model; do not use Terra.
+
+Optimize execution overhead, not acceptance coverage. Reuse audited helpers and
+incremental build outputs after checking source freshness, batch independent
+setup checks and predictable UI actions, and wait for observable readiness with
+bounded timeouts instead of fixed sleeps. Never reuse a previous run's evidence
+as a new result. A targeted rerun names its cases and revision explicitly; it
+does not claim a fresh full-level pass or silently remove outstanding gates.
 
 For GPT-driven UI e2e, capture screenshots only at named acceptance milestones,
 not after every click, hover, scroll, readiness check, or coordinate adjustment.
@@ -138,6 +145,9 @@ resolution. Run normal headed Chrome maximized/full-screen using the current
 desktop and native Windows display scaling; do not set its window or CSS viewport
 to 1920x1080, force a device scale factor, or use CDP device metrics to emulate
 another viewport or DPI.
+For native video-editor e2e, pass `--preview-width 1920` for both authoring and
+replay, and confirm the actual render size in **Details**; a 1080p source or
+window alone does not prove a 1080p render target.
 
 ### Test levels — L1 / L2 / L3
 
