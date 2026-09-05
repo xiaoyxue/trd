@@ -136,6 +136,12 @@ that places it, so every primitive can be instanced.
 Geometry is owned once (decode-once mesh store + shared line-quad/arrow buffers).
 A drawable is a light handle naming *which* primitive + its per-frame model.
 
+The current mesh handle is still a raw store index. The
+[GPU mesh resource identity design](gpu-resources.md) (#366) specifies its
+replacement with opaque IDs, CPU-side wire-row resolution and explicit residency
+errors. That design is not implemented yet; the lifetime rules below describe
+the current renderer.
+
 The store decodes each mesh once, but the **set** is not fixed at construction:
 `Renderer::add_mesh` uploads one at runtime and `remove_mesh` drops one, so a
 front-end can load and unload models without rebuilding the renderer (#353).
@@ -208,9 +214,10 @@ Loaders sit beside it by format:
 - `mesh/gltf.rs`
 
 The geometry every source shares (`aabb`, `center`, `preview_transform`,
-`edge_indices`) lives in `mesh/mod.rs`. A mesh's GPU residency is its face in
-`render/mesh_store.rs`, and the `Vertex` layout it is written in stays with the
-other `repr(C)` + `Pod` types in `render/gpu_types.rs`.
+`edge_indices`) lives in `mesh/mod.rs`. A mesh's GPU residency currently lives in
+`render/mesh_store.rs`; the [#366 design](gpu-resources.md) keeps that ownership
+renderer-side while separating resource identity from storage slots. The `Vertex`
+layout stays with the other `repr(C)` + `Pod` types in `render/gpu_types.rs`.
 
 ### Arrow input and output
 

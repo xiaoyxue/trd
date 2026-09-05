@@ -305,6 +305,8 @@ MP4 opens and seeks in megabytes.
 
 - [`docs/architecture.md`](docs/architecture.md) — the render core + front-ends,
   and the source layout.
+- [`docs/gpu-resources.md`](docs/gpu-resources.md) — the #366 design for opaque
+  mesh identities, CPU registration and renderer-owned residency; not yet implemented.
 - [`docs/rendering.md`](docs/rendering.md) — running every front-end
   (wrappers ⇄ `cargo run`), all CLI flags, PBR / tone-map / MSAA, camera forms,
   AR demos, the native window, the interactive viewer, web, and Windows setup.
