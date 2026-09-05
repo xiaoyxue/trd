@@ -1,7 +1,7 @@
 //! IO-free Arrow column decode + schema validation for the trd input protocol.
 //!
 //! The single source of truth for turning a params [`RecordBatch`] into
-//! [`FrameParams`] + per-frame [`Draw`] lists, reached through the one framing
+//! [`FrameParams`] + per-frame [`WireDraw`] lists, reached through the one framing
 //! driver ([`super::InputSession`], `protocol/input_session.rs`) that the native
 //! byte transport (`InputStream`, `io/input_stream.rs`) and the
 //! browser's `push` both run. It performs **no** I/O and holds **no** state
@@ -21,7 +21,8 @@ use arrow::array::{
 use arrow::datatypes::{DataType, Field, Schema};
 
 use crate::math::Matrix4;
-use crate::render::{Draw, DrawSelection};
+use crate::render::{DrawSelection, WireDraw};
+use crate::MeshTableIndex;
 use crate::{CameraFormError, FrameParams};
 
 use super::{ProtocolError, PROTOCOL_VERSION_KEY, SUPPORTED_INPUT_VERSIONS};
@@ -132,13 +133,15 @@ pub(crate) fn decode_frame_ids(
 /// Decodes the optional per-frame **instanced draw list** columns `draw_mesh`
 /// (`List<UInt32>`) and `draw_model` (`List<FixedSizeList<Float32>[16]>`), plus
 /// the optional per-draw `draw_mode` (`List<UInt8>`) render-mode override, into
-/// one `Vec<Draw>` per row. Returns `Some(rows)` when both required columns are
+/// one `Vec<WireDraw>` per row. Returns `Some(rows)` when both required columns are
 /// present, `None` when neither is (legacy single-object streams). Having
 /// exactly one of the `draw_mesh`/`draw_model` pair, or a per-row length
 /// mismatch, is an error. `draw_mode` bytes decode via
 /// [`DrawSelection::from_wire`] (`255` = inherit); an absent column leaves every
-/// [`Draw::mode`] `None`. Mirrors the native `stream::decode_draws`.
-pub(crate) fn decode_draws(batch: &RecordBatch) -> Result<Option<Vec<Vec<Draw>>>, ProtocolError> {
+/// [`DrawSelection::INHERIT`]. Mesh rows are resolved during scene assembly.
+pub(crate) fn decode_draws(
+    batch: &RecordBatch,
+) -> Result<Option<Vec<Vec<WireDraw>>>, ProtocolError> {
     let (mesh_col, model_col) = match (
         batch.column_by_name("draw_mesh"),
         batch.column_by_name("draw_model"),
@@ -272,8 +275,8 @@ pub(crate) fn decode_draws(batch: &RecordBatch) -> Result<Option<Vec<Vec<Draw>>>
         };
 
         let draws = (0..ids.len())
-            .map(|j| Draw {
-                mesh_id: ids.value(j),
+            .map(|j| WireDraw {
+                mesh_id: MeshTableIndex::new(ids.value(j)),
                 // The wire is raw column-major floats; this is the one place it
                 // becomes a typed `Matrix4` (#235 R3).
                 model: Matrix4::from_cols_array(&read_fixed::<16>(models, model_values, j)),

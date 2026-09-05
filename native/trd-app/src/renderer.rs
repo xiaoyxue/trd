@@ -8,8 +8,8 @@
 use std::sync::Arc;
 
 use trd_core::{
-    EnvMapData, FrameFit, ImageData, ImageTexture, Lighting, Mesh, RenderError, RenderOptions,
-    RenderTarget, Renderer, Scene, SurfaceTarget,
+    EnvMapData, FrameFit, ImageData, ImageTexture, Lighting, Mesh, MeshResourceError, RenderError,
+    RenderOptions, RenderTarget, Renderer, Scene, SurfaceTarget,
 };
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
@@ -123,17 +123,22 @@ impl WindowRenderer {
     /// Binds `texture` as the albedo sampled by [`RenderMode::Textured`](trd_core::RenderMode::Textured) meshes
     /// (`0.0.4`). No-op until the renderer is built; re-uploaded lazily on the
     /// next `render`.
-    pub(crate) fn set_texture(&mut self, texture: &ImageTexture) {
+    pub(crate) fn set_texture(&mut self, texture: &ImageTexture) -> Result<(), MeshResourceError> {
         if let Some(renderer) = self.renderer.as_mut() {
-            renderer.set_texture(texture);
+            renderer.set_texture(texture)?;
         }
+        Ok(())
     }
 
     /// Sets the appearance of every mesh. No-op until the renderer is built.
-    pub(crate) fn set_appearance(&mut self, appearance: trd_core::MeshAppearance) {
+    pub(crate) fn set_appearance(
+        &mut self,
+        appearance: trd_core::MeshAppearance,
+    ) -> Result<(), MeshResourceError> {
         if let Some(renderer) = self.renderer.as_mut() {
-            renderer.set_appearance(trd_core::MeshTarget::All, appearance);
+            renderer.set_appearance(trd_core::MeshTarget::All, appearance)?;
         }
+        Ok(())
     }
 
     pub(crate) fn set_lighting(&mut self, lighting: Lighting) {
@@ -153,6 +158,14 @@ impl WindowRenderer {
     pub(crate) fn render(&mut self, frame: Option<&FrameData>, options: &RenderOptions) {
         let (Some(renderer), Some(frame)) = (self.renderer.as_mut(), frame) else {
             return;
+        };
+
+        let draws = match Scene::resolve_draws(&frame.draws, renderer.initial_mesh_ids()) {
+            Ok(draws) => draws,
+            Err(error) => {
+                log::warn!("skipping frame with an invalid mesh row: {error}");
+                return;
+            }
         };
 
         // Author the frame's Scene from its draw list + the render mode/overlay
@@ -177,8 +190,7 @@ impl WindowRenderer {
                 None
             }
         };
-        let scene =
-            Scene::from_draws(&frame.draws, options, frame_fit).with_lighting(self.lighting);
+        let scene = Scene::from_draws(&draws, options, frame_fit).with_lighting(self.lighting);
 
         let camera = match frame.params.to_camera(self.target.viewport()) {
             Ok(camera) => camera,

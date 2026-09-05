@@ -28,8 +28,8 @@
 //! borrow checker — the renderer now splits the borrow in time instead.
 
 use super::buffer::draw_indexed;
-use super::{Draw, Renderer, Viewport};
-use crate::Camera;
+use super::{Draw, RenderError, Renderer, Viewport};
+use crate::{Camera, MeshId, MeshResourceError};
 
 use super::GpuContext;
 
@@ -199,8 +199,8 @@ impl Renderer {
     /// Stages the **object-id picking pass** (#141) for `draws`: writes the frame
     /// camera and uploads one id instance per pickable draw, returning the
     /// `(mesh_id, instance slot)` records [`encode_picking`](Self::encode_picking)
-    /// then draws. Out-of-range mesh ids and `Shadow` draws are skipped, but the
-    /// index mapping is preserved (a skipped draw's index simply never appears),
+    /// then draws. `Shadow` draws are skipped, but the
+    /// index mapping is preserved (a shadow's index simply never appears),
     /// so a decoded id maps straight back to `draws[index]`.
     ///
     /// Split from the encode half so the pass's two borrows never overlap: this
@@ -222,31 +222,33 @@ impl Renderer {
     /// each one carries a distinct id. Sharing the walk would mean threading a
     /// pass-kind through every `record` body to couple two loops that agree on
     /// almost nothing, for little gain.
-    fn prepare_picking(&mut self, camera: Camera, draws: &[Draw]) -> Vec<(usize, u32)> {
+    fn prepare_picking(
+        &mut self,
+        camera: Camera,
+        draws: &[Draw],
+    ) -> Result<Vec<(MeshId, u32)>, MeshResourceError> {
         // Camera P·V for this frame (writes the shared camera uniform bound by
         // `uniforms.camera`, which is layout-compatible with the pick pipeline).
         self.uniforms.write_camera(&self.gpu.queue, camera);
 
         // Build one pick instance per drawable object, carrying its index color.
         let mut instances: Vec<PickInstanceRaw> = Vec::with_capacity(draws.len());
-        let mut records: Vec<(usize, u32)> = Vec::with_capacity(draws.len());
+        let mut records: Vec<(MeshId, u32)> = Vec::with_capacity(draws.len());
         // A shadow blob has no mesh geometry to hit-test, so it is not pickable.
         for (index, draw) in draws.iter().enumerate() {
             if !draw.selection.is_mesh() {
                 continue;
             }
-            let Some(mesh) = self.meshes.get(draw.mesh_id as usize) else {
-                continue;
-            };
+            let mesh = self.resources.get(draw.mesh_id)?;
             let effective = draw.model * mesh.geometry.base_model;
             let slot = instances.len() as u32;
             instances.push(PickInstanceRaw::new(effective, index as u32));
-            records.push((draw.mesh_id as usize, slot));
+            records.push((draw.mesh_id, slot));
         }
 
         // Grow + upload the pick instance buffer.
         self.picking.upload_instances(&self.gpu, &instances);
-        records
+        Ok(records)
     }
 
     /// Encodes the **object-id picking pass** for the records staged by
@@ -276,8 +278,8 @@ impl Renderer {
         &self,
         encoder: &mut wgpu::CommandEncoder,
         target: &PickPass<'_>,
-        records: &[(usize, u32)],
-    ) {
+        records: &[(MeshId, u32)],
+    ) -> Result<(), MeshResourceError> {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("trd picking pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -306,13 +308,10 @@ impl Renderer {
         self.picking
             .bind(&mut pass, self.uniforms.camera.bind_group());
         for &(mesh_id, slot) in records {
-            // `prepare_picking` already dropped out-of-range ids, but the store is
-            // the only thing that can prove it — so ask it, don't index it (#235 R7).
-            let Some(mesh) = self.meshes.get(mesh_id) else {
-                continue;
-            };
+            let mesh = self.resources.get(mesh_id)?;
             draw_indexed(&mut pass, mesh.filled(), slot..slot + 1);
         }
+        Ok(())
     }
 
     /// **Object-id picking** (#141): renders `draws` through the flat id-color
@@ -331,7 +330,10 @@ impl Renderer {
         x: u32,
         y: u32,
         viewport: Viewport,
-    ) -> Option<u32> {
+    ) -> Result<Option<u32>, RenderError> {
+        for draw in draws.iter().filter(|draw| draw.selection.is_mesh()) {
+            self.resources.get(draw.mesh_id)?;
+        }
         let gpu = self.gpu.clone();
         let Viewport {
             width: w,
@@ -341,11 +343,14 @@ impl Renderer {
         // The borrows are separated in *time* instead of by moving it out: the
         // `&mut self` staging first, then an all-immutable encode + read-back.
         self.picking.ensure_target(&gpu.device, w, h);
-        let records = self.prepare_picking(camera, draws);
+        let records = self.prepare_picking(camera, draws)?;
 
-        let target = self.picking.pass()?;
+        let target = self
+            .picking
+            .pass()
+            .ok_or_else(|| RenderError::Gpu("pick target was not allocated".into()))?;
         if !target.id.contains(x, y) {
-            return None;
+            return Ok(None);
         }
 
         let mut encoder = gpu
@@ -353,7 +358,7 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("trd pick frame"),
             });
-        self.encode_picking(&mut encoder, &target, &records);
+        self.encode_picking(&mut encoder, &target, &records)?;
         // Copy just the one texel under the cursor into the staging buffer.
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
@@ -384,15 +389,21 @@ impl Renderer {
             let _ = sender.send(result);
         });
         // Same wait as the offscreen readback; see `platform::poll_for_map`.
-        super::platform::poll_for_map(&gpu.device).ok()?;
-        receiver.await.ok()?.ok()?;
+        super::platform::poll_for_map(&gpu.device)
+            .map_err(|error| RenderError::Gpu(error.to_string()))?;
+        receiver
+            .await
+            .map_err(|error| RenderError::Gpu(error.to_string()))?
+            .map_err(|error| RenderError::Gpu(error.to_string()))?;
 
         let id = {
-            let mapped = slice.get_mapped_range().ok()?;
+            let mapped = slice
+                .get_mapped_range()
+                .map_err(|error| RenderError::Gpu(error.to_string()))?;
             let rgba = [mapped[0], mapped[1], mapped[2], mapped[3]];
             PickInstanceRaw::decode(rgba)
         };
         target.staging.unmap();
-        id
+        Ok(id)
     }
 }

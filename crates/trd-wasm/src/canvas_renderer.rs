@@ -25,7 +25,7 @@ pub struct CanvasRenderer {
     /// Built lazily from the stream's leading mesh table, so `None` until the
     /// first frame arrives.
     renderer: Option<Renderer>,
-    /// Draw mode + overlay toggles; [`Scene::from_draws`] turns it into a scene.
+    /// Wire draw mode + overlay toggles, resolved by [`Scene::try_from_frame`].
     options: RenderOptions,
     /// Draw the uploaded background texture beneath the scene as the scene's
     /// frame plane. A no-op until a background is uploaded.
@@ -260,7 +260,7 @@ impl CanvasRenderer {
         exposure: f32,
         ambient: f32,
         tonemap: &str,
-    ) {
+    ) -> Result<(), JsValue> {
         let material = DisneyMaterial {
             metallic,
             roughness,
@@ -284,12 +284,13 @@ impl CanvasRenderer {
         };
         let pbr = PbrState::new(material, lighting, ibl, tone_mapping);
         if let Some(renderer) = self.renderer.as_mut() {
-            pbr.apply(renderer);
+            pbr.apply(renderer).map_err(crate::js_error)?;
         }
         self.pbr = Some(pbr);
         // The sky follows the same output transform as the objects in front of
         // it, so re-derive it whenever the tone mapping changes (#235 R2).
         self.refresh_env_background();
+        Ok(())
     }
 
     /// Draws the bound HDR probe as the background sky. `blur` runs `0.0` (sharp)
@@ -421,16 +422,20 @@ impl CanvasRenderer {
         let params = frame.params;
         let has_inline_frame = self.upload_inline_frame(frame.frame_id)?;
         let has_external_frame = std::mem::take(&mut self.external_frame_ready);
-        let mesh_count = self.ensure_renderer()?.mesh_count();
+        self.ensure_renderer()?;
         // Draw-list resolution + mesh-id validation are the protocol's rules, not
         // this harness's, so they come from the shared assembly every front-end
         // uses — same scene, same error text, as the CLI.
         let scene = Scene::try_from_frame(
             frame,
-            mesh_count,
+            self.renderer
+                .as_ref()
+                .expect("renderer just built")
+                .initial_mesh_ids(),
             &self.options,
             (has_inline_frame || (self.composite_frame && has_external_frame))
                 .then_some(FrameFit::Stretch),
+            None,
         )
         .map_err(|error| js_error(error.to_string()))?
         // The staged light rig belongs to the frame, not to the harness (#182).
@@ -562,13 +567,15 @@ impl CanvasRenderer {
                 self.renderer
                     .as_mut()
                     .expect("renderer just built")
-                    .set_texture(texture);
+                    .set_texture(texture)
+                    .map_err(crate::js_error)?;
             }
 
             // Apply the Disney PBR material + HDR environment probe staged by the
             // JS shell before the first frame (RenderMode::Shaded draws only).
             if let Some(pbr) = &self.pbr {
-                pbr.apply(self.renderer.as_mut().expect("renderer just built"));
+                pbr.apply(self.renderer.as_mut().expect("renderer just built"))
+                    .map_err(crate::js_error)?;
             }
             if let Some(env) = self.env_map.clone() {
                 self.renderer

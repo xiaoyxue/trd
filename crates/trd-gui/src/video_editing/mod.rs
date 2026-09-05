@@ -461,7 +461,7 @@ pub struct VideoEditingShared {
     renderer_generation: Cell<u64>,
     renderer: RefCell<Option<crate::video_editing_renderer::VideoPlacementRenderer>>,
     renderer_diagnostics: RefCell<Option<crate::video_editing_renderer::VideoRendererDiagnostics>>,
-    asset_defaults: RefCell<Option<(CatalogAsset, trd_core::RenderMode, trd_core::DisneyMaterial)>>,
+    asset_defaults: RefCell<Option<(CatalogAsset, crate::scene::SceneObject)>>,
     error: RefCell<Option<(ErrorScope, String)>>,
 }
 
@@ -795,8 +795,14 @@ impl VideoEditingShared {
         asset: CatalogAsset,
         renderer: crate::video_editing_renderer::VideoPlacementRenderer,
     ) {
-        let (mode, material) = renderer.defaults();
-        self.asset_defaults.replace(Some((asset, mode, material)));
+        let Some(object) = renderer.defaults() else {
+            self.set_error(
+                ErrorScope::Catalog,
+                "catalog renderer has no registered mesh",
+            );
+            return;
+        };
+        self.asset_defaults.replace(Some((asset, object)));
         self.set_renderer(renderer);
     }
 
@@ -976,7 +982,7 @@ impl VideoEditingApp {
         self.selected_asset = None;
         self.last_pick_result = None;
         self.controller.state.selected = None;
-        self.controller.state.objects[0] = crate::scene::ObjectTransform::default();
+        self.controller.state.objects.clear();
         self.shared.request_overlay();
     }
 
@@ -1229,12 +1235,18 @@ impl VideoEditingApp {
     }
 
     fn consume_asset_defaults(&mut self) {
-        let Some((asset, mode, material)) = self.shared.asset_defaults.borrow_mut().take() else {
+        let Some((asset, mut object)) = self.shared.asset_defaults.borrow_mut().take() else {
             return;
         };
         if self.selected_asset == Some(asset) {
-            self.controller.state.modes[0] = mode;
-            self.controller.state.materials[0] = material;
+            if let Some(previous) = self.controller.state.objects.first() {
+                object.transform = previous.transform;
+                object.appearance.ibl = previous.appearance.ibl;
+                object.appearance.tone_mapping = previous.appearance.tone_mapping;
+                object.appearance.debug_view = previous.appearance.debug_view;
+            }
+            self.controller.state.objects = vec![object];
+            self.controller.state.selected = Some(0);
             self.controller.state.environment_available = true;
             self.controller.state.lighting = match asset {
                 CatalogAsset::Dragon => trd_core::Lighting {
@@ -1557,7 +1569,7 @@ impl VideoEditingApp {
         };
         let quad_basis = trd_placement::placement_model(frame, placement).ok()?;
         let object = self.controller.state.objects.first()?;
-        let object_model = object.model_matrix();
+        let object_model = object.transform.model_matrix();
         Some(quad_basis * object_model)
     }
 
@@ -2492,7 +2504,7 @@ pub(super) mod tests {
         let mut app = VideoEditingApp::new(document(), shared);
         let mut rendered = test_rendered_frame_diagnostics();
         rendered.selected_asset = Some(CatalogAsset::Dragon);
-        rendered.scene.materials[0].metallic = 0.25;
+        rendered.scene.objects[0].appearance.material.metallic = 0.25;
         rendered.scene.lighting = trd_core::Lighting {
             ambient: 0.0,
             scale: 0.0,
@@ -2521,7 +2533,8 @@ pub(super) mod tests {
         app.displayed_frame_index = 0;
         app.last_rendered_frame_index = Some(0);
         app.displayed_diagnostics = Some(rendered);
-        app.controller.state.materials[0].metallic = 0.9;
+        app.controller.state = crate::scene::test_scene(1);
+        app.controller.state.objects[0].appearance.material.metallic = 0.9;
 
         let facts = app.displayed_facts();
         let imported = facts
@@ -2531,7 +2544,7 @@ pub(super) mod tests {
             .map(|asset| &asset.imported_material)
             .unwrap();
         assert_eq!(facts.frame_index, Some(0));
-        assert_eq!(facts.scene.materials[0].metallic, 0.25);
+        assert_eq!(facts.scene.objects[0].appearance.material.metallic, 0.25);
         assert_eq!(imported.metallic, 1.0);
         assert!(imported.auxiliary.textures.metallic_roughness);
         assert!(imported.auxiliary.textures.normal);
@@ -2582,7 +2595,7 @@ pub(super) mod tests {
         RenderedFrameDiagnostics {
             media_time_seconds: 0.25,
             duration_seconds: 272.0 / TIMESCALE,
-            scene: crate::scene::SceneState::default(),
+            scene: crate::scene::test_scene(1),
             selected_asset: None,
             selected_quad: false,
             move_direction: crate::interaction::MoveDirection::Reference1,

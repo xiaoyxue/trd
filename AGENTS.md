@@ -117,6 +117,7 @@ have run.
 | a manifest change that *builds* differently — a dependency, feature, profile, lint or workspace-member edit in `Cargo.toml`/`Cargo.lock`, `web/**/package.json` deps or `bun.lock` | **L3** — it changes what every binary compiles to, so the blast radius is the whole tree |
 | Rust/TS that changes behaviour but cannot reach pixels, a window or media — `crates/trd-placement`, `protocol/` decode, CLI arg parsing, `math/` helpers | **L2** |
 | `crates/trd-core/src/render/**`, `src/shader/*.wgsl`, PBR/tone-map, `math/` transforms feeding the GPU `Uniform`, or the golden fixtures | **L3** |
+| Mesh registration/geometry or render API plumbing — `crates/trd-core/src/mesh/**`, `crates/trd-core/src/stream_filter/**`, API re-exports in `crates/trd-core/src/lib.rs`, or GPU-facing `crates/trd-core/examples/**` | **L3** |
 | a delivery surface or shell — `native/**`, `crates/trd-wasm/**`, `crates/trd-gui/**`, `web/**` | **L3** |
 | `web/gui-video-editing/src/media/**`, or anything else that demuxes, decodes or seeks | **L3, and §4.7 is required** |
 | `scripts/golden_fixtures.py`, `scripts/{jsonl,obj,texture}_to_arrow.py`, `scripts/fiba_video_editing_bundle.py` — they regenerate goldens or stamp a version | **L3** |

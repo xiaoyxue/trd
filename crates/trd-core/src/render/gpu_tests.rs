@@ -7,6 +7,7 @@ use super::{
     Scene,
 };
 use crate::math::{Matrix4, Point3, Vector3};
+use crate::{MeshId, MeshResourceError};
 use glam::{Mat4, Vec3};
 
 /// Test convenience constructor: a [`Renderer`] over a single mesh with an
@@ -75,6 +76,14 @@ fn single(format: wgpu::TextureFormat, mesh: &Mesh) -> Renderer {
         &[Matrix4::IDENTITY],
     )
     .expect("one mesh with one base model is a valid mesh set")
+}
+
+fn initial_mesh_id(renderer: &Renderer, row: u32) -> MeshId {
+    renderer
+        .initial_mesh_ids()
+        .get(row as usize)
+        .copied()
+        .unwrap_or_else(|| panic!("renderer has no initial mesh row {row}"))
 }
 
 fn render_with_readback(
@@ -256,7 +265,7 @@ fn draw_then_read_pixels_matches_render_layers() {
 
     let camera = camera_of(FrameParams::IDENTITY, width, height);
     let scene: Scene = [DrawableObject::mesh(
-        0,
+        initial_mesh_id(&renderer, 0),
         Matrix4::IDENTITY,
         RenderMode::Filled,
     )]
@@ -266,7 +275,7 @@ fn draw_then_read_pixels_matches_render_layers() {
 
     let fused = pollster::block_on(renderer.render_layers(&layers, &target)).expect("fused render");
 
-    renderer.draw_layers(&layers, &target);
+    renderer.draw_layers(&layers, &target).expect("split draw");
     let split = pollster::block_on(renderer.read_pixels(&target)).expect("split readback");
 
     assert_eq!(
@@ -306,7 +315,7 @@ fn the_target_view_samples_the_bytes_read_pixels_returns() {
         .expect("destination target");
 
     let scene: Scene = [DrawableObject::mesh(
-        0,
+        initial_mesh_id(&renderer, 0),
         Matrix4::IDENTITY,
         RenderMode::Filled,
     )]
@@ -351,19 +360,19 @@ fn the_target_view_samples_the_bytes_read_pixels_returns() {
 fn an_adopted_context_renders_like_a_requested_one() {
     let (width, height) = (48, 32);
     let meshes = [Mesh::hello_triangle()];
-    let scene: Scene = [DrawableObject::mesh(
-        0,
+
+    let requested = test_gpu();
+    let (mut owned, owned_target) = Renderer::with_gpu(requested.clone(), width, height, &meshes)
+        .expect("the harness accepts an existing device");
+    let owned_scene: Scene = [DrawableObject::mesh(
+        initial_mesh_id(&owned, 0),
         Matrix4::IDENTITY,
         RenderMode::Filled,
     )]
     .into_iter()
     .collect();
-
-    let requested = test_gpu();
-    let (mut owned, owned_target) = Renderer::with_gpu(requested.clone(), width, height, &meshes)
-        .expect("the harness accepts an existing device");
     let expected =
-        pollster::block_on(owned.render_params(FrameParams::IDENTITY, &scene, &owned_target))
+        pollster::block_on(owned.render_params(FrameParams::IDENTITY, &owned_scene, &owned_target))
             .expect("renders");
 
     // The trio a front-end hands over — `eframe`'s `wgpu_render_state` exposes
@@ -377,9 +386,19 @@ fn an_adopted_context_renders_like_a_requested_one() {
 
     let (mut shared, shared_target) = Renderer::with_gpu(adopted, width, height, &meshes)
         .expect("an adopted context builds a renderer");
-    let actual =
-        pollster::block_on(shared.render_params(FrameParams::IDENTITY, &scene, &shared_target))
-            .expect("renders");
+    let shared_scene: Scene = [DrawableObject::mesh(
+        initial_mesh_id(&shared, 0),
+        Matrix4::IDENTITY,
+        RenderMode::Filled,
+    )]
+    .into_iter()
+    .collect();
+    let actual = pollster::block_on(shared.render_params(
+        FrameParams::IDENTITY,
+        &shared_scene,
+        &shared_target,
+    ))
+    .expect("renders");
 
     assert_eq!(
         actual, expected,
@@ -409,7 +428,7 @@ fn render_layers_composites_and_matches_render_for_one_layer() {
 
     let at = |x: f32| {
         DrawableObject::mesh(
-            0,
+            initial_mesh_id(&renderer, 0),
             Matrix4::from_translation(Vector3::new(x, 0.0, 0.0)),
             RenderMode::Filled,
         )
@@ -522,14 +541,13 @@ fn the_quad_fill_washes_the_target_translucent_green() {
 #[test]
 #[ignore = "requires a GPU adapter"]
 fn render_params_after_resizing_a_caller_owned_target() {
+    let mut renderer = single(TEXTURE_TARGET_FORMAT, &Mesh::hello_triangle());
     let scene: Scene = vec![DrawableObject::mesh(
-        0,
+        initial_mesh_id(&renderer, 0),
         Matrix4::IDENTITY,
         RenderMode::Filled,
     )]
     .into();
-
-    let mut renderer = single(TEXTURE_TARGET_FORMAT, &Mesh::hello_triangle());
     let mut target = renderer
         .create_texture_target(40, 24)
         .expect("target builds");
@@ -581,25 +599,34 @@ fn with_gpu_renders_identically_to_with_meshes() {
 
     let (width, height) = (64, 64);
     let meshes = [Mesh::hello_triangle()];
-    let scene: Scene = vec![DrawableObject::mesh(
-        0,
-        Matrix4::IDENTITY,
-        RenderMode::Filled,
-    )]
-    .into();
 
     let (mut owned, owned_target) =
         pollster::block_on(Renderer::with_meshes(width, height, &meshes))
             .expect("the harness requests its own device");
+    let owned_scene: Scene = vec![DrawableObject::mesh(
+        initial_mesh_id(&owned, 0),
+        Matrix4::IDENTITY,
+        RenderMode::Filled,
+    )]
+    .into();
     let expected =
-        pollster::block_on(owned.render_params(FrameParams::IDENTITY, &scene, &owned_target))
+        pollster::block_on(owned.render_params(FrameParams::IDENTITY, &owned_scene, &owned_target))
             .expect("renders");
 
     let (mut borrowed, borrowed_target) = Renderer::with_gpu(test_gpu(), width, height, &meshes)
         .expect("the harness accepts an existing device");
-    let actual =
-        pollster::block_on(borrowed.render_params(FrameParams::IDENTITY, &scene, &borrowed_target))
-            .expect("renders");
+    let borrowed_scene: Scene = vec![DrawableObject::mesh(
+        initial_mesh_id(&borrowed, 0),
+        Matrix4::IDENTITY,
+        RenderMode::Filled,
+    )]
+    .into();
+    let actual = pollster::block_on(borrowed.render_params(
+        FrameParams::IDENTITY,
+        &borrowed_scene,
+        &borrowed_target,
+    ))
+    .expect("renders");
 
     assert_eq!(borrowed.mesh_count(), 1);
     assert_eq!(actual.len(), (width * height * 4) as usize);
@@ -630,7 +657,7 @@ fn a_material_change_between_frames_still_reaches_the_slots() {
     let (width, height) = (48, 48);
     let mut renderer = single(format, &Mesh::hello_triangle());
     let scene: Scene = vec![DrawableObject::mesh(
-        0,
+        initial_mesh_id(&renderer, 0),
         Matrix4::IDENTITY,
         RenderMode::Shaded,
     )]
@@ -638,39 +665,45 @@ fn a_material_change_between_frames_still_reaches_the_slots() {
 
     let frame = |renderer: &mut Renderer| {
         render_with_readback(&gpu, format, width, height, |encoder, view| {
-            renderer.encode(
-                encoder,
-                view,
-                camera_of(FrameParams::IDENTITY, width, height),
-                &scene,
-            );
+            renderer
+                .encode(
+                    encoder,
+                    view,
+                    camera_of(FrameParams::IDENTITY, width, height),
+                    &scene,
+                )
+                .expect("the scene is resident");
         })
     };
 
-    renderer.set_disney_material(
-        crate::MeshTarget::All,
-        crate::DisneyMaterial {
-            base_color: [0.9, 0.05, 0.05],
-            metallic: 0.0,
-            roughness: 0.5,
-            ..Default::default()
-        },
-    );
+    renderer
+        .set_disney_material(
+            crate::MeshTarget::All,
+            crate::DisneyMaterial {
+                base_color: [0.9, 0.05, 0.05],
+                metallic: 0.0,
+                roughness: 0.5,
+                ..Default::default()
+            },
+        )
+        .expect("all meshes are resident");
     let red = frame(&mut renderer);
     // A second frame with nothing changed: the slots are skipped, and the image
     // must be identical — the skip is invisible.
     let red_again = frame(&mut renderer);
     assert_eq!(red, red_again, "an unchanged scene renders identically");
 
-    renderer.set_disney_material(
-        crate::MeshTarget::All,
-        crate::DisneyMaterial {
-            base_color: [0.05, 0.05, 0.9],
-            metallic: 0.0,
-            roughness: 0.5,
-            ..Default::default()
-        },
-    );
+    renderer
+        .set_disney_material(
+            crate::MeshTarget::All,
+            crate::DisneyMaterial {
+                base_color: [0.05, 0.05, 0.9],
+                metallic: 0.0,
+                roughness: 0.5,
+                ..Default::default()
+            },
+        )
+        .expect("all meshes are resident");
     let blue = frame(&mut renderer);
     assert_ne!(
         red, blue,
@@ -689,14 +722,21 @@ fn first_frame_renders_with_no_setters_called() {
     // Every draw kind that reads a lazily-bound resource: Textured samples the
     // albedo, Pbr samples albedo + material maps + the environment probe.
     for mode in [RenderMode::Textured, RenderMode::Shaded] {
-        let scene: Scene = vec![DrawableObject::mesh(0, Matrix4::IDENTITY, mode)].into();
+        let scene: Scene = vec![DrawableObject::mesh(
+            initial_mesh_id(&renderer, 0),
+            Matrix4::IDENTITY,
+            mode,
+        )]
+        .into();
         let pixels = render_with_readback(&gpu, format, width, height, |encoder, view| {
-            renderer.encode(
-                encoder,
-                view,
-                camera_of(FrameParams::IDENTITY, width, height),
-                &scene,
-            );
+            renderer
+                .encode(
+                    encoder,
+                    view,
+                    camera_of(FrameParams::IDENTITY, width, height),
+                    &scene,
+                )
+                .expect("the scene is resident");
         });
         assert_eq!(pixels.len(), (width * height * 4) as usize);
         assert!(
@@ -715,10 +755,11 @@ fn mesh_renderer_draws_multiple_instances() {
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (64, 64);
     let mut mesh = single(format, &Mesh::hello_triangle());
+    let mesh_id = initial_mesh_id(&mesh, 0);
 
     // One centered instance vs. two instances translated to opposite sides.
     let single: Scene = [DrawableObject::mesh(
-        0,
+        mesh_id,
         Matrix4::IDENTITY,
         RenderMode::Filled,
     )]
@@ -730,17 +771,18 @@ fn mesh_renderer_draws_multiple_instances() {
             v,
             camera_of(FrameParams::IDENTITY, width, height),
             &single,
-        );
+        )
+        .expect("the scene is resident");
     });
 
     let two: Scene = [
         DrawableObject::mesh(
-            0,
+            mesh_id,
             Matrix4::from_translation(Vector3::new(-0.4, 0.0, 0.0)),
             RenderMode::Filled,
         ),
         DrawableObject::mesh(
-            0,
+            mesh_id,
             Matrix4::from_translation(Vector3::new(0.4, 0.0, 0.0)),
             RenderMode::Filled,
         ),
@@ -748,7 +790,8 @@ fn mesh_renderer_draws_multiple_instances() {
     .into_iter()
     .collect();
     let two_px = render_with_readback(&gpu, format, width, height, |e, v| {
-        mesh.encode(e, v, camera_of(FrameParams::IDENTITY, width, height), &two);
+        mesh.encode(e, v, camera_of(FrameParams::IDENTITY, width, height), &two)
+            .expect("the scene is resident");
     });
 
     assert_ne!(
@@ -821,14 +864,16 @@ fn mesh_renderer_depth_buffer_occludes_far_behind_near() {
         &[Matrix4::IDENTITY, Matrix4::IDENTITY],
     )
     .expect("two meshes with two base models is a valid mesh set");
+    let red_mesh = initial_mesh_id(&mesh, 0);
+    let green_mesh = initial_mesh_id(&mesh, 1);
     let scene: Scene = [
         DrawableObject::mesh(
-            0,
+            red_mesh,
             Matrix4::from_translation(Vector3::new(0.0, 0.0, 0.25)),
             RenderMode::Filled,
         ),
         DrawableObject::mesh(
-            1,
+            green_mesh,
             Matrix4::from_translation(Vector3::new(0.0, 0.0, 0.75)),
             RenderMode::Filled,
         ),
@@ -841,7 +886,8 @@ fn mesh_renderer_depth_buffer_occludes_far_behind_near() {
             v,
             camera_of(FrameParams::IDENTITY, width, height),
             &scene,
-        );
+        )
+        .expect("the scene is resident");
     });
     let c = ((height / 2 * width + width / 2) * 4) as usize;
     let (r, g, b) = (px[c], px[c + 1], px[c + 2]);
@@ -859,11 +905,12 @@ fn mesh_renderer_wireframe_lights_edges_only() {
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (64, 64);
     let mut mesh = single(format, &Mesh::hello_triangle());
+    let mesh_id = initial_mesh_id(&mesh, 0);
     let model = Matrix4::IDENTITY;
-    let filled_scene: Scene = [DrawableObject::mesh(0, model, RenderMode::Filled)]
+    let filled_scene: Scene = [DrawableObject::mesh(mesh_id, model, RenderMode::Filled)]
         .into_iter()
         .collect();
-    let wire_scene: Scene = [DrawableObject::mesh(0, model, RenderMode::Wireframe)]
+    let wire_scene: Scene = [DrawableObject::mesh(mesh_id, model, RenderMode::Wireframe)]
         .into_iter()
         .collect();
 
@@ -873,7 +920,8 @@ fn mesh_renderer_wireframe_lights_edges_only() {
             v,
             camera_of(FrameParams::IDENTITY, width, height),
             &filled_scene,
-        );
+        )
+        .expect("the scene is resident");
     });
 
     let wire = render_with_readback(&gpu, format, width, height, |e, v| {
@@ -882,7 +930,8 @@ fn mesh_renderer_wireframe_lights_edges_only() {
             v,
             camera_of(FrameParams::IDENTITY, width, height),
             &wire_scene,
-        );
+        )
+        .expect("the scene is resident");
     });
 
     assert_ne!(filled, wire, "wireframe must differ from filled");
@@ -976,9 +1025,10 @@ fn mesh_renderer_textured_samples_bound_texture() {
     .unwrap();
 
     let mut mesh = single(format, &quad);
-    mesh.set_texture(&checker);
+    mesh.set_texture(&checker)
+        .expect("the initial mesh is resident");
     let scene: Scene = [DrawableObject::mesh(
-        0,
+        initial_mesh_id(&mesh, 0),
         Matrix4::IDENTITY,
         RenderMode::Textured,
     )]
@@ -990,7 +1040,8 @@ fn mesh_renderer_textured_samples_bound_texture() {
             v,
             camera_of(FrameParams::IDENTITY, width, height),
             &scene,
-        );
+        )
+        .expect("the scene is resident");
     });
 
     // Read a pixel at the center of each screen quadrant (well away from the
@@ -1031,13 +1082,14 @@ fn mesh_renderer_aabb_overlay_draws_green_box() {
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (64, 64);
     let mut mesh = single(format, &Mesh::hello_triangle());
+    let mesh_id = initial_mesh_id(&mesh, 0);
     let model = Matrix4::IDENTITY;
-    let plain_scene: Scene = [DrawableObject::mesh(0, model, RenderMode::Filled)]
+    let plain_scene: Scene = [DrawableObject::mesh(mesh_id, model, RenderMode::Filled)]
         .into_iter()
         .collect();
     let box_scene: Scene = [
-        DrawableObject::mesh(0, model, RenderMode::Filled),
-        DrawableObject::aabb_box(0, model),
+        DrawableObject::mesh(mesh_id, model, RenderMode::Filled),
+        DrawableObject::aabb_box(mesh_id, model),
     ]
     .into_iter()
     .collect();
@@ -1048,7 +1100,8 @@ fn mesh_renderer_aabb_overlay_draws_green_box() {
             v,
             camera_of(FrameParams::IDENTITY, width, height),
             &plain_scene,
-        );
+        )
+        .expect("the scene is resident");
     });
 
     let with_box = render_with_readback(&gpu, format, width, height, |e, v| {
@@ -1057,7 +1110,8 @@ fn mesh_renderer_aabb_overlay_draws_green_box() {
             v,
             camera_of(FrameParams::IDENTITY, width, height),
             &box_scene,
-        );
+        )
+        .expect("the scene is resident");
     });
 
     assert_ne!(plain, with_box, "AABB overlay must change the image");
@@ -1090,12 +1144,13 @@ fn mesh_renderer_axes_overlay_draws_rgb_gizmo() {
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (64, 64);
     let mut mesh = single(format, &Mesh::hello_triangle());
+    let mesh_id = initial_mesh_id(&mesh, 0);
     let model = Matrix4::IDENTITY;
-    let plain_scene: Scene = [DrawableObject::mesh(0, model, RenderMode::Filled)]
+    let plain_scene: Scene = [DrawableObject::mesh(mesh_id, model, RenderMode::Filled)]
         .into_iter()
         .collect();
     let axes_scene: Scene = [
-        DrawableObject::mesh(0, model, RenderMode::Filled),
+        DrawableObject::mesh(mesh_id, model, RenderMode::Filled),
         DrawableObject::coordinate_axes(Matrix4::IDENTITY),
     ]
     .into_iter()
@@ -1107,7 +1162,8 @@ fn mesh_renderer_axes_overlay_draws_rgb_gizmo() {
             v,
             camera_of(FrameParams::IDENTITY, width, height),
             &plain_scene,
-        );
+        )
+        .expect("the scene is resident");
     });
 
     let with_axes = render_with_readback(&gpu, format, width, height, |e, v| {
@@ -1116,7 +1172,8 @@ fn mesh_renderer_axes_overlay_draws_rgb_gizmo() {
             v,
             camera_of(FrameParams::IDENTITY, width, height),
             &axes_scene,
-        );
+        )
+        .expect("the scene is resident");
     });
 
     assert_ne!(plain, with_axes, "axes overlay must change the image");
@@ -1166,12 +1223,14 @@ fn gizmo_lines_and_arrowheads_stay_smooth_without_msaa() {
         .collect();
 
     let pixels = render_with_readback(&gpu, format, width, height, |e, v| {
-        renderer.encode(
-            e,
-            v,
-            camera_of(FrameParams::IDENTITY, width, height),
-            &scene,
-        );
+        renderer
+            .encode(
+                e,
+                v,
+                camera_of(FrameParams::IDENTITY, width, height),
+                &scene,
+            )
+            .expect("the scene has no mesh resources");
     });
     let red = |x: u32, y: u32| {
         let i = ((y * width + x) * 4) as usize;
@@ -1217,15 +1276,16 @@ fn scene_composes_all_drawable_kinds_together() {
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (64, 64);
     let mut mesh = single(format, &Mesh::hello_triangle());
+    let mesh_id = initial_mesh_id(&mesh, 0);
     let model = Matrix4::IDENTITY;
 
-    let filled_only: Scene = [DrawableObject::mesh(0, model, RenderMode::Filled)]
+    let filled_only: Scene = [DrawableObject::mesh(mesh_id, model, RenderMode::Filled)]
         .into_iter()
         .collect();
     let composed: Scene = [
-        DrawableObject::mesh(0, model, RenderMode::Filled),
-        DrawableObject::mesh(0, model, RenderMode::Wireframe),
-        DrawableObject::aabb_box(0, model),
+        DrawableObject::mesh(mesh_id, model, RenderMode::Filled),
+        DrawableObject::mesh(mesh_id, model, RenderMode::Wireframe),
+        DrawableObject::aabb_box(mesh_id, model),
         DrawableObject::coordinate_axes(Matrix4::IDENTITY),
     ]
     .into_iter()
@@ -1237,7 +1297,8 @@ fn scene_composes_all_drawable_kinds_together() {
             v,
             camera_of(FrameParams::IDENTITY, width, height),
             &filled_only,
-        );
+        )
+        .expect("the scene is resident");
     });
     let composed_px = render_with_readback(&gpu, format, width, height, |e, v| {
         mesh.encode(
@@ -1245,7 +1306,8 @@ fn scene_composes_all_drawable_kinds_together() {
             v,
             camera_of(FrameParams::IDENTITY, width, height),
             &composed,
-        );
+        )
+        .expect("the scene is resident");
     });
 
     assert_ne!(
@@ -1326,12 +1388,14 @@ fn environment_background_draws_bound_probe() {
         frame: None,
     });
     let pixels = render_with_readback(&gpu, format, width, height, |encoder, view| {
-        renderer.encode(
-            encoder,
-            view,
-            camera_of(FrameParams::IDENTITY, width, height),
-            &scene,
-        );
+        renderer
+            .encode(
+                encoder,
+                view,
+                camera_of(FrameParams::IDENTITY, width, height),
+                &scene,
+            )
+            .expect("the scene has no mesh resources");
     });
     assert!(
         pixels.chunks_exact(4).any(|pixel| pixel[0] > 128),
@@ -1351,9 +1415,10 @@ fn mesh_renderer_renders_loaded_quad_filled_with_correct_coverage() {
     let (width, height) = (64, 64);
     let quad = Mesh::from_obj(QUAD_OBJ).expect("quad OBJ parses");
     let mut mesh = single(format, &quad);
+    let mesh_id = initial_mesh_id(&mesh, 0);
 
     let scene: Scene = [DrawableObject::mesh(
-        0,
+        mesh_id,
         Matrix4::IDENTITY,
         RenderMode::Filled,
     )]
@@ -1365,7 +1430,8 @@ fn mesh_renderer_renders_loaded_quad_filled_with_correct_coverage() {
             v,
             camera_of(FrameParams::IDENTITY, width, height),
             &scene,
-        );
+        )
+        .expect("the scene is resident");
     });
 
     let (w, h) = (width as usize, height as usize);
@@ -1413,9 +1479,10 @@ fn cg_and_cv_cameras_render_matching_output() {
     let viewport = Viewport { width, height };
     let quad = Mesh::from_obj(QUAD_OBJ).expect("quad OBJ parses");
     let mut mesh = single(format, &quad);
+    let mesh_id = initial_mesh_id(&mesh, 0);
 
     let scene: Scene = [DrawableObject::mesh(
-        0,
+        mesh_id,
         Matrix4::IDENTITY,
         RenderMode::Filled,
     )]
@@ -1451,10 +1518,12 @@ fn cg_and_cv_cameras_render_matching_output() {
     };
 
     let cg_px = render_with_readback(&gpu, format, width, height, |e, v| {
-        mesh.encode(e, v, cg.to_camera(viewport).unwrap(), &scene);
+        mesh.encode(e, v, cg.to_camera(viewport).unwrap(), &scene)
+            .expect("the scene is resident");
     });
     let cv_px = render_with_readback(&gpu, format, width, height, |e, v| {
-        mesh.encode(e, v, cv.to_camera(viewport).unwrap(), &scene);
+        mesh.encode(e, v, cv.to_camera(viewport).unwrap(), &scene)
+            .expect("the scene is resident");
     });
 
     // Both must actually show the quad (non-trivial coverage).
@@ -1506,6 +1575,7 @@ fn dolly_turntable_bird_eye_cg_cv_wireframe_stays_framed() {
     let viewport = Viewport { width, height };
     let cube = Mesh::from_obj(CUBE_OBJ).expect("cube OBJ parses");
     let mut mesh = single(format, &cube);
+    let mesh_id = initial_mesh_id(&mesh, 0);
 
     let fovy = crate::DEFAULT_FOV_Y; // 45°
                                      // Fixed bird's-eye view direction: 45° elevation, 35° azimuth (unit).
@@ -1555,7 +1625,7 @@ fn dolly_turntable_bird_eye_cg_cv_wireframe_stays_framed() {
 
         for &theta in &angles {
             let scene: Scene = [DrawableObject::mesh(
-                0,
+                mesh_id,
                 Matrix4::from_glam(Mat4::from_rotation_y(theta)),
                 RenderMode::Wireframe,
             )]
@@ -1576,10 +1646,12 @@ fn dolly_turntable_bird_eye_cg_cv_wireframe_stays_framed() {
             };
 
             let cg_px = render_with_readback(&gpu, format, width, height, |e, v| {
-                mesh.encode(e, v, cg.to_camera(viewport).unwrap(), &scene);
+                mesh.encode(e, v, cg.to_camera(viewport).unwrap(), &scene)
+                    .expect("the scene is resident");
             });
             let cv_px = render_with_readback(&gpu, format, width, height, |e, v| {
-                mesh.encode(e, v, cv.to_camera(viewport).unwrap(), &scene);
+                mesh.encode(e, v, cv.to_camera(viewport).unwrap(), &scene)
+                    .expect("the scene is resident");
             });
 
             let cg_lit = lit(&cg_px);
@@ -1672,6 +1744,7 @@ fn frame_plane_composites_background_under_scene() {
         shading: None,
     };
     let mut mesh = single(format, &quad);
+    let mesh_id = initial_mesh_id(&mesh, 0);
 
     // 2×2 background, row-major top-left origin: white, red / green, blue.
     assert!(!mesh.has_frame_texture());
@@ -1698,7 +1771,8 @@ fn frame_plane_composites_background_under_scene() {
             v,
             camera_of(FrameParams::IDENTITY, width, height),
             &plane_only,
-        );
+        )
+        .expect("the scene has no mesh resources");
     });
     let at = |px: &[u8], x: u32, y: u32| -> [u8; 3] {
         let i = ((y * width + x) * 4) as usize;
@@ -1731,7 +1805,7 @@ fn frame_plane_composites_background_under_scene() {
     // its one object): the whole frame is green, proving the mesh composites over
     // the plane.
     let composited = Scene::from(vec![DrawableObject::mesh(
-        0,
+        mesh_id,
         Matrix4::IDENTITY,
         RenderMode::Filled,
     )])
@@ -1745,10 +1819,11 @@ fn frame_plane_composites_background_under_scene() {
             v,
             camera_of(FrameParams::IDENTITY, width, height),
             &composited,
-        );
+        )
+        .expect("the scene is resident");
     });
     let foreground: Scene = [DrawableObject::mesh(
-        0,
+        mesh_id,
         Matrix4::IDENTITY,
         RenderMode::Filled,
     )]
@@ -1760,13 +1835,15 @@ fn frame_plane_composites_background_under_scene() {
             v,
             camera_of(FrameParams::IDENTITY, width, height),
             &plane_only,
-        );
+        )
+        .expect("the scene has no mesh resources");
         mesh.encode_overlay(
             e,
             v,
             camera_of(FrameParams::IDENTITY, width, height),
             &foreground,
-        );
+        )
+        .expect("the foreground is resident");
     });
     assert_eq!(
         two_pass, over,
@@ -1847,14 +1924,15 @@ fn picking_resolves_object_ids_and_background() {
             Mat4::from_translation(Vec3::new(x, 0.0, 0.0)) * Mat4::from_scale(Vec3::splat(0.35)),
         )
     };
+    let mesh_id = initial_mesh_id(&renderer, 0);
     let draws = [
         Draw {
-            mesh_id: 0,
+            mesh_id,
             model: model(-0.5),
             selection: DrawSelection::INHERIT,
         },
         Draw {
-            mesh_id: 0,
+            mesh_id,
             model: model(0.5),
             selection: DrawSelection::INHERIT,
         },
@@ -1868,6 +1946,7 @@ fn picking_resolves_object_ids_and_background() {
             y,
             Viewport { width, height },
         ))
+        .expect("the draws are resident")
     };
 
     // NDC x=-0.5 → pixel ≈ 16; x=+0.5 → ≈ 48; center gap at 32; corner at (2,2).
@@ -1877,6 +1956,31 @@ fn picking_resolves_object_ids_and_background() {
     assert_eq!(pick(2, 2), None, "corner → background");
     // Out-of-bounds coordinates are safely rejected.
     assert_eq!(pick(width, 0), None, "x == width is out of bounds");
+
+    let shadow_then_mesh = [
+        Draw {
+            mesh_id,
+            model: Matrix4::IDENTITY,
+            selection: DrawSelection::Shadow,
+        },
+        Draw {
+            mesh_id,
+            model: model(-0.5),
+            selection: DrawSelection::INHERIT,
+        },
+    ];
+    assert_eq!(
+        pollster::block_on(renderer.pick(
+            camera_of(FrameParams::IDENTITY, width, height),
+            &shadow_then_mesh,
+            16,
+            32,
+            Viewport { width, height },
+        ))
+        .expect("the mesh draw is resident"),
+        Some(1),
+        "skipping a shadow must preserve the original draw-list index"
+    );
 }
 
 /// The pick target tracks the viewport: after a resize both of its attachments
@@ -1895,14 +1999,15 @@ fn picking_tracks_a_resized_viewport() {
             Mat4::from_translation(Vec3::new(x, 0.0, 0.0)) * Mat4::from_scale(Vec3::splat(0.35)),
         )
     };
+    let mesh_id = initial_mesh_id(&renderer, 0);
     let draws = [
         Draw {
-            mesh_id: 0,
+            mesh_id,
             model: model(-0.5),
             selection: DrawSelection::INHERIT,
         },
         Draw {
-            mesh_id: 0,
+            mesh_id,
             model: model(0.5),
             selection: DrawSelection::INHERIT,
         },
@@ -1921,6 +2026,7 @@ fn picking_tracks_a_resized_viewport() {
                 height: size,
             },
         ))
+        .expect("the draws are resident")
     };
 
     assert_eq!(
@@ -1942,8 +2048,8 @@ fn picking_tracks_a_resized_viewport() {
     assert_eq!(renderer.pick_target_size(), Some((64, 64)));
 }
 
-/// `MeshTarget` decides *which* meshes an appearance edit reaches, and the
-/// out-of-range case must be a no-op rather than a silent write elsewhere.
+/// `MeshTarget` decides *which* meshes an appearance edit reaches, and a
+/// foreign identity must fail without writing another mesh.
 #[test]
 #[ignore = "requires a GPU adapter"]
 fn mesh_target_selects_which_meshes_an_appearance_edit_reaches() {
@@ -1955,6 +2061,8 @@ fn mesh_target_selects_which_meshes_an_appearance_edit_reaches() {
         &[Matrix4::IDENTITY; 2],
     )
     .expect("two meshes with two base models is a valid mesh set");
+    let first = initial_mesh_id(&renderer, 0);
+    let second = initial_mesh_id(&renderer, 1);
 
     let red = crate::MeshAppearance {
         material: crate::DisneyMaterial {
@@ -1963,15 +2071,17 @@ fn mesh_target_selects_which_meshes_an_appearance_edit_reaches() {
         },
         ..Default::default()
     };
-    renderer.set_appearance(crate::MeshTarget::All, red.clone());
+    renderer
+        .set_appearance(crate::MeshTarget::All, red.clone())
+        .expect("all meshes are resident");
     assert_eq!(
-        renderer.mesh_appearance(0),
-        Some(&red),
+        renderer.mesh_appearance(first),
+        Ok(&red),
         "All reaches mesh 0"
     );
     assert_eq!(
-        renderer.mesh_appearance(1),
-        Some(&red),
+        renderer.mesh_appearance(second),
+        Ok(&red),
         "All reaches mesh 1"
     );
 
@@ -1979,35 +2089,83 @@ fn mesh_target_selects_which_meshes_an_appearance_edit_reaches() {
         base_color: [0.0, 0.0, 1.0],
         ..Default::default()
     };
-    renderer.set_disney_material(crate::MeshTarget::One(1), blue.clone());
+    renderer
+        .set_disney_material(crate::MeshTarget::One(second), blue.clone())
+        .expect("mesh 1 is resident");
     assert_eq!(
-        renderer.mesh_appearance(0).map(|a| &a.material),
-        Some(&red.material),
+        renderer.mesh_appearance(first).map(|a| &a.material),
+        Ok(&red.material),
         "One(1) leaves mesh 0 alone"
     );
     assert_eq!(
-        renderer.mesh_appearance(1).map(|a| &a.material),
-        Some(&blue),
+        renderer.mesh_appearance(second).map(|a| &a.material),
+        Ok(&blue),
         "One(1) reaches mesh 1"
     );
 
-    // Out of range: nothing to write, and nothing written anywhere else.
-    renderer.set_disney_material(
-        crate::MeshTarget::One(9),
-        crate::DisneyMaterial {
-            base_color: [0.0, 1.0, 0.0],
-            ..Default::default()
-        },
+    let other = single(TEXTURE_TARGET_FORMAT, &Mesh::hello_triangle());
+    let foreign = initial_mesh_id(&other, 0);
+    let error = renderer
+        .set_disney_material(
+            crate::MeshTarget::One(foreign),
+            crate::DisneyMaterial {
+                base_color: [0.0, 1.0, 0.0],
+                ..Default::default()
+            },
+        )
+        .expect_err("a foreign identity is not resident");
+    assert_eq!(error, MeshResourceError::NotResident { mesh: foreign });
+    assert_eq!(
+        renderer.mesh_appearance(first).map(|a| &a.material),
+        Ok(&red.material)
     );
     assert_eq!(
-        renderer.mesh_appearance(0).map(|a| &a.material),
-        Some(&red.material)
+        renderer.mesh_appearance(second).map(|a| &a.material),
+        Ok(&blue)
     );
     assert_eq!(
-        renderer.mesh_appearance(1).map(|a| &a.material),
-        Some(&blue)
+        renderer.mesh_appearance(foreign),
+        Err(MeshResourceError::NotResident { mesh: foreign })
     );
-    assert!(renderer.mesh_appearance(9).is_none());
+}
+
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn initial_ids_are_non_owning_snapshots_and_each_renderer_upload_is_independent() {
+    let mesh = Mesh::hello_triangle();
+    let mut first = single(TEXTURE_TARGET_FORMAT, &mesh);
+    let second = single(TEXTURE_TARGET_FORMAT, &mesh);
+    let first_id = initial_mesh_id(&first, 0);
+    let second_id = initial_mesh_id(&second, 0);
+    assert_ne!(first_id, second_id);
+    assert_eq!(
+        first.mesh_appearance(second_id),
+        Err(MeshResourceError::NotResident { mesh: second_id })
+    );
+    first.remove_mesh(first_id).unwrap();
+    let replacement = first.add_mesh(&mesh).unwrap();
+    assert_ne!(first_id, replacement);
+    assert_eq!(first.initial_mesh_ids(), &[first_id]);
+    assert_eq!(
+        first.mesh_appearance(first_id),
+        Err(MeshResourceError::NotResident { mesh: first_id })
+    );
+    assert!(first.mesh_appearance(replacement).is_ok());
+    assert!(second.mesh_appearance(second_id).is_ok());
+
+    drop(mesh);
+    let camera = camera_of(FrameParams::IDENTITY, 32, 32);
+    let scene: Scene = [DrawableObject::mesh(
+        replacement,
+        Matrix4::IDENTITY,
+        RenderMode::Filled,
+    )]
+    .into_iter()
+    .collect();
+    let target = first.create_texture_target(32, 32).unwrap();
+    first
+        .draw_layers(&[SceneLayer::new(camera, &scene)], &target)
+        .unwrap();
 }
 
 /// A mesh added at runtime is drawable, and adding it leaves the meshes already
@@ -2025,6 +2183,7 @@ fn add_mesh_grows_the_pbr_slots_and_keeps_existing_appearance() {
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let (width, height) = (64, 64);
     let mut renderer = single(format, &Mesh::hello_triangle());
+    let initial = initial_mesh_id(&renderer, 0);
 
     // Mesh 0 gets a distinctive appearance *before* the add, so the assertion
     // afterwards is that reallocating the slot buffer did not lose it.
@@ -2035,35 +2194,41 @@ fn add_mesh_grows_the_pbr_slots_and_keeps_existing_appearance() {
         },
         ..Default::default()
     };
-    renderer.set_appearance(crate::MeshTarget::One(0), red.clone());
+    renderer
+        .set_appearance(crate::MeshTarget::One(initial), red.clone())
+        .expect("the initial mesh is resident");
     assert_eq!(renderer.mesh_count(), 1, "one mesh to start");
 
     let one: Scene = [DrawableObject::mesh(
-        0,
+        initial,
         Matrix4::from_translation(Vector3::new(-0.4, 0.0, 0.0)),
         RenderMode::Shaded,
     )]
     .into_iter()
     .collect();
     let before = render_with_readback(&gpu, format, width, height, |e, v| {
-        renderer.encode(e, v, camera_of(FrameParams::IDENTITY, width, height), &one);
+        renderer
+            .encode(e, v, camera_of(FrameParams::IDENTITY, width, height), &one)
+            .expect("the scene is resident");
     });
 
-    let added = renderer.add_mesh(&Mesh::hello_triangle());
-    assert_eq!(added, 1, "the new mesh id is the next index");
+    let added = renderer
+        .add_mesh(&Mesh::hello_triangle())
+        .expect("the mesh uploads");
+    assert_ne!(added, initial, "runtime uploads mint fresh identities");
     assert_eq!(
         renderer.mesh_count(),
         2,
         "and the store grew by exactly one"
     );
     assert_eq!(
-        renderer.mesh_appearance(0),
-        Some(&red),
+        renderer.mesh_appearance(initial),
+        Ok(&red),
         "the existing mesh keeps its appearance across the slot reallocation"
     );
     assert_eq!(
-        renderer.mesh_appearance(1),
-        Some(&crate::MeshAppearance::default()),
+        renderer.mesh_appearance(added),
+        Ok(&crate::MeshAppearance::default()),
         "and the new mesh starts from the default"
     );
 
@@ -2071,12 +2236,12 @@ fn add_mesh_grows_the_pbr_slots_and_keeps_existing_appearance() {
     // one-mesh frame because the second triangle is there.
     let two: Scene = [
         DrawableObject::mesh(
-            0,
+            initial,
             Matrix4::from_translation(Vector3::new(-0.4, 0.0, 0.0)),
             RenderMode::Shaded,
         ),
         DrawableObject::mesh(
-            1,
+            added,
             Matrix4::from_translation(Vector3::new(0.4, 0.0, 0.0)),
             RenderMode::Shaded,
         ),
@@ -2084,7 +2249,9 @@ fn add_mesh_grows_the_pbr_slots_and_keeps_existing_appearance() {
     .into_iter()
     .collect();
     let after = render_with_readback(&gpu, format, width, height, |e, v| {
-        renderer.encode(e, v, camera_of(FrameParams::IDENTITY, width, height), &two);
+        renderer
+            .encode(e, v, camera_of(FrameParams::IDENTITY, width, height), &two)
+            .expect("the scene is resident");
     });
 
     assert_ne!(
@@ -2109,12 +2276,11 @@ fn add_mesh_grows_the_pbr_slots_and_keeps_existing_appearance() {
     );
 }
 
-/// A removed mesh frees its slot, keeps every other id valid, and the slot is
-/// reused by the next upload (#353).
+/// A removed mesh frees its slot, keeps every other identity valid, and the
+/// next upload reuses only the private slot, never the public identity (#353).
 ///
 /// Compacting the store instead would renumber meshes after the hole, silently
-/// repointing any scene that holds an id — so what is asserted here is that
-/// mesh 2 is still mesh 2 after mesh 0 is gone.
+/// repointing any scene that holds an id.
 #[test]
 #[ignore = "requires a GPU adapter"]
 fn remove_mesh_frees_the_slot_without_renumbering_the_survivors() {
@@ -2130,56 +2296,420 @@ fn remove_mesh_frees_the_slot_without_renumbering_the_survivors() {
         &[Matrix4::IDENTITY; 3],
     )
     .expect("three meshes with three base models is a valid mesh set");
+    let removed = initial_mesh_id(&renderer, 0);
+    let middle = initial_mesh_id(&renderer, 1);
+    let survivor = initial_mesh_id(&renderer, 2);
 
     let blue = crate::DisneyMaterial {
         base_color: [0.0, 0.0, 1.0],
         ..Default::default()
     };
-    renderer.set_disney_material(crate::MeshTarget::One(2), blue.clone());
+    renderer
+        .set_disney_material(crate::MeshTarget::One(survivor), blue.clone())
+        .expect("the survivor is resident");
 
-    assert!(renderer.remove_mesh(0), "mesh 0 was there to remove");
-    assert!(!renderer.remove_mesh(0), "and removing it twice is a no-op");
-    assert!(
-        renderer.mesh_appearance(0).is_none(),
-        "the removed id resolves to nothing"
+    renderer
+        .remove_mesh(removed)
+        .expect("the initial mesh is resident");
+    assert_eq!(
+        renderer.remove_mesh(removed),
+        Err(MeshResourceError::NotResident { mesh: removed }),
+        "repeated removal is explicit"
     );
     assert_eq!(
-        renderer.mesh_appearance(2).map(|a| &a.material),
-        Some(&blue),
-        "mesh 2 is still mesh 2, with its own material"
+        renderer.mesh_appearance(removed),
+        Err(MeshResourceError::NotResident { mesh: removed }),
+        "the removed identity is stale"
+    );
+    assert_eq!(
+        renderer.mesh_appearance(survivor).map(|a| &a.material),
+        Ok(&blue),
+        "the survivor keeps its identity and material"
+    );
+    assert_eq!(renderer.mesh_count(), 2, "only live resources are counted");
+    assert_eq!(
+        renderer.resources.slot_count(),
+        3,
+        "deletion does not collapse the private allocation span"
     );
 
     // The next upload reuses the hole rather than growing past it.
-    let reused = renderer.add_mesh(&Mesh::hello_triangle());
-    assert_eq!(reused, 0, "the freed slot is reused");
-    assert_eq!(renderer.mesh_count(), 3, "so the store did not grow");
+    let replacement = renderer
+        .add_mesh(&Mesh::hello_triangle())
+        .expect("the replacement uploads");
+    assert_ne!(
+        replacement, removed,
+        "a recycled slot gets a fresh identity"
+    );
+    assert_eq!(renderer.mesh_count(), 3, "the live count returns to three");
     assert_eq!(
-        renderer.mesh_appearance(0),
-        Some(&crate::MeshAppearance::default()),
+        renderer.resources.slot_count(),
+        3,
+        "the private span stays flat"
+    );
+    assert_eq!(
+        renderer.mesh_appearance(replacement),
+        Ok(&crate::MeshAppearance::default()),
         "and the reused slot starts clean rather than inheriting the old mesh"
     );
-
-    // A scene naming the removed id renders rather than failing: an unknown id
-    // is skipped, exactly like an out-of-range one.
-    let gpu = test_gpu();
-    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-    let (width, height) = (32, 32);
-    assert!(renderer.remove_mesh(1), "free one more to leave a hole");
     let scene: Scene = [
-        DrawableObject::mesh(1, Matrix4::IDENTITY, RenderMode::Shaded),
-        DrawableObject::mesh(2, Matrix4::IDENTITY, RenderMode::Shaded),
+        DrawableObject::mesh(
+            replacement,
+            Matrix4::from_translation(Vector3::new(-0.4, 0.0, 0.0)),
+            RenderMode::Shaded,
+        ),
+        DrawableObject::mesh(
+            survivor,
+            Matrix4::from_translation(Vector3::new(0.4, 0.0, 0.0)),
+            RenderMode::Shaded,
+        ),
     ]
     .into_iter()
     .collect();
-    let pixels = render_with_readback(&gpu, format, width, height, |e, v| {
-        renderer.encode(
-            e,
-            v,
-            camera_of(FrameParams::IDENTITY, width, height),
-            &scene,
+    let pixels = render_with_readback(
+        &test_gpu(),
+        TEXTURE_TARGET_FORMAT,
+        64,
+        64,
+        |encoder, view| {
+            renderer
+                .encode(
+                    encoder,
+                    view,
+                    camera_of(FrameParams::IDENTITY, 64, 64),
+                    &scene,
+                )
+                .expect("the replacement and survivor are resident");
+        },
+    );
+    let side_is_lit = |xs: std::ops::Range<u32>| {
+        xs.into_iter().any(|x| {
+            (0..64).any(|y| {
+                let offset = ((y * 64 + x) * 4) as usize;
+                pixels[offset..offset + 3] != [0, 0, 0]
+            })
+        })
+    };
+    assert!(side_is_lit(0..64 / 3), "the replacement must draw");
+    assert!(side_is_lit(2 * 64 / 3..64), "the survivor must still draw");
+
+    renderer
+        .remove_mesh(middle)
+        .expect("the middle mesh is resident");
+    assert_eq!(renderer.mesh_count(), 2);
+    assert_eq!(renderer.resources.slot_count(), 3);
+}
+
+fn assert_not_resident(error: RenderError, mesh: MeshId) {
+    assert!(
+        matches!(
+            &error,
+            RenderError::MeshResource(MeshResourceError::NotResident { mesh: actual })
+                if *actual == mesh
+        ),
+        "expected NotResident for {mesh:?}, got {error:?}"
+    );
+}
+
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn stale_and_foreign_mesh_ids_are_rejected_by_scene_pick_setters_and_delete() {
+    let meshes = [Mesh::hello_triangle(), Mesh::hello_triangle()];
+    let mut renderer = Renderer::new(
+        test_gpu(),
+        TEXTURE_TARGET_FORMAT,
+        &meshes,
+        &[Matrix4::IDENTITY; 2],
+    )
+    .expect("two meshes build");
+    let stale = initial_mesh_id(&renderer, 0);
+    let survivor = initial_mesh_id(&renderer, 1);
+    renderer.remove_mesh(stale).expect("the mesh is resident");
+
+    let other = single(TEXTURE_TARGET_FORMAT, &Mesh::hello_triangle());
+    let foreign = initial_mesh_id(&other, 0);
+    let target = renderer
+        .create_texture_target(32, 32)
+        .expect("target builds");
+    let camera = camera_of(FrameParams::IDENTITY, 32, 32);
+    let texture = crate::ImageTexture::from_rgba(1, 1, vec![255, 255, 255, 255])
+        .expect("one texel is a texture");
+
+    for invalid in [stale, foreign] {
+        for object in [
+            DrawableObject::mesh(invalid, Matrix4::IDENTITY, RenderMode::Filled),
+            DrawableObject::aabb_box(invalid, Matrix4::IDENTITY),
+        ] {
+            let scene: Scene = [object].into_iter().collect();
+            let error = renderer
+                .draw_layers(&[SceneLayer::new(camera, &scene)], &target)
+                .expect_err("a nonresident scene must fail");
+            assert_not_resident(error, invalid);
+        }
+
+        let draws = [Draw {
+            mesh_id: invalid,
+            model: Matrix4::IDENTITY,
+            selection: DrawSelection::INHERIT,
+        }];
+        let error = pollster::block_on(renderer.pick(
+            camera,
+            &draws,
+            16,
+            16,
+            Viewport {
+                width: 32,
+                height: 32,
+            },
+        ))
+        .expect_err("a nonresident pick must fail");
+        assert_not_resident(error, invalid);
+
+        assert_eq!(
+            renderer.set_mesh_texture(invalid, &texture),
+            Err(MeshResourceError::NotResident { mesh: invalid })
         );
-    });
-    assert_eq!(pixels.len(), (width * height * 4) as usize);
+        assert_eq!(
+            renderer.set_disney_material(
+                crate::MeshTarget::One(invalid),
+                crate::DisneyMaterial::default(),
+            ),
+            Err(MeshResourceError::NotResident { mesh: invalid })
+        );
+        assert_eq!(
+            renderer.remove_mesh(invalid),
+            Err(MeshResourceError::NotResident { mesh: invalid })
+        );
+    }
+
+    assert_eq!(renderer.mesh_count(), 1);
+    assert!(renderer.mesh_appearance(survivor).is_ok());
+}
+
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn set_texture_keeps_targeting_the_stale_initial_row_zero_after_replacement() {
+    let mut renderer = single(TEXTURE_TARGET_FORMAT, &Mesh::hello_triangle());
+    let original = initial_mesh_id(&renderer, 0);
+    renderer
+        .remove_mesh(original)
+        .expect("the initial mesh is resident");
+    let replacement = renderer
+        .add_mesh(&Mesh::hello_triangle())
+        .expect("the replacement uploads");
+    let texture = crate::ImageTexture::from_rgba(1, 1, vec![255, 255, 255, 255])
+        .expect("one texel is a texture");
+
+    assert_eq!(
+        renderer.set_texture(&texture),
+        Err(MeshResourceError::NotResident { mesh: original }),
+        "the convenience setter must not retarget the replacement in slot zero"
+    );
+    renderer
+        .set_mesh_texture(replacement, &texture)
+        .expect("the replacement remains explicitly addressable");
+}
+
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn repeated_hole_reuse_keeps_live_count_flat_and_uploads_each_new_pbr_appearance() {
+    let gpu = test_gpu();
+    let format = TEXTURE_TARGET_FORMAT;
+    let (width, height) = (48, 48);
+    let mut renderer = single(format, &Mesh::hello_triangle());
+    let mut current = initial_mesh_id(&renderer, 0);
+    let mut previous_pixels: Option<Vec<u8>> = None;
+
+    for color in [[0.9, 0.05, 0.05], [0.05, 0.9, 0.05], [0.05, 0.05, 0.9]] {
+        renderer
+            .remove_mesh(current)
+            .expect("the current occupant is resident");
+        let stale = current;
+        current = renderer
+            .add_mesh(&Mesh::hello_triangle())
+            .expect("the hole accepts a replacement");
+        assert_ne!(current, stale);
+        assert_eq!(renderer.mesh_count(), 1, "only the replacement is live");
+        assert_eq!(
+            renderer.resources.slot_count(),
+            1,
+            "reusing the hole must not grow the private allocation span"
+        );
+        assert_eq!(
+            renderer.mesh_appearance(stale),
+            Err(MeshResourceError::NotResident { mesh: stale })
+        );
+
+        let material = crate::DisneyMaterial {
+            base_color: color,
+            metallic: 0.0,
+            roughness: 0.5,
+            ..Default::default()
+        };
+        renderer
+            .set_disney_material(crate::MeshTarget::One(current), material.clone())
+            .expect("the replacement is resident");
+        assert_eq!(
+            renderer.mesh_appearance(current).map(|a| &a.material),
+            Ok(&material)
+        );
+
+        let scene: Scene = [DrawableObject::mesh(
+            current,
+            Matrix4::IDENTITY,
+            RenderMode::Shaded,
+        )]
+        .into_iter()
+        .collect();
+        let pixels = render_with_readback(&gpu, format, width, height, |encoder, view| {
+            renderer
+                .encode(
+                    encoder,
+                    view,
+                    camera_of(FrameParams::IDENTITY, width, height),
+                    &scene,
+                )
+                .expect("the replacement scene is resident");
+        });
+        if let Some(previous) = &previous_pixels {
+            assert_ne!(
+                previous.as_slice(),
+                pixels.as_slice(),
+                "a replacement's changed PBR appearance must reach its reused slot"
+            );
+        }
+        previous_pixels = Some(pixels);
+    }
+}
+
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn wireframe_overlay_order_follows_reused_private_slots_not_identity_age() {
+    let colored = |color: [f32; 3]| {
+        let mut mesh = Mesh::hello_triangle();
+        for vertex in &mut mesh.vertices {
+            vertex.color = color;
+        }
+        mesh
+    };
+    let discarded = colored([1.0, 0.0, 0.0]);
+    let green = colored([0.0, 1.0, 0.0]);
+    let blue = colored([0.0, 0.0, 1.0]);
+    let gpu = test_gpu();
+    let format = TEXTURE_TARGET_FORMAT;
+    let (width, height) = (64, 64);
+    let mut renderer = Renderer::auto_fit(gpu.clone(), format, &[discarded, green])
+        .expect("two meshes build with the same preview transform policy as runtime additions");
+    let first_slot = initial_mesh_id(&renderer, 0);
+    let later_slot = initial_mesh_id(&renderer, 1);
+    renderer
+        .remove_mesh(first_slot)
+        .expect("the first slot is occupied");
+    let replacement = renderer.add_mesh(&blue).expect("the first slot is reused");
+    assert!(
+        replacement > later_slot,
+        "the replacement must be newer than the surviving identity"
+    );
+
+    let render = |renderer: &mut Renderer, ids: &[MeshId]| {
+        let scene: Scene = ids
+            .iter()
+            .copied()
+            .map(|id| DrawableObject::mesh(id, Matrix4::IDENTITY, RenderMode::Wireframe))
+            .collect();
+        render_with_readback(&gpu, format, width, height, |encoder, view| {
+            renderer
+                .encode(
+                    encoder,
+                    view,
+                    camera_of(FrameParams::IDENTITY, width, height),
+                    &scene,
+                )
+                .expect("the wireframe scene is resident");
+        })
+    };
+    let green_only = render(&mut renderer, &[later_slot]);
+    let blue_only = render(&mut renderer, &[replacement]);
+    assert_ne!(
+        green_only, blue_only,
+        "the two overlays need distinct colors"
+    );
+
+    let combined = render(&mut renderer, &[later_slot, replacement]);
+    assert_eq!(
+        combined, green_only,
+        "slot 0's newer replacement must draw before slot 1's older identity"
+    );
+}
+
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn draw_layers_validates_the_whole_list_before_any_layer_writes() {
+    let meshes = [Mesh::hello_triangle(), Mesh::hello_triangle()];
+    let mut renderer = Renderer::new(
+        test_gpu(),
+        TEXTURE_TARGET_FORMAT,
+        &meshes,
+        &[Matrix4::IDENTITY; 2],
+    )
+    .expect("two meshes build");
+    let stale = initial_mesh_id(&renderer, 0);
+    let valid = initial_mesh_id(&renderer, 1);
+    renderer
+        .remove_mesh(stale)
+        .expect("the first mesh is resident");
+
+    let (width, height) = (48, 48);
+    let target = renderer
+        .create_texture_target(width, height)
+        .expect("target builds");
+    let camera = camera_of(FrameParams::IDENTITY, width, height);
+    let empty = Scene::new();
+    let valid_scene: Scene = [DrawableObject::mesh(
+        valid,
+        Matrix4::IDENTITY,
+        RenderMode::Filled,
+    )]
+    .into_iter()
+    .collect();
+    let invalid_scene: Scene = [DrawableObject::mesh(
+        stale,
+        Matrix4::IDENTITY,
+        RenderMode::Filled,
+    )]
+    .into_iter()
+    .collect();
+
+    let baseline =
+        pollster::block_on(renderer.render_layers(&[SceneLayer::new(camera, &empty)], &target))
+            .expect("the empty scene clears the target");
+    let would_write = pollster::block_on(
+        renderer.render_layers(&[SceneLayer::new(camera, &valid_scene)], &target),
+    )
+    .expect("the valid scene renders");
+    assert_ne!(
+        would_write, baseline,
+        "the first layer would change the target"
+    );
+    let baseline =
+        pollster::block_on(renderer.render_layers(&[SceneLayer::new(camera, &empty)], &target))
+            .expect("the target resets to the baseline");
+
+    let error = renderer
+        .draw_layers(
+            &[
+                SceneLayer::new(camera, &valid_scene),
+                SceneLayer::new(camera, &invalid_scene),
+            ],
+            &target,
+        )
+        .expect_err("the later invalid layer rejects the whole list");
+    assert_not_resident(error, stale);
+    let after = pollster::block_on(renderer.read_pixels(&target)).expect("target reads back");
+    assert_eq!(
+        after, baseline,
+        "validation must happen before the first layer clears or writes"
+    );
 }
 
 /// Removing a mesh releases its GPU memory **at the call**, not at the next
@@ -2245,17 +2775,23 @@ fn removing_a_mesh_releases_its_memory_immediately() {
     };
     let baseline = live(&gpu);
 
-    let id = renderer.add_mesh(&big);
-    renderer.set_mesh_texture(id, &texture);
-    renderer.set_mesh_metallic_roughness_texture(id, &texture);
-    renderer.set_mesh_normal_texture(id, &texture);
+    let id = renderer.add_mesh(&big).expect("the mesh uploads");
+    renderer
+        .set_mesh_texture(id, &texture)
+        .expect("the albedo uploads");
+    renderer
+        .set_mesh_metallic_roughness_texture(id, &texture)
+        .expect("the metallic-roughness map uploads");
+    renderer
+        .set_mesh_normal_texture(id, &texture)
+        .expect("the normal map uploads");
     let loaded = live(&gpu);
     assert!(
         loaded > baseline,
         "the mesh and its maps must show up as allocated ({baseline} -> {loaded} bytes)"
     );
 
-    assert!(renderer.remove_mesh(id));
+    renderer.remove_mesh(id).expect("the mesh is resident");
     let freed = live(&gpu);
     assert!(
         freed < loaded,

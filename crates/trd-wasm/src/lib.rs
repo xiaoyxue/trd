@@ -64,7 +64,10 @@ impl PbrState {
 
     /// Pushes the staged per-object material onto the render harness. Shared by
     /// the offscreen and canvas renderers.
-    pub(crate) fn apply(&self, renderer: &mut trd_core::Renderer) {
+    pub(crate) fn apply(
+        &self,
+        renderer: &mut trd_core::Renderer,
+    ) -> Result<(), trd_core::MeshResourceError> {
         renderer.set_appearance(
             trd_core::MeshTarget::All,
             trd_core::MeshAppearance {
@@ -73,7 +76,7 @@ impl PbrState {
                 tone_mapping: self.tone_mapping,
                 ..Default::default()
             },
-        );
+        )
     }
 }
 

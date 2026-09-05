@@ -261,34 +261,46 @@ impl Cli {
     /// material and maps, exactly as `?mesh=<glb>` does in the browser), carrying
     /// the GLB's imported material when there is one and the flag-assembled one
     /// otherwise.
-    pub fn scene_state(&self, loaded: &LoadedMesh, has_env: bool) -> SceneState {
-        // The native CLI authors a single object, so the seed carries exactly one
-        // material; `seeded` keeps every per-object vector that length.
+    pub fn scene_state(
+        &self,
+        loaded: &LoadedMesh,
+        has_env: bool,
+        mesh_ids: &[trd_core::MeshId],
+    ) -> Result<SceneState, GuiError> {
         let imported = loaded.material.clone();
         let gltf = imported.is_some();
-        SceneState::seeded(SceneSeed {
-            materials: vec![imported.unwrap_or_else(|| self.disney_material())],
-            mode: if self.pbr || gltf {
-                RenderMode::Shaded
-            } else {
-                RenderMode::Filled
+        SceneState::seeded(
+            mesh_ids,
+            SceneSeed {
+                materials: vec![imported.unwrap_or_else(|| self.disney_material())],
+                mode: if self.pbr || gltf {
+                    RenderMode::Shaded
+                } else {
+                    RenderMode::Filled
+                },
+                image_based_lighting: self.image_based_lighting(),
+                tone_mapping: self.tone_mapping(gltf),
+                lighting: self.lighting(),
+                // A probe is always bound now (built-in when `--env` is absent), so
+                // the side panel's environment controls are always live.
+                environment_available: has_env,
+                // ...but the sky stays off until asked for: the probe is there to
+                // light the model, not to become the backdrop.
+                show_environment_background: false,
             },
-            image_based_lighting: self.image_based_lighting(),
-            tone_mapping: self.tone_mapping(gltf),
-            lighting: self.lighting(),
-            // A probe is always bound now (built-in when `--env` is absent), so
-            // the side panel's environment controls are always live.
-            environment_available: has_env,
-            // ...but the sky stays off until asked for: the probe is there to
-            // light the model, not to become the backdrop.
-            show_environment_background: false,
-        })
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scene(cli: &Cli, loaded: &LoadedMesh, has_env: bool) -> SceneState {
+        let ids = trd_core::test_support::mesh_ids(1);
+        cli.scene_state(loaded, has_env, &ids)
+            .expect("matching material")
+    }
 
     #[test]
     fn default_mesh_parses() {
@@ -331,18 +343,27 @@ mod tests {
     #[test]
     fn pbr_flag_selects_pbr_mode_and_material() {
         let cli = Cli::parse_from(["trd-gui", "--pbr", "--metallic", "1", "--roughness", "0.3"]);
-        let state = cli.scene_state(&cli.load_mesh().expect("the built-in cube parses"), true);
-        assert_eq!(state.modes[0], RenderMode::Shaded);
-        assert_eq!(state.materials[0].metallic, 1.0);
-        assert_eq!(state.materials[0].roughness, 0.3);
+        let state = scene(
+            &cli,
+            &cli.load_mesh().expect("the built-in cube parses"),
+            true,
+        );
+        assert_eq!(state.objects[0].mode, RenderMode::Shaded);
+        assert_eq!(state.objects[0].appearance.material.metallic, 1.0);
+        assert_eq!(state.objects[0].appearance.material.roughness, 0.3);
     }
 
     #[test]
     fn no_pbr_flag_keeps_filled_mode() {
         let cli = Cli::parse_from(["trd-gui"]);
         assert_eq!(
-            cli.scene_state(&cli.load_mesh().expect("the built-in cube parses"), true)
-                .modes[0],
+            scene(
+                &cli,
+                &cli.load_mesh().expect("the built-in cube parses"),
+                true
+            )
+            .objects[0]
+                .mode,
             RenderMode::Filled
         );
     }
@@ -354,7 +375,7 @@ mod tests {
     fn a_bound_probe_makes_the_environment_background_available() {
         let cli = Cli::parse_from(["trd-gui", "--env", "probe.hdr"]);
         let loaded = cli.load_mesh().expect("the built-in cube parses");
-        let state = cli.scene_state(&loaded, true);
+        let state = scene(&cli, &loaded, true);
         assert!(state.environment_available, "the controls are live");
         assert!(
             !state.show_environment_background,
@@ -362,7 +383,7 @@ mod tests {
         );
 
         // Only a probe that could not be read at all leaves the controls off.
-        let state = cli.scene_state(&loaded, false);
+        let state = scene(&cli, &loaded, false);
         assert!(!state.environment_available);
         assert!(!state.show_environment_background);
     }
