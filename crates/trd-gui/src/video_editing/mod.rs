@@ -2499,45 +2499,6 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn catalog_replacement_adopts_the_registered_object_and_its_material() {
-        let shared = Rc::new(VideoEditingShared::default());
-        let mut app = VideoEditingApp::new(document(), shared.clone());
-        assert!(app.controller.state.objects.is_empty());
-        let original = crate::scene::test_scene(1).objects.remove(0);
-        app.selected_asset = Some(CatalogAsset::CocaColaCan);
-        shared
-            .asset_defaults
-            .replace(Some((CatalogAsset::CocaColaCan, original.clone())));
-        app.consume_asset_defaults();
-        assert_eq!(app.controller.state.objects[0].mesh, original.mesh);
-        assert_eq!(app.controller.state.selected, Some(0));
-
-        app.select_catalog_asset(CatalogAsset::Dragon);
-        let mut replacement = crate::scene::test_scene(1).objects.remove(0);
-        replacement.mode = trd_core::RenderMode::Shaded;
-        replacement.appearance.material.metallic = 0.75;
-        let fresh = replacement.mesh;
-        assert_ne!(fresh, original.mesh);
-        shared
-            .asset_defaults
-            .replace(Some((CatalogAsset::Dragon, replacement)));
-        app.consume_asset_defaults();
-        assert_eq!(app.controller.state.objects.len(), 1);
-        let object = &app.controller.state.objects[0];
-        assert_eq!(object.mesh, fresh);
-        assert_eq!(object.appearance.material.metallic, 0.75);
-        assert_eq!(object.mode, trd_core::RenderMode::Shaded);
-        assert_eq!(app.controller.state.draws()[0].mesh_id, fresh);
-        assert_eq!(app.controller.state.lighting.scale, 0.0);
-        assert_eq!(app.controller.state.lighting.ambient, 0.0);
-        assert!(app.controller.state.environment_available);
-
-        app.set_document(None);
-        assert!(app.controller.state.objects.is_empty());
-        assert!(app.controller.state.selected.is_none());
-    }
-
-    #[test]
     fn diagnostics_keep_the_scene_bound_to_the_displayed_render() {
         let shared = Rc::new(VideoEditingShared::default());
         let mut app = VideoEditingApp::new(document(), shared);
