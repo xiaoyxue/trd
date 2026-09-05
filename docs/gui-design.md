@@ -127,15 +127,15 @@ Scene { background: Background, objects: Vec<DrawableObject> }   // render/scene
 Background { environment: Option<EnvironmentBackground>, frame: Option<FrameFit> }
 DrawableObject { primitive: Primitive, model: [f32;16] }  // placed primitive
 Primitive::Mesh { mesh_id, mode }   // + AabbBox / CoordinateAxes / PlaneGrid / QuadOutline / BlobShadow
-Draw { mesh_id: MeshTableIndex, model: [f32;16], selection } // wire form
-ResolvedDraw { mesh_id: MeshId, model: [f32;16], selection } // GUI/scene form
+WireDraw { mesh_id: MeshTableIndex, model: [f32;16], selection } // wire form
+Draw { mesh_id: MeshId, model: [f32;16], selection } // GUI/scene form
 FrameParams { model?, k?, pose?, eye?, target?, fovy?, ... }  // camera
 ```
 
 Mesh identities are registered, not object-row numbers. `SceneState` keeps each
 object's handle, transform, mode and `MeshAppearance` in one `SceneObject`; it
 does not maintain parallel mesh/material vectors. See the
-[resource identity contract](gpu-resources.md) for registration, deletion and
+[resource identity contract](gpu-resources.md) for upload, deletion and
 shared-mesh ownership.
 
 The **model matrix lives per-draw** (`Draw.model`, composed under the mesh's

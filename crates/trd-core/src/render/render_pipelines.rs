@@ -8,7 +8,7 @@
 //! `renderer.rs` (#221 §2) or on the scene (which is `Clone + PartialEq` and
 //! device-free).
 
-use super::mesh_store::MeshResources;
+use super::gpu_resources::GpuResourceManager;
 use super::*;
 use crate::Camera;
 
@@ -246,7 +246,7 @@ impl SceneUniforms {
     ///
     /// The rig used to be re-encoded into every slot, so an N-object scene wrote
     /// N identical copies of the same lights each frame. The per-mesh values are
-    /// read straight off the [`MeshGpu`](super::mesh_store::MeshGpu)s that own them (#203): they used to be
+    /// read straight off the [`MeshGpu`](super::gpu_resources::MeshGpu)s that own them (#203): they used to be
     /// four `Vec`s on the renderer, all sized to the mesh count with nothing
     /// enforcing it, joined here by a four-deep `zip`.
     /// The per-mesh half is skipped when nothing has changed since the last
@@ -256,7 +256,7 @@ impl SceneUniforms {
         &mut self,
         queue: &wgpu::Queue,
         camera: Camera,
-        meshes: &MeshResources,
+        resources: &GpuResourceManager,
         lighting: Lighting,
         use_env: bool,
     ) {
@@ -272,7 +272,7 @@ impl SceneUniforms {
         }
         // A removed mesh leaves a hole whose slot nothing draws; skipping it
         // keeps every surviving mesh on the slot its id names.
-        for (slot, mesh) in meshes.all() {
+        for (slot, mesh) in resources.all() {
             let appearance = mesh.appearance();
             let uniform = PbrUniform::new(PbrUniformInputs {
                 material: &appearance.material,

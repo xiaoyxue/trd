@@ -3,15 +3,15 @@
 //! The shared, platform-agnostic model the interaction loop mutates: an orbit
 //! camera plus a single object transform, the render mode and overlay flags. It
 //! holds no GPU or egui state — it produces the two values `trd-core` consumes
-//! each frame, a [`FrameParams`](trd_core::FrameParams) camera and a [`ResolvedDraw`] list.
+//! each frame, a [`Camera`] and a [`Draw`] list.
 //!
 //! Conventions follow `trd-core::math`: right-handed world, `+Y` up, radians; the
 //! mesh is preview-scaled by [`trd_core::Mesh::preview_transform`] about the origin.
 
 use trd_core::{
-    Camera, DisneyMaterial, DrawSelection, ImageBasedLighting, Lighting, Matrix4, MeshAppearance,
-    MeshId, MeshTable, PbrDebugView, Point3, RenderMode, ResolvedDraw, Rotation, ToneMapping,
-    Transform, Vector3, Viewport,
+    Camera, DisneyMaterial, Draw, DrawSelection, ImageBasedLighting, Lighting, Matrix4,
+    MeshAppearance, MeshId, PbrDebugView, Point3, RenderMode, Rotation, ToneMapping, Transform,
+    Vector3, Viewport,
 };
 
 /// Orbit limits: never cross the target, never reach the poles (`up = +Y` would
@@ -188,7 +188,7 @@ pub struct SceneObject {
 }
 
 /// The full interactive scene: the orbit camera, the object placement, the mesh
-/// render mode, and the overlay toggles. Rebuilt into a [`FrameParams`](trd_core::FrameParams) + `draws`
+/// render mode, and the overlay toggles. Rebuilt into a [`Camera`] + `draws`
 /// each frame the state changes, with **no per-primitive branching** — a single
 /// mesh is the degenerate one-draw scene.
 #[derive(Debug, Clone, PartialEq)]
@@ -333,17 +333,18 @@ impl SceneState {
         self.objects.iter().any(|object| object.mesh == mesh)
     }
 
-    /// Seeds one row per initial registration, preserving its imported material.
-    pub fn seeded(table: &MeshTable, seed: SceneSeed) -> Result<Self, crate::error::GuiError> {
-        if table.len() != seed.materials.len() {
+    /// Seeds one row per supplied upload identity, preserving its imported material.
+    pub fn seeded(mesh_ids: &[MeshId], seed: SceneSeed) -> Result<Self, crate::error::GuiError> {
+        if mesh_ids.len() != seed.materials.len() {
             return Err(crate::error::GuiError::SceneSeedCount {
-                meshes: table.len(),
+                meshes: mesh_ids.len(),
                 materials: seed.materials.len(),
             });
         }
         Ok(Self {
-            objects: table
-                .ids()
+            objects: mesh_ids
+                .iter()
+                .copied()
                 .zip(seed.materials)
                 .map(|(mesh, material)| SceneObject {
                     mesh,
@@ -397,12 +398,12 @@ impl SceneState {
     /// world `X` (a single object stays at the origin). Each draw carries its
     /// **own** render mode, so objects can mix filled /
     /// wireframe / textured / PBR.
-    pub fn draws(&self) -> Vec<ResolvedDraw> {
+    pub fn draws(&self) -> Vec<Draw> {
         let n = self.objects.len();
         self.objects
             .iter()
             .enumerate()
-            .map(|(i, obj)| ResolvedDraw {
+            .map(|(i, obj)| Draw {
                 mesh_id: obj.mesh,
                 model: obj.transform.model_matrix_offset(layout_offset(i, n)),
                 selection: DrawSelection::Mesh(Some(obj.mode)),
@@ -487,10 +488,9 @@ fn layout_offset(i: usize, n: usize) -> [f32; 3] {
 
 #[cfg(test)]
 pub(crate) fn test_scene(count: usize) -> SceneState {
-    let mesh = crate::assets::default_mesh().expect("test mesh");
-    let table = MeshTable::new(vec![mesh; count]).expect("test registration");
+    let ids = trd_core::test_support::mesh_ids(count);
     SceneState::seeded(
-        &table,
+        &ids,
         SceneSeed {
             materials: vec![DisneyMaterial::default(); count],
             mode: RenderMode::Filled,
@@ -667,7 +667,7 @@ mod tests {
         let state = test_scene(3);
         let draws = state.draws();
         assert_eq!(draws.len(), 3);
-        let x = |d: &ResolvedDraw| d.model.to_cols_array()[12];
+        let x = |d: &Draw| d.model.to_cols_array()[12];
         assert_eq!(
             (draws[0].mesh_id, draws[1].mesh_id, draws[2].mesh_id),
             (
@@ -692,9 +692,10 @@ mod tests {
     }
 
     #[test]
-    fn seeded_colocates_registered_identity_and_appearance() {
+    fn seeded_colocates_supplied_identity_and_appearance() {
         for n in [0usize, 1, 3] {
-            let table = MeshTable::new(vec![crate::assets::default_mesh().unwrap(); n]).unwrap();
+            let mut ids = trd_core::test_support::mesh_ids(n);
+            ids.reverse();
             let materials: Vec<_> = (0..n)
                 .map(|i| DisneyMaterial {
                     metallic: i as f32 * 0.25,
@@ -702,7 +703,7 @@ mod tests {
                 })
                 .collect();
             let state = SceneState::seeded(
-                &table,
+                &ids,
                 SceneSeed {
                     materials: materials.clone(),
                     mode: RenderMode::Shaded,
@@ -715,7 +716,7 @@ mod tests {
             )
             .unwrap();
             assert_eq!(state.objects.len(), n);
-            for (i, mesh) in table.ids().enumerate() {
+            for (i, mesh) in ids.iter().copied().enumerate() {
                 let object = &state.objects[i];
                 assert_eq!(object.mesh, mesh);
                 assert_eq!(object.mode, RenderMode::Shaded);
@@ -858,10 +859,10 @@ mod tests {
 
     #[test]
     fn seeded_rejects_missing_and_extra_materials() {
-        let table = MeshTable::new(vec![crate::assets::default_mesh().unwrap()]).unwrap();
+        let ids = trd_core::test_support::mesh_ids(1);
         for count in [0, 2] {
             let result = SceneState::seeded(
-                &table,
+                &ids,
                 SceneSeed {
                     materials: vec![DisneyMaterial::default(); count],
                     mode: RenderMode::Filled,

@@ -1,7 +1,7 @@
 //! [`Renderer`] — the persistent render harness (#134, #203).
 //!
 //! One type owns everything a frame needs: the mesh/gizmo/PBR/picking
-//! pipelines, the decode-once [`MeshResources`], materials/lighting/IBL, and the
+//! pipelines, the decode-once [`GpuResourceManager`], materials/lighting/IBL, and the
 //! picking pipeline + its lazily-allocated pick target. It used to be split
 //! into an outer `Renderer<T: RenderTarget>` — generic over *where* the frame
 //! lands, wrapping the render target — around an inner `SceneRenderer` holding
@@ -45,7 +45,7 @@
 //! | `pick`, `prepare_picking`, `encode_picking`, `pick_target_size` | `picking.rs` |
 //! | target lifecycle — `create_*_target`, `resize_*`, `reconfigure_surface`, `replace_surface`, `read_pixels`, `read_back` | `render_target.rs` |
 //! | the per-[`Primitive`] `record` bodies + `bind_instances` | `draw_command.rs` |
-//! | [`MeshTarget`], `add_mesh`, `remove_mesh`, `mesh_count`, the texture setters, `edit_appearance` + the appearance setters | `mesh_store.rs` |
+//! | [`MeshTarget`], `add_mesh`, `remove_mesh`, `mesh_count`, the texture setters, `edit_appearance` + the appearance setters | `gpu_resources.rs` |
 //! | `set_env_map` | `environment.rs` |
 //! | `update_frame_texture*`, `has_frame_texture` | `frame_plane.rs` |
 //!
@@ -61,7 +61,7 @@
 //!   *what draws* and *what it reads* are different questions (#203); both live
 //!   in `render_pipelines.rs` because both are `f(format, sample_count)` rather
 //!   than a function of any one scene (#221 §2).
-//! - [`MeshResources`] — addressed mesh residency, separate from constant
+//! - [`GpuResourceManager`] — addressed mesh residency, separate from constant
 //!   gizmos and per-frame instance buffers.
 //! - [`BoundTexture`](super::BoundTexture) — the mesh albedo sampled by textured
 //!   draws (#20).
@@ -96,12 +96,12 @@ use super::draw_command::{build_batches, Batches};
 use super::environment::{EnvBackgroundSettings, Environment};
 use super::frame_plane::FramePlane;
 use super::gizmo::GizmoGeometry;
-use super::mesh_store::MeshResources;
+use super::gpu_resources::GpuResourceManager;
 use super::picking::Picking;
 use super::*;
 use super::{Primitive, Scene};
 use crate::math::Matrix4;
-use crate::{Camera, MeshResourceError, MeshTable};
+use crate::{Camera, MeshResourceError};
 use thiserror::Error;
 
 /// Errors constructing or driving a [`Renderer`].
@@ -204,8 +204,7 @@ pub struct Renderer {
     /// background sky. One type, like its sibling `FramePlane` (#221 §5).
     pub(super) environment: Environment,
     /// Caller-supplied residency; public identities never expose its slots.
-    pub(super) meshes: MeshResources,
-    pub(super) mesh_table: MeshTable,
+    pub(super) resources: GpuResourceManager,
     /// The constant overlay geometry (axes, grids, quad outlines, shadow quad):
     /// a function of nothing, built once.
     pub(super) gizmos: GizmoGeometry,
@@ -257,27 +256,11 @@ impl Renderer {
         Self::new(gpu, format, meshes, &base_models)
     }
 
-    /// Uploads existing CPU registrations without changing their identities.
-    pub fn auto_fit_table(
-        gpu: Arc<GpuContext>,
-        format: wgpu::TextureFormat,
-        table: MeshTable,
-    ) -> Result<Self, RenderError> {
-        let base_models: Vec<_> = table
-            .iter()
-            .map(|(_, mesh)| {
-                mesh.preview_transform(crate::DEFAULT_PREVIEW_TARGET)
-                    .matrix()
-            })
-            .collect();
-        Self::with_mesh_table(gpu, format, table, &base_models, MSAA_SAMPLE_COUNT)
-    }
-
     /// Constructs a `Renderer` over one or more meshes, each paired with an
     /// explicit base (preview) model that is pre-multiplied beneath every
     /// per-frame instance model (`effective = model · base`). This is the primary
     /// constructor; [`auto_fit`](Self::auto_fit) derives the base models for you.
-    /// A frame's [`Scene`] references identities from [`Self::mesh_table`]. The mesh
+    /// A frame's [`Scene`] references [`Self::initial_mesh_ids`]. The mesh
     /// pass renders at [`MSAA_SAMPLE_COUNT`]×; use
     /// [`with_sample_count`](Self::with_sample_count) to override (e.g. `1` = no
     /// MSAA).
@@ -308,35 +291,16 @@ impl Renderer {
         base_models: &[Matrix4],
         sample_count: u32,
     ) -> Result<Self, RenderError> {
-        Self::with_mesh_table(
-            gpu,
-            format,
-            MeshTable::new(meshes.to_vec())?,
-            base_models,
-            sample_count,
-        )
-    }
-
-    /// Uploads a CPU mesh table with explicit base models and MSAA.
-    ///
-    /// Scene assembly may resolve this same table before a GPU exists.
-    pub fn with_mesh_table(
-        gpu: Arc<GpuContext>,
-        format: wgpu::TextureFormat,
-        table: MeshTable,
-        base_models: &[Matrix4],
-        sample_count: u32,
-    ) -> Result<Self, RenderError> {
-        if table.is_empty() {
+        if meshes.is_empty() {
             return Err(RenderError::InvalidMeshSet {
                 reason: "a renderer needs at least one mesh".into(),
             });
         }
-        if table.len() != base_models.len() {
+        if meshes.len() != base_models.len() {
             return Err(RenderError::InvalidMeshSet {
                 reason: format!(
                     "{} mesh(es) but {} base model(s) — they pair one-to-one",
-                    table.len(),
+                    meshes.len(),
                     base_models.len()
                 ),
             });
@@ -359,27 +323,26 @@ impl Renderer {
             &material_maps_layout,
             environment.layout(),
             sample_count,
-            table.len(),
+            meshes.len(),
         );
-        let store = MeshResources::new(
+        let resources = GpuResourceManager::new(
             &gpu,
-            &table,
+            meshes,
             base_models,
-            &texture_layout,
-            &material_maps_layout,
-        );
+            texture_layout,
+            material_maps_layout,
+        )?;
         let gizmos = GizmoGeometry::new(&gpu);
         let instances =
-            InstanceBuffer::new(&gpu.device, "trd mesh instance buffer", table.len() as u32);
+            InstanceBuffer::new(&gpu.device, "trd mesh instance buffer", meshes.len() as u32);
         let frame_plane = FramePlane::new(&gpu.device, format, sample_count);
-        let picking = Picking::new(&gpu.device, table.len());
+        let picking = Picking::new(&gpu.device, meshes.len());
 
         Ok(Self {
             pipelines,
             uniforms,
             environment,
-            meshes: store,
-            mesh_table: table,
+            resources,
             gizmos,
             instances,
             batches: Batches::default(),
@@ -395,7 +358,7 @@ impl Renderer {
     /// each mesh's [`Mesh::preview_transform`] (center + uniform scale-to-fit)
     /// beneath its per-frame model so an arbitrary-unit asset renders centered
     /// and at a reasonable size. Per-frame draw lists place instances of these
-    /// meshes through [`Self::mesh_table`]. The mesh pass renders at 4× MSAA; use
+    /// meshes through [`Self::initial_mesh_ids`]. The mesh pass renders at 4× MSAA; use
     /// [`with_meshes_sample_count`](Self::with_meshes_sample_count) to override
     /// (e.g. `1` = no MSAA).
     ///
@@ -716,7 +679,7 @@ impl Renderer {
     fn validate_scene(&self, scene: &Scene) -> Result<(), MeshResourceError> {
         for object in scene.objects() {
             if let Some(id) = object.primitive().mesh_id() {
-                self.meshes.get(id)?;
+                self.resources.get(id)?;
             }
         }
         Ok(())
@@ -735,10 +698,10 @@ impl Renderer {
     fn prepare_frame(&mut self, camera: Camera, scene: &Scene) -> Result<(), MeshResourceError> {
         // Resolve before writes so a bad handle cannot partially change frame state.
         let Self {
-            batches, meshes, ..
+            batches, resources, ..
         } = self;
         build_batches(batches, scene.objects(), |id| {
-            let resident = meshes.resolve(id)?;
+            let resident = resources.resolve(id)?;
             Ok((resident.slot.index(), resident.gpu.geometry.base_model))
         })?;
         // 1. Camera P·V for this frame.
@@ -748,7 +711,7 @@ impl Renderer {
         self.uniforms.write_pbr(
             &self.gpu.queue,
             camera,
-            &self.meshes,
+            &self.resources,
             scene.lighting(),
             self.environment.has_env(),
         );
@@ -853,10 +816,10 @@ impl Renderer {
             let range = command.start..command.start + command.count;
             match command.primitive {
                 Primitive::Mesh { mesh_id, mode } => {
-                    self.record_mesh(&mut pass, self.meshes.resolve(mesh_id)?, mode, range)
+                    self.record_mesh(&mut pass, self.resources.resolve(mesh_id)?, mode, range)
                 }
                 Primitive::AabbBox { mesh_id } => {
-                    self.record_aabb_box(&mut pass, self.meshes.resolve(mesh_id)?, range)
+                    self.record_aabb_box(&mut pass, self.resources.resolve(mesh_id)?, range)
                 }
                 Primitive::PlaneGrid { plane } => self.record_plane_grid(&mut pass, plane, range),
                 Primitive::QuadOutline { selected } => {

@@ -6,17 +6,17 @@ use std::sync::mpsc;
 use std::sync::Arc;
 
 use trd_core::{
-    FrameParams, ImageData, ImageTexture, InlineFrameCache, InputStream, MeshId, MeshTable,
-    MeshTableIndex, ResolvedDraw, Scene, SceneError,
+    FrameParams, ImageData, ImageTexture, InlineFrameCache, InputStream, Mesh, MeshTableIndex,
+    Scene, WireDraw,
 };
 
-/// A message from the stdin reader thread: the registered CPU mesh table (sent
+/// A message from the stdin reader thread: the decoded CPU mesh table (sent
 /// once, first), then the optional bound texture, then the playback rate,
 /// then each decoded frame.
 pub(crate) enum StreamMsg {
     Meshes {
-        table: MeshTable,
-        grid_mesh: Option<MeshId>,
+        meshes: Vec<Mesh>,
+        grid_mesh: Option<MeshTableIndex>,
     },
     // Only sent when the stream carries a texture table; small (width/height +
     // an RGBA byte buffer), so it needs no boxing.
@@ -27,7 +27,7 @@ pub(crate) enum StreamMsg {
     Frame(Box<FrameData>),
 }
 
-/// One decoded frame: its camera/transform params and resolved instanced draw
+/// One decoded frame: its camera/transform params and validated wire draw
 /// list, built into a [`trd_core::Scene`] at render time. `frame_image` holds a
 /// per-frame background image (#63) decoded to RGBA at full source
 /// resolution off the render thread (from `frame_path` + `--frames-base`),
@@ -38,7 +38,7 @@ pub(crate) enum StreamMsg {
 #[derive(Clone)]
 pub(crate) struct FrameData {
     pub(crate) params: FrameParams,
-    pub(crate) draws: Vec<ResolvedDraw>,
+    pub(crate) draws: Vec<WireDraw>,
     pub(crate) frame_image: Option<Arc<ImageData>>,
 }
 
@@ -82,17 +82,12 @@ fn read_stream<R: std::io::Read>(
 ) -> Result<(), trd_core::StreamError> {
     let mut input = InputStream::new(source);
     let prologue = input.prologue()?;
-    let table = MeshTable::new(prologue.meshes.to_vec())?;
-    let grid_mesh = grid_mesh
-        .map(|row| {
-            table.id(row).ok_or(SceneError::MeshIndexOutOfRange {
-                mesh_id: row,
-                mesh_count: table.len(),
-            })
-        })
-        .transpose()?;
+    let mesh_count = prologue.meshes.len();
+    if let Some(row) = grid_mesh {
+        Scene::validate_mesh_index(row, mesh_count)?;
+    }
     let _ = tx.send(StreamMsg::Meshes {
-        table: table.clone(),
+        meshes: prologue.meshes.to_vec(),
         grid_mesh,
     });
     if let Some(texture) = prologue.texture {
@@ -103,7 +98,8 @@ fn read_stream<R: std::io::Read>(
     let mut inline_cache = InlineFrameCache::default();
     while let Some(batch) = input.next_batch() {
         for frame in batch? {
-            let draws = Scene::resolve_draws(&frame.resolved_draws(), &table)?;
+            let draws = frame.resolved_draws();
+            Scene::validate_draws(&draws, mesh_count)?;
             let frame_image = inline_cache
                 .resolve(frame.frame_id, input.frames())?
                 .map(|(image, _changed)| image)
@@ -149,6 +145,7 @@ fn load_frame_image(path: &std::path::Path) -> Option<ImageData> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use trd_core::SceneError;
 
     fn fixture() -> Vec<u8> {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -163,32 +160,32 @@ mod tests {
     }
 
     #[test]
-    fn reader_sends_the_registration_used_to_resolve_every_frame() {
+    fn reader_sends_cpu_meshes_once_and_validated_wire_draws() {
         let bytes = fixture();
         let (tx, rx) = mpsc::channel();
         read_stream(bytes.as_slice(), &tx, None, Some(MeshTableIndex::new(0))).unwrap();
-        let StreamMsg::Meshes { table, grid_mesh } = rx.try_recv().unwrap() else {
-            panic!("the CPU registration must precede all frames");
+        let StreamMsg::Meshes { meshes, grid_mesh } = rx.try_recv().unwrap() else {
+            panic!("the CPU meshes must precede all frames");
         };
-        assert_eq!(grid_mesh, table.id(MeshTableIndex::new(0)));
+        assert_eq!(grid_mesh, Some(MeshTableIndex::new(0)));
         let received: Vec<_> = rx
             .try_iter()
             .filter_map(|message| match message {
                 StreamMsg::Frame(frame) => Some(frame),
+                StreamMsg::Meshes { .. } => panic!("meshes must be sent only once"),
                 _ => None,
             })
             .collect();
         let mut input = trd_core::InputSession::new();
         let decoded: Vec<_> = input.push(&bytes).unwrap().into_iter().flatten().collect();
         input.finish().unwrap();
+        assert_eq!(meshes.len(), input.meshes().len());
         assert!(!received.is_empty());
         assert_eq!(received.len(), decoded.len());
         for (received, wire) in received.iter().zip(&decoded) {
             assert_eq!(received.params, wire.params);
-            assert_eq!(
-                received.draws,
-                Scene::resolve_draws(&wire.resolved_draws(), &table).unwrap(),
-            );
+            assert_eq!(received.draws, wire.resolved_draws());
+            Scene::validate_draws(&received.draws, meshes.len()).unwrap();
         }
     }
 

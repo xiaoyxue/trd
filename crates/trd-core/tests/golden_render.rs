@@ -61,10 +61,10 @@ use std::sync::Mutex;
 use arrow::array::{Array, FixedSizeListArray, UInt8Array};
 use arrow::ipc::reader::StreamReader;
 use trd_core::{
-    run_stream, Camera, DisneyMaterial, DrawSelection, EnvMapData, EnvironmentBackground,
-    EnvironmentLight, ImageBasedLighting, Lighting, Matrix4, Mesh, MeshTableIndex, Msaa, PbrConfig,
-    Point3, RenderMode, RenderOptions, Renderer, ResolvedDraw, Scene, SceneLayer, ToneMapping,
-    Tonemap, Vector3, Vertex, Viewport,
+    run_stream, Camera, DisneyMaterial, Draw, DrawSelection, EnvMapData, EnvironmentBackground,
+    EnvironmentLight, ImageBasedLighting, Lighting, Matrix4, Mesh, Msaa, PbrConfig, Point3,
+    RenderMode, RenderOptions, Renderer, Scene, SceneLayer, ToneMapping, Tonemap, Vector3, Vertex,
+    Viewport,
 };
 
 /// Golden render resolution (16:9; the fixtures' CV `k` is rescaled to match).
@@ -240,7 +240,7 @@ fn render_fixture(fixture: &str, options: RenderOptions) -> Vec<Vec<u8>> {
         let _serial = GPU_SERIAL
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        run_stream(&bytes[..], &mut out, WIDTH, HEIGHT, options, None)
+        run_stream(&bytes[..], &mut out, WIDTH, HEIGHT, options, None, None)
             .unwrap_or_else(|e| panic!("run_stream on {fixture}: {e:?}"));
     }
 
@@ -678,13 +678,14 @@ fn golden_environment_light_syncs_sky_and_reflection() {
         )
         .expect("the sphere is resident");
     let sphere = renderer
-        .mesh_table()
-        .id(MeshTableIndex::new(0))
+        .initial_mesh_ids()
+        .first()
+        .copied()
         .expect("the renderer has one registered sphere");
 
     // A yaw no symmetry can hide: 2.2 rad ≈ 126°, inside the second quadrant.
     let scene = Scene::from_draws(
-        &[ResolvedDraw {
+        &[Draw {
             mesh_id: sphere,
             model: Matrix4::IDENTITY,
             selection: DrawSelection::Mesh(Some(RenderMode::Shaded)),

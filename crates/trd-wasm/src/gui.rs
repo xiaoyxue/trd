@@ -216,7 +216,7 @@ pub async fn start(
     let renderer = GuiRenderer::new(&meshes, &textures, &material_maps, env, render_w, render_h)
         .await
         .map_err(to_js)?;
-    let scene = SceneState::seeded(renderer.mesh_table(), seed).map_err(to_js)?;
+    let scene = SceneState::seeded(renderer.initial_mesh_ids(), seed).map_err(to_js)?;
     let shared = Rc::new(crate::gui_web_app::GuiShared::new(on_pick_model));
     let app = WebApp::new(InteractionController::new(scene), renderer, shared.clone());
 

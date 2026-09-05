@@ -1,13 +1,10 @@
-//! Device-free mesh registration, separate from renderer residency.
+//! Opaque GPU mesh identity and the distinct wire-table row type.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-
-use super::Mesh;
 
 static NEXT_MESH_ID: AtomicU64 = AtomicU64::new(1);
 
-/// A logical mesh identity, minted by registration or runtime upload.
+/// A non-owning mesh identity, minted by a resource manager during upload.
 ///
 /// Identities are never recycled or serialized. Independent registrations in
 /// the same process/module instance cannot alias, even across renderers.
@@ -66,79 +63,18 @@ pub enum MeshResourceError {
     NotResident { mesh: MeshId },
 }
 
-/// An immutable, ordered CPU mesh table and its registered identities.
-///
-/// Cloning preserves identity and shares the CPU data. Uploading the same table
-/// to another renderer is explicit; constructing another table mints new IDs.
-#[derive(Debug, Clone, PartialEq)]
-pub struct MeshTable {
-    entries: Arc<[(MeshId, Mesh)]>,
-}
-
-impl MeshTable {
-    /// Registers each mesh once, before a GPU device is needed.
-    pub fn new(meshes: Vec<Mesh>) -> Result<Self, MeshResourceError> {
-        let entries = meshes
-            .into_iter()
-            .map(|mesh| Ok((MeshId::fresh()?, mesh)))
-            .collect::<Result<Vec<_>, MeshResourceError>>()?;
-        Ok(Self {
-            entries: entries.into(),
-        })
-    }
-
-    /// The number of wire rows, independent of renderer residency.
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    /// Resolves a wire row without consulting a renderer or GPU device.
-    pub fn id(&self, row: MeshTableIndex) -> Option<MeshId> {
-        self.entries.get(row.index()).map(|(id, _)| *id)
-    }
-
-    /// Registered meshes in wire-table order.
-    pub fn iter(&self) -> impl ExactSizeIterator<Item = (MeshId, &Mesh)> {
-        self.entries.iter().map(|(id, mesh)| (*id, mesh))
-    }
-
-    /// Registered identities in wire-table order.
-    pub fn ids(&self) -> impl ExactSizeIterator<Item = MeshId> + '_ {
-        self.entries.iter().map(|(id, _)| *id)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn registration_is_device_free_and_cloning_preserves_identity() {
-        let table = MeshTable::new(vec![Mesh::hello_triangle(), Mesh::hello_triangle()]).unwrap();
-        let copy = table.clone();
-        assert_eq!(table, copy);
-        assert_eq!(table.len(), 2);
-        assert!(!table.is_empty());
-        assert_ne!(
-            table.id(MeshTableIndex::new(0)),
-            table.id(MeshTableIndex::new(1))
-        );
-        assert_eq!(table.id(MeshTableIndex::new(2)), None);
-        assert_eq!(table.iter().count(), table.ids().count());
-    }
-
-    #[test]
-    fn independent_tables_never_share_an_identity() {
-        let first = MeshTable::new(vec![Mesh::hello_triangle()]).unwrap();
-        let second = MeshTable::new(vec![Mesh::hello_triangle()]).unwrap();
-        assert_ne!(
-            first.id(MeshTableIndex::new(0)),
-            second.id(MeshTableIndex::new(0))
-        );
+    fn identities_are_small_copy_values_and_never_reissued() {
+        let first = MeshId::fresh().unwrap();
+        let second = MeshId::fresh().unwrap();
+        let copy = first;
+        assert_eq!(copy, first);
+        assert_ne!(first, second);
+        assert_eq!(std::mem::size_of::<MeshId>(), std::mem::size_of::<u64>());
     }
 
     #[test]
@@ -178,12 +114,9 @@ mod tests {
     }
 
     #[test]
-    fn empty_table_and_wire_index_round_trip() {
-        let table = MeshTable::new(Vec::new()).unwrap();
-        assert!(table.is_empty());
+    fn wire_index_round_trip() {
         let row = MeshTableIndex::new(u32::MAX);
         assert_eq!(row.get(), u32::MAX);
         assert_eq!(row.index(), u32::MAX as usize);
-        assert_eq!(table.id(row), None);
     }
 }

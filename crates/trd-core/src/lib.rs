@@ -37,7 +37,7 @@ pub use math::{
 // stays in `render/` (#221/#224). Public paths are unchanged.
 pub use mesh::{
     import_glb, import_gltf_materials, GltfAsset, GltfImportError, Mesh, MeshError, MeshId,
-    MeshResourceError, MeshShading, MeshTable, MeshTableIndex, DEFAULT_PREVIEW_TARGET,
+    MeshResourceError, MeshShading, MeshTableIndex, DEFAULT_PREVIEW_TARGET,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -64,7 +64,7 @@ pub use render::{
 // renderer that dispatches on it (#223). Public paths are unchanged.
 pub use render::{
     Background, Draw, DrawSelection, DrawableObject, EnvironmentBackground, FrameFit, GridPlane,
-    Primitive, RenderMode, ResolvedDraw, Scene, SceneError,
+    Primitive, RenderMode, Scene, SceneError, WireDraw,
 };
 // The render harness; available on both platforms since readback became async
 // (#180) — the browser could not use it while it blocked on readback.
@@ -87,6 +87,18 @@ pub use stream_filter::{decode_frames, run_stream, FrameResolver, StreamError};
 /// Returns the project greeting used by the CLI and web entry points.
 pub fn greeting() -> String {
     "Hello from trd-core!".to_string()
+}
+
+/// CPU-only fixtures for downstream unit tests, not an upload/registration API.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub mod test_support {
+    /// Fresh nonresident identities; a real renderer will reject them.
+    pub fn mesh_ids(count: usize) -> Vec<crate::MeshId> {
+        (0..count)
+            .map(|_| crate::MeshId::fresh().expect("test identity space exhausted"))
+            .collect()
+    }
 }
 
 #[cfg(test)]

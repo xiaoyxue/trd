@@ -4,7 +4,7 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::{DataType, Schema};
 use arrow::error::ArrowError;
 
-use crate::render::{Draw, DrawSelection};
+use crate::render::{DrawSelection, WireDraw};
 use crate::texture::TextureError;
 #[cfg(test)]
 use crate::texture::TEXTURE_COLUMN;
@@ -83,7 +83,7 @@ pub type FrameBatch = Vec<DecodedFrame>;
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecodedFrame {
     pub params: FrameParams,
-    pub draws: Option<Vec<Draw>>,
+    pub draws: Option<Vec<WireDraw>>,
     pub frame_ref: Option<String>,
     pub frame_id: Option<u32>,
 }
@@ -96,10 +96,10 @@ impl DecodedFrame {
     /// single-object stream) becomes one default instance of mesh `0` placed by
     /// the frame's own [`FrameParams::model_matrix`]. Shared by the native and
     /// wasm render paths so they resolve draws identically.
-    pub fn resolved_draws(&self) -> Vec<Draw> {
+    pub fn resolved_draws(&self) -> Vec<WireDraw> {
         match &self.draws {
             Some(draws) => draws.clone(),
-            None => vec![Draw {
+            None => vec![WireDraw {
                 mesh_id: MeshTableIndex::new(0),
                 model: self.params.model_matrix(),
                 selection: DrawSelection::INHERIT,
@@ -1165,7 +1165,7 @@ mod tests {
         assert!(empty.resolved_draws().is_empty());
 
         // Explicit non-empty list ⇒ used verbatim.
-        let one = Draw {
+        let one = WireDraw {
             mesh_id: MeshTableIndex::new(3),
             model: Matrix4::from_cols_array(&[1.0_f32; 16]),
             selection: DrawSelection::INHERIT,
@@ -1196,12 +1196,12 @@ mod tests {
         assert_eq!(
             batches[0][0].draws,
             Some(vec![
-                Draw {
+                WireDraw {
                     mesh_id: MeshTableIndex::new(0),
                     model: Matrix4::from_cols_array(&a),
                     selection: DrawSelection::INHERIT
                 },
-                Draw {
+                WireDraw {
                     mesh_id: MeshTableIndex::new(1),
                     model: Matrix4::from_cols_array(&b),
                     selection: DrawSelection::INHERIT

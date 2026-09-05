@@ -8,8 +8,8 @@
 use std::sync::Arc;
 
 use trd_core::{
-    EnvMapData, FrameFit, ImageData, ImageTexture, Lighting, MeshId, MeshResourceError, MeshTable,
-    RenderError, RenderOptions, RenderTarget, Renderer, Scene, SurfaceTarget,
+    EnvMapData, FrameFit, ImageData, ImageTexture, Lighting, Mesh, MeshResourceError, RenderError,
+    RenderOptions, RenderTarget, Renderer, Scene, SurfaceTarget,
 };
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
@@ -110,11 +110,11 @@ impl WindowRenderer {
     /// Reports an unusable mesh set (e.g. a stream whose mesh table decoded to
     /// nothing) rather than aborting the window on it (#235 R8) — the mesh set
     /// comes from the wire, so it is input, not a bug.
-    pub(crate) fn set_meshes(&mut self, meshes: &MeshTable) -> Result<(), RenderError> {
-        self.renderer = Some(Renderer::auto_fit_table(
+    pub(crate) fn set_meshes(&mut self, meshes: &[Mesh]) -> Result<(), RenderError> {
+        self.renderer = Some(Renderer::auto_fit(
             self.gpu.clone(),
             self.target.view_format(),
-            meshes.clone(),
+            meshes,
         )?);
         self.uploaded_frame_image = None;
         Ok(())
@@ -155,9 +155,17 @@ impl WindowRenderer {
 
     /// Renders one frame's [`Scene`](trd_core::Scene) to the window surface.
     /// No-op until the renderer is built and a frame is available.
-    pub(crate) fn render(&mut self, frame: Option<&FrameData>, options: &RenderOptions<MeshId>) {
+    pub(crate) fn render(&mut self, frame: Option<&FrameData>, options: &RenderOptions) {
         let (Some(renderer), Some(frame)) = (self.renderer.as_mut(), frame) else {
             return;
+        };
+
+        let draws = match Scene::resolve_draws(&frame.draws, renderer.initial_mesh_ids()) {
+            Ok(draws) => draws,
+            Err(error) => {
+                log::warn!("skipping frame with an invalid mesh row: {error}");
+                return;
+            }
         };
 
         // Author the frame's Scene from its draw list + the render mode/overlay
@@ -182,8 +190,7 @@ impl WindowRenderer {
                 None
             }
         };
-        let scene =
-            Scene::from_draws(&frame.draws, options, frame_fit).with_lighting(self.lighting);
+        let scene = Scene::from_draws(&draws, options, frame_fit).with_lighting(self.lighting);
 
         let camera = match frame.params.to_camera(self.target.viewport()) {
             Ok(camera) => camera,

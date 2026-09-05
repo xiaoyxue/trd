@@ -16,12 +16,12 @@
 //! |---|---|
 //! | [`scene`] | [`Scene`], its [`Background`], and its assembly, [`Scene::from_draws`] |
 //! | [`drawable`] | [`Primitive`] — *what* can be drawn — and [`DrawableObject`], one placed by a model |
-//! | [`draw`] | [`Draw`] + [`DrawSelection`], the *wire* instance record and its byte codec |
+//! | [`draw`] | [`WireDraw`], runtime [`Draw`] and the [`DrawSelection`] codec |
 //! | [`draw_config`] | [`RenderMode`], [`FrameFit`], [`GridPlane`] — the per-drawable configuration a front-end selects |
 //!
-//! Assembly ([`Scene::from_draws`]) is the **one** place a wire [`Draw`] becomes
-//! a [`DrawableObject`], which is what keeps every front-end rendering the same
-//! scene from the same inputs (#180).
+//! Wire rows resolve to runtime [`Draw`] identities before shared assembly
+//! ([`Scene::from_draws`]) creates [`DrawableObject`]s, keeping front-ends
+//! consistent without a GPU dependency in scene assembly.
 //!
 //! Nothing in those four files touches wgpu, and the guarantee is carried by the
 //! **derives**: a `wgpu::BindGroup`/`RenderPipeline`/`Buffer` field on [`Scene`]
@@ -46,8 +46,8 @@ mod frame_params;
 mod frame_plane;
 mod gizmo;
 mod gpu_context;
+mod gpu_resources;
 mod gpu_types;
-mod mesh_store;
 mod options;
 mod pbr;
 mod picking;
@@ -71,7 +71,7 @@ mod gpu_tests;
 // Public API surface (re-exported unchanged by `crate::lib`).
 // The headless offscreen harness is native-only (drives wgpu under
 // `pollster::block_on`), so it and its re-export are gated off wasm.
-pub use draw::{Draw, DrawSelection, ResolvedDraw};
+pub use draw::{Draw, DrawSelection, WireDraw};
 pub use draw_config::{FrameFit, GridPlane, RenderMode};
 pub use drawable::{DrawableObject, Primitive};
 pub use env_map::{EnvMapData, ImageBasedLighting};
@@ -79,8 +79,8 @@ pub use external_frame::ExternalFrame;
 pub use frame_params::{CameraFormError, FrameParams, Viewport};
 pub(crate) use gpu_context::LimitsPreset;
 pub use gpu_context::{create_instance, AdapterFacts, GpuContext, GpuInitError, GpuRequest};
+pub use gpu_resources::{MeshAppearance, MeshTarget};
 pub use gpu_types::Vertex;
-pub use mesh_store::{MeshAppearance, MeshTarget};
 pub use options::{Msaa, PbrConfig, RenderOptions};
 pub use pbr::PbrDebugView;
 pub use render_target::{

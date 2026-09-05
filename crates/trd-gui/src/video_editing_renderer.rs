@@ -115,10 +115,10 @@ impl VideoPlacementRenderer {
             trd_core::Renderer::with_gpu(gpu, width, height, std::slice::from_ref(&placeholder))
                 .map_err(|error| error.to_string())?;
         let mesh = renderer
-            .mesh_table()
-            .ids()
-            .next()
-            .ok_or("placeholder mesh was not registered")?;
+            .initial_mesh_ids()
+            .first()
+            .copied()
+            .ok_or("placeholder upload returned no mesh identity")?;
         renderer
             .remove_mesh(mesh)
             .map_err(|error| error.to_string())?;
@@ -204,10 +204,10 @@ impl VideoPlacementRenderer {
             trd_core::Renderer::with_gpu(gpu, width, height, std::slice::from_ref(mesh))
                 .map_err(|error| error.to_string())?;
         let mesh = renderer
-            .mesh_table()
-            .ids()
-            .next()
-            .ok_or("catalog mesh was not registered")?;
+            .initial_mesh_ids()
+            .first()
+            .copied()
+            .ok_or("catalog upload returned no mesh identity")?;
         let (default_mode, default_material) = imported
             .configure(&mut renderer, mesh)
             .map_err(|error| error.to_string())?;
@@ -280,7 +280,7 @@ impl VideoPlacementRenderer {
         self.renderer
             .pick(
                 camera,
-                &[trd_core::ResolvedDraw {
+                &[trd_core::Draw {
                     mesh_id,
                     model,
                     selection: trd_core::DrawSelection::INHERIT,

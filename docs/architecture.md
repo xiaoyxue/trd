@@ -55,7 +55,7 @@ field (#203).
 frame loop. The rest of `impl Renderer` lives in the `render/` module that owns
 the resource each group drives — picking in `picking.rs`, the target lifecycle in
 `render_target.rs`, the per-primitive `record` bodies in `draw_command.rs`, the
-mesh surface in `mesh_store.rs`, and one forward each into `environment.rs` and
+asset residency surface in `gpu_resources.rs`, and one forward each into `environment.rs` and
 `frame_plane.rs` (#363). `renderer.rs`'s module doc carries the locator table.
 
 `render/render_target.rs` holds the resources a frame lands in — plus the
@@ -136,12 +136,12 @@ that places it, so every primitive can be instanced.
 Geometry is owned once (decode-once mesh store + shared line-quad/arrow buffers).
 A drawable is a light handle naming *which* primitive + its per-frame model.
 
-Meshes carry opaque `MeshId`s, not store indices. A device-free `MeshTable`
-registers CPU meshes and resolves wire `MeshTableIndex` rows; the renderer's
-`MeshResources` separately resolves those identities to resident resources and
-private slots. Stale or foreign IDs are explicit errors, never silent skips or
-references to a replacement. See the [resource identity contract](gpu-resources.md)
-(#366).
+Meshes carry opaque `MeshId`s, not store indices. The renderer's
+`GpuResourceManager` borrows CPU meshes during upload and owns their GPU
+residency, without retaining CPU asset copies. Wire `MeshTableIndex` rows resolve
+through a lightweight initial-ID snapshot during device-free scene assembly.
+Stale or foreign IDs are explicit errors, never silent skips or references to a
+replacement. See the [resource ownership contract](gpu-resources.md) (#366).
 
 The store decodes each mesh once, but the **set** is not fixed at construction:
 `Renderer::add_mesh` uploads one at runtime and `remove_mesh` drops one, so a
@@ -216,8 +216,9 @@ Loaders sit beside it by format:
 - `mesh/gltf.rs`
 
 The geometry every source shares (`aabb`, `center`, `preview_transform`,
-`edge_indices`) lives in `mesh/mod.rs`. `mesh/identity.rs` holds device-free
-registration; GPU residency lives in `render/mesh_store.rs`. The
+`edge_indices`) lives in `mesh/mod.rs`. `mesh/identity.rs` defines opaque resource
+identity and the separate wire-row type; GPU residency lives in
+`render/gpu_resources.rs`. The
 [#366 contract](gpu-resources.md) separates logical identity, wire rows and
 renderer-private storage slots. The `Vertex`
 layout stays with the other `repr(C)` + `Pod` types in `render/gpu_types.rs`.

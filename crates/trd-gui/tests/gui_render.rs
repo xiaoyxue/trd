@@ -35,10 +35,11 @@ fn backend(width: u32, height: u32) -> GuiRenderer {
 }
 
 fn scene(renderer: &GuiRenderer) -> SceneState {
+    let ids = renderer.initial_mesh_ids();
     SceneState::seeded(
-        renderer.mesh_table(),
+        ids,
         SceneSeed {
-            materials: vec![trd_core::DisneyMaterial::default(); renderer.mesh_table().len()],
+            materials: vec![trd_core::DisneyMaterial::default(); ids.len()],
             mode: trd_core::RenderMode::Filled,
             image_based_lighting: trd_core::ImageBasedLighting::default(),
             tone_mapping: trd_core::ToneMapping::default(),

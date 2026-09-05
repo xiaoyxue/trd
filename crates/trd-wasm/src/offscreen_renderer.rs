@@ -417,10 +417,11 @@ impl OffscreenRenderer {
             self.renderer
                 .as_ref()
                 .expect("renderer just built")
-                .mesh_table(),
+                .initial_mesh_ids(),
             &self.options,
             (has_inline_frame || (self.composite_frame && has_external_frame))
                 .then_some(FrameFit::Stretch),
+            None,
         )
         .map_err(|error| error.to_string())?
         // The staged light rig belongs to the frame, not to the harness (#182).

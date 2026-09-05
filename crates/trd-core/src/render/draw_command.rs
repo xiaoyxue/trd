@@ -31,7 +31,7 @@
 use std::ops::Range;
 
 use super::buffer::{draw_indexed, draw_vertices, VertexBuffer};
-use super::mesh_store::ResolvedMesh;
+use super::gpu_resources::ResolvedMesh;
 use super::{GizmoLineVertex, GridPlane, RenderMode, Renderer};
 use crate::{MeshId, MeshResourceError};
 

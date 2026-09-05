@@ -26,7 +26,7 @@ use crate::render::FrameFit;
 use crate::render::{
     check_dimensions, FrameParams, RenderOptions, Renderer, TargetError, TextureTarget,
 };
-use crate::OutputStream;
+use crate::{MeshTableIndex, OutputStream};
 
 /// Errors from decoding, validating, rendering, or encoding a trd stream.
 ///
@@ -54,7 +54,7 @@ pub enum StreamError {
     /// stream never sent.
     #[error(transparent)]
     Scene(#[from] crate::SceneError),
-    /// CPU mesh registration or a mesh-addressed renderer edit failed.
+    /// GPU mesh upload or a mesh-addressed renderer edit failed.
     #[error(transparent)]
     MeshResource(#[from] crate::MeshResourceError),
     /// The input is not mesh-first: the protocol requires a leading mesh table
@@ -119,6 +119,7 @@ fn render_and_write_batch<W: Write>(
     renderer: &mut Renderer,
     target: &TextureTarget,
     options: &RenderOptions,
+    grid_mesh: Option<MeshTableIndex>,
     output: &mut OutputStream<W>,
     batch: &crate::FrameBatch,
     inline_frames: &[crate::InlineFrame],
@@ -148,9 +149,14 @@ fn render_and_write_batch<W: Write>(
         } else {
             background_state.last_ref = None;
         }
-        // CPU registrations, not the live GPU mesh count, define wire rows.
-        let scene =
-            crate::render::Scene::try_from_frame(frame, renderer.mesh_table(), options, frame_fit)?;
+        // Wire rows name the initial uploads, never a mutable residency count.
+        let scene = crate::render::Scene::try_from_frame(
+            frame,
+            renderer.initial_mesh_ids(),
+            options,
+            frame_fit,
+            grid_mesh,
+        )?;
         // `run_stream` is a synchronous `Read`/`Write` filter, while the renderer
         // is async because GPU read-back is (the browser must not block its event
         // loop). Natively blocking here is free: the future is already complete
@@ -177,6 +183,9 @@ fn render_and_write_batch<W: Write>(
 /// then the following params stream drives per-frame rendering. A params-only
 /// stream with no leading mesh table is a [`StreamError::MissingMeshStream`].
 ///
+/// `grid_mesh` is a wire row resolved against the initial uploads; `None` keeps
+/// [`RenderOptions::show_local_grid_mesh`]'s runtime handle filter.
+///
 /// Framing is driven by the single shared [`InputSession`](crate::InputSession)
 /// (also used by the wasm renderers): input bytes are read in chunks and pushed
 /// through it, so all the mesh-first sub-stream sniffing + boundary handling
@@ -188,6 +197,7 @@ pub fn run_stream<R: Read, W: Write>(
     width: u32,
     height: u32,
     options: RenderOptions,
+    grid_mesh: Option<MeshTableIndex>,
     frame_resolver: Option<FrameResolver>,
 ) -> Result<(), StreamError> {
     // Validate dimensions up front so schema construction (which multiplies
@@ -200,6 +210,9 @@ pub fn run_stream<R: Read, W: Write>(
     // its texture target are a matched pair (#203): the target is a call
     // argument, not a field, so both are held here.
     let prologue = input.prologue()?;
+    if let Some(row) = grid_mesh {
+        crate::Scene::validate_mesh_index(row, prologue.meshes.len())?;
+    }
     let frame_rate = prologue.frame_rate;
     let (mut renderer, target) = pollster::block_on(Renderer::with_meshes_sample_count(
         width,
@@ -239,6 +252,7 @@ pub fn run_stream<R: Read, W: Write>(
             &mut renderer,
             &target,
             &options,
+            grid_mesh,
             &mut output,
             &batch?,
             input.frames(),
@@ -261,7 +275,7 @@ mod tests {
     use crate::protocol::{
         MESH_TABLE_KIND, PARAMS_TABLE_KIND, PROTOCOL_VERSION_KEY, TABLE_KIND_KEY,
     };
-    use crate::render::{Draw, DrawSelection, RenderMode};
+    use crate::render::{DrawSelection, RenderMode, WireDraw};
     use crate::stream_filter::*;
     use crate::Mesh;
     use crate::MeshTableIndex;
@@ -550,12 +564,12 @@ mod tests {
         assert_eq!(
             rows[0],
             vec![
-                Draw {
+                WireDraw {
                     mesh_id: MeshTableIndex::new(0),
                     model: Matrix4::from_cols_array(&a),
                     selection: DrawSelection::INHERIT
                 },
-                Draw {
+                WireDraw {
                     mesh_id: MeshTableIndex::new(1),
                     model: Matrix4::from_cols_array(&b),
                     selection: DrawSelection::INHERIT
@@ -564,7 +578,7 @@ mod tests {
         );
         assert_eq!(
             rows[1],
-            vec![Draw {
+            vec![WireDraw {
                 mesh_id: MeshTableIndex::new(1),
                 model: Matrix4::from_cols_array(&b),
                 selection: DrawSelection::INHERIT
@@ -911,6 +925,7 @@ mod tests {
             w,
             h,
             RenderOptions::default(),
+            None,
             None,
         )
         .unwrap();

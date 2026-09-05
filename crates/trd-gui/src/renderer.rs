@@ -20,7 +20,7 @@ pub struct ImageRgba {
 /// so [`scene_for`] produces exactly the scene the CLI produces from the same
 /// inputs. Platform-neutral, which is what stops native and browser overlay
 /// handling drifting apart again (#180).
-pub fn render_options(state: &SceneState) -> trd_core::RenderOptions<trd_core::MeshId> {
+pub fn render_options(state: &SceneState) -> trd_core::RenderOptions {
     let xz = |on: bool| on.then_some(trd_core::GridPlane::Xz);
     trd_core::RenderOptions {
         mode: trd_core::RenderMode::Filled, // per-draw Some(mode) overrides; this is only a fallback
@@ -132,19 +132,19 @@ impl GuiRenderer {
     ) -> Result<Self, GuiError> {
         let (mut renderer, target) = trd_core::Renderer::with_meshes(width, height, meshes).await?;
         let had_env = env.is_some();
+        let ids = renderer.initial_mesh_ids().to_vec();
         for (kind, bindings) in [
             ("texture", textures.len()),
             ("material-map", material_maps.len()),
         ] {
-            if bindings > renderer.mesh_table().len() {
+            if bindings > ids.len() {
                 return Err(GuiError::MaterialBindingCount {
                     kind,
                     bindings,
-                    meshes: renderer.mesh_table().len(),
+                    meshes: ids.len(),
                 });
             }
         }
-        let ids: Vec<_> = renderer.mesh_table().ids().collect();
         for (mesh, texture) in ids.iter().copied().zip(textures) {
             if let Some(texture) = texture {
                 renderer.set_mesh_texture(mesh, *texture)?;
@@ -175,9 +175,9 @@ impl GuiRenderer {
         (self.width, self.height)
     }
 
-    /// Initial registrations used to seed the scene; runtime additions are separate.
-    pub fn mesh_table(&self) -> &trd_core::MeshTable {
-        self.renderer.mesh_table()
+    /// Initial upload identities used to seed the scene; runtime additions are separate.
+    pub fn initial_mesh_ids(&self) -> &[trd_core::MeshId] {
+        self.renderer.initial_mesh_ids()
     }
 
     /// Whether an HDR probe is bound — i.e. whether IBL can light a surface.

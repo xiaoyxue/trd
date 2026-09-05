@@ -1,6 +1,6 @@
 //! The **wire** instance record and its `draw_mode` codec.
 //!
-//! [`Draw`] is what the protocol's `draw_mesh` / `draw_model` / `draw_mode`
+//! [`WireDraw`] is what the protocol's `draw_mesh` / `draw_model` / `draw_mode`
 //! columns decode into: which mesh to place, where, and what to draw there. It
 //! is deliberately separate from [`DrawableObject`](super::DrawableObject), the
 //! *renderer's* primitive. [`Scene::resolve_draws`](super::Scene::resolve_draws)
@@ -21,7 +21,7 @@ use crate::{MeshId, MeshTableIndex};
 /// composes it (plus core gizmos) into a [`Scene`](super::Scene) of
 /// [`DrawableObject`](super::DrawableObject)s.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Draw {
+pub struct WireDraw {
     /// Index into the leading mesh table — which geometry this draw places.
     pub mesh_id: MeshTableIndex,
     /// The per-instance placement, applied beneath that mesh's base (preview)
@@ -34,12 +34,12 @@ pub struct Draw {
     pub selection: DrawSelection,
 }
 
-/// A registered mesh placement, independent of wire rows and GPU residency.
+/// A runtime mesh placement, independent of wire rows.
 ///
 /// Wire callers obtain these through [`Scene::resolve_draws`](super::Scene::resolve_draws);
-/// interactive callers already hold the IDs returned by mesh registration.
+/// interactive callers already hold the IDs returned by GPU upload.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ResolvedDraw {
+pub struct Draw {
     pub mesh_id: MeshId,
     pub model: Matrix4,
     pub selection: DrawSelection,

@@ -2,16 +2,22 @@ use super::GpuContext;
 use crate::texture::{ConstantTexture, ImageData, Texture};
 
 /// Linear-data textures used by the glTF metallic-roughness and normal inputs.
+///
+/// Exclusively owns both allocations: bindings may borrow them, but no other
+/// material may share them because replacement explicitly destroys the old map.
 pub(super) struct BoundMaterialMaps {
     layout: wgpu::BindGroupLayout,
     /// Always valid: built at construction from the neutral defaults and rebuilt
     /// by each setter, so the renderer never uploads during `encode` (#180).
     bind_group: wgpu::BindGroup,
-    metallic_roughness: ImageData,
-    normal: ImageData,
-    /// Retained so [`destroy`](Self::destroy) can free them explicitly — see
-    /// [`BoundTexture`](super::BoundTexture) for why dropping is not enough.
-    textures: [wgpu::Texture; 2],
+    metallic_roughness: LinearMap,
+    normal: LinearMap,
+    sampler: wgpu::Sampler,
+}
+
+struct LinearMap {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
 }
 
 impl BoundMaterialMaps {
@@ -40,41 +46,77 @@ impl BoundMaterialMaps {
         // textured but no texture stream is bound" — rather than a private 1×1
         // `ImageData` builder next to it (#247 T5). The sRGB-vs-linear choice
         // still lives at upload, where `upload_linear_view` makes it.
-        let metallic_roughness = ConstantTexture::new([0, 255, 255, 255]).to_image();
-        let normal = ConstantTexture::new([128, 128, 255, 255]).to_image();
-        let (bind_group, textures) = build_bind_group(gpu, &layout, &metallic_roughness, &normal);
+        let metallic_roughness = upload_linear_view(
+            gpu,
+            "trd metallic-roughness",
+            &ConstantTexture::new([0, 255, 255, 255]).to_image(),
+            false,
+        );
+        let normal = upload_linear_view(
+            gpu,
+            "trd normal map",
+            &ConstantTexture::new([128, 128, 255, 255]).to_image(),
+            true,
+        );
+        let sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("trd PBR material map sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            ..Default::default()
+        });
+        let bind_group = build_bind_group(
+            &gpu.device,
+            &layout,
+            &metallic_roughness.view,
+            &normal.view,
+            &sampler,
+        );
         Self {
             layout,
             bind_group,
             metallic_roughness,
             normal,
-            textures,
+            sampler,
         }
     }
 
-    /// Frees both maps, whoever else still holds a handle to them.
+    /// Frees both exclusively owned maps, including their bound views.
     pub(super) fn destroy(&self) {
-        for texture in &self.textures {
-            texture.destroy();
-        }
+        self.metallic_roughness.texture.destroy();
+        self.normal.texture.destroy();
     }
 
     pub(super) fn set_metallic_roughness(&mut self, gpu: &GpuContext, texture: &dyn Texture) {
-        self.metallic_roughness = texture.to_image();
-        self.upload(gpu);
+        let metallic_roughness =
+            upload_linear_view(gpu, "trd metallic-roughness", &texture.to_image(), false);
+        let bind_group = build_bind_group(
+            &gpu.device,
+            &self.layout,
+            &metallic_roughness.view,
+            &self.normal.view,
+            &self.sampler,
+        );
+        let previous = std::mem::replace(&mut self.metallic_roughness, metallic_roughness);
+        self.bind_group = bind_group;
+        previous.texture.destroy();
     }
 
     pub(super) fn set_normal(&mut self, gpu: &GpuContext, texture: &dyn Texture) {
-        self.normal = texture.to_image();
-        self.upload(gpu);
-    }
-
-    fn upload(&mut self, gpu: &GpuContext) {
-        let (bind_group, textures) =
-            build_bind_group(gpu, &self.layout, &self.metallic_roughness, &self.normal);
-        self.destroy();
+        let normal = upload_linear_view(gpu, "trd normal map", &texture.to_image(), true);
+        let bind_group = build_bind_group(
+            &gpu.device,
+            &self.layout,
+            &self.metallic_roughness.view,
+            &normal.view,
+            &self.sampler,
+        );
+        let previous = std::mem::replace(&mut self.normal, normal);
         self.bind_group = bind_group;
-        self.textures = textures;
+        previous.texture.destroy();
     }
 
     pub(super) fn bind_group(&self) -> &wgpu::BindGroup {
@@ -82,45 +124,31 @@ impl BoundMaterialMaps {
     }
 }
 
-/// Uploads both maps and builds the group-3 bind group.
 fn build_bind_group(
-    gpu: &GpuContext,
+    device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
-    mr_image: &ImageData,
-    normal_image: &ImageData,
-) -> (wgpu::BindGroup, [wgpu::Texture; 2]) {
-    let device = &gpu.device;
-    let metallic_roughness = upload_linear_view(gpu, "trd metallic-roughness", mr_image, false);
-    let normal = upload_linear_view(gpu, "trd normal map", normal_image, true);
-    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-        label: Some("trd PBR material map sampler"),
-        address_mode_u: wgpu::AddressMode::Repeat,
-        address_mode_v: wgpu::AddressMode::Repeat,
-        address_mode_w: wgpu::AddressMode::ClampToEdge,
-        mag_filter: wgpu::FilterMode::Linear,
-        min_filter: wgpu::FilterMode::Linear,
-        mipmap_filter: wgpu::MipmapFilterMode::Linear,
-        ..Default::default()
-    });
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+    metallic_roughness: &wgpu::TextureView,
+    normal: &wgpu::TextureView,
+    sampler: &wgpu::Sampler,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("trd PBR material maps bind group"),
         layout,
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: wgpu::BindingResource::TextureView(&metallic_roughness.0),
+                resource: wgpu::BindingResource::TextureView(metallic_roughness),
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: wgpu::BindingResource::TextureView(&normal.0),
+                resource: wgpu::BindingResource::TextureView(normal),
             },
             wgpu::BindGroupEntry {
                 binding: 2,
-                resource: wgpu::BindingResource::Sampler(&sampler),
+                resource: wgpu::BindingResource::Sampler(sampler),
             },
         ],
-    });
-    (bind_group, [metallic_roughness.1, normal.1])
+    })
 }
 
 fn texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
@@ -141,7 +169,7 @@ fn upload_linear_view(
     label: &str,
     image: &ImageData,
     normal_map: bool,
-) -> (wgpu::TextureView, wgpu::Texture) {
+) -> LinearMap {
     let (device, queue) = (&gpu.device, &gpu.queue);
     let size = wgpu::Extent3d {
         width: image.width,
@@ -149,6 +177,10 @@ fn upload_linear_view(
         depth_or_array_layers: 1,
     };
     let mip_level_count = 1 + image.width.max(image.height).ilog2();
+    let usage = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST;
+    // Readback proves that replacing one map leaves the other allocation alive.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    let usage = usage | wgpu::TextureUsages::COPY_SRC;
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
         size,
@@ -156,7 +188,7 @@ fn upload_linear_view(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8Unorm,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        usage,
         view_formats: &[],
     });
     let mut width = image.width;
@@ -189,7 +221,7 @@ fn upload_linear_view(
         }
     }
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    (view, texture)
+    LinearMap { texture, view }
 }
 
 fn downsample_linear(width: u32, height: u32, rgba: &[u8], normal_map: bool) -> Vec<u8> {
@@ -234,4 +266,115 @@ fn downsample_linear(width: u32, height: u32, rgba: &[u8], normal_map: bool) -> 
         }
     }
     out
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use crate::render::{create_instance, GpuRequest};
+
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    fn setters_replace_only_the_changed_map() {
+        let instance = create_instance();
+        let gpu = pollster::block_on(GpuContext::request(&instance, &GpuRequest::default()))
+            .expect("GPU adapter required");
+        let mut maps =
+            BoundMaterialMaps::with_layout(&gpu, BoundMaterialMaps::create_layout(&gpu.device));
+
+        // Exhaustive destructuring pins the GPU-only ownership record.
+        let BoundMaterialMaps {
+            layout: _,
+            bind_group: _,
+            metallic_roughness:
+                LinearMap {
+                    texture: initial_mr,
+                    view: _,
+                },
+            normal:
+                LinearMap {
+                    texture: initial_normal,
+                    view: _,
+                },
+            sampler,
+        } = &maps;
+        let initial_mr = initial_mr.clone();
+        let initial_normal = initial_normal.clone();
+        let sampler = sampler.clone();
+        assert_eq!(read_pixel(&gpu, &initial_mr), [0, 255, 255, 255]);
+        assert_eq!(read_pixel(&gpu, &initial_normal), [128, 128, 255, 255]);
+
+        let mr_pixel = [9, 82, 173, 255];
+        maps.set_metallic_roughness(&gpu, &ConstantTexture::new(mr_pixel));
+        assert_ne!(maps.metallic_roughness.texture, initial_mr);
+        assert_eq!(maps.normal.texture, initial_normal);
+        assert_eq!(read_pixel(&gpu, &initial_normal), [128, 128, 255, 255]);
+        assert_eq!(read_pixel(&gpu, &maps.metallic_roughness.texture), mr_pixel);
+
+        let retained_mr = maps.metallic_roughness.texture.clone();
+        let normal_pixel = [153, 102, 245, 255];
+        maps.set_normal(&gpu, &ConstantTexture::new(normal_pixel));
+        assert_ne!(maps.normal.texture, initial_normal);
+        assert_eq!(maps.metallic_roughness.texture, retained_mr);
+        assert_eq!(read_pixel(&gpu, &retained_mr), mr_pixel);
+        assert_eq!(read_pixel(&gpu, &maps.normal.texture), normal_pixel);
+
+        let retained_normal = maps.normal.texture.clone();
+        maps.set_metallic_roughness(&gpu, &ConstantTexture::new([2, 3, 4, 255]));
+        assert_ne!(maps.metallic_roughness.texture, retained_mr);
+        assert_eq!(maps.normal.texture, retained_normal);
+        assert_eq!(read_pixel(&gpu, &retained_normal), normal_pixel);
+        assert_eq!(
+            read_pixel(&gpu, &maps.metallic_roughness.texture),
+            [2, 3, 4, 255]
+        );
+        assert_eq!(maps.sampler, sampler);
+        maps.destroy();
+    }
+
+    fn read_pixel(gpu: &GpuContext, texture: &wgpu::Texture) -> [u8; 4] {
+        let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("trd material map test readback"),
+            size: 4,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        encoder.copy_texture_to_buffer(
+            texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &staging,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: None,
+                    rows_per_image: None,
+                },
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+        gpu.queue.submit(Some(encoder.finish()));
+        let slice = staging.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        gpu.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("GPU poll failed");
+        rx.recv()
+            .expect("map_async callback dropped")
+            .expect("GPU readback failed");
+        let pixel = {
+            let mapped = slice.get_mapped_range().expect("buffer mapped after poll");
+            mapped[..4].try_into().expect("one RGBA pixel")
+        };
+        staging.unmap();
+        pixel
+    }
 }

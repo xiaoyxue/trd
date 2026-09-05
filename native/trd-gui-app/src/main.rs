@@ -91,7 +91,7 @@ fn main() -> eframe::Result<()> {
         }
     };
 
-    let scene = match cli.scene_state(&loaded, has_env, renderer.mesh_table()) {
+    let scene = match cli.scene_state(&loaded, has_env, renderer.initial_mesh_ids()) {
         Ok(scene) => scene,
         Err(error) => {
             log::error!("failed to seed scene: {error}");

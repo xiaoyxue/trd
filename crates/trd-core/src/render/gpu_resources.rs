@@ -1,18 +1,8 @@
-//! GPU-side mesh storage: the decode-once mesh store.
+//! Addressable asset residency: identity, upload, mutation and destruction.
 //!
-//! [`MeshGpu`] is one uploaded mesh (vertex/index buffers, its bound albedo and
-//! material maps, its AABB gizmo geometry and base model); [`MeshResources`] owns
-//! every mesh a scene's ids can name, and **only** those — the constant gizmo
-//! geometry and the per-frame instance buffer moved to their own owners in
-//! `gizmo.rs` and `buffer.rs` (#222).
-//!
-//! Named `mesh_store` rather than `mesh` because `crate::mesh` already holds the
-//! CPU-side [`Mesh`]; this is its GPU face.
-//!
-//! [`MeshTarget`] and the renderer-level surface over the store — uploads,
-//! removals, texture binding, appearance edits — are at the bottom of this file
-//! (#363). They stay [`Renderer`] methods because each needs the GPU context,
-//! but they read beside the state they mutate.
+//! [`GpuResourceManager`] owns the live mesh records, not CPU assets or frame
+//! scratch. Mesh-exclusive buffers/textures keep their existing thin wrappers;
+//! shared texture/material registries are not introduced without real consumers.
 
 use super::bound_material_maps::BoundMaterialMaps;
 use super::bound_texture::BoundTexture;
@@ -21,7 +11,7 @@ use super::*;
 use crate::material::DisneyMaterial;
 use crate::math::Matrix4;
 use crate::texture::Texture;
-use crate::{MeshId, MeshResourceError, MeshTable, MeshTableIndex};
+use crate::{MeshId, MeshResourceError};
 use std::collections::HashMap;
 
 /// A mesh uploaded to the GPU, in three parts by how they change: `geometry` is
@@ -30,7 +20,7 @@ use std::collections::HashMap;
 ///
 /// Only `appearance` is private, and that is the point: privacy here means
 /// "there is an invariant", so the one private field is the one
-/// `Renderer::edit_appearance` must be the sole writer of (#347).
+/// the manager's appearance-edit path must be the sole writer of (#347).
 pub(super) struct MeshGpu {
     pub(super) geometry: MeshGeometry,
     pub(super) textures: MeshTextures,
@@ -92,8 +82,8 @@ impl MeshGpu {
         &self.appearance
     }
 
-    /// The only way to mutate appearance, so `Renderer::edit_appearance` stays
-    /// the one place an appearance edit marks the PBR slots stale.
+    /// Used only by the manager; Renderer coordinates successful edits with
+    /// the uniform dirty flag.
     pub(super) fn appearance_mut(&mut self) -> &mut MeshAppearance {
         &mut self.appearance
     }
@@ -121,7 +111,7 @@ impl MeshGpu {
     }
 }
 
-pub(super) fn upload_mesh(
+fn upload_mesh(
     gpu: &GpuContext,
     mesh: &Mesh,
     base_model: Matrix4,
@@ -194,9 +184,12 @@ struct ResidentMesh {
 }
 
 /// Caller-supplied mesh residency, with identity independent of reusable slots.
-pub(super) struct MeshResources {
+pub(super) struct GpuResourceManager {
     slots: Vec<Option<ResidentMesh>>,
     by_id: HashMap<MeshId, MeshSlot>,
+    initial_ids: Vec<MeshId>,
+    texture_layout: wgpu::BindGroupLayout,
+    material_maps_layout: wgpu::BindGroupLayout,
 }
 
 /// A successful lookup supplies both the resource and its private PBR slot.
@@ -205,25 +198,44 @@ pub(super) struct ResolvedMesh<'a> {
     pub(super) gpu: &'a MeshGpu,
 }
 
-impl MeshResources {
+impl GpuResourceManager {
     pub(super) fn new(
         gpu: &GpuContext,
-        table: &MeshTable,
+        meshes: &[Mesh],
         base_models: &[Matrix4],
-        texture_layout: &wgpu::BindGroupLayout,
-        material_maps_layout: &wgpu::BindGroupLayout,
-    ) -> Self {
+        texture_layout: wgpu::BindGroupLayout,
+        material_maps_layout: wgpu::BindGroupLayout,
+    ) -> Result<Self, MeshResourceError> {
         let mut resources = Self {
-            slots: Vec::with_capacity(table.len()),
-            by_id: HashMap::with_capacity(table.len()),
+            slots: Vec::with_capacity(meshes.len()),
+            by_id: HashMap::with_capacity(meshes.len()),
+            initial_ids: Vec::with_capacity(meshes.len()),
+            texture_layout,
+            material_maps_layout,
         };
-        for ((id, mesh), &base) in table.iter().zip(base_models) {
-            resources.insert(
-                id,
-                upload_mesh(gpu, mesh, base, texture_layout, material_maps_layout),
-            );
+        for (mesh, &base) in meshes.iter().zip(base_models) {
+            let id = resources.upload(gpu, mesh, base)?;
+            resources.initial_ids.push(id);
         }
-        resources
+        Ok(resources)
+    }
+
+    fn upload(
+        &mut self,
+        gpu: &GpuContext,
+        mesh: &Mesh,
+        base_model: Matrix4,
+    ) -> Result<MeshId, MeshResourceError> {
+        let id = MeshId::fresh()?;
+        let uploaded = upload_mesh(
+            gpu,
+            mesh,
+            base_model,
+            &self.texture_layout,
+            &self.material_maps_layout,
+        );
+        self.insert(id, uploaded);
+        Ok(id)
     }
 
     fn insert(&mut self, id: MeshId, gpu: MeshGpu) {
@@ -242,7 +254,7 @@ impl MeshResources {
         assert!(previous.is_none(), "registration identities are unique");
     }
 
-    pub(super) fn remove(&mut self, id: MeshId) -> Result<(), MeshResourceError> {
+    fn remove(&mut self, gpu: &GpuContext, id: MeshId) -> Result<(), MeshResourceError> {
         let slot = self
             .by_id
             .remove(&id)
@@ -252,6 +264,52 @@ impl MeshResources {
             .expect("the identity lookup contains only occupied slots");
         debug_assert_eq!(resident.id, id);
         resident.gpu.destroy();
+        gpu.queue.submit([]);
+        Ok(())
+    }
+
+    fn set_texture(
+        &mut self,
+        gpu: &GpuContext,
+        id: MeshId,
+        texture: &dyn Texture,
+    ) -> Result<(), MeshResourceError> {
+        self.get_mut(id)?.textures.albedo.set(gpu, texture);
+        Ok(())
+    }
+
+    fn set_metallic_roughness(
+        &mut self,
+        gpu: &GpuContext,
+        id: MeshId,
+        texture: &dyn Texture,
+    ) -> Result<(), MeshResourceError> {
+        self.get_mut(id)?
+            .textures
+            .maps
+            .set_metallic_roughness(gpu, texture);
+        Ok(())
+    }
+
+    fn set_normal(
+        &mut self,
+        gpu: &GpuContext,
+        id: MeshId,
+        texture: &dyn Texture,
+    ) -> Result<(), MeshResourceError> {
+        self.get_mut(id)?.textures.maps.set_normal(gpu, texture);
+        Ok(())
+    }
+
+    fn edit_appearance(
+        &mut self,
+        target: MeshTarget,
+        edit: impl Fn(&mut MeshAppearance),
+    ) -> Result<(), MeshResourceError> {
+        match target {
+            MeshTarget::All => self.iter_mut().for_each(|mesh| edit(mesh.appearance_mut())),
+            MeshTarget::One(id) => edit(self.get_mut(id)?.appearance_mut()),
+        }
         Ok(())
     }
 
@@ -323,32 +381,26 @@ pub enum MeshTarget {
 }
 
 impl Renderer {
-    /// The initial CPU registrations, independent of subsequent removals/adds.
-    pub fn mesh_table(&self) -> &MeshTable {
-        &self.mesh_table
+    /// Immutable initial wire-row bindings; runtime additions do not renumber them.
+    pub fn initial_mesh_ids(&self) -> &[MeshId] {
+        &self.resources.initial_ids
     }
 
     /// The live mesh count, never a resource-ID validation bound.
     pub fn mesh_count(&self) -> usize {
-        self.meshes.len()
+        self.resources.len()
     }
 
     /// Uploads a preview-fitted mesh under a fresh identity, even on slot reuse.
     pub fn add_mesh(&mut self, mesh: &Mesh) -> Result<MeshId, MeshResourceError> {
-        let mesh_id = MeshId::fresh()?;
-        let texture_layout = create_texture_bind_group_layout(&self.gpu.device);
-        let material_maps_layout = BoundMaterialMaps::create_layout(&self.gpu.device);
-        let uploaded = upload_mesh(
+        let mesh_id = self.resources.upload(
             &self.gpu,
             mesh,
             mesh.preview_transform(crate::DEFAULT_PREVIEW_TARGET)
                 .matrix(),
-            &texture_layout,
-            &material_maps_layout,
-        );
-        self.meshes.insert(mesh_id, uploaded);
+        )?;
         self.uniforms
-            .grow_pbr_slots(&self.gpu.device, self.meshes.slot_count());
+            .grow_pbr_slots(&self.gpu.device, self.resources.slot_count());
         // Reuse also invalidates the old occupant's uniform bytes.
         self.uniforms.mark_slots_dirty();
         Ok(mesh_id)
@@ -357,8 +409,7 @@ impl Renderer {
     /// Invalidates `mesh_id` and destroys its GPU resources. Repeated removal
     /// fails explicitly. In-flight submissions may defer physical reclamation.
     pub fn remove_mesh(&mut self, mesh_id: MeshId) -> Result<(), MeshResourceError> {
-        self.meshes.remove(mesh_id)?;
-        self.gpu.queue.submit([]);
+        self.resources.remove(&self.gpu, mesh_id)?;
         self.uniforms.mark_slots_dirty();
         Ok(())
     }
@@ -366,8 +417,9 @@ impl Renderer {
     /// Sets the initial row-zero mesh's albedo, never a replacement in its slot.
     pub fn set_texture(&mut self, texture: &dyn Texture) -> Result<(), MeshResourceError> {
         let id = self
-            .mesh_table
-            .id(MeshTableIndex::new(0))
+            .initial_mesh_ids()
+            .first()
+            .copied()
             .expect("renderer construction requires a nonempty mesh table");
         self.set_mesh_texture(id, texture)
     }
@@ -378,12 +430,7 @@ impl Renderer {
         mesh_id: MeshId,
         texture: &dyn Texture,
     ) -> Result<(), MeshResourceError> {
-        self.meshes
-            .get_mut(mesh_id)?
-            .textures
-            .albedo
-            .set(&self.gpu, texture);
-        Ok(())
+        self.resources.set_texture(&self.gpu, mesh_id, texture)
     }
 
     /// Uploads a glTF metallic-roughness map (G=roughness, B=metallic).
@@ -392,12 +439,8 @@ impl Renderer {
         mesh_id: MeshId,
         texture: &dyn Texture,
     ) -> Result<(), MeshResourceError> {
-        self.meshes
-            .get_mut(mesh_id)?
-            .textures
-            .maps
-            .set_metallic_roughness(&self.gpu, texture);
-        Ok(())
+        self.resources
+            .set_metallic_roughness(&self.gpu, mesh_id, texture)
     }
 
     /// Uploads the resident mesh's tangent-space glTF normal map.
@@ -406,12 +449,7 @@ impl Renderer {
         mesh_id: MeshId,
         texture: &dyn Texture,
     ) -> Result<(), MeshResourceError> {
-        self.meshes
-            .get_mut(mesh_id)?
-            .textures
-            .maps
-            .set_normal(&self.gpu, texture);
-        Ok(())
+        self.resources.set_normal(&self.gpu, mesh_id, texture)
     }
 
     fn edit_appearance(
@@ -419,16 +457,7 @@ impl Renderer {
         target: MeshTarget,
         edit: impl Fn(&mut MeshAppearance),
     ) -> Result<(), MeshResourceError> {
-        match target {
-            MeshTarget::All => self
-                .meshes
-                .iter_mut()
-                .for_each(|mesh| edit(mesh.appearance_mut())),
-            MeshTarget::One(mesh_id) => {
-                let mesh = self.meshes.get_mut(mesh_id)?;
-                edit(mesh.appearance_mut());
-            }
-        }
+        self.resources.edit_appearance(target, edit)?;
         self.uniforms.mark_slots_dirty();
         Ok(())
     }
@@ -445,7 +474,7 @@ impl Renderer {
 
     /// The current appearance, or an explicit nonresident-resource error.
     pub fn mesh_appearance(&self, mesh_id: MeshId) -> Result<&MeshAppearance, MeshResourceError> {
-        self.meshes.get(mesh_id).map(MeshGpu::appearance)
+        self.resources.get(mesh_id).map(MeshGpu::appearance)
     }
 
     /// Sets the [`DisneyMaterial`] of `target`. Takes effect on the next

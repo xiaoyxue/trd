@@ -45,10 +45,10 @@ pub enum GuiError {
     #[error(transparent)]
     MeshResource(#[from] trd_core::MeshResourceError),
 
-    #[error("scene has {meshes} registered meshes but {materials} imported materials")]
+    #[error("scene has {meshes} initial meshes but {materials} imported materials")]
     SceneSeedCount { meshes: usize, materials: usize },
 
-    #[error("{bindings} {kind} bindings exceed the {meshes} registered meshes")]
+    #[error("{bindings} {kind} bindings exceed the {meshes} initial meshes")]
     MaterialBindingCount {
         kind: &'static str,
         bindings: usize,

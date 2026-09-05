@@ -28,7 +28,7 @@
 //! borrow checker — the renderer now splits the borrow in time instead.
 
 use super::buffer::draw_indexed;
-use super::{RenderError, Renderer, ResolvedDraw, Viewport};
+use super::{Draw, RenderError, Renderer, Viewport};
 use crate::{Camera, MeshId, MeshResourceError};
 
 use super::GpuContext;
@@ -225,7 +225,7 @@ impl Renderer {
     fn prepare_picking(
         &mut self,
         camera: Camera,
-        draws: &[ResolvedDraw],
+        draws: &[Draw],
     ) -> Result<Vec<(MeshId, u32)>, MeshResourceError> {
         // Camera P·V for this frame (writes the shared camera uniform bound by
         // `uniforms.camera`, which is layout-compatible with the pick pipeline).
@@ -239,7 +239,7 @@ impl Renderer {
             if !draw.selection.is_mesh() {
                 continue;
             }
-            let mesh = self.meshes.get(draw.mesh_id)?;
+            let mesh = self.resources.get(draw.mesh_id)?;
             let effective = draw.model * mesh.geometry.base_model;
             let slot = instances.len() as u32;
             instances.push(PickInstanceRaw::new(effective, index as u32));
@@ -308,7 +308,7 @@ impl Renderer {
         self.picking
             .bind(&mut pass, self.uniforms.camera.bind_group());
         for &(mesh_id, slot) in records {
-            let mesh = self.meshes.get(mesh_id)?;
+            let mesh = self.resources.get(mesh_id)?;
             draw_indexed(&mut pass, mesh.filled(), slot..slot + 1);
         }
         Ok(())
@@ -326,13 +326,13 @@ impl Renderer {
     pub async fn pick(
         &mut self,
         camera: Camera,
-        draws: &[ResolvedDraw],
+        draws: &[Draw],
         x: u32,
         y: u32,
         viewport: Viewport,
     ) -> Result<Option<u32>, RenderError> {
         for draw in draws.iter().filter(|draw| draw.selection.is_mesh()) {
-            self.meshes.get(draw.mesh_id)?;
+            self.resources.get(draw.mesh_id)?;
         }
         let gpu = self.gpu.clone();
         let Viewport {

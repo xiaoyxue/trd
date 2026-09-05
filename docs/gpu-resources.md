@@ -1,301 +1,153 @@
-# GPU mesh resource identity
+# GPU asset resources
 
-**Resource identity contract (#366).** Wire rows, logical mesh identities and
-private GPU slots are separate addresses. Protocol and shader bytes are
-unchanged; invalid resource references now fail explicitly instead of silently
-skipping a draw or rebinding a removed mesh.
+`GpuResourceManager` is the renderer's owner of addressable asset residency
+(#366). It manages mesh identity, upload, lookup, mutation and removal. It is
+not a registry of every wgpu object in the application.
 
-The goal is narrow: a scene names a mesh by an opaque identity, and the renderer
-resolves that identity to its resident resources. Deleting a mesh must never let
-an old scene silently draw a replacement.
-
-## Decisions
-
-| Question | Decision |
-|---|---|
-| D1: manager scope | Evolve `MeshStore` into `MeshResources`, not a generic manager around another store. Manage only caller-supplied, removable meshes. |
-| D2: handle and generation | An opaque `MeshId(u64)`, minted once and never reused within its issuing process/module instance. No public slot or per-slot generation. Preserve private slot ordering when batching. |
-| D3: wire boundary | `MeshTableIndex` resolves through a CPU-owned registration table in scene assembly. Table validity and GPU residency remain separate errors. |
-| D4: dispatch seam | Resolve a handle, then record the primitive. Each `record_*` binds its own complete pass state. |
-| D5: PBR slot | Keep one PBR slot per private mesh-storage slot, including holes in the allocation span. No shaded-only allocator in this migration. |
-| D6: public surface | Mesh-addressed operations take `MeshId`; wire draws keep table indices. Put GUI identity and appearance beside each object's transform. Do not add unrelated API consolidation. |
-
-## D1: ownership without another forwarding layer
-
-`Renderer` owns `MeshResources`, and `MeshResources` owns the resident `MeshGpu`s.
-It replaces the existing store; it does not wrap a second public or private
-manager. `MeshGpu` remains the thin geometry/textures/appearance record, including
-its explicit destruction behavior. Private slot allocation stays simple.
-
-The following are constraints, not candidates for later migration in this work:
-
-- Gizmos remain enum-addressed: grid plane and selection state already identify
-  constant geometry without allocation or stale references.
-- Pipelines, uniforms, environment, frame plane, attachments, instances and
-  picking remain singleton subsystems owned directly by `Renderer`.
-- No `GeometryStore` trait, resource-kind enum with unused variants, generic
-  `ResourceArena<T>`, or buffer-access trait is introduced.
-
-The addressing implementation needs a live `MeshId -> private slot` lookup and
-reusable slots. Each occupied slot stores its identity with its `MeshGpu`; there
-are no parallel metadata vectors whose lengths callers must synchronize.
-Removal deletes the lookup entry, destroys the GPU resources and services the
-queue exactly as today. Reuse installs a new identity in the vacant slot.
-
-## D2: identity, invalidation and ordering
-
-The public identity is a `Copy + Eq + Hash` integer newtype with private bits:
-
-```rust
-pub struct MeshId(u64);
-pub struct MeshTableIndex(u32);
-```
-
-`MeshTableIndex` exposes boundary construction and an indexing accessor; scene
-assembly checks its range. `MeshId` has no public integer constructor, indexing accessor,
-`From<u64>`, serialization, or stable external representation.
-
-One internal, device-free issuer allocates monotonically increasing `MeshId`s
-for both initial CPU registrations and runtime additions. It is shared across
-resource managers in the same process/module instance, safe for concurrent
-registration, and must fail explicitly at exhaustion rather than wrap. Wasm
-module instances are separate identity domains; transferring handles between
-them or persisting them is unsupported. This adds no browser API or platform
-conditional to a shared crate.
-
-**No explicit generation is needed because identities never repeat.** The
-manager never exposes a slot token; a recycled slot cannot recreate its former
-public ID. There is no second long-lived internal handle whose generation must
-also be maintained. A per-slot `(index, generation)` by itself was rejected:
-two independently created managers can issue the same pair.
-
-Fresh registrations in two renderers have distinct IDs, so passing one
-renderer's ID to the other cannot accidentally name its first mesh. Uploading
-the *same CPU registration* to two renderers may deliberately preserve its
-logical identity: each renderer still needs its own explicit upload. A resource
-not uploaded to the receiving renderer fails its residency lookup.
-
-### Sorting is not identity
-
-Today mesh slot order determines submission order within each render mode,
-including depth-disabled wireframes and AABBs. Sorting by a newly minted
-monotonic ID would change that order after deleting an early slot and refilling
-the hole. Widening `Primitive::sort_key` to `u64` alone is therefore insufficient.
-
-During batching, resolve the handle to its private slot and base model. Sort
-with the existing `(layer, variation, private geometry slot)` precedence, with
-the full `MeshId` as an identity tie-breaker. Non-mesh geometry retains its
-existing enum order. The resolved sort key is renderer-private scratch; it never
-becomes a field on `Primitive` or `DrawableObject`.
-
-Batch equality continues to compare the complete `Primitive`, including the
-complete `MeshId`. Never truncate the ID to `u32` or group on the slot alone.
-`Primitive::sort_key` accepts the resolved private slot, keeping its
-layer/variation policy with the taxonomy while storage ordering comes from
-resolution. Stable ordering among instances of the same primitive is unchanged.
-
-## D3: registration before residency
-
-Three different addresses must not become another overloaded integer:
-
-| Type | Meaning | Owner |
-|---|---|---|
-| `MeshTableIndex` | A row of the current wire mesh table | Protocol/CPU registration |
-| `MeshId` | A registered logical mesh identity | Scene and caller |
-| Private mesh slot | A resident record and its PBR uniform offset | `MeshResources` only |
-
-The initial CPU registration table, `MeshTable`, owns an ordered
-sequence of registered meshes, each pairing its `MeshId` with its CPU `Mesh`.
-It mints identities once when the decoded mesh table is registered, not once per
-frame. Its row-to-ID view can be borrowed by scene assembly without a device,
-queue, `Renderer`, or GPU-manager borrow. This is a CPU asset table, not a mirror
-of resident slots.
-
-Construction uploads those same registered entries into `MeshResources`; it
-must not mint a different set of IDs while uploading. Existing convenience
-constructors can register internally, but must make their CPU row-to-ID binding
-available to callers. The explicit registered-input constructor supports the
-native reader's pre-device validation/assembly path. Runtime `add_mesh` uses the
-same internal issuer and returns a fresh ID directly; it does not append to or
-reinterpret a stream's mesh table.
+## Ownership
 
 ```text
-decoded mesh table -> CPU registration: [(MeshId, Mesh), ...]
-                           |                         |
-                      row-to-ID view            explicit upload
-                           |                         |
-Draw { MeshTableIndex }    |                   MeshResources
-             |             |                 MeshId -> slot -> MeshGpu
-             +-------> scene assembly                ^
-                           |                         |
-              Primitive::Mesh { MeshId, mode } ------+
+Caller / loader
+  CPU Mesh and Texture inputs -- borrowed during upload --> Renderer
+  SurfaceTarget / TextureTarget -- borrowed per render --> Renderer
+
+Renderer
+  GpuResourceManager
+    private live-ID lookup and reusable mesh slots
+    MeshGpu
+      existing VertexBuffer / IndexBuffer wrappers
+      exclusive BoundTexture / BoundMaterialMaps
+      base transform and mesh appearance
+  existing pipelines, uniforms, gizmos, attachments, picking and frame plane
+
+Scene / Draw / Primitive
+  non-owning MeshId + per-instance placement
 ```
 
-`Scene::try_from_frame(frame, &mesh_table, options, frame_fit)` is the wire
-entry. Its shared resolution helper replaces the count-only check. It resolves
-the explicit draw list, or implicit mesh row zero, before calling the common
-overlay/scene assembler. The native window path must use this same helper,
-rather than retain its separate `mesh_id < mesh_count` loop.
+The manager is the single authority for its resident assets. Its private slot
+storage is a mechanism, not another resource manager. Mesh-exclusive allocations
+remain directly owned by `MeshGpu`; there is no redundant public buffer registry.
 
-`Draw` remains the wire record, with a `MeshTableIndex` rather than a resident
-handle. A distinct handle-bearing `ResolvedDraw` feeds `Scene::from_draws` and
-picking; GUI-authored draws already have IDs and do not masquerade as wire rows.
-Resolve wire mesh-selector options, including `show_local_grid_mesh`, through
-the same table at this boundary. Object selection indices remain object/draw
-indices, not resource IDs.
+CPU geometry is borrowed during upload, not cloned into a retained registration
+table. The caller decides whether to retain its source assets. The renderer keeps
+only an immutable initial `Vec<MeshId>` in wire-table order; runtime additions
+return IDs directly and do not rewrite that original mapping.
 
-### Two validations, two errors
+Render targets remain caller-owned. Constant gizmos, viewport attachments,
+uniforms and other frame subsystems keep their existing owners and update
+policies. They do not acquire asset handles merely because they use GPU memory.
 
-`SceneError::MeshIndexOutOfRange` remains a table-boundary error, reporting the
-bad `MeshTableIndex` and table length, not a count of GPU slots. It must be
-possible to raise it before any device exists. Preserve the protocol's current
-row validation, absent-versus-empty draw-list behavior, and shadow encoding;
-this migration does not relax validation of a wire field just because the
-selected primitive does not use mesh geometry.
+## Identity and lifetime
 
-Renderer-side lookup reports `MeshResourceError::NotResident { mesh: MeshId }`
-for a removed, foreign or not-yet-uploaded resource. It need not distinguish
-these cases by retaining every retired ID forever. A CPU table may still name
-a deleted registration; resolution must not silently substitute the next
-occupant of its former GPU slot.
+`MeshId` is an opaque, non-owning `Copy` value. The manager mints a fresh identity
+for every upload, including when a private slot is reused. Independent renderers
+upload the same CPU mesh under different IDs.
 
-Validate all mesh-bearing primitives before target acquisition, uniform writes,
-or command encoding. A bad scene fails as a whole; it does not partially draw,
-silently skip, or accidentally reuse stale buffers. Apply the same rule to
-layered rendering and picking. Public entry points that currently cannot return
-this error must become fallible, and every shell must surface it through its
-existing error/log/UI path.
+The internal issuer never recycles IDs; exhaustion is an error rather than wrap.
+There is no public integer-to-ID conversion, storage index accessor or serialized
+representation. A removed or foreign ID produces `MeshResourceError::NotResident`
+instead of naming another mesh.
 
-## D4: resolve, then record
+Copying a Scene does not retain GPU resources. Removing an object from the GUI
+does not automatically remove a mesh still used by another object; callers
+request resource removal only when they intend to unload it. A retained stale
+Scene then fails explicitly.
 
-Resolution supplies a resident resource and its private slot. `record_mesh` and
-`record_aabb_box` consume that validated information, not a public array index.
-Picking uses the same residency rules and keeps the original draw index for
-the returned hit; filtering or batching must not renumber selectable objects.
+Removal invalidates the live lookup, takes the resident record and destroys its
+exclusive GPU allocations. Queue servicing preserves the existing release
+behavior. This does not promise synchronous physical reclamation: GPU work
+already in flight can defer it.
 
-The dispatch seam stays at `record_*`. Each body binds its own pipeline, bind
-groups and instance buffers at entry, relying on no previous record and
-restoring nothing at exit. Do not turn this into a trait exposing buffers or
-move GPU ownership into the scene.
+No independent shared-texture/material registry is introduced in this slice.
+When actual shared resources require one, dependencies must be explicit and
+removal of a resource with live dependants must fail without mutating either
+resource. An exclusive binding wrapper must not also independently destroy a
+texture owned by a shared registry.
 
-## D5: deliberately keep derived PBR slots
+## Reuse the existing wrappers
 
-After handle validation, `private mesh slot == PBR slot` remains intentional.
-Every stored mesh can switch to `RenderMode::Shaded` next frame, so allocating
-only for currently shaded draws introduces another lifecycle with no measured
-benefit for this scope.
-
-`write_pbr` and `record_mesh` obtain the same private slot from the manager;
-neither casts a `MeshId` into a dynamic uniform offset. Slot capacity still
-covers the allocation span, not just the live mesh count. Initial upload, growth,
-hole reuse, removal and appearance edits retain the existing dirty-marking
-rules. Texture edits do not dirty PBR uniforms. The slot buffer and its bind
-group grow together, and growth rewrites all live slots before the next draw.
-
-An independently allocated PBR slot is deferred until a new resource kind or a
-measurement justifies it. It is not a prerequisite for opaque mesh identity.
-
-## D6: target public API and GUI ownership
-
-The old surface in `render/mesh_store.rs` had **13** public methods, not the
-11 quoted in the original issue. They migrate as follows, with `mesh_table()`
-additionally exposing the immutable initial CPU registrations:
-
-| Current operation | Target contract |
+| Type | Responsibility retained |
 |---|---|
-| `mesh_count()` | Returns the live resource count; never a validation bound or slot capacity. |
-| `add_mesh(&Mesh)` | Returns `Result<MeshId, MeshResourceError>`; fresh identity, including when a private hole is reused. |
-| `remove_mesh(usize)` | Takes `MeshId`, returns `Result<(), MeshResourceError>`; repeated/stale removal is an explicit error. |
-| `set_texture(texture)` | Retains the single-mesh convenience by targeting the initial registered row-zero ID; errors if it is no longer resident, never retargets a replacement. |
-| `set_mesh_texture(usize, texture)` | Takes `MeshId` and returns a result. |
-| `set_mesh_metallic_roughness_texture(usize, texture)` | Takes `MeshId` and returns a result. |
-| `set_mesh_normal_texture(usize, texture)` | Takes `MeshId` and returns a result. |
-| `mesh_appearance(usize)` | Takes `MeshId`; returns a result containing the borrowed appearance. |
-| `set_appearance(target, appearance)` | `MeshTarget::One(MeshId)` or `All`; returns a result. |
-| `set_disney_material(target, material)` | Same typed target/result, through the existing private appearance-edit path. |
-| `set_image_based_lighting(target, ibl)` | Same typed target/result and dirty marking. |
-| `set_tone_mapping(target, tone_mapping)` | Same typed target/result and dirty marking. |
-| `set_pbr_debug_view(target, debug_view)` | Same typed target/result and dirty marking. |
+| `VertexBuffer<T>` / `IndexBuffer` | Typed geometry layout/count and buffer usage |
+| `InstanceBuffer<T>` | Per-frame capacity, growth and upload |
+| `BoundUniform` / `BoundSceneSlots` | Buffer/binding consistency and aligned dynamic offsets |
+| `BoundTexture` | Exclusive albedo upload, replacement and binding |
+| `BoundMaterialMaps` | Linear material maps, normal-map mip generation and group-3 binding |
+| `Attachment` / `ViewportAttachment` / `MeshAttachments` | Allocation, resizing and matching MSAA/depth attachments |
 
-`MeshTarget::All` edits all live records, including the valid empty set.
-`MeshTarget::One` never silently ignores a nonresident ID. Keep the existing
-private `edit_appearance` as the sole mutation/dirty-marking path; exposing a
-generic edit closure or collapsing texture setters is not part of this change.
-The internal residency error also propagates through `RenderError`.
+The CPU `Texture` trait and `ImageData` remain upload inputs, not GPU-residency
+records. Material maps retain their GPU texture/view state rather than whole
+CPU image copies. Replacing one map uploads only that map and rebuilds the binding
+against the unchanged companion; only the superseded exclusive allocation is
+destroyed. Defaults, color-space rules and mip generation stay unchanged.
 
-**The GUI cannot drop the object-to-mesh relationship.** Replace its parallel
-vectors with records, rather than merely renaming `mesh_ids`:
+New shared-buffer suballocation, texture pooling or dense compaction must be
+justified by a real requirement. They are not prerequisites for handle safety.
+GPU ranges cannot be recycled merely because a CPU slot is free: any later
+suballocator must track when the GPU has finished using each range.
 
-```rust
-struct SceneObject {
-    mesh: MeshId,
-    transform: ObjectTransform,
-    mode: RenderMode,
-    appearance: MeshAppearance,
-}
-```
+## Wire boundary
 
-`SceneState::objects` becomes `Vec<SceneObject>`. Registration supplies a real
-ID when an object is constructed; scene seeding must not invent `0..n` IDs or
-fall back to an object's row number. The UI's selected row indexes these
-records. Removing a row does not change surviving resource identities, and
-removing its GPU resource is explicit. Where multiple objects share a mesh,
-removing one object must not destroy a resource still referenced by another.
+`WireDraw` contains a `MeshTableIndex`, while runtime `Draw` contains `MeshId`.
+The protocol still carries mesh-table rows; its encoding and version do not
+change.
 
-This co-location is part of the implementation's caller migration, not a claim
-that handles automatically remove bookkeeping. It must cover native/web viewers,
-video-editor catalog swaps, appearance editing and pick results together.
-Do not generalize this into multi-part model ownership.
+Input can be validated before a device exists: mesh rows are checked against
+the decoded mesh count, alongside camera/protocol validation. Upload then returns
+the initial ID snapshot. Scene assembly resolves rows through that plain slice;
+it needs neither a GPU device nor a CPU registration framework.
 
-## Ordering and delivery
+`RenderOptions` is an ordinary non-generic value. A wire-only grid-mesh row is
+passed separately at the stream/scene boundary and resolved to the corresponding
+handle before the common overlay assembler runs. This avoids cloning appearance
+or environment data merely to convert one selector.
 
-#366 was reviewed as a design before the vertical handle/lifecycle migration,
-including its callers and inline/integration tests. #225's N2 follows this
-contract: `MeshTableIndex` at the wire boundary and opaque `MeshId` afterwards,
-not a publicly constructible `MeshId(u32)` with `.index()`. #225's object-index
-and frame-ID work remains separate.
+The mapping preserves implicit row zero, absent versus empty draw lists and
+shadow row validation. Removing an initial mesh leaves its original row bound to
+the invalidated ID, not to a replacement in its former slot. `mesh_count()` is
+live resource count, never a wire-table bound.
 
-This migration lands **before #222 step 3** so model/submesh grouping can use
-stable resource identity. Handles alone do not make `import_glb` accept
-multi-primitive assets; grouping and per-part materials remain #222/#160/#161.
-New geometry representations (#222 step 2) remain out of scope.
+The GUI keeps `SceneObject { mesh, transform, mode, appearance }`; object rows,
+pick results and resource identities remain distinct. There is no numeric-row
+fallback when an identity is missing.
 
-Draft #368 overlaps protocol/scene/delivery callers, #291 overlaps uniform
-construction, and #285 overlaps renderer preparation. Reconcile their actual
-heads before implementation; do not copy their changes into this design PR.
-Protocol `0.0.6`, video-edit document `0.2.0`, Arrow producers and fixtures are
-unchanged by the identity migration.
+## Preparation, ordering and PBR
 
-### Implementation acceptance
+Validate every mesh-backed primitive before acquiring or writing its target.
+Validate all layers before the first layer writes. Picking follows the same
+residency rule without renumbering the original draw list.
 
-- CPU-only registration/assembly tests cover independent tables, implicit row
-  zero, empty draw lists, bad rows and wire mesh-selector resolution.
-- Lifecycle tests cover upload/remove/reuse, repeated removal, stale appearance
-  and texture edits, a stale scene, and foreign-manager IDs. Exhaustion fails
-  without wrapping. Retired IDs never resolve to replacements.
-- Batching tests cover multiple instances sharing one handle, independent
-  handles, deletion/reuse ordering and unmodified overlay layer precedence.
-- GPU tests exercise PBR buffer growth, hole reuse with a different material,
-  render-mode changes, layered draws, AABBs and picking after deletion/reuse.
-- GUI coverage exercises deleting the middle of three objects, loading another,
-  editing/picking the survivors, and catalog replacement without invented IDs.
-- The implementation declares **L3**, runs every required gate on both
-  platforms, and records the full matrix/handoff in the PR and issue. The normal
-  golden suite must remain green, and main-to-candidate outputs must be
-  **bit-identical**, MSAA on/off and PBR ACES/Reinhard; tolerance-based success
-  alone does not establish this stronger requirement.
-  Do not regenerate goldens to accommodate re-keying.
+The manager resolves a handle to its GPU record and private slot; Renderer
+prepares instances and records the draw. Each `record_*` binds the pass state it
+needs, without depending on another record's preceding bindings.
 
-Use `TRD_STRICT_GOLDENS=1` with the existing golden-render suite to require exact
-RGBA equality to the committed PNGs rather than the usual reference tolerance.
-If unchanged `main` also differs from those references, keep that failure visible
-and use `TRD_DUMP_ACTUAL=1` on both revisions, on the same GPU. Compare the complete
-actual-image sets: identical filenames, counts and bytes establish pixel
-preservation without regenerating references or widening the normal tolerance.
-Repeat this comparison independently on each platform; do not assume the cause
-of a pre-existing reference difference.
+Keep the existing `(layer, variation, private slot)` ordering with complete
+identity in batch equality. Sorting only by the new ID would reorder overlays
+when an early slot is reused.
 
-The implementation is **L3**, including the explicitly classified CPU
-registration/render-input paths in `AGENTS.md`. Results and any unavailable
-platform/device cases belong in the PR/issue matrix, never inferred from the
-earlier design-only L1 run.
+Every mesh can become shaded, so private mesh slots continue to select the
+private PBR uniform slots. Allocation spans include holes; growth and reuse
+retain their existing dirty-marking behavior. Public IDs are never converted to
+uniform offsets. Texture replacement does not dirty material uniforms.
+
+## Scope and validation
+
+This is an ownership and identity migration, not a shader/IBL change. Additional
+geometry, multi-part model grouping, independent instance materials, bindless
+rendering, global pools and streaming eviction remain separate features.
+
+Downstream GPU-free unit tests use the opt-in `test-support` development feature
+to mint nonresident identity fixtures. Production callers cannot construct IDs
+from integers; real render integration tests obtain IDs from an actual upload.
+The development helper does not register resources or create a second asset API.
+
+The change is **L3**. Required coverage includes source lifetime after upload,
+foreign/stale IDs, slot reuse, single-map texture replacement, GUI deletion and
+re-addition, picking, PBR growth and whole-layer validation. Run complete L1-L3
+on both platforms and keep unavailable physical-device cases explicit.
+
+The reference-only commit `c5af1df` is separate: historical old-algorithm replay
+first reproduced all 12 original Stage 2 references exactly, then the references
+were updated to the already-established main output. Use
+`TRD_STRICT_GOLDENS=1` with the full golden suite; neither shaders, Arrow fixtures
+nor tolerances change in this ownership migration.

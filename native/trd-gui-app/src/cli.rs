@@ -265,12 +265,12 @@ impl Cli {
         &self,
         loaded: &LoadedMesh,
         has_env: bool,
-        table: &trd_core::MeshTable,
+        mesh_ids: &[trd_core::MeshId],
     ) -> Result<SceneState, GuiError> {
         let imported = loaded.material.clone();
         let gltf = imported.is_some();
         SceneState::seeded(
-            table,
+            mesh_ids,
             SceneSeed {
                 materials: vec![imported.unwrap_or_else(|| self.disney_material())],
                 mode: if self.pbr || gltf {
@@ -297,8 +297,8 @@ mod tests {
     use super::*;
 
     fn scene(cli: &Cli, loaded: &LoadedMesh, has_env: bool) -> SceneState {
-        let table = trd_core::MeshTable::new(vec![loaded.mesh.clone()]).expect("registration");
-        cli.scene_state(loaded, has_env, &table)
+        let ids = trd_core::test_support::mesh_ids(1);
+        cli.scene_state(loaded, has_env, &ids)
             .expect("matching material")
     }
 

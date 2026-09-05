@@ -3,11 +3,11 @@
 
 use super::*;
 use super::{
-    Background, DrawSelection, DrawableObject, EnvironmentBackground, FrameFit, RenderMode,
-    ResolvedDraw, Scene,
+    Background, Draw, DrawSelection, DrawableObject, EnvironmentBackground, FrameFit, RenderMode,
+    Scene,
 };
 use crate::math::{Matrix4, Point3, Vector3};
-use crate::{MeshId, MeshResourceError, MeshTable, MeshTableIndex};
+use crate::{MeshId, MeshResourceError};
 use glam::{Mat4, Vec3};
 
 /// Test convenience constructor: a [`Renderer`] over a single mesh with an
@@ -80,8 +80,9 @@ fn single(format: wgpu::TextureFormat, mesh: &Mesh) -> Renderer {
 
 fn initial_mesh_id(renderer: &Renderer, row: u32) -> MeshId {
     renderer
-        .mesh_table()
-        .id(MeshTableIndex::new(row))
+        .initial_mesh_ids()
+        .get(row as usize)
+        .copied()
         .unwrap_or_else(|| panic!("renderer has no initial mesh row {row}"))
 }
 
@@ -1925,12 +1926,12 @@ fn picking_resolves_object_ids_and_background() {
     };
     let mesh_id = initial_mesh_id(&renderer, 0);
     let draws = [
-        ResolvedDraw {
+        Draw {
             mesh_id,
             model: model(-0.5),
             selection: DrawSelection::INHERIT,
         },
-        ResolvedDraw {
+        Draw {
             mesh_id,
             model: model(0.5),
             selection: DrawSelection::INHERIT,
@@ -1957,12 +1958,12 @@ fn picking_resolves_object_ids_and_background() {
     assert_eq!(pick(width, 0), None, "x == width is out of bounds");
 
     let shadow_then_mesh = [
-        ResolvedDraw {
+        Draw {
             mesh_id,
             model: Matrix4::IDENTITY,
             selection: DrawSelection::Shadow,
         },
-        ResolvedDraw {
+        Draw {
             mesh_id,
             model: model(-0.5),
             selection: DrawSelection::INHERIT,
@@ -2000,12 +2001,12 @@ fn picking_tracks_a_resized_viewport() {
     };
     let mesh_id = initial_mesh_id(&renderer, 0);
     let draws = [
-        ResolvedDraw {
+        Draw {
             mesh_id,
             model: model(-0.5),
             selection: DrawSelection::INHERIT,
         },
-        ResolvedDraw {
+        Draw {
             mesh_id,
             model: model(0.5),
             selection: DrawSelection::INHERIT,
@@ -2102,10 +2103,8 @@ fn mesh_target_selects_which_meshes_an_appearance_edit_reaches() {
         "One(1) reaches mesh 1"
     );
 
-    let foreign = MeshTable::new(vec![Mesh::hello_triangle()])
-        .expect("registration succeeds")
-        .id(MeshTableIndex::new(0))
-        .expect("one registered mesh");
+    let other = single(TEXTURE_TARGET_FORMAT, &Mesh::hello_triangle());
+    let foreign = initial_mesh_id(&other, 0);
     let error = renderer
         .set_disney_material(
             crate::MeshTarget::One(foreign),
@@ -2132,32 +2131,41 @@ fn mesh_target_selects_which_meshes_an_appearance_edit_reaches() {
 
 #[test]
 #[ignore = "requires a GPU adapter"]
-fn explicit_mesh_table_uploads_preserve_the_registered_identities() {
-    let table = MeshTable::new(vec![Mesh::hello_triangle()]).expect("registration succeeds");
-    let registered = table
-        .id(MeshTableIndex::new(0))
-        .expect("one registered mesh");
-    let explicit = Renderer::with_mesh_table(
-        test_gpu(),
-        TEXTURE_TARGET_FORMAT,
-        table.clone(),
-        &[Matrix4::IDENTITY],
-        1,
-    )
-    .expect("the explicit table uploads");
-    let auto_fit = Renderer::auto_fit_table(test_gpu(), TEXTURE_TARGET_FORMAT, table.clone())
-        .expect("the auto-fit table uploads");
+fn initial_ids_are_non_owning_snapshots_and_each_renderer_upload_is_independent() {
+    let mesh = Mesh::hello_triangle();
+    let mut first = single(TEXTURE_TARGET_FORMAT, &mesh);
+    let second = single(TEXTURE_TARGET_FORMAT, &mesh);
+    let first_id = initial_mesh_id(&first, 0);
+    let second_id = initial_mesh_id(&second, 0);
+    assert_ne!(first_id, second_id);
+    assert_eq!(
+        first.mesh_appearance(second_id),
+        Err(MeshResourceError::NotResident { mesh: second_id })
+    );
+    first.remove_mesh(first_id).unwrap();
+    let replacement = first.add_mesh(&mesh).unwrap();
+    assert_ne!(first_id, replacement);
+    assert_eq!(first.initial_mesh_ids(), &[first_id]);
+    assert_eq!(
+        first.mesh_appearance(first_id),
+        Err(MeshResourceError::NotResident { mesh: first_id })
+    );
+    assert!(first.mesh_appearance(replacement).is_ok());
+    assert!(second.mesh_appearance(second_id).is_ok());
 
-    for renderer in [&explicit, &auto_fit] {
-        assert_eq!(
-            renderer.mesh_table().ids().collect::<Vec<_>>(),
-            table.ids().collect::<Vec<_>>()
-        );
-        assert!(
-            renderer.mesh_appearance(registered).is_ok(),
-            "the registered identity must be resident after upload"
-        );
-    }
+    drop(mesh);
+    let camera = camera_of(FrameParams::IDENTITY, 32, 32);
+    let scene: Scene = [DrawableObject::mesh(
+        replacement,
+        Matrix4::IDENTITY,
+        RenderMode::Filled,
+    )]
+    .into_iter()
+    .collect();
+    let target = first.create_texture_target(32, 32).unwrap();
+    first
+        .draw_layers(&[SceneLayer::new(camera, &scene)], &target)
+        .unwrap();
 }
 
 /// A mesh added at runtime is drawable, and adding it leaves the meshes already
@@ -2320,7 +2328,7 @@ fn remove_mesh_frees_the_slot_without_renumbering_the_survivors() {
     );
     assert_eq!(renderer.mesh_count(), 2, "only live resources are counted");
     assert_eq!(
-        renderer.meshes.slot_count(),
+        renderer.resources.slot_count(),
         3,
         "deletion does not collapse the private allocation span"
     );
@@ -2335,7 +2343,7 @@ fn remove_mesh_frees_the_slot_without_renumbering_the_survivors() {
     );
     assert_eq!(renderer.mesh_count(), 3, "the live count returns to three");
     assert_eq!(
-        renderer.meshes.slot_count(),
+        renderer.resources.slot_count(),
         3,
         "the private span stays flat"
     );
@@ -2389,7 +2397,7 @@ fn remove_mesh_frees_the_slot_without_renumbering_the_survivors() {
         .remove_mesh(middle)
         .expect("the middle mesh is resident");
     assert_eq!(renderer.mesh_count(), 2);
-    assert_eq!(renderer.meshes.slot_count(), 3);
+    assert_eq!(renderer.resources.slot_count(), 3);
 }
 
 fn assert_not_resident(error: RenderError, mesh: MeshId) {
@@ -2418,10 +2426,8 @@ fn stale_and_foreign_mesh_ids_are_rejected_by_scene_pick_setters_and_delete() {
     let survivor = initial_mesh_id(&renderer, 1);
     renderer.remove_mesh(stale).expect("the mesh is resident");
 
-    let foreign = MeshTable::new(vec![Mesh::hello_triangle()])
-        .expect("registration succeeds")
-        .id(MeshTableIndex::new(0))
-        .expect("one registered mesh");
+    let other = single(TEXTURE_TARGET_FORMAT, &Mesh::hello_triangle());
+    let foreign = initial_mesh_id(&other, 0);
     let target = renderer
         .create_texture_target(32, 32)
         .expect("target builds");
@@ -2441,7 +2447,7 @@ fn stale_and_foreign_mesh_ids_are_rejected_by_scene_pick_setters_and_delete() {
             assert_not_resident(error, invalid);
         }
 
-        let draws = [ResolvedDraw {
+        let draws = [Draw {
             mesh_id: invalid,
             model: Matrix4::IDENTITY,
             selection: DrawSelection::INHERIT,
@@ -2525,7 +2531,7 @@ fn repeated_hole_reuse_keeps_live_count_flat_and_uploads_each_new_pbr_appearance
         assert_ne!(current, stale);
         assert_eq!(renderer.mesh_count(), 1, "only the replacement is live");
         assert_eq!(
-            renderer.meshes.slot_count(),
+            renderer.resources.slot_count(),
             1,
             "reusing the hole must not grow the private allocation span"
         );

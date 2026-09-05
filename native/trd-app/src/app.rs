@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 use trd_core::{
-    DisneyMaterial, EnvMapData, ImageBasedLighting, ImageTexture, Lighting, MeshId, MeshTable,
-    PbrConfig, RenderMode, RenderOptions, ToneMapping,
+    DisneyMaterial, EnvMapData, ImageBasedLighting, ImageTexture, Lighting, Mesh, MeshTableIndex,
+    PbrConfig, RenderMode, RenderOptions, Scene, ToneMapping,
 };
 use winit::application::ApplicationHandler;
 #[cfg(not(target_os = "windows"))]
@@ -33,9 +33,10 @@ struct App {
     gpu: Option<WindowRenderer>,
     /// Meshes + rate + frames arriving from the stdin reader thread.
     rx: Receiver<StreamMsg>,
-    /// The stream's CPU registrations, held until the
-    /// GPU surface exists so the renderer can be built.
-    pending_meshes: Option<MeshTable>,
+    /// CPU meshes are held only until the surface exists and uploads complete.
+    pending_meshes: Option<Vec<Mesh>>,
+    /// A validated wire row, resolved only after the renderer has uploaded meshes.
+    pending_grid_mesh: Option<MeshTableIndex>,
     /// The stream's bound texture (`0.0.4`), held until the renderer is built so
     /// it can be uploaded; `None` for streams without a texture table.
     pending_texture: Option<ImageTexture>,
@@ -66,7 +67,7 @@ struct App {
     vsync: bool,
     /// Draw mode + every overlay toggle, in the **one** type every front-end uses
     /// to describe a frame's appearance (#180).
-    options: RenderOptions<MeshId>,
+    options: RenderOptions,
     /// The Disney PBR material + optional HDR env probe (`--pbr`), held until the
     /// renderer is built so it can be applied; `None` unless `--pbr` is set.
     pbr_config: Option<PbrConfig>,
@@ -81,13 +82,14 @@ impl App {
         rate_override: Option<f64>,
         loop_playback: bool,
         vsync: bool,
-        options: RenderOptions<MeshId>,
+        options: RenderOptions,
         pbr_config: Option<PbrConfig>,
     ) -> Self {
         Self {
             gpu: None,
             rx,
             pending_meshes: None,
+            pending_grid_mesh: None,
             pending_texture: None,
             texture_applied: false,
             frames: Vec::new(),
@@ -116,9 +118,9 @@ impl App {
     fn drain_stream(&mut self) {
         loop {
             match self.rx.try_recv() {
-                Ok(StreamMsg::Meshes { table, grid_mesh }) => {
-                    self.options.show_local_grid_mesh = grid_mesh;
-                    self.pending_meshes = Some(table);
+                Ok(StreamMsg::Meshes { meshes, grid_mesh }) => {
+                    self.pending_grid_mesh = grid_mesh;
+                    self.pending_meshes = Some(meshes);
                 }
                 Ok(StreamMsg::Texture(texture)) => self.pending_texture = Some(texture),
                 Ok(StreamMsg::Rate(rate)) => self.stream_rate = rate,
@@ -252,17 +254,32 @@ impl ApplicationHandler for App {
         self.drain_stream();
 
         // Build the scene renderer once both the GPU surface and the stream's
-        // CPU mesh registrations are available; then upload those same identities.
+        // CPU meshes are available; only the uploads mint runtime identities.
         if let Some(gpu) = self.gpu.as_mut() {
             if gpu.renderer.is_none() {
-                if let Some(meshes) = self.pending_meshes.as_ref() {
-                    match gpu.set_meshes(meshes) {
-                        Ok(()) => gpu.window.request_redraw(),
+                if let Some(meshes) = self.pending_meshes.take() {
+                    match gpu.set_meshes(&meshes) {
+                        Ok(()) => {
+                            if let Some(row) = self.pending_grid_mesh.take() {
+                                let ids = gpu
+                                    .renderer
+                                    .as_ref()
+                                    .expect("renderer just built")
+                                    .initial_mesh_ids();
+                                if let Err(error) = Scene::validate_mesh_index(row, ids.len()) {
+                                    log::error!("cannot resolve the stream's grid mesh: {error}");
+                                    event_loop.exit();
+                                    return;
+                                }
+                                self.options.show_local_grid_mesh = Some(ids[row.index()]);
+                            }
+                            gpu.window.request_redraw();
+                        }
                         // An unusable mesh table is a bad stream, not a crash:
                         // report it and stop retrying it every wake (#235 R8).
                         Err(error) => {
                             log::error!("cannot render this stream's meshes: {error}");
-                            self.pending_meshes = None;
+                            self.pending_grid_mesh = None;
                         }
                     }
                 }
