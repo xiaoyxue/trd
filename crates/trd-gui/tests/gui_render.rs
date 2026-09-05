@@ -239,3 +239,166 @@ fn deleting_adding_and_picking_keep_gui_rows_bound_to_live_meshes() {
     assert!(pollster::block_on(renderer.render(&stale)).is_err());
     assert!(pollster::block_on(renderer.pick(&stale, 128, 64)).is_err());
 }
+
+#[test]
+#[ignore = "requires a GPU adapter and the repository Dragon asset"]
+fn video_placement_draw_and_pick_agree_on_dragon_geometry() {
+    use trd_core::{FrameParams, Point3, Transform, VideoEditingFrame, Viewport};
+    use trd_gui::video_editing::CatalogAsset;
+    use trd_gui::video_editing_renderer::{QuadOverlay, VideoPlacementRenderer};
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let bytes = std::fs::read(
+        root.join("assets")
+            .join("meshes")
+            .join("glb")
+            .join("Meshy_AI_Dragon_0804104424_texture.glb"),
+    )
+    .expect("committed Dragon fixture");
+    let env = std::fs::read(root.join("assets").join("envmap").join("uffizi-large.hdr"))
+        .expect("committed environment fixture");
+    let mesh = trd_core::import_glb(&bytes).unwrap().mesh;
+    let frame = VideoEditingFrame {
+        video_frame_index: 0,
+        present_index: 0,
+        timestamp_us: 0,
+        k: Some([4510.0986, 0.0, 960.0, 0.0, 4510.0986, 540.0, 0.0, 0.0, 1.0]),
+        placement_quad: Some([
+            [752.108, 541.875],
+            [1292.765, 501.099],
+            [1480.544, 645.707],
+            [872.690, 696.286],
+        ]),
+        tracked: true,
+    };
+    let quad = trd_placement::quad_frame(
+        trd_placement::CameraIntrinsics {
+            row_major: frame.k.unwrap(),
+        },
+        trd_placement::PlacementQuad {
+            points_px: frame.placement_quad.unwrap(),
+        },
+    )
+    .unwrap();
+    let model = trd_placement::placement_model(
+        quad,
+        trd_placement::LocalPlacement {
+            offset_e1: 1.3,
+            offset_e2: -1.7,
+            size_factor: 0.24,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let mut renderer = pollster::block_on(VideoPlacementRenderer::new(
+        CatalogAsset::Dragon,
+        &bytes,
+        &[],
+        &env,
+        1569,
+        883,
+    ))
+    .unwrap();
+    let state = SceneState {
+        objects: vec![renderer.defaults().unwrap()],
+        lighting: trd_gui::scene::ibl_only_lighting(),
+        ..Default::default()
+    };
+    for (width, height) in [(1569, 883), (1920, 1080)] {
+        renderer.resize(width, height).unwrap();
+        let sx = width as f32 / 1920.0;
+        let sy = height as f32 / 1080.0;
+        let camera = FrameParams {
+            k: Some([
+                4510.0986 * sx,
+                0.0,
+                0.0,
+                0.0,
+                4510.0986 * sy,
+                0.0,
+                960.0 * sx,
+                540.0 * sy,
+                1.0,
+            ]),
+            ..FrameParams::IDENTITY
+        }
+        .to_camera(Viewport { width, height })
+        .unwrap();
+        let transform = Transform::from_matrix(
+            camera.view_projection().matrix()
+                * model
+                * mesh
+                    .preview_transform(trd_core::DEFAULT_PREVIEW_TARGET)
+                    .matrix(),
+        );
+        let projected: Vec<_> = mesh
+            .vertices
+            .iter()
+            .map(|vertex| {
+                let p = transform.project_point(Point3::from_array(vertex.position));
+                [
+                    (p.x() + 1.0) * width as f32 * 0.5,
+                    (1.0 - p.y()) * height as f32 * 0.5,
+                    p.z(),
+                ]
+            })
+            .collect();
+        // A geometric interior sample avoids guessing a hit from shaded/AA pixels.
+        let edge = |a: [f32; 3], b: [f32; 3], p: [f32; 3]| {
+            (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])
+        };
+        let point = mesh
+            .indices
+            .chunks_exact(3)
+            .filter_map(|indices| {
+                let [a, b, c] = [
+                    projected[indices[0] as usize],
+                    projected[indices[1] as usize],
+                    projected[indices[2] as usize],
+                ];
+                if [a, b, c].iter().any(|p| !(0.0..=1.0).contains(&p[2])) {
+                    return None;
+                }
+                let x = ((a[0] + b[0] + c[0]) / 3.0).floor();
+                let y = ((a[1] + b[1] + c[1]) / 3.0).floor();
+                if x < 0.0 || y < 0.0 || x >= width as f32 || y >= height as f32 {
+                    return None;
+                }
+                let p = [x + 0.5, y + 0.5, 0.0];
+                let signs = [edge(a, b, p), edge(b, c, p), edge(c, a, p)];
+                (signs.iter().all(|v| *v > 0.01) || signs.iter().all(|v| *v < -0.01))
+                    .then_some((edge(a, b, c).abs(), (x as u32, y as u32)))
+            })
+            .max_by(|a, b| a.0.total_cmp(&b.0))
+            .expect("Dragon has a covered interior pixel")
+            .1;
+        let rgba = vec![0; 1920 * 1080 * 4];
+        let pixels = pollster::block_on(renderer.render(
+            &rgba,
+            1920,
+            1080,
+            (1920, 1080),
+            Some(&frame),
+            QuadOverlay::default(),
+            Some(&frame),
+            Some(model),
+            &state,
+        ))
+        .unwrap();
+        let offset = ((point.1 * width + point.0) * 4) as usize;
+        assert_ne!(
+            &pixels[offset..offset + 3],
+            &[0, 0, 0],
+            "sample must be visible"
+        );
+        assert_eq!(
+            pollster::block_on(renderer.pick(&frame, (1920, 1080), model, point)).unwrap(),
+            Some(0),
+            "visible Dragon geometry must be pickable at {point:?} in {width}x{height}"
+        );
+    }
+}
