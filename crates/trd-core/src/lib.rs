@@ -36,8 +36,8 @@ pub use math::{
 // crate root beside `texture`/`camera`/`material` while their GPU residency
 // stays in `render/` (#221/#224). Public paths are unchanged.
 pub use mesh::{
-    import_glb, import_gltf_materials, GltfAsset, GltfImportError, Mesh, MeshError, MeshShading,
-    DEFAULT_PREVIEW_TARGET,
+    import_glb, import_gltf_materials, GltfAsset, GltfImportError, Mesh, MeshError, MeshId,
+    MeshResourceError, MeshShading, MeshTable, MeshTableIndex, DEFAULT_PREVIEW_TARGET,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -64,7 +64,7 @@ pub use render::{
 // renderer that dispatches on it (#223). Public paths are unchanged.
 pub use render::{
     Background, Draw, DrawSelection, DrawableObject, EnvironmentBackground, FrameFit, GridPlane,
-    Primitive, RenderMode, Scene, SceneError,
+    Primitive, RenderMode, ResolvedDraw, Scene, SceneError,
 };
 // The render harness; available on both platforms since readback became async
 // (#180) — the browser could not use it while it blocked on readback.

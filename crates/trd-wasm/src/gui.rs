@@ -188,7 +188,7 @@ pub async fn start(
     } else {
         trd_core::ToneMapping::default()
     };
-    let scene = SceneState::seeded(SceneSeed {
+    let seed = SceneSeed {
         materials: loaded.iter().map(|asset| asset.material.clone()).collect(),
         mode: initial_mode,
         image_based_lighting: trd_core::ImageBasedLighting::default(),
@@ -198,7 +198,7 @@ pub async fn start(
         // The probe lights the scene; it becomes the backdrop only when the
         // panel's "Environment background" checkbox is ticked.
         show_environment_background: false,
-    });
+    };
     let (render_w, render_h) = browser_render_size(&canvas);
     let textures: Vec<Option<&dyn trd_core::Texture>> = textures
         .iter()
@@ -216,6 +216,7 @@ pub async fn start(
     let renderer = GuiRenderer::new(&meshes, &textures, &material_maps, env, render_w, render_h)
         .await
         .map_err(to_js)?;
+    let scene = SceneState::seeded(renderer.mesh_table(), seed).map_err(to_js)?;
     let shared = Rc::new(crate::gui_web_app::GuiShared::new(on_pick_model));
     let app = WebApp::new(InteractionController::new(scene), renderer, shared.clone());
 

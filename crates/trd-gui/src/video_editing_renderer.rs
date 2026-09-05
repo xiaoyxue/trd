@@ -89,6 +89,7 @@ pub struct VideoPlacementRenderer {
     target: trd_core::TextureTarget,
     default_mode: trd_core::RenderMode,
     default_material: trd_core::DisneyMaterial,
+    mesh: Option<trd_core::MeshId>,
     identity: Rc<RendererIdentity>,
     asset_diagnostics: Option<ImportedAssetDiagnostics>,
     /// Transfer counts written at the transfer sites (#229).
@@ -108,15 +109,25 @@ impl VideoPlacementRenderer {
         height: u32,
     ) -> Result<Self, String> {
         let facts = gpu.adapter_facts();
+        // The core constructor needs one mesh; the player owns no placed object.
         let placeholder = assets::default_mesh().map_err(|error| error.to_string())?;
-        let (renderer, target) =
+        let (mut renderer, target) =
             trd_core::Renderer::with_gpu(gpu, width, height, std::slice::from_ref(&placeholder))
                 .map_err(|error| error.to_string())?;
+        let mesh = renderer
+            .mesh_table()
+            .ids()
+            .next()
+            .ok_or("placeholder mesh was not registered")?;
+        renderer
+            .remove_mesh(mesh)
+            .map_err(|error| error.to_string())?;
         Ok(Self {
             renderer,
             target,
             default_mode: trd_core::RenderMode::Filled,
             default_material: trd_core::DisneyMaterial::default(),
+            mesh: None,
             identity: Rc::new(RendererIdentity {
                 adapter_name: facts.name,
                 backend: facts.backend,
@@ -192,7 +203,14 @@ impl VideoPlacementRenderer {
         let (mut renderer, target) =
             trd_core::Renderer::with_gpu(gpu, width, height, std::slice::from_ref(mesh))
                 .map_err(|error| error.to_string())?;
-        let (default_mode, default_material) = imported.configure(&mut renderer);
+        let mesh = renderer
+            .mesh_table()
+            .ids()
+            .next()
+            .ok_or("catalog mesh was not registered")?;
+        let (default_mode, default_material) = imported
+            .configure(&mut renderer, mesh)
+            .map_err(|error| error.to_string())?;
         let env = assets::decode_env_hdr(env_bytes).map_err(|error| error.to_string())?;
         renderer.set_env_map(env);
         Ok(Self {
@@ -200,6 +218,7 @@ impl VideoPlacementRenderer {
             target,
             default_mode,
             default_material,
+            mesh: Some(mesh),
             identity: Rc::new(RendererIdentity {
                 adapter_name: facts.name,
                 backend: facts.backend,
@@ -210,8 +229,16 @@ impl VideoPlacementRenderer {
         })
     }
 
-    pub fn defaults(&self) -> (trd_core::RenderMode, trd_core::DisneyMaterial) {
-        (self.default_mode, self.default_material.clone())
+    pub fn defaults(&self) -> Option<crate::scene::SceneObject> {
+        Some(crate::scene::SceneObject {
+            mesh: self.mesh?,
+            transform: crate::scene::ObjectTransform::default(),
+            mode: self.default_mode,
+            appearance: trd_core::MeshAppearance {
+                material: self.default_material.clone(),
+                ..Default::default()
+            },
+        })
     }
 
     pub fn size(&self) -> (u32, u32) {
@@ -247,12 +274,14 @@ impl VideoPlacementRenderer {
         point: (u32, u32),
     ) -> Result<Option<u32>, String> {
         let camera = self.frame_camera(frame, source_size)?;
-        Ok(self
-            .renderer
+        let Some(mesh_id) = self.mesh else {
+            return Ok(None);
+        };
+        self.renderer
             .pick(
                 camera,
-                &[trd_core::Draw {
-                    mesh_id: 0,
+                &[trd_core::ResolvedDraw {
+                    mesh_id,
                     model,
                     selection: trd_core::DrawSelection::INHERIT,
                 }],
@@ -260,7 +289,8 @@ impl VideoPlacementRenderer {
                 point.1,
                 self.viewport(),
             )
-            .await)
+            .await
+            .map_err(|error| error.to_string())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -336,31 +366,27 @@ impl VideoPlacementRenderer {
             .map(|frame| self.frame_camera(frame, calibration_size))
             .transpose()?
             .unwrap_or(background_camera);
-        if self.renderer.mesh_count() > 0 {
-            self.renderer.set_appearance(
-                trd_core::MeshTarget::One(0),
-                trd_core::MeshAppearance {
-                    material: state.materials[0].clone(),
-                    ibl: state.image_based_lighting[0],
-                    tone_mapping: state.tone_mappings[0],
-                    debug_view: state.pbr_debug_views[0],
-                },
-            );
+        if let Some(object) = state.objects.first() {
+            self.renderer
+                .set_appearance(
+                    trd_core::MeshTarget::One(object.mesh),
+                    object.appearance.clone(),
+                )
+                .map_err(|error| error.to_string())?;
         }
 
-        let has_mesh = self.renderer.mesh_count() > 0;
-        let (background, foreground, selection_overlay) =
-            placement_scenes(quad, model.filter(|_| has_mesh), state);
+        let (background, foreground, selection_overlay) = placement_scenes(quad, model, state);
 
-        self.renderer.draw_layers(
-            &[
-                trd_core::SceneLayer::new(background_camera, &background),
-                trd_core::SceneLayer::new(foreground_camera, &foreground),
-                trd_core::SceneLayer::new(foreground_camera, &selection_overlay),
-            ],
-            &self.target,
-        );
-        Ok(())
+        self.renderer
+            .draw_layers(
+                &[
+                    trd_core::SceneLayer::new(background_camera, &background),
+                    trd_core::SceneLayer::new(foreground_camera, &foreground),
+                    trd_core::SceneLayer::new(foreground_camera, &selection_overlay),
+                ],
+                &self.target,
+            )
+            .map_err(|error| error.to_string())
     }
 
     /// Sampleable view of the rendered target (gamma space).
@@ -470,30 +496,32 @@ impl ImportedAsset {
     fn configure(
         self,
         renderer: &mut trd_core::Renderer,
-    ) -> (trd_core::RenderMode, trd_core::DisneyMaterial) {
+        mesh: trd_core::MeshId,
+    ) -> Result<(trd_core::RenderMode, trd_core::DisneyMaterial), trd_core::MeshResourceError> {
         match self {
             Self::Textured { texture, .. } => {
-                renderer.set_mesh_texture(0, &texture);
+                renderer.set_mesh_texture(mesh, &texture)?;
                 let material = trd_core::DisneyMaterial {
                     metallic: 0.0,
                     roughness: 0.35,
                     ..Default::default()
                 };
-                renderer.set_disney_material(trd_core::MeshTarget::One(0), material.clone());
-                (trd_core::RenderMode::Shaded, material)
+                renderer.set_disney_material(trd_core::MeshTarget::One(mesh), material.clone())?;
+                Ok((trd_core::RenderMode::Shaded, material))
             }
             Self::Pbr(asset) => {
                 if let Some(texture) = asset.base_color_texture.as_ref() {
-                    renderer.set_mesh_texture(0, texture);
+                    renderer.set_mesh_texture(mesh, texture)?;
                 }
                 if let Some(texture) = asset.metallic_roughness_texture.as_ref() {
-                    renderer.set_mesh_metallic_roughness_texture(0, texture);
+                    renderer.set_mesh_metallic_roughness_texture(mesh, texture)?;
                 }
                 if let Some(texture) = asset.normal_texture.as_ref() {
-                    renderer.set_mesh_normal_texture(0, texture);
+                    renderer.set_mesh_normal_texture(mesh, texture)?;
                 }
-                renderer.set_disney_material(trd_core::MeshTarget::One(0), asset.material.clone());
-                (trd_core::RenderMode::Shaded, asset.material)
+                renderer
+                    .set_disney_material(trd_core::MeshTarget::One(mesh), asset.material.clone())?;
+                Ok((trd_core::RenderMode::Shaded, asset.material))
             }
         }
     }
@@ -552,10 +580,14 @@ pub fn placement_scenes(
 
     let mut foreground = trd_core::Scene::new();
     let mut selection_overlay = trd_core::Scene::new();
-    if let Some(model) = model {
-        foreground.push(trd_core::DrawableObject::mesh(0, model, state.modes[0]));
+    if let (Some(model), Some(object)) = (model, state.objects.first()) {
+        foreground.push(trd_core::DrawableObject::mesh(
+            object.mesh,
+            model,
+            object.mode,
+        ));
         if state.show_aabb || state.selected == Some(0) {
-            selection_overlay.push(trd_core::DrawableObject::aabb_box(0, model));
+            selection_overlay.push(trd_core::DrawableObject::aabb_box(object.mesh, model));
         }
         if state.show_local_axes {
             foreground.push(trd_core::DrawableObject::coordinate_axes(model));
@@ -728,7 +760,7 @@ mod tests {
     fn the_selection_aabb_is_its_own_layer() {
         let state = SceneState {
             selected: Some(0),
-            ..SceneState::default()
+            ..crate::scene::test_scene(1)
         };
         let (_, foreground, overlay) = placement_scenes(
             QuadOverlay::default(),
@@ -741,7 +773,9 @@ mod tests {
                 .iter()
                 .map(|d| d.primitive())
                 .collect::<Vec<_>>(),
-            [trd_core::Primitive::AabbBox { mesh_id: 0 }]
+            [trd_core::Primitive::AabbBox {
+                mesh_id: state.objects[0].mesh
+            }]
         );
         assert!(!foreground
             .objects()

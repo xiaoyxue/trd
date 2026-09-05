@@ -22,6 +22,7 @@ use arrow::datatypes::{DataType, Field, Schema};
 
 use crate::math::Matrix4;
 use crate::render::{Draw, DrawSelection};
+use crate::MeshTableIndex;
 use crate::{CameraFormError, FrameParams};
 
 use super::{ProtocolError, PROTOCOL_VERSION_KEY, SUPPORTED_INPUT_VERSIONS};
@@ -137,7 +138,7 @@ pub(crate) fn decode_frame_ids(
 /// exactly one of the `draw_mesh`/`draw_model` pair, or a per-row length
 /// mismatch, is an error. `draw_mode` bytes decode via
 /// [`DrawSelection::from_wire`] (`255` = inherit); an absent column leaves every
-/// [`Draw::mode`] `None`. Mirrors the native `stream::decode_draws`.
+/// [`DrawSelection::INHERIT`]. Mesh rows are resolved during scene assembly.
 pub(crate) fn decode_draws(batch: &RecordBatch) -> Result<Option<Vec<Vec<Draw>>>, ProtocolError> {
     let (mesh_col, model_col) = match (
         batch.column_by_name("draw_mesh"),
@@ -273,7 +274,7 @@ pub(crate) fn decode_draws(batch: &RecordBatch) -> Result<Option<Vec<Vec<Draw>>>
 
         let draws = (0..ids.len())
             .map(|j| Draw {
-                mesh_id: ids.value(j),
+                mesh_id: MeshTableIndex::new(ids.value(j)),
                 // The wire is raw column-major floats; this is the one place it
                 // becomes a typed `Matrix4` (#235 R3).
                 model: Matrix4::from_cols_array(&read_fixed::<16>(models, model_values, j)),

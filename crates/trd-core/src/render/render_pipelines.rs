@@ -8,7 +8,7 @@
 //! `renderer.rs` (#221 §2) or on the scene (which is `Clone + PartialEq` and
 //! device-free).
 
-use super::mesh_store::MeshGpu;
+use super::mesh_store::MeshResources;
 use super::*;
 use crate::Camera;
 
@@ -240,13 +240,13 @@ impl SceneUniforms {
 
     /// Rewrites the Disney PBR uniforms for this frame, **split by frequency of
     /// change** (#182): the camera terms + the scene's light rig **once**, then
-    /// one slot per mesh (mesh id → slot id) carrying only that mesh's
+    /// one slot per resident mesh (private storage slot, not identity) carrying only that mesh's
     /// material/IBL/tone-map/debug view. A PBR draw binds its object's slot via
     /// a dynamic offset.
     ///
     /// The rig used to be re-encoded into every slot, so an N-object scene wrote
     /// N identical copies of the same lights each frame. The per-mesh values are
-    /// read straight off the [`MeshGpu`]s that own them (#203): they used to be
+    /// read straight off the [`MeshGpu`](super::mesh_store::MeshGpu)s that own them (#203): they used to be
     /// four `Vec`s on the renderer, all sized to the mesh count with nothing
     /// enforcing it, joined here by a four-deep `zip`.
     /// The per-mesh half is skipped when nothing has changed since the last
@@ -256,7 +256,7 @@ impl SceneUniforms {
         &mut self,
         queue: &wgpu::Queue,
         camera: Camera,
-        meshes: &[Option<MeshGpu>],
+        meshes: &MeshResources,
         lighting: Lighting,
         use_env: bool,
     ) {
@@ -272,10 +272,7 @@ impl SceneUniforms {
         }
         // A removed mesh leaves a hole whose slot nothing draws; skipping it
         // keeps every surviving mesh on the slot its id names.
-        for (slot, mesh) in meshes.iter().enumerate() {
-            let Some(mesh) = mesh.as_ref() else {
-                continue;
-            };
+        for (slot, mesh) in meshes.all() {
             let appearance = mesh.appearance();
             let uniform = PbrUniform::new(PbrUniformInputs {
                 material: &appearance.material,
@@ -283,7 +280,7 @@ impl SceneUniforms {
                 tone_mapping: appearance.tone_mapping,
                 debug_view: appearance.debug_view,
             });
-            self.pbr.write_slot(queue, slot, &uniform);
+            self.pbr.write_slot(queue, slot.index(), &uniform);
         }
         // Cleared only once every live slot has been rewritten.
         self.slots_dirty = false;

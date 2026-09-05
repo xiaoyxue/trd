@@ -1,7 +1,8 @@
 //! [`Scene`] — a frame's ordered list of primitives plus the [`Background`] they
 //! composite over, and the one place it is assembled from a wire draw list.
 //!
-//! [`Scene::from_draws`] is the entry point every front-end uses; the overlay
+//! [`Scene::try_from_frame`] resolves wire rows, while [`Scene::from_draws`]
+//! accepts registered identities. Both share the same assembly; the overlay
 //! builders it composes are private, so a front-end cannot assemble half a
 //! scene. That is what keeps native and browser rendering the same frame from
 //! the same inputs (#180).
@@ -10,10 +11,10 @@
 //! (#204): an object is a placed, instanceable primitive; a background is a
 //! per-frame setting with no model, no instance and no place in the draw list.
 
-use super::{Draw, DrawableObject, FrameFit, GridPlane, RenderMode};
+use super::{Draw, DrawableObject, FrameFit, GridPlane, RenderMode, ResolvedDraw};
 use crate::math::Matrix4;
 use crate::render::Tonemap;
-use crate::{DecodedFrame, Lighting, RenderOptions};
+use crate::{DecodedFrame, Lighting, MeshId, MeshTable, MeshTableIndex, RenderOptions};
 
 /// Errors from assembling a [`Scene`] out of a decoded frame.
 ///
@@ -22,9 +23,12 @@ use crate::{DecodedFrame, Lighting, RenderOptions};
 /// front-end can validate a frame before it has a device.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SceneError {
-    /// A draw references a mesh index outside the uploaded mesh set.
+    /// A wire draw or mesh-selector option names a row outside the CPU table.
     #[error("draw references mesh index {mesh_id} but only {mesh_count} mesh(es) are loaded")]
-    MeshIndexOutOfRange { mesh_id: u32, mesh_count: usize },
+    MeshIndexOutOfRange {
+        mesh_id: MeshTableIndex,
+        mesh_count: usize,
+    },
 }
 
 /// The camera-centered spherical HDR **environment background**: the bound
@@ -83,12 +87,10 @@ pub struct Background {
 /// degenerate one-element scene — the renderer always iterates a `Scene`, with
 /// no single-object special case.
 ///
-/// A struct rather than a `Vec` alias (#203) so assembly can live on it:
-/// [`Scene::from_draws`] is the one entry point every front-end uses, which is
-/// what keeps them all rendering the same scene from the same inputs. It
-/// [`Deref`](std::ops::Deref)s to `[DrawableObject]`, so it reads like the slice it wraps — the
-/// background is reached through [`background`](Self::background) instead of
-/// hiding among the primitives (#204).
+/// Shared assembly behind [`Scene::from_draws`] and [`Scene::try_from_frame`]
+/// keeps every front-end rendering the same scene from the same inputs.
+/// Primitives are exposed through [`objects`](Self::objects), and background
+/// settings through [`background`](Self::background).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Scene {
     background: Background,
@@ -169,7 +171,7 @@ impl Scene {
         &self.objects
     }
 
-    /// The **one** place a frame's scene is assembled from a wire draw list plus
+    /// Assembles a frame's scene from registered mesh placements plus
     /// appearance options.
     ///
     /// Every front-end used to do this itself — the headless `Renderer` from nine
@@ -184,8 +186,21 @@ impl Scene {
     /// [`RenderOptions::env_background`], so every front-end that binds an HDR
     /// probe can draw it as a background from the same shared assembly instead of
     /// reaching around this function to set `background_mut()` (#235 R2).
-    pub fn from_draws(draws: &[Draw], options: &RenderOptions, frame: Option<FrameFit>) -> Self {
-        let mut scene = build_scene(draws, options, frame);
+    pub fn from_draws(
+        draws: &[ResolvedDraw],
+        options: &RenderOptions<MeshId>,
+        frame: Option<FrameFit>,
+    ) -> Self {
+        Self::assemble(draws, options, frame, options.show_local_grid_mesh)
+    }
+
+    fn assemble<M>(
+        draws: &[ResolvedDraw],
+        options: &RenderOptions<M>,
+        frame: Option<FrameFit>,
+        grid_mesh: Option<MeshId>,
+    ) -> Self {
+        let mut scene = build_scene(draws, options, frame, grid_mesh);
         // World / object plane grids (#140) are ungated by render mode, so a
         // filled or shaded object still gets a floor. `encode` buckets by
         // primitive type, so appending here still draws them in the grid pass.
@@ -213,8 +228,8 @@ impl Scene {
     /// The wire draw list is resolved through
     /// [`DecodedFrame::resolved_draws`] — an explicit list is drawn verbatim (an
     /// empty one leaves just the background), an absent one places a single
-    /// instance of mesh `0` by the frame's own model — and each `mesh_id` is
-    /// checked against `mesh_count` before [`from_draws`](Self::from_draws) runs.
+    /// instance of row zero by the frame's own model. Every row, including a
+    /// shadow draw's row and the local-grid selector, resolves through `meshes`.
     ///
     /// This is the whole of what the CLI, `CanvasRenderer` and
     /// `OffscreenRenderer` used to spell out separately, in three different
@@ -222,21 +237,43 @@ impl Scene {
     /// device and identical on every platform.
     pub fn try_from_frame(
         frame: &DecodedFrame,
-        mesh_count: usize,
+        meshes: &MeshTable,
         options: &RenderOptions,
         frame_fit: Option<FrameFit>,
     ) -> Result<Self, SceneError> {
-        let draws = frame.resolved_draws();
-        for draw in &draws {
-            if draw.mesh_id as usize >= mesh_count {
-                return Err(SceneError::MeshIndexOutOfRange {
-                    mesh_id: draw.mesh_id,
-                    mesh_count,
-                });
-            }
-        }
-        Ok(Self::from_draws(&draws, options, frame_fit))
+        let draws = Self::resolve_draws(&frame.resolved_draws(), meshes)?;
+        let grid_mesh = options
+            .show_local_grid_mesh
+            .map(|row| resolve_mesh(row, meshes))
+            .transpose()?;
+        Ok(Self::assemble(&draws, options, frame_fit, grid_mesh))
     }
+
+    /// Resolves every wire row against one CPU registration, before any GPU upload.
+    ///
+    /// Shadow rows are validated too. Draw order and selection indices are unchanged.
+    pub fn resolve_draws(
+        draws: &[Draw],
+        meshes: &MeshTable,
+    ) -> Result<Vec<ResolvedDraw>, SceneError> {
+        draws
+            .iter()
+            .map(|draw| {
+                Ok(ResolvedDraw {
+                    mesh_id: resolve_mesh(draw.mesh_id, meshes)?,
+                    model: draw.model,
+                    selection: draw.selection,
+                })
+            })
+            .collect()
+    }
+}
+
+fn resolve_mesh(row: MeshTableIndex, meshes: &MeshTable) -> Result<MeshId, SceneError> {
+    meshes.id(row).ok_or(SceneError::MeshIndexOutOfRange {
+        mesh_id: row,
+        mesh_count: meshes.len(),
+    })
 }
 
 impl FromIterator<DrawableObject> for Scene {
@@ -264,8 +301,8 @@ impl From<Vec<DrawableObject>> for Scene {
 /// [`Background::frame`] fit is set so the mesh scene composites on top of the
 /// bound frame texture (#63); the background is a scene-level setting rather
 /// than a leading drawable, since it carries no model and cannot be instanced
-/// (#204). Each [`Draw`] becomes one [`Primitive::Mesh`](super::Primitive::Mesh)
-/// in the draw's own [`Draw::mode`] when set, else [`RenderOptions::mode`]; with
+/// (#204). Each mesh [`ResolvedDraw`] becomes one [`Primitive::Mesh`](super::Primitive::Mesh)
+/// in the draw's own [`ResolvedDraw::selection`] mode when set, else [`RenderOptions::mode`]; with
 /// [`show_aabb`](RenderOptions::show_aabb), each also emits a tracking
 /// [`Primitive::AabbBox`](super::Primitive::AabbBox); with
 /// [`show_local_grid`](RenderOptions::show_local_grid) `= Some(plane)`, each
@@ -298,14 +335,18 @@ impl From<Vec<DrawableObject>> for Scene {
 ///
 /// Private: [`Scene::from_draws`] is the entry point, so a front-end cannot
 /// assemble half a scene.
-fn build_scene(draws: &[Draw], options: &RenderOptions, frame: Option<FrameFit>) -> Scene {
+fn build_scene<M>(
+    draws: &[ResolvedDraw],
+    options: &RenderOptions<M>,
+    frame: Option<FrameFit>,
+    grid_mesh: Option<MeshId>,
+) -> Scene {
     let RenderOptions {
         mode,
         show_aabb,
         show_axes,
         show_local_axes,
         show_local_grid: local_grid,
-        show_local_grid_mesh: grid_mesh,
         env_background,
         ..
     } = *options;
@@ -375,7 +416,7 @@ fn build_scene(draws: &[Draw], options: &RenderOptions, frame: Option<FrameFit>)
 /// overlays) without the #77 wireframe-quad gating; `None`/`None` yields an empty
 /// list, so callers that don't opt in are byte-identical.
 pub(crate) fn plane_grid_overlays(
-    draws: &[Draw],
+    draws: &[ResolvedDraw],
     world_grid: Option<GridPlane>,
     object_grid: Option<GridPlane>,
 ) -> Vec<DrawableObject> {
@@ -397,7 +438,10 @@ pub(crate) fn plane_grid_overlays(
 /// `None`, an out-of-range index, or a `Shadow` draw yields an empty list, so a
 /// caller that doesn't opt in is byte-identical. Appended to the scene by
 /// front-ends that highlight a clicked object.
-pub(crate) fn selection_aabb_overlay(draws: &[Draw], selected: Option<u32>) -> Vec<DrawableObject> {
+pub(crate) fn selection_aabb_overlay(
+    draws: &[ResolvedDraw],
+    selected: Option<u32>,
+) -> Vec<DrawableObject> {
     let Some(draw) = selected.and_then(|i| draws.get(i as usize)) else {
         return Vec::new();
     };
@@ -413,16 +457,32 @@ mod tests {
     use crate::render::DrawSelection;
     use crate::render::Primitive;
 
+    fn mesh_id(row: u32) -> MeshId {
+        static TABLE: std::sync::OnceLock<MeshTable> = std::sync::OnceLock::new();
+        TABLE
+            .get_or_init(|| MeshTable::new(vec![crate::Mesh::hello_triangle(); 8]).unwrap())
+            .id(MeshTableIndex::new(row))
+            .unwrap()
+    }
+
+    fn build_scene(
+        draws: &[ResolvedDraw],
+        options: &RenderOptions<MeshId>,
+        frame: Option<FrameFit>,
+    ) -> Scene {
+        super::build_scene(draws, options, frame, options.show_local_grid_mesh)
+    }
+
     #[test]
     fn plane_grid_overlays_place_world_and_object_grids() {
         let draws = [
-            Draw {
-                mesh_id: 0,
+            ResolvedDraw {
+                mesh_id: mesh_id(0),
                 model: Matrix4::from_translation(crate::math::Vector3::new(1.0, 0.0, 0.0)),
                 selection: DrawSelection::INHERIT,
             },
-            Draw {
-                mesh_id: 1,
+            ResolvedDraw {
+                mesh_id: mesh_id(1),
                 model: Matrix4::IDENTITY,
                 selection: DrawSelection::Shadow,
             },
@@ -449,8 +509,8 @@ mod tests {
 
     #[test]
     fn build_scene_puts_the_frame_on_the_background_not_in_the_objects() {
-        let draws = [Draw {
-            mesh_id: 0,
+        let draws = [ResolvedDraw {
+            mesh_id: mesh_id(0),
             model: Matrix4::IDENTITY,
             selection: DrawSelection::INHERIT,
         }];
@@ -514,8 +574,8 @@ mod tests {
             blur: 0.25,
             tonemap: Tonemap::Aces,
         };
-        let draws = [Draw {
-            mesh_id: 0,
+        let draws = [ResolvedDraw {
+            mesh_id: mesh_id(0),
             model: Matrix4::IDENTITY,
             selection: DrawSelection::INHERIT,
         }];
@@ -549,8 +609,8 @@ mod tests {
     /// the slot stays empty, which is what keeps existing streams byte-identical.
     #[test]
     fn from_draws_carries_the_environment_background_from_the_options() {
-        let draws = [Draw {
-            mesh_id: 0,
+        let draws = [ResolvedDraw {
+            mesh_id: mesh_id(0),
             model: Matrix4::IDENTITY,
             selection: DrawSelection::INHERIT,
         }];
@@ -584,18 +644,18 @@ mod tests {
         // and a wireframe placement quad (the two-stage cornellbox scene).
         let model = Matrix4::IDENTITY;
         let draws = [
-            Draw {
-                mesh_id: 0,
+            ResolvedDraw {
+                mesh_id: mesh_id(0),
                 model,
                 selection: DrawSelection::INHERIT,
             }, // inherits the scene default
-            Draw {
-                mesh_id: 1,
+            ResolvedDraw {
+                mesh_id: mesh_id(1),
                 model,
                 selection: DrawSelection::Mesh(Some(RenderMode::Wireframe)),
             }, // overrides
-            Draw {
-                mesh_id: 2,
+            ResolvedDraw {
+                mesh_id: mesh_id(2),
                 model,
                 selection: DrawSelection::Mesh(Some(RenderMode::Textured)),
             }, // overrides
@@ -661,13 +721,13 @@ mod tests {
         let model_a = Matrix4::from_translation(crate::math::Vector3::new(1.0, 0.0, 0.0)); // distinct translation (col-major tx)
         let model_b = Matrix4::from_translation(crate::math::Vector3::new(5.0, 0.0, 0.0));
         let draws = [
-            Draw {
-                mesh_id: 0,
+            ResolvedDraw {
+                mesh_id: mesh_id(0),
                 model: model_a,
                 selection: DrawSelection::INHERIT,
             },
-            Draw {
-                mesh_id: 1,
+            ResolvedDraw {
+                mesh_id: mesh_id(1),
                 model: model_b,
                 selection: DrawSelection::INHERIT,
             },
@@ -754,13 +814,13 @@ mod tests {
         let model_a = Matrix4::from_translation(crate::math::Vector3::new(2.0, 0.0, 0.0)); // distinct translations (col-major tx)
         let model_b = Matrix4::from_translation(crate::math::Vector3::new(7.0, 0.0, 0.0));
         let draws = [
-            Draw {
-                mesh_id: 0,
+            ResolvedDraw {
+                mesh_id: mesh_id(0),
                 model: model_a,
                 selection: DrawSelection::INHERIT,
             },
-            Draw {
-                mesh_id: 1,
+            ResolvedDraw {
+                mesh_id: mesh_id(1),
                 model: model_b,
                 selection: DrawSelection::INHERIT,
             },
@@ -833,13 +893,13 @@ mod tests {
         // Mixed scene (bunny + quad): only the wireframe quad (draw b) gets the
         // grid; the filled/textured content mesh (draw a) does not.
         let mixed = [
-            Draw {
-                mesh_id: 0,
+            ResolvedDraw {
+                mesh_id: mesh_id(0),
                 model: model_a,
                 selection: DrawSelection::Mesh(Some(RenderMode::Textured)),
             },
-            Draw {
-                mesh_id: 1,
+            ResolvedDraw {
+                mesh_id: mesh_id(1),
                 model: model_b,
                 selection: DrawSelection::Mesh(Some(RenderMode::Wireframe)),
             },
@@ -872,18 +932,18 @@ mod tests {
         let model_quad = Matrix4::from_translation(crate::math::Vector3::new(9.0, 0.0, 0.0));
         // Two cans (mesh 0) + one placement quad (mesh 1), all wireframe.
         let draws = [
-            Draw {
-                mesh_id: 0,
+            ResolvedDraw {
+                mesh_id: mesh_id(0),
                 model: model_can,
                 selection: DrawSelection::Mesh(Some(RenderMode::Wireframe)),
             },
-            Draw {
-                mesh_id: 0,
+            ResolvedDraw {
+                mesh_id: mesh_id(0),
                 model: Matrix4::IDENTITY,
                 selection: DrawSelection::Mesh(Some(RenderMode::Wireframe)),
             },
-            Draw {
-                mesh_id: 1,
+            ResolvedDraw {
+                mesh_id: mesh_id(1),
                 model: model_quad,
                 selection: DrawSelection::Mesh(Some(RenderMode::Wireframe)),
             },
@@ -923,7 +983,7 @@ mod tests {
             &RenderOptions {
                 mode: RenderMode::Filled,
                 show_local_grid: Some(GridPlane::Xy),
-                show_local_grid_mesh: Some(1),
+                show_local_grid_mesh: Some(mesh_id(1)),
                 ..Default::default()
             },
             None,
@@ -940,7 +1000,7 @@ mod tests {
             &RenderOptions {
                 mode: RenderMode::Filled,
                 show_local_grid: Some(GridPlane::Xy),
-                show_local_grid_mesh: Some(7),
+                show_local_grid_mesh: Some(mesh_id(7)),
                 ..Default::default()
             },
             None,
@@ -961,18 +1021,18 @@ mod tests {
         let bunny_m = Matrix4::from_translation(crate::math::Vector3::new(4.0, 0.0, 0.0));
         let quad_m = Matrix4::from_translation(crate::math::Vector3::new(5.0, 0.0, 0.0));
         let draws = [
-            Draw {
-                mesh_id: 0,
+            ResolvedDraw {
+                mesh_id: mesh_id(0),
                 model: shadow_m,
                 selection: DrawSelection::Shadow,
             },
-            Draw {
-                mesh_id: 0,
+            ResolvedDraw {
+                mesh_id: mesh_id(0),
                 model: bunny_m,
                 selection: DrawSelection::Mesh(Some(RenderMode::Textured)),
             },
-            Draw {
-                mesh_id: 1,
+            ResolvedDraw {
+                mesh_id: mesh_id(1),
                 model: quad_m,
                 selection: DrawSelection::Mesh(Some(RenderMode::Wireframe)),
             },
@@ -1035,13 +1095,13 @@ mod tests {
         let a = Matrix4::from_cols_array(&[1.0f32; 16]);
         let b = Matrix4::from_cols_array(&[2.0f32; 16]);
         let draws = [
-            Draw {
-                mesh_id: 0,
+            ResolvedDraw {
+                mesh_id: mesh_id(0),
                 model: a,
                 selection: DrawSelection::INHERIT,
             },
-            Draw {
-                mesh_id: 1,
+            ResolvedDraw {
+                mesh_id: mesh_id(1),
                 model: b,
                 selection: DrawSelection::INHERIT,
             },
@@ -1059,8 +1119,8 @@ mod tests {
             )
             .objects(),
             [
-                DrawableObject::mesh(0, a, RenderMode::Filled),
-                DrawableObject::mesh(1, b, RenderMode::Filled),
+                DrawableObject::mesh(mesh_id(0), a, RenderMode::Filled),
+                DrawableObject::mesh(mesh_id(1), b, RenderMode::Filled),
             ]
         );
 
@@ -1076,8 +1136,8 @@ mod tests {
             )
             .objects(),
             [
-                DrawableObject::mesh(0, a, RenderMode::Wireframe),
-                DrawableObject::mesh(1, b, RenderMode::Wireframe),
+                DrawableObject::mesh(mesh_id(0), a, RenderMode::Wireframe),
+                DrawableObject::mesh(mesh_id(1), b, RenderMode::Wireframe),
             ]
         );
 
@@ -1095,10 +1155,10 @@ mod tests {
             )
             .objects(),
             [
-                DrawableObject::mesh(0, a, RenderMode::Filled),
-                DrawableObject::mesh(1, b, RenderMode::Filled),
-                DrawableObject::aabb_box(0, a),
-                DrawableObject::aabb_box(1, b),
+                DrawableObject::mesh(mesh_id(0), a, RenderMode::Filled),
+                DrawableObject::mesh(mesh_id(1), b, RenderMode::Filled),
+                DrawableObject::aabb_box(mesh_id(0), a),
+                DrawableObject::aabb_box(mesh_id(1), b),
                 DrawableObject::coordinate_axes(Matrix4::IDENTITY),
             ]
         );
@@ -1117,8 +1177,8 @@ mod tests {
             )
             .objects(),
             [
-                DrawableObject::mesh(0, a, RenderMode::Filled),
-                DrawableObject::mesh(1, b, RenderMode::Filled),
+                DrawableObject::mesh(mesh_id(0), a, RenderMode::Filled),
+                DrawableObject::mesh(mesh_id(1), b, RenderMode::Filled),
                 DrawableObject::coordinate_axes(a),
                 DrawableObject::coordinate_axes(b),
             ]
@@ -1127,13 +1187,13 @@ mod tests {
         // Per-draw mode override: a draw's own `mode` wins over the global one,
         // so one frame can mix (e.g.) a textured mesh with a wireframe overlay.
         let mixed = [
-            Draw {
-                mesh_id: 0,
+            ResolvedDraw {
+                mesh_id: mesh_id(0),
                 model: a,
                 selection: DrawSelection::INHERIT,
             },
-            Draw {
-                mesh_id: 1,
+            ResolvedDraw {
+                mesh_id: mesh_id(1),
                 model: b,
                 selection: DrawSelection::Mesh(Some(RenderMode::Wireframe)),
             },
@@ -1149,18 +1209,19 @@ mod tests {
             )
             .objects(),
             [
-                DrawableObject::mesh(0, a, RenderMode::Textured),
-                DrawableObject::mesh(1, b, RenderMode::Wireframe),
+                DrawableObject::mesh(mesh_id(0), a, RenderMode::Textured),
+                DrawableObject::mesh(mesh_id(1), b, RenderMode::Wireframe),
             ]
         );
     }
 
     #[test]
     fn try_from_frame_rejects_a_draw_naming_a_mesh_the_stream_never_sent() {
+        let table = MeshTable::new(vec![crate::Mesh::hello_triangle(); 2]).unwrap();
         let frame = crate::DecodedFrame {
             params: crate::FrameParams::IDENTITY,
             draws: Some(vec![Draw {
-                mesh_id: 3,
+                mesh_id: MeshTableIndex::new(3),
                 model: Matrix4::IDENTITY,
                 selection: crate::DrawSelection::INHERIT,
             }]),
@@ -1168,9 +1229,9 @@ mod tests {
             frame_id: None,
         };
         assert_eq!(
-            Scene::try_from_frame(&frame, 2, &RenderOptions::default(), None),
+            Scene::try_from_frame(&frame, &table, &RenderOptions::default(), None),
             Err(SceneError::MeshIndexOutOfRange {
-                mesh_id: 3,
+                mesh_id: MeshTableIndex::new(3),
                 mesh_count: 2
             })
         );
@@ -1178,23 +1239,226 @@ mod tests {
 
     #[test]
     fn try_from_frame_defaults_an_absent_draw_list_to_mesh_zero() {
+        let table = MeshTable::new(vec![crate::Mesh::hello_triangle()]).unwrap();
         // An absent wire draw list is the legacy single-object stream: one
         // instance of mesh 0 placed by the frame's own model.
         let frame = crate::DecodedFrame {
-            params: crate::FrameParams::IDENTITY,
+            params: crate::FrameParams {
+                model: Some(
+                    Matrix4::from_translation(crate::math::Vector3::new(2.0, 3.0, 4.0))
+                        .to_cols_array(),
+                ),
+                ..crate::FrameParams::IDENTITY
+            },
             draws: None,
             frame_ref: None,
             frame_id: None,
         };
-        let scene = Scene::try_from_frame(&frame, 1, &RenderOptions::default(), None).unwrap();
-        assert_eq!(scene.objects().len(), 1);
+        let scene = Scene::try_from_frame(&frame, &table, &RenderOptions::default(), None).unwrap();
+        assert_eq!(
+            scene.objects(),
+            [DrawableObject::mesh(
+                table.id(MeshTableIndex::new(0)).unwrap(),
+                frame.params.model_matrix(),
+                RenderMode::Filled,
+            )],
+        );
         // An explicit empty list draws no meshes at all — the background plate only.
         let background_only = crate::DecodedFrame {
             draws: Some(Vec::new()),
             ..frame
         };
         let scene =
-            Scene::try_from_frame(&background_only, 1, &RenderOptions::default(), None).unwrap();
+            Scene::try_from_frame(&background_only, &table, &RenderOptions::default(), None)
+                .unwrap();
         assert!(scene.objects().is_empty());
+    }
+
+    #[test]
+    fn resolve_draws_preserves_registration_order_models_and_selections() {
+        let table = MeshTable::new(vec![crate::Mesh::hello_triangle(); 2]).unwrap();
+        let draws = [
+            Draw {
+                mesh_id: MeshTableIndex::new(1),
+                model: Matrix4::from_translation(crate::math::Vector3::new(2.0, 0.0, 0.0)),
+                selection: DrawSelection::Shadow,
+            },
+            Draw {
+                mesh_id: MeshTableIndex::new(0),
+                model: Matrix4::IDENTITY,
+                selection: DrawSelection::Mesh(Some(RenderMode::Wireframe)),
+            },
+            Draw {
+                mesh_id: MeshTableIndex::new(1),
+                model: Matrix4::IDENTITY,
+                selection: DrawSelection::INHERIT,
+            },
+        ];
+        let resolved = Scene::resolve_draws(&draws, &table).unwrap();
+        for (wire, registered) in draws.iter().zip(&resolved) {
+            assert_eq!(Some(registered.mesh_id), table.id(wire.mesh_id));
+            assert_eq!(registered.model, wire.model);
+            assert_eq!(registered.selection, wire.selection);
+        }
+        assert_eq!(resolved[0].mesh_id, resolved[2].mesh_id);
+        assert_eq!(
+            Scene::resolve_draws(&draws, &table.clone()).unwrap(),
+            resolved,
+        );
+
+        let independent = MeshTable::new(vec![crate::Mesh::hello_triangle(); 2]).unwrap();
+        let other = Scene::resolve_draws(&draws, &independent).unwrap();
+        for (first, second) in resolved.iter().zip(&other) {
+            assert_ne!(first.mesh_id, second.mesh_id);
+            assert_eq!(first.model, second.model);
+            assert_eq!(first.selection, second.selection);
+        }
+    }
+
+    #[test]
+    fn wire_shadow_rows_are_validated_before_becoming_shared_geometry() {
+        let table = MeshTable::new(vec![crate::Mesh::hello_triangle()]).unwrap();
+        let mut frame = crate::DecodedFrame {
+            params: crate::FrameParams::IDENTITY,
+            draws: Some(vec![Draw {
+                mesh_id: MeshTableIndex::new(1),
+                model: Matrix4::IDENTITY,
+                selection: DrawSelection::Shadow,
+            }]),
+            frame_ref: None,
+            frame_id: None,
+        };
+        assert_eq!(
+            Scene::try_from_frame(&frame, &table, &RenderOptions::default(), None),
+            Err(SceneError::MeshIndexOutOfRange {
+                mesh_id: MeshTableIndex::new(1),
+                mesh_count: 1,
+            }),
+        );
+        frame.draws.as_mut().unwrap()[0].mesh_id = MeshTableIndex::new(0);
+        let scene = Scene::try_from_frame(&frame, &table, &RenderOptions::default(), None).unwrap();
+        assert_eq!(
+            scene.objects(),
+            [DrawableObject::blob_shadow(Matrix4::IDENTITY)]
+        );
+    }
+
+    #[test]
+    fn empty_registration_rejects_implicit_zero_but_accepts_explicit_empty() {
+        let table = MeshTable::new(Vec::new()).unwrap();
+        let mut frame = crate::DecodedFrame {
+            params: crate::FrameParams::IDENTITY,
+            draws: None,
+            frame_ref: None,
+            frame_id: None,
+        };
+        assert_eq!(
+            Scene::try_from_frame(&frame, &table, &RenderOptions::default(), None),
+            Err(SceneError::MeshIndexOutOfRange {
+                mesh_id: MeshTableIndex::new(0),
+                mesh_count: 0,
+            }),
+        );
+        frame.draws = Some(Vec::new());
+        let scene = Scene::try_from_frame(
+            &frame,
+            &table,
+            &RenderOptions::default(),
+            Some(FrameFit::Stretch),
+        )
+        .unwrap();
+        assert!(scene.objects().is_empty());
+        assert_eq!(scene.background().frame, Some(FrameFit::Stretch));
+    }
+
+    #[test]
+    fn wire_grid_selector_resolves_against_the_same_registration_as_draws() {
+        let table = MeshTable::new(vec![crate::Mesh::hello_triangle(); 2]).unwrap();
+        let model = Matrix4::from_translation(crate::math::Vector3::new(3.0, 0.0, 0.0));
+        let frame = crate::DecodedFrame {
+            params: crate::FrameParams::IDENTITY,
+            draws: Some(vec![
+                Draw {
+                    mesh_id: MeshTableIndex::new(0),
+                    model: Matrix4::IDENTITY,
+                    selection: DrawSelection::Shadow,
+                },
+                Draw {
+                    mesh_id: MeshTableIndex::new(1),
+                    model,
+                    selection: DrawSelection::INHERIT,
+                },
+                Draw {
+                    mesh_id: MeshTableIndex::new(0),
+                    model: Matrix4::IDENTITY,
+                    selection: DrawSelection::INHERIT,
+                },
+            ]),
+            frame_ref: None,
+            frame_id: None,
+        };
+        let options = RenderOptions {
+            mode: RenderMode::Wireframe,
+            show_aabb: true,
+            show_axes: true,
+            show_local_axes: true,
+            show_local_grid: Some(GridPlane::Xy),
+            show_local_grid_mesh: Some(MeshTableIndex::new(1)),
+            show_world_grid: Some(GridPlane::Xz),
+            show_object_grid: Some(GridPlane::Yz),
+            selected: Some(1),
+            pbr: Some(crate::PbrConfig::default()),
+            ..Default::default()
+        };
+        let scene = Scene::try_from_frame(&frame, &table, &options, Some(FrameFit::Cover)).unwrap();
+        let row_zero = table.id(MeshTableIndex::new(0)).unwrap();
+        let row_one = table.id(MeshTableIndex::new(1)).unwrap();
+        assert_eq!(
+            scene.objects(),
+            [
+                DrawableObject::blob_shadow(Matrix4::IDENTITY),
+                DrawableObject::mesh(row_one, model, RenderMode::Wireframe),
+                DrawableObject::mesh(row_zero, Matrix4::IDENTITY, RenderMode::Wireframe),
+                DrawableObject::aabb_box(row_one, model),
+                DrawableObject::aabb_box(row_zero, Matrix4::IDENTITY),
+                DrawableObject::plane_grid(GridPlane::Xy, model),
+                DrawableObject::coordinate_axes(model),
+                DrawableObject::coordinate_axes(Matrix4::IDENTITY),
+                DrawableObject::coordinate_axes(Matrix4::IDENTITY),
+                DrawableObject::plane_grid(GridPlane::Xz, Matrix4::IDENTITY),
+                DrawableObject::plane_grid(GridPlane::Yz, model),
+                DrawableObject::plane_grid(GridPlane::Yz, Matrix4::IDENTITY),
+                DrawableObject::aabb_box(row_one, model),
+            ],
+        );
+        assert_eq!(scene.background().frame, Some(FrameFit::Cover));
+        assert_eq!(scene.lighting(), options.pbr.as_ref().unwrap().lighting);
+        assert!(selection_aabb_overlay(
+            &Scene::resolve_draws(&frame.resolved_draws(), &table).unwrap(),
+            Some(0),
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn wire_grid_selector_rejects_bad_rows_even_without_draws_or_a_grid() {
+        let table = MeshTable::new(vec![crate::Mesh::hello_triangle()]).unwrap();
+        let frame = crate::DecodedFrame {
+            params: crate::FrameParams::IDENTITY,
+            draws: Some(Vec::new()),
+            frame_ref: None,
+            frame_id: None,
+        };
+        let options = RenderOptions {
+            show_local_grid_mesh: Some(MeshTableIndex::new(u32::MAX)),
+            ..Default::default()
+        };
+        assert_eq!(
+            Scene::try_from_frame(&frame, &table, &options, None),
+            Err(SceneError::MeshIndexOutOfRange {
+                mesh_id: MeshTableIndex::new(u32::MAX),
+                mesh_count: 1,
+            }),
+        );
     }
 }

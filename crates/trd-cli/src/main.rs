@@ -255,7 +255,7 @@ fn main() -> Result<(), trd_core::StreamError> {
             show_axes: cli.axes,
             show_local_axes: cli.axes_local,
             show_local_grid: cli.grid_local.map(Into::into),
-            show_local_grid_mesh: cli.grid_mesh,
+            show_local_grid_mesh: cli.grid_mesh.map(trd_core::MeshTableIndex::new),
             // The CLI exposes no world/object grid or selection flags; those are
             // interactive-only overlays.
             show_world_grid: None,

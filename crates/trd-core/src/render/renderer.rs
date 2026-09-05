@@ -1,7 +1,7 @@
 //! [`Renderer`] — the persistent render harness (#134, #203).
 //!
 //! One type owns everything a frame needs: the mesh/gizmo/PBR/picking
-//! pipelines, the decode-once [`MeshStore`], materials/lighting/IBL, and the
+//! pipelines, the decode-once [`MeshResources`], materials/lighting/IBL, and the
 //! picking pipeline + its lazily-allocated pick target. It used to be split
 //! into an outer `Renderer<T: RenderTarget>` — generic over *where* the frame
 //! lands, wrapping the render target — around an inner `SceneRenderer` holding
@@ -61,10 +61,8 @@
 //!   *what draws* and *what it reads* are different questions (#203); both live
 //!   in `render_pipelines.rs` because both are `f(format, sample_count)` rather
 //!   than a function of any one scene (#221 §2).
-//! - [`MeshStore`] — the uploaded [`MeshGpu`](super::mesh_store::MeshGpu)s (each
-//!   owning its albedo, material maps, material, IBL, tone-map and debug view),
-//!   the shared axes gizmo, and the growable per-instance model buffer; also
-//!   walks a [`Scene`] into draw batches.
+//! - [`MeshResources`] — addressed mesh residency, separate from constant
+//!   gizmos and per-frame instance buffers.
 //! - [`BoundTexture`](super::BoundTexture) — the mesh albedo sampled by textured
 //!   draws (#20).
 //! - [`FramePlane`] — the background video frame plane (#63).
@@ -98,12 +96,12 @@ use super::draw_command::{build_batches, Batches};
 use super::environment::{EnvBackgroundSettings, Environment};
 use super::frame_plane::FramePlane;
 use super::gizmo::GizmoGeometry;
-use super::mesh_store::MeshStore;
+use super::mesh_store::MeshResources;
 use super::picking::Picking;
 use super::*;
 use super::{Primitive, Scene};
 use crate::math::Matrix4;
-use crate::Camera;
+use crate::{Camera, MeshResourceError, MeshTable};
 use thiserror::Error;
 
 /// Errors constructing or driving a [`Renderer`].
@@ -151,6 +149,9 @@ pub enum RenderError {
     /// incomplete CG look-at), so no camera could be resolved.
     #[error(transparent)]
     CameraForm(#[from] super::CameraFormError),
+    /// Registration failed or a scene names a nonresident mesh.
+    #[error(transparent)]
+    MeshResource(#[from] MeshResourceError),
 }
 
 /// Validates a render size before anything is allocated for it.
@@ -202,8 +203,9 @@ pub struct Renderer {
     /// [`RenderMode::Shaded`] draws **and** the pipeline drawing it as the
     /// background sky. One type, like its sibling `FramePlane` (#221 §5).
     pub(super) environment: Environment,
-    /// The caller's uploaded meshes, fixed at construction.
-    pub(super) meshes: MeshStore,
+    /// Caller-supplied residency; public identities never expose its slots.
+    pub(super) meshes: MeshResources,
+    pub(super) mesh_table: MeshTable,
     /// The constant overlay geometry (axes, grids, quad outlines, shadow quad):
     /// a function of nothing, built once.
     pub(super) gizmos: GizmoGeometry,
@@ -255,11 +257,27 @@ impl Renderer {
         Self::new(gpu, format, meshes, &base_models)
     }
 
+    /// Uploads existing CPU registrations without changing their identities.
+    pub fn auto_fit_table(
+        gpu: Arc<GpuContext>,
+        format: wgpu::TextureFormat,
+        table: MeshTable,
+    ) -> Result<Self, RenderError> {
+        let base_models: Vec<_> = table
+            .iter()
+            .map(|(_, mesh)| {
+                mesh.preview_transform(crate::DEFAULT_PREVIEW_TARGET)
+                    .matrix()
+            })
+            .collect();
+        Self::with_mesh_table(gpu, format, table, &base_models, MSAA_SAMPLE_COUNT)
+    }
+
     /// Constructs a `Renderer` over one or more meshes, each paired with an
     /// explicit base (preview) model that is pre-multiplied beneath every
     /// per-frame instance model (`effective = model · base`). This is the primary
     /// constructor; [`auto_fit`](Self::auto_fit) derives the base models for you.
-    /// A frame's [`Scene`] references these meshes by id (row index). The mesh
+    /// A frame's [`Scene`] references identities from [`Self::mesh_table`]. The mesh
     /// pass renders at [`MSAA_SAMPLE_COUNT`]×; use
     /// [`with_sample_count`](Self::with_sample_count) to override (e.g. `1` = no
     /// MSAA).
@@ -290,16 +308,35 @@ impl Renderer {
         base_models: &[Matrix4],
         sample_count: u32,
     ) -> Result<Self, RenderError> {
-        if meshes.is_empty() {
+        Self::with_mesh_table(
+            gpu,
+            format,
+            MeshTable::new(meshes.to_vec())?,
+            base_models,
+            sample_count,
+        )
+    }
+
+    /// Uploads a CPU mesh table with explicit base models and MSAA.
+    ///
+    /// Scene assembly may resolve this same table before a GPU exists.
+    pub fn with_mesh_table(
+        gpu: Arc<GpuContext>,
+        format: wgpu::TextureFormat,
+        table: MeshTable,
+        base_models: &[Matrix4],
+        sample_count: u32,
+    ) -> Result<Self, RenderError> {
+        if table.is_empty() {
             return Err(RenderError::InvalidMeshSet {
                 reason: "a renderer needs at least one mesh".into(),
             });
         }
-        if meshes.len() != base_models.len() {
+        if table.len() != base_models.len() {
             return Err(RenderError::InvalidMeshSet {
                 reason: format!(
                     "{} mesh(es) but {} base model(s) — they pair one-to-one",
-                    meshes.len(),
+                    table.len(),
                     base_models.len()
                 ),
             });
@@ -322,26 +359,27 @@ impl Renderer {
             &material_maps_layout,
             environment.layout(),
             sample_count,
-            meshes.len(),
+            table.len(),
         );
-        let store = MeshStore::new(
+        let store = MeshResources::new(
             &gpu,
-            meshes,
+            &table,
             base_models,
             &texture_layout,
             &material_maps_layout,
         );
         let gizmos = GizmoGeometry::new(&gpu);
         let instances =
-            InstanceBuffer::new(&gpu.device, "trd mesh instance buffer", meshes.len() as u32);
+            InstanceBuffer::new(&gpu.device, "trd mesh instance buffer", table.len() as u32);
         let frame_plane = FramePlane::new(&gpu.device, format, sample_count);
-        let picking = Picking::new(&gpu.device, meshes.len());
+        let picking = Picking::new(&gpu.device, table.len());
 
         Ok(Self {
             pipelines,
             uniforms,
             environment,
             meshes: store,
+            mesh_table: table,
             gizmos,
             instances,
             batches: Batches::default(),
@@ -352,12 +390,12 @@ impl Renderer {
         })
     }
 
-    /// Builds the harness for `meshes` (drawn by index), requesting its own GPU
+    /// Registers `meshes` and builds the harness, requesting its own GPU
     /// device, and a matching [`TextureTarget`] of `width` × `height`. Applies
     /// each mesh's [`Mesh::preview_transform`] (center + uniform scale-to-fit)
     /// beneath its per-frame model so an arbitrary-unit asset renders centered
     /// and at a reasonable size. Per-frame draw lists place instances of these
-    /// meshes by index. The mesh pass renders at 4× MSAA; use
+    /// meshes through [`Self::mesh_table`]. The mesh pass renders at 4× MSAA; use
     /// [`with_meshes_sample_count`](Self::with_meshes_sample_count) to override
     /// (e.g. `1` = no MSAA).
     ///
@@ -496,10 +534,11 @@ impl Renderer {
         scene: &Scene,
         target: &mut RenderTarget,
     ) -> Result<Option<SurfaceRepair>, RenderError> {
+        self.validate_scene(scene)?;
         match target.kind_mut() {
             RenderTargetType::Surface(surface) => Ok(self.render_surface(camera, scene, surface)?),
             RenderTargetType::Texture(texture) => {
-                self.render_texture(camera, scene, texture);
+                self.render_texture(camera, scene, texture)?;
                 Ok(None)
             }
         }
@@ -519,7 +558,7 @@ impl Renderer {
         camera: Camera,
         scene: &Scene,
         target: &mut SurfaceTarget,
-    ) -> Result<Option<SurfaceRepair>, SurfaceError> {
+    ) -> Result<Option<SurfaceRepair>, RenderError> {
         let (texture, repair) = match target.surface().get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture) => (texture, None),
             // Presented, but the configuration no longer matches: the frame is on
@@ -527,11 +566,11 @@ impl Renderer {
             wgpu::CurrentSurfaceTexture::Suboptimal(texture) => {
                 (texture, Some(SurfaceRepair::Reconfigure))
             }
-            wgpu::CurrentSurfaceTexture::Outdated => return Err(SurfaceError::Outdated),
-            wgpu::CurrentSurfaceTexture::Lost => return Err(SurfaceError::Lost),
-            wgpu::CurrentSurfaceTexture::Timeout => return Err(SurfaceError::Timeout),
-            wgpu::CurrentSurfaceTexture::Occluded => return Err(SurfaceError::Occluded),
-            wgpu::CurrentSurfaceTexture::Validation => return Err(SurfaceError::Validation),
+            wgpu::CurrentSurfaceTexture::Outdated => return Err(SurfaceError::Outdated.into()),
+            wgpu::CurrentSurfaceTexture::Lost => return Err(SurfaceError::Lost.into()),
+            wgpu::CurrentSurfaceTexture::Timeout => return Err(SurfaceError::Timeout.into()),
+            wgpu::CurrentSurfaceTexture::Occluded => return Err(SurfaceError::Occluded.into()),
+            wgpu::CurrentSurfaceTexture::Validation => return Err(SurfaceError::Validation.into()),
         };
         let gpu = self.gpu.clone();
         let view = texture.texture.create_view(&wgpu::TextureViewDescriptor {
@@ -543,7 +582,7 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("trd onscreen frame"),
             });
-        self.encode(&mut encoder, &view, camera, scene);
+        self.encode(&mut encoder, &view, camera, scene)?;
         gpu.queue.submit(Some(encoder.finish()));
         gpu.queue.present(texture);
         Ok(repair)
@@ -554,8 +593,13 @@ impl Renderer {
     ///
     /// Private, and the degenerate one-layer [`draw_layers`](Self::draw_layers);
     /// reachable through [`render`](Self::render).
-    fn render_texture(&mut self, camera: Camera, scene: &Scene, target: &TextureTarget) {
-        self.draw_layers(&[SceneLayer::new(camera, scene)], target);
+    fn render_texture(
+        &mut self,
+        camera: Camera,
+        scene: &Scene,
+        target: &TextureTarget,
+    ) -> Result<(), RenderError> {
+        self.draw_layers(&[SceneLayer::new(camera, scene)], target)
     }
 
     /// Encodes and submits `layers` into `target` **without** reading it back.
@@ -569,7 +613,14 @@ impl Renderer {
     /// Each layer is submitted **separately**: instances are uploaded into one
     /// shared buffer, so the next layer's upload must not race the previous
     /// layer's draw.
-    pub fn draw_layers(&mut self, layers: &[SceneLayer<'_>], target: &TextureTarget) {
+    pub fn draw_layers(
+        &mut self,
+        layers: &[SceneLayer<'_>],
+        target: &TextureTarget,
+    ) -> Result<(), RenderError> {
+        for layer in layers {
+            self.validate_scene(layer.scene)?;
+        }
         let gpu = self.gpu.clone();
         let view = target
             .texture()
@@ -581,14 +632,15 @@ impl Renderer {
                     label: Some("trd texture target layer"),
                 });
             if index == 0 {
-                self.encode(&mut encoder, &view, layer.camera, layer.scene);
+                self.encode(&mut encoder, &view, layer.camera, layer.scene)?;
             } else {
-                self.encode_overlay(&mut encoder, &view, layer.camera, layer.scene);
+                self.encode_overlay(&mut encoder, &view, layer.camera, layer.scene)?;
             }
             // Submitted per layer, not once at the end: instances share one
             // buffer, so the next layer's upload must not race this layer's draw.
             gpu.queue.submit(Some(encoder.finish()));
         }
+        Ok(())
     }
 
     /// Renders `layers` back-to-front into `target`, then reads it back as
@@ -604,7 +656,7 @@ impl Renderer {
         layers: &[SceneLayer<'_>],
         target: &TextureTarget,
     ) -> Result<Vec<u8>, RenderError> {
-        self.draw_layers(layers, target);
+        self.draw_layers(layers, target)?;
         self.read_pixels(target).await
     }
 
@@ -634,7 +686,7 @@ impl Renderer {
     /// record the pass — the background frame plane first (depth-write off) so
     /// the mesh scene z-composites on top, then each batched draw. Instances are
     /// grouped by geometry so each buffer is drawn once over a contiguous range.
-    /// Out-of-range `mesh_id`s are skipped (callers should validate first).
+    /// A nonresident mesh is an error, before any frame data is uploaded.
     ///
     /// `pub(crate)`: only this module's per-target draw functions call it; a
     /// front-end reaches it through [`render`](Self::render) (or
@@ -645,8 +697,8 @@ impl Renderer {
         view: &wgpu::TextureView,
         camera: Camera,
         scene: &Scene,
-    ) {
-        self.encode_pass(encoder, view, camera, scene, false);
+    ) -> Result<(), RenderError> {
+        self.encode_pass(encoder, view, camera, scene, false)
     }
 
     /// Encodes a foreground scene while preserving color already rendered into
@@ -657,8 +709,17 @@ impl Renderer {
         view: &wgpu::TextureView,
         camera: Camera,
         scene: &Scene,
-    ) {
-        self.encode_pass(encoder, view, camera, scene, true);
+    ) -> Result<(), RenderError> {
+        self.encode_pass(encoder, view, camera, scene, true)
+    }
+
+    fn validate_scene(&self, scene: &Scene) -> Result<(), MeshResourceError> {
+        for object in scene.objects() {
+            if let Some(id) = object.primitive().mesh_id() {
+                self.meshes.get(id)?;
+            }
+        }
+        Ok(())
     }
 
     /// Everything a frame needs **written** before a pass can start: the camera
@@ -671,38 +732,28 @@ impl Renderer {
     /// deliberately *not* sized here: `encode_pass` sizes them itself, so its
     /// descriptor takes the views straight from the call that allocated them
     /// (#363).
-    fn prepare_frame(&mut self, camera: Camera, scene: &Scene) {
+    fn prepare_frame(&mut self, camera: Camera, scene: &Scene) -> Result<(), MeshResourceError> {
+        // Resolve before writes so a bad handle cannot partially change frame state.
+        let Self {
+            batches, meshes, ..
+        } = self;
+        build_batches(batches, scene.objects(), |id| {
+            let resident = meshes.resolve(id)?;
+            Ok((resident.slot.index(), resident.gpu.geometry.base_model))
+        })?;
         // 1. Camera P·V for this frame.
         self.uniforms.write_camera(&self.gpu.queue, camera);
-        // 1b. Disney PBR uniform slots for this frame — one per mesh (each carries
-        //     the shared camera/lights + that mesh's material, #141). Written
-        //     unconditionally so a PBR draw always has a current material slot.
+        // The shared camera/lights change per frame; material slots only when dirty.
         let viewport = camera.viewport();
-        //     The per-mesh **slots** are rewritten only when a setter has changed
-        //     one since the last frame (#235 R5): their inputs carry no per-frame
-        //     value, so an unchanged scene would upload the same bytes again.
         self.uniforms.write_pbr(
             &self.gpu.queue,
             camera,
-            self.meshes.all(),
+            &self.meshes,
             scene.lighting(),
             self.environment.has_env(),
         );
 
-        // 2. Walk the scene's objects once into per-geometry instance batches,
-        //    then upload the flattened instance models (growing the buffer if
-        //    needed). The backgrounds are not objects: they are settings on the
-        //    scene, read directly below (#204).
         let background = *scene.background();
-        // Split the borrow by field so the walk can fill the renderer's own
-        // scratch while reading the mesh store (#235 R6) — the same shape S3 used
-        // for the pick target: keep the buffer in `self`, don't move it out.
-        let Self {
-            batches, meshes, ..
-        } = self;
-        build_batches(batches, scene.objects(), |mesh_id| {
-            meshes.get(mesh_id).map(|mesh| mesh.geometry.base_model)
-        });
         self.instances.upload(&self.gpu, &self.batches.instances);
 
         // 3. Background frame-plane fit for this viewport (no-op if the scene
@@ -731,6 +782,7 @@ impl Renderer {
                 },
             );
         }
+        Ok(())
     }
 
     /// Draws one frame of `scene` into `view`: prepare, then dispatch the
@@ -743,8 +795,8 @@ impl Renderer {
         camera: Camera,
         scene: &Scene,
         load_color: bool,
-    ) {
-        self.prepare_frame(camera, scene);
+    ) -> Result<(), RenderError> {
+        self.prepare_frame(camera, scene)?;
 
         let background = *scene.background();
         // Sizing the attachments here — rather than in `prepare_frame` — is what
@@ -801,9 +853,11 @@ impl Renderer {
             let range = command.start..command.start + command.count;
             match command.primitive {
                 Primitive::Mesh { mesh_id, mode } => {
-                    self.record_mesh(&mut pass, mesh_id, mode, range)
+                    self.record_mesh(&mut pass, self.meshes.resolve(mesh_id)?, mode, range)
                 }
-                Primitive::AabbBox { mesh_id } => self.record_aabb_box(&mut pass, mesh_id, range),
+                Primitive::AabbBox { mesh_id } => {
+                    self.record_aabb_box(&mut pass, self.meshes.resolve(mesh_id)?, range)
+                }
                 Primitive::PlaneGrid { plane } => self.record_plane_grid(&mut pass, plane, range),
                 Primitive::QuadOutline { selected } => {
                     self.record_quad_outline(&mut pass, selected, range)
@@ -813,6 +867,7 @@ impl Renderer {
                 Primitive::CoordinateAxes => self.record_coordinate_axes(&mut pass, range),
             }
         }
+        Ok(())
     }
 }
 

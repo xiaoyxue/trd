@@ -17,6 +17,7 @@
 
 use super::{GridPlane, RenderMode};
 use crate::math::Matrix4;
+use crate::MeshId;
 
 /// **What** the renderer draws: the closed list of primitives it knows, with the
 /// per-primitive configuration that selects the geometry and pipeline — but
@@ -37,19 +38,19 @@ use crate::math::Matrix4;
 /// in [`sort_key`](Self::sort_key) instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Primitive {
-    /// A decoded mesh (id = row index in the leading mesh table) drawn in `mode`
+    /// A registered mesh identity drawn in `mode`
     /// (filled, textured, shaded, or wireframe). The renderer pre-multiplies the
     /// mesh's base (preview) model beneath the drawable's model
     /// (`effective = model · base`).
     ///
     /// The **only** variant carrying a mode: every other primitive has exactly
     /// one way of being drawn.
-    Mesh { mesh_id: u32, mode: RenderMode },
+    Mesh { mesh_id: MeshId, mode: RenderMode },
     /// The axis-aligned bounding-box outline of mesh `mesh_id` (#42), placed by
     /// the same model as the mesh instance it boxes (the renderer applies that
     /// mesh's base model beneath it too), so the box tracks the mesh exactly.
     /// Reuses the mesh's precomputed corner geometry.
-    AabbBox { mesh_id: u32 },
+    AabbBox { mesh_id: MeshId },
     /// A **coordinate-plane grid** lattice on `plane` (X/Y, X/Z, or Y/Z),
     /// spanning the model-space square `[-1, 1]²`. Like
     /// [`CoordinateAxes`](Self::CoordinateAxes) it is a screen-space-expanded
@@ -86,6 +87,17 @@ pub enum Primitive {
 }
 
 impl Primitive {
+    pub(crate) fn mesh_id(self) -> Option<MeshId> {
+        match self {
+            Self::Mesh { mesh_id, .. } | Self::AabbBox { mesh_id } => Some(mesh_id),
+            Self::PlaneGrid { .. }
+            | Self::QuadOutline { .. }
+            | Self::QuadFill
+            | Self::CoordinateAxes
+            | Self::BlobShadow => None,
+        }
+    }
+
     /// The frame's **layer order**: lower layers are submitted first, so later
     /// layers paint over them.
     ///
@@ -131,7 +143,7 @@ impl Primitive {
     }
 
     /// The total order the renderer submits primitives in:
-    /// `(layer, variation, geometry)`.
+    /// `(layer, variation, private geometry slot, complete identity)`.
     ///
     /// - `layer` is [`layer`](Self::layer) — the frame's z-order, since every
     ///   overlay pipeline is depth-disabled and submission order is all there is.
@@ -139,7 +151,7 @@ impl Primitive {
     ///   groups, so draws sharing GPU state stay adjacent: the solid mesh layer
     ///   runs filled → textured → shaded, one pipeline switch each. Every other
     ///   layer has a single pipeline and leaves it `0`.
-    /// - `geometry` finally orders by the buffers bound: the mesh id, the grid
+    /// - `geometry` orders by the buffers bound: the resolved mesh slot, the grid
     ///   plane, or the quad-outline state.
     ///
     /// Ranking `variation` **above** `geometry` is what keeps mesh draws grouped
@@ -147,12 +159,11 @@ impl Primitive {
     /// the struct-like variants would do, and worth a pipeline switch per mesh if
     /// it were reversed.
     ///
-    /// Equal keys mean equal primitives (every component is part of the
-    /// primitive's identity), so sorting by this key lays each batch out as one
-    /// contiguous run.
-    pub(crate) fn sort_key(self) -> (u8, u8, u32) {
+    /// Slot ordering preserves overlay order after a hole is reused; complete
+    /// identity still participates so equal keys mean equal primitives.
+    pub(crate) fn sort_key(self, mesh_slot: usize) -> (u8, u8, usize, Option<MeshId>) {
         let (variation, geometry) = match self {
-            Primitive::Mesh { mesh_id, mode } => {
+            Primitive::Mesh { mode, .. } => {
                 let variation = match mode {
                     RenderMode::Filled => 0,
                     RenderMode::Textured => 1,
@@ -160,14 +171,14 @@ impl Primitive {
                     // Alone on layer 5, so its rank within the layer is free.
                     RenderMode::Wireframe => 0,
                 };
-                (variation, mesh_id)
+                (variation, mesh_slot)
             }
-            Primitive::AabbBox { mesh_id } => (0, mesh_id),
-            Primitive::PlaneGrid { plane } => (0, plane.index() as u32),
-            Primitive::QuadOutline { selected } => (0, u32::from(selected)),
+            Primitive::AabbBox { .. } => (0, mesh_slot),
+            Primitive::PlaneGrid { plane } => (0, plane.index()),
+            Primitive::QuadOutline { selected } => (0, usize::from(selected)),
             Primitive::CoordinateAxes | Primitive::BlobShadow | Primitive::QuadFill => (0, 0),
         };
-        (self.layer(), variation, geometry)
+        (self.layer(), variation, geometry, self.mesh_id())
     }
 }
 
@@ -215,13 +226,13 @@ impl DrawableObject {
     }
 
     /// Mesh `mesh_id` placed by `model` and drawn in `mode`.
-    pub fn mesh(mesh_id: u32, model: Matrix4, mode: RenderMode) -> Self {
+    pub fn mesh(mesh_id: MeshId, model: Matrix4, mode: RenderMode) -> Self {
         Self::new(Primitive::Mesh { mesh_id, mode }, model)
     }
 
     /// The AABB outline of mesh `mesh_id`, placed by the same `model` as the mesh
     /// instance it boxes.
-    pub fn aabb_box(mesh_id: u32, model: Matrix4) -> Self {
+    pub fn aabb_box(mesh_id: MeshId, model: Matrix4) -> Self {
         Self::new(Primitive::AabbBox { mesh_id }, model)
     }
 
@@ -277,18 +288,19 @@ mod tests {
     /// composites over them, and alpha blending makes the order visible.
     #[test]
     fn layers_run_shadow_solid_grid_quad_wireframe_aabb_axes() {
+        let id = MeshId::fresh().unwrap();
         let layers = [
             Primitive::BlobShadow,
             Primitive::Mesh {
-                mesh_id: 0,
+                mesh_id: id,
                 mode: RenderMode::Filled,
             },
             Primitive::Mesh {
-                mesh_id: 0,
+                mesh_id: id,
                 mode: RenderMode::Textured,
             },
             Primitive::Mesh {
-                mesh_id: 0,
+                mesh_id: id,
                 mode: RenderMode::Shaded,
             },
             Primitive::PlaneGrid {
@@ -297,10 +309,10 @@ mod tests {
             Primitive::QuadFill,
             Primitive::QuadOutline { selected: false },
             Primitive::Mesh {
-                mesh_id: 0,
+                mesh_id: id,
                 mode: RenderMode::Wireframe,
             },
-            Primitive::AabbBox { mesh_id: 0 },
+            Primitive::AabbBox { mesh_id: id },
             Primitive::CoordinateAxes,
         ]
         .map(Primitive::layer);
@@ -313,13 +325,13 @@ mod tests {
     #[test]
     fn mode_outranks_mesh_id_within_the_solid_layer() {
         let filled_last_mesh = Primitive::Mesh {
-            mesh_id: 9,
+            mesh_id: MeshId::fresh().unwrap(),
             mode: RenderMode::Filled,
         };
         let textured_first_mesh = Primitive::Mesh {
-            mesh_id: 0,
+            mesh_id: MeshId::fresh().unwrap(),
             mode: RenderMode::Textured,
         };
-        assert!(filled_last_mesh.sort_key() < textured_first_mesh.sort_key());
+        assert!(filled_last_mesh.sort_key(9) < textured_first_mesh.sort_key(0));
     }
 }

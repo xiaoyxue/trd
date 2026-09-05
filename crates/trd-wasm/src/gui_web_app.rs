@@ -55,6 +55,11 @@ impl GuiShared {
     }
 }
 
+struct CompletedPick {
+    meshes: Vec<trd_core::MeshId>,
+    hit: Option<u32>,
+}
+
 /// The interactive viewer application (browser).
 pub struct WebApp {
     controller: InteractionController,
@@ -78,16 +83,15 @@ pub struct WebApp {
     /// `true` while an async pick is running (shares the renderer, so it is
     /// mutually exclusive with a render via the two guards).
     pick_in_flight: Rc<Cell<bool>>,
-    /// The most recent completed pick result (`Some(hit)` where `hit` is the
-    /// selected object index or `None` for background), applied on the next pass.
-    pick_result: Rc<RefCell<Option<Option<u32>>>>,
+    /// Keep the picked row's identity binding across asynchronous deletion.
+    pick_result: Rc<RefCell<Option<CompletedPick>>>,
     /// The JS bridge: the file picker out, the picked model in (#353).
     shared: Rc<GuiShared>,
     /// The most recent model-load failure, shown in the panel until one succeeds.
     model_error: Option<String>,
     /// Meshes whose objects were deleted, waiting for a frame where the renderer
     /// is not out on an async render or pick (#353).
-    pending_free: Vec<u32>,
+    pending_free: Vec<trd_core::MeshId>,
 }
 
 impl WebApp {
@@ -129,9 +133,17 @@ impl WebApp {
         let Some(renderer) = slot.as_mut() else {
             return;
         };
+        self.pending_free.sort_unstable();
+        self.pending_free.dedup();
         for mesh_id in self.pending_free.drain(..) {
-            if renderer.remove_mesh(mesh_id as usize) {
-                log::info!("freed mesh {mesh_id}");
+            if !self.controller.state.uses_mesh(mesh_id) {
+                match renderer.remove_mesh(mesh_id) {
+                    Ok(()) => log::info!("freed mesh {mesh_id:?}"),
+                    Err(error) => {
+                        log::error!("mesh removal failed: {error}");
+                        self.model_error = Some(error.to_string());
+                    }
+                }
             }
         }
     }
@@ -156,6 +168,7 @@ impl WebApp {
             Ok(index) => {
                 log::info!("loaded '{}' as object {index}", request.name);
                 self.model_error = None;
+                self.controller.rebase_reset();
                 self.needs_render = true;
             }
             Err(error) => {
@@ -240,7 +253,13 @@ impl WebApp {
             };
             let hit = owned.pick(&state, x, y).await;
             renderer.borrow_mut().replace(owned);
-            *result_cell.borrow_mut() = Some(hit);
+            match hit {
+                Ok(hit) => {
+                    let meshes = state.objects.iter().map(|object| object.mesh).collect();
+                    *result_cell.borrow_mut() = Some(CompletedPick { meshes, hit });
+                }
+                Err(error) => log::error!("wasm scene pick failed: {error}"),
+            }
             in_flight.set(false);
             ctx.request_repaint();
         });
@@ -261,8 +280,14 @@ impl eframe::App for WebApp {
         // Apply a completed pick as the new selection, re-rendering if it changed
         // (so the selected object's AABB appears / clears).
         let picked = self.pick_result.borrow_mut().take();
-        if let Some(hit) = picked {
-            if hit != self.controller.state.selected {
+        if let Some(CompletedPick { meshes, hit }) = picked {
+            let same_objects = meshes.iter().copied().eq(self
+                .controller
+                .state
+                .objects
+                .iter()
+                .map(|object| object.mesh));
+            if same_objects && hit != self.controller.state.selected {
                 self.controller.state.selected = hit;
                 self.needs_render = true;
             }

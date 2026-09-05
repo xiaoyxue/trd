@@ -71,7 +71,7 @@ mod gpu_tests;
 // Public API surface (re-exported unchanged by `crate::lib`).
 // The headless offscreen harness is native-only (drives wgpu under
 // `pollster::block_on`), so it and its re-export are gated off wasm.
-pub use draw::{Draw, DrawSelection};
+pub use draw::{Draw, DrawSelection, ResolvedDraw};
 pub use draw_config::{FrameFit, GridPlane, RenderMode};
 pub use drawable::{DrawableObject, Primitive};
 pub use env_map::{EnvMapData, ImageBasedLighting};

@@ -8,8 +8,8 @@
 use std::sync::Arc;
 
 use trd_core::{
-    EnvMapData, FrameFit, ImageData, ImageTexture, Lighting, Mesh, RenderError, RenderOptions,
-    RenderTarget, Renderer, Scene, SurfaceTarget,
+    EnvMapData, FrameFit, ImageData, ImageTexture, Lighting, MeshId, MeshResourceError, MeshTable,
+    RenderError, RenderOptions, RenderTarget, Renderer, Scene, SurfaceTarget,
 };
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
@@ -110,11 +110,11 @@ impl WindowRenderer {
     /// Reports an unusable mesh set (e.g. a stream whose mesh table decoded to
     /// nothing) rather than aborting the window on it (#235 R8) — the mesh set
     /// comes from the wire, so it is input, not a bug.
-    pub(crate) fn set_meshes(&mut self, meshes: &[Mesh]) -> Result<(), RenderError> {
-        self.renderer = Some(Renderer::auto_fit(
+    pub(crate) fn set_meshes(&mut self, meshes: &MeshTable) -> Result<(), RenderError> {
+        self.renderer = Some(Renderer::auto_fit_table(
             self.gpu.clone(),
             self.target.view_format(),
-            meshes,
+            meshes.clone(),
         )?);
         self.uploaded_frame_image = None;
         Ok(())
@@ -123,17 +123,22 @@ impl WindowRenderer {
     /// Binds `texture` as the albedo sampled by [`RenderMode::Textured`](trd_core::RenderMode::Textured) meshes
     /// (`0.0.4`). No-op until the renderer is built; re-uploaded lazily on the
     /// next `render`.
-    pub(crate) fn set_texture(&mut self, texture: &ImageTexture) {
+    pub(crate) fn set_texture(&mut self, texture: &ImageTexture) -> Result<(), MeshResourceError> {
         if let Some(renderer) = self.renderer.as_mut() {
-            renderer.set_texture(texture);
+            renderer.set_texture(texture)?;
         }
+        Ok(())
     }
 
     /// Sets the appearance of every mesh. No-op until the renderer is built.
-    pub(crate) fn set_appearance(&mut self, appearance: trd_core::MeshAppearance) {
+    pub(crate) fn set_appearance(
+        &mut self,
+        appearance: trd_core::MeshAppearance,
+    ) -> Result<(), MeshResourceError> {
         if let Some(renderer) = self.renderer.as_mut() {
-            renderer.set_appearance(trd_core::MeshTarget::All, appearance);
+            renderer.set_appearance(trd_core::MeshTarget::All, appearance)?;
         }
+        Ok(())
     }
 
     pub(crate) fn set_lighting(&mut self, lighting: Lighting) {
@@ -150,7 +155,7 @@ impl WindowRenderer {
 
     /// Renders one frame's [`Scene`](trd_core::Scene) to the window surface.
     /// No-op until the renderer is built and a frame is available.
-    pub(crate) fn render(&mut self, frame: Option<&FrameData>, options: &RenderOptions) {
+    pub(crate) fn render(&mut self, frame: Option<&FrameData>, options: &RenderOptions<MeshId>) {
         let (Some(renderer), Some(frame)) = (self.renderer.as_mut(), frame) else {
             return;
         };

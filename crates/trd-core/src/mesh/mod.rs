@@ -17,6 +17,7 @@
 
 mod arrow;
 mod gltf;
+mod identity;
 // `mesh::mesh` holds the type this module is named for; the loaders around it
 // are named for their formats, so the inner module keeps the type's own name.
 #[allow(clippy::module_inception)]
@@ -24,6 +25,7 @@ mod mesh;
 mod obj;
 
 pub use gltf::{import_glb, import_gltf_materials, GltfAsset, GltfImportError};
+pub use identity::{MeshId, MeshResourceError, MeshTable, MeshTableIndex};
 pub use mesh::{Mesh, MeshShading};
 
 // `::arrow` (leading `::`) is the external Arrow crate, not this module's

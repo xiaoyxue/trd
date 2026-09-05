@@ -31,7 +31,9 @@
 use std::ops::Range;
 
 use super::buffer::{draw_indexed, draw_vertices, VertexBuffer};
+use super::mesh_store::ResolvedMesh;
 use super::{GizmoLineVertex, GridPlane, RenderMode, Renderer};
+use crate::{MeshId, MeshResourceError};
 
 use super::InstanceRaw;
 use super::{DrawableObject, Primitive};
@@ -67,12 +69,12 @@ pub(super) struct Batches {
     pub(super) instances: Vec<InstanceRaw>,
     pub(super) commands: Vec<DrawCommand>,
     /// The `(primitive, instance)` pairs the walk sorts before grouping.
-    staged: Vec<(Primitive, InstanceRaw)>,
+    staged: Vec<(Primitive, InstanceRaw, usize)>,
 }
 
 /// Walks `objects` once into a flat draw list, stable-sorts by
 /// [`Primitive::sort_key`], then groups equal primitives into instanced
-/// commands. Out-of-range mesh ids are skipped.
+/// commands. A nonresident resource fails before any batches are emitted.
 ///
 /// The only thing this has to *decide* is the model: mesh-backed primitives
 /// compose the mesh's base (preview) model beneath the drawable's, everything
@@ -90,8 +92,8 @@ pub(super) struct Batches {
 pub(super) fn build_batches(
     into: &mut Batches,
     objects: &[DrawableObject],
-    mut mesh_base_model: impl FnMut(usize) -> Option<Matrix4>,
-) {
+    mut resolve_mesh: impl FnMut(MeshId) -> Result<(usize, Matrix4), MeshResourceError>,
+) -> Result<(), MeshResourceError> {
     let Batches {
         instances,
         commands,
@@ -104,37 +106,36 @@ pub(super) fn build_batches(
 
     for object in objects {
         let primitive = object.primitive();
-        let model = match primitive {
+        let (mesh_slot, model) = match primitive {
             // Mesh-backed primitives ride on the mesh's base (preview) model;
             // gizmos are tied to no mesh and are placed by their own model alone.
             // Listed exhaustively so a new primitive has to answer the question.
             Primitive::Mesh { mesh_id, .. } | Primitive::AabbBox { mesh_id } => {
-                let Some(base_model) = mesh_base_model(mesh_id as usize) else {
-                    continue;
-                };
-                object.model() * base_model
+                let (slot, base_model) = resolve_mesh(mesh_id)?;
+                (slot, object.model() * base_model)
             }
             Primitive::PlaneGrid { .. }
             | Primitive::QuadOutline { .. }
             | Primitive::QuadFill
             | Primitive::CoordinateAxes
-            | Primitive::BlobShadow => object.model(),
+            | Primitive::BlobShadow => (0, object.model()),
         };
-        staged.push((primitive, InstanceRaw { model }));
+        staged.push((primitive, InstanceRaw { model }, mesh_slot));
     }
 
-    staged.sort_by_key(|(primitive, _)| primitive.sort_key());
+    staged.sort_by_key(|(primitive, _, slot)| primitive.sort_key(*slot));
 
     instances.reserve(staged.len());
     for run in staged.chunk_by(|a, b| a.0 == b.0) {
         let start = instances.len() as u32;
-        instances.extend(run.iter().map(|(_, instance)| *instance));
+        instances.extend(run.iter().map(|(_, instance, _)| *instance));
         commands.push(DrawCommand {
             primitive: run[0].0,
             start,
             count: run.len() as u32,
         });
     }
+    Ok(())
 }
 
 /// **The `record` bodies: one per [`Primitive`], each self-contained** (#204).
@@ -198,16 +199,11 @@ impl Renderer {
     pub(super) fn record_mesh(
         &self,
         pass: &mut wgpu::RenderPass<'_>,
-        mesh_id: u32,
+        resident: ResolvedMesh<'_>,
         mode: RenderMode,
         range: Range<u32>,
     ) {
-        // The batcher already dropped out-of-range ids, but nothing in the types
-        // says so — ask the store rather than index it, so a future caller that
-        // skips the batcher draws nothing instead of panicking (#235 R7).
-        let Some(mesh) = self.meshes.get(mesh_id as usize) else {
-            return;
-        };
+        let mesh = resident.gpu;
         self.bind_instances(pass);
         match mode {
             RenderMode::Filled => {
@@ -226,7 +222,7 @@ impl Renderer {
                 // offset), group 1 = this mesh's albedo, group 2 = the HDR env
                 // map, group 3 = its material maps.
                 pass.set_pipeline(&self.pipelines.pbr);
-                let offset = self.uniforms.pbr.offset(mesh_id as usize);
+                let offset = self.uniforms.pbr.offset(resident.slot.index());
                 pass.set_bind_group(0, self.uniforms.pbr.bind_group(), &[offset]);
                 pass.set_bind_group(1, mesh.textures.albedo.bind_group(), &[]);
                 pass.set_bind_group(2, self.environment.bind_group(), &[]);
@@ -269,14 +265,10 @@ impl Renderer {
     pub(super) fn record_aabb_box(
         &self,
         pass: &mut wgpu::RenderPass<'_>,
-        mesh_id: u32,
+        resident: ResolvedMesh<'_>,
         range: Range<u32>,
     ) {
-        // Same as `record_mesh`: the id is checked, not assumed (#235 R7).
-        let Some(mesh) = self.meshes.get(mesh_id as usize) else {
-            return;
-        };
-        self.record_gizmo_lines(pass, &mesh.geometry.aabb, range);
+        self.record_gizmo_lines(pass, &resident.gpu.geometry.aabb, range);
     }
 
     /// Records the coordinate-plane grid lattice on `plane`, resolving the plane
@@ -352,7 +344,7 @@ mod tests {
         Matrix4::from_translation(crate::math::Vector3::new(tag, 0.0, 0.0))
     }
 
-    fn mesh(mesh_id: u32, tag: f32, mode: RenderMode) -> DrawableObject {
+    fn mesh(mesh_id: MeshId, tag: f32, mode: RenderMode) -> DrawableObject {
         DrawableObject::mesh(mesh_id, model(tag), mode)
     }
 
@@ -371,42 +363,50 @@ mod tests {
     ///    switch per mode instead of one per mesh.
     ///
     /// The instance tags then show the sort is stable (equal primitives keep
-    /// their scene order) and that skipped, out-of-range mesh ids leave no trace.
+    /// their scene order).
     #[test]
     fn batches_in_layer_order_and_preserves_equal_primitive_order() {
+        let ids = [MeshId::fresh().unwrap(), MeshId::fresh().unwrap()];
         let scene = [
             DrawableObject::coordinate_axes(model(80.0)),
-            mesh(1, 61.0, RenderMode::Wireframe),
-            mesh(1, 12.0, RenderMode::Filled),
-            mesh(0, 30.0, RenderMode::Shaded),
+            mesh(ids[1], 61.0, RenderMode::Wireframe),
+            mesh(ids[1], 12.0, RenderMode::Filled),
+            mesh(ids[0], 30.0, RenderMode::Shaded),
             DrawableObject::blob_shadow(model(1.0)),
-            DrawableObject::aabb_box(1, model(71.0)),
+            DrawableObject::aabb_box(ids[1], model(71.0)),
             DrawableObject::plane_grid(GridPlane::Yz, model(52.0)),
-            mesh(0, 10.0, RenderMode::Filled),
-            mesh(0, 20.0, RenderMode::Textured),
+            mesh(ids[0], 10.0, RenderMode::Filled),
+            mesh(ids[0], 20.0, RenderMode::Textured),
             DrawableObject::quad_outline(model(40.0), false),
             DrawableObject::plane_grid(GridPlane::Xy, model(50.0)),
-            mesh(0, 11.0, RenderMode::Filled),
+            mesh(ids[0], 11.0, RenderMode::Filled),
             DrawableObject::quad_outline(model(41.0), true),
-            DrawableObject::aabb_box(0, model(70.0)),
-            mesh(1, 21.0, RenderMode::Textured),
-            mesh(1, 31.0, RenderMode::Shaded),
-            mesh(0, 60.0, RenderMode::Wireframe),
-            mesh(99, 99.0, RenderMode::Filled),
+            DrawableObject::aabb_box(ids[0], model(70.0)),
+            mesh(ids[1], 21.0, RenderMode::Textured),
+            mesh(ids[1], 31.0, RenderMode::Shaded),
+            mesh(ids[0], 60.0, RenderMode::Wireframe),
         ];
         let base_models = [Matrix4::IDENTITY, Matrix4::IDENTITY];
 
         let mut batches = Batches::default();
         build_batches(&mut batches, &scene, |mesh_id| {
-            base_models.get(mesh_id).copied()
-        });
+            let slot = ids
+                .iter()
+                .position(|id| *id == mesh_id)
+                .ok_or(MeshResourceError::NotResident { mesh: mesh_id })?;
+            Ok((slot, base_models[slot]))
+        })
+        .unwrap();
         let commands = batches
             .commands
             .iter()
             .map(|command| (command.primitive, command.start, command.count))
             .collect::<Vec<_>>();
 
-        let solid = |mesh_id, mode| Primitive::Mesh { mesh_id, mode };
+        let solid = |index: usize, mode| Primitive::Mesh {
+            mesh_id: ids[index],
+            mode,
+        };
         assert_eq!(
             commands,
             [
@@ -435,8 +435,8 @@ mod tests {
                 (Primitive::QuadOutline { selected: true }, 11, 1),
                 (solid(0, RenderMode::Wireframe), 12, 1),
                 (solid(1, RenderMode::Wireframe), 13, 1),
-                (Primitive::AabbBox { mesh_id: 0 }, 14, 1),
-                (Primitive::AabbBox { mesh_id: 1 }, 15, 1),
+                (Primitive::AabbBox { mesh_id: ids[0] }, 14, 1),
+                (Primitive::AabbBox { mesh_id: ids[1] }, 15, 1),
                 (Primitive::CoordinateAxes, 16, 1),
             ]
         );
@@ -459,22 +459,29 @@ mod tests {
     /// fresh scratch — commands, instances and all.
     #[test]
     fn a_reused_scratch_batches_exactly_like_a_fresh_one() {
+        let ids = [MeshId::fresh().unwrap(), MeshId::fresh().unwrap()];
         let base_models = [Matrix4::IDENTITY, Matrix4::IDENTITY];
-        let base = |mesh_id: usize| base_models.get(mesh_id).copied();
+        let base = |mesh_id: MeshId| {
+            let slot = ids
+                .iter()
+                .position(|id| *id == mesh_id)
+                .ok_or(MeshResourceError::NotResident { mesh: mesh_id })?;
+            Ok((slot, base_models[slot]))
+        };
         let crowded = [
-            mesh(0, 10.0, RenderMode::Filled),
-            mesh(1, 11.0, RenderMode::Filled),
-            DrawableObject::aabb_box(0, model(70.0)),
+            mesh(ids[0], 10.0, RenderMode::Filled),
+            mesh(ids[1], 11.0, RenderMode::Filled),
+            DrawableObject::aabb_box(ids[0], model(70.0)),
             DrawableObject::coordinate_axes(model(80.0)),
         ];
-        let sparse = [mesh(1, 21.0, RenderMode::Textured)];
+        let sparse = [mesh(ids[1], 21.0, RenderMode::Textured)];
 
         let mut reused = Batches::default();
-        build_batches(&mut reused, &crowded, base);
-        build_batches(&mut reused, &sparse, base);
+        build_batches(&mut reused, &crowded, base).unwrap();
+        build_batches(&mut reused, &sparse, base).unwrap();
 
         let mut fresh = Batches::default();
-        build_batches(&mut fresh, &sparse, base);
+        build_batches(&mut fresh, &sparse, base).unwrap();
 
         assert_eq!(reused.commands, fresh.commands);
         assert_eq!(
@@ -491,5 +498,54 @@ mod tests {
         );
         assert_eq!(reused.commands.len(), 1, "one textured mesh ⇒ one command");
         assert_eq!(reused.instances.len(), 1);
+    }
+
+    #[test]
+    fn private_slot_order_survives_replacement_with_a_newer_identity() {
+        let survivor = MeshId::fresh().unwrap();
+        let replacement = MeshId::fresh().unwrap();
+        let scene = [
+            mesh(survivor, 1.0, RenderMode::Wireframe),
+            mesh(replacement, 2.0, RenderMode::Wireframe),
+        ];
+        let mut batches = Batches::default();
+        build_batches(&mut batches, &scene, |id| {
+            Ok((usize::from(id == survivor), Matrix4::IDENTITY))
+        })
+        .unwrap();
+        assert_eq!(batches.commands[0].primitive.mesh_id(), Some(replacement));
+        assert_eq!(batches.commands[1].primitive.mesh_id(), Some(survivor));
+    }
+
+    #[test]
+    fn complete_identity_breaks_slot_ties_without_merging_distinct_primitives() {
+        let a = MeshId::fresh().unwrap();
+        let b = MeshId::fresh().unwrap();
+        let scene = [
+            mesh(a, 1.0, RenderMode::Filled),
+            mesh(b, 2.0, RenderMode::Filled),
+            mesh(a, 3.0, RenderMode::Filled),
+        ];
+        let mut batches = Batches::default();
+        build_batches(&mut batches, &scene, |_| Ok((0, Matrix4::IDENTITY))).unwrap();
+        assert_eq!(batches.commands.len(), 2);
+        assert_eq!(batches.commands[0].count, 2);
+        assert_eq!(batches.commands[1].count, 1);
+    }
+
+    #[test]
+    fn a_nonresident_resource_emits_no_partial_batches() {
+        let id = MeshId::fresh().unwrap();
+        let scene = [
+            DrawableObject::coordinate_axes(model(1.0)),
+            mesh(id, 2.0, RenderMode::Filled),
+        ];
+        let mut batches = Batches::default();
+        let error = build_batches(&mut batches, &scene, |mesh| {
+            Err(MeshResourceError::NotResident { mesh })
+        });
+        assert_eq!(error, Err(MeshResourceError::NotResident { mesh: id }));
+        assert!(batches.commands.is_empty());
+        assert!(batches.instances.is_empty());
     }
 }

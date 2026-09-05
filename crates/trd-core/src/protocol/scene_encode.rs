@@ -43,6 +43,7 @@ use crate::math::Matrix4;
 use crate::render::{Draw, DrawSelection, RenderMode};
 use crate::render::{FrameParams, Mesh};
 use crate::texture::{Texture, TEXTURE_COLUMN};
+use crate::MeshTableIndex;
 use crate::{InlineFrame, FRAME_BYTES_COLUMN, FRAME_PIXELS_COLUMN};
 
 /// A failure authoring an input Arrow stream.
@@ -356,7 +357,7 @@ pub fn encode_params_stream_with_frame_ids(
     if let Some(draws) = draws {
         let mesh_rows: Vec<Vec<u32>> = draws
             .iter()
-            .map(|row| row.iter().map(|d| d.mesh_id).collect())
+            .map(|row| row.iter().map(|d| d.mesh_id.get()).collect())
             .collect();
         let model_rows: Vec<Vec<f32>> = draws
             .iter()
@@ -639,7 +640,7 @@ mod tests {
             ..FrameParams::IDENTITY
         };
         let draws = vec![vec![Draw {
-            mesh_id: 0,
+            mesh_id: MeshTableIndex::new(0),
             model: Matrix4::from_cols_array(&[
                 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.2, -0.1, 0.0, 1.0,
             ]),
@@ -655,6 +656,25 @@ mod tests {
         let decoded: Vec<_> = batches.into_iter().flatten().collect();
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0].params, frame);
+        assert_eq!(decoded[0].draws, Some(draws[0].clone()));
+    }
+
+    #[test]
+    fn wire_mesh_rows_keep_all_32_bits_and_shadow_encoding() {
+        let draws = vec![vec![Draw {
+            mesh_id: MeshTableIndex::new(u32::MAX),
+            model: Matrix4::IDENTITY,
+            selection: DrawSelection::Shadow,
+        }]];
+        let bytes = encode_scene(&[tri_mesh()], &[FrameParams::IDENTITY], Some(&draws)).unwrap();
+        let mut session = InputSession::new();
+        let decoded: Vec<_> = session
+            .push(&bytes)
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .collect();
+        session.finish().unwrap();
         assert_eq!(decoded[0].draws, Some(draws[0].clone()));
     }
 
@@ -704,14 +724,14 @@ mod tests {
         ];
         let draws = vec![
             vec![Draw {
-                mesh_id: 0,
+                mesh_id: MeshTableIndex::new(0),
                 model: Matrix4::from_cols_array(&[
                     1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.2, -0.1, 0.0, 1.0,
                 ]),
                 selection: DrawSelection::INHERIT,
             }],
             vec![Draw {
-                mesh_id: 0,
+                mesh_id: MeshTableIndex::new(0),
                 model: Matrix4::from_cols_array(&[
                     0.5, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 1.0,
                 ]),
@@ -739,7 +759,7 @@ mod tests {
         // ⇒ default instance"). Guards the FIBA tail (untracked frames).
         let frames = vec![FrameParams::IDENTITY, FrameParams::IDENTITY];
         let placed = Draw {
-            mesh_id: 0,
+            mesh_id: MeshTableIndex::new(0),
             model: Matrix4::from_cols_array(&[
                 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.2, -0.1, 0.0, 1.0,
             ]),

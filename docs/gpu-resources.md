@@ -1,9 +1,9 @@
 # GPU mesh resource identity
 
-**Design for #366; not implemented yet.** This document fixes the contract for
-the later handle migration. The current renderer still publishes mesh-store
-indices. No protocol, shader, resource lifetime or rendering behavior changes
-with this document.
+**Resource identity contract (#366).** Wire rows, logical mesh identities and
+private GPU slots are separate addresses. Protocol and shader bytes are
+unchanged; invalid resource references now fail explicitly instead of silently
+skipping a draw or rebinding a removed mesh.
 
 The goal is narrow: a scene names a mesh by an opaque identity, and the renderer
 resolves that identity to its resident resources. Deleting a mesh must never let
@@ -51,9 +51,8 @@ pub struct MeshId(u64);
 pub struct MeshTableIndex(u32);
 ```
 
-These are target shapes, not declarations of an already shipped API.
-`MeshTableIndex` may expose checked boundary construction and an indexing
-accessor. `MeshId` has no public integer constructor, indexing accessor,
+`MeshTableIndex` exposes boundary construction and an indexing accessor; scene
+assembly checks its range. `MeshId` has no public integer constructor, indexing accessor,
 `From<u64>`, serialization, or stable external representation.
 
 One internal, device-free issuer allocates monotonically increasing `MeshId`s
@@ -91,10 +90,9 @@ becomes a field on `Primitive` or `DrawableObject`.
 
 Batch equality continues to compare the complete `Primitive`, including the
 complete `MeshId`. Never truncate the ID to `u32` or group on the slot alone.
-The current argument-free `Primitive::sort_key` must be split so its
-layer/variation policy remains with the taxonomy while storage ordering comes
-from resolution. Stable ordering among instances of the same primitive remains
-unchanged.
+`Primitive::sort_key` accepts the resolved private slot, keeping its
+layer/variation policy with the taxonomy while storage ordering comes from
+resolution. Stable ordering among instances of the same primitive is unchanged.
 
 ## D3: registration before residency
 
@@ -106,7 +104,7 @@ Three different addresses must not become another overloaded integer:
 | `MeshId` | A registered logical mesh identity | Scene and caller |
 | Private mesh slot | A resident record and its PBR uniform offset | `MeshResources` only |
 
-The initial CPU registration table, called `MeshTable` here, owns an ordered
+The initial CPU registration table, `MeshTable`, owns an ordered
 sequence of registered meshes, each pairing its `MeshId` with its CPU `Mesh`.
 It mints identities once when the decoded mesh table is registered, not once per
 frame. Its row-to-ID view can be borrowed by scene assembly without a device,
@@ -199,9 +197,9 @@ measurement justifies it. It is not a prerequisite for opaque mesh identity.
 
 ## D6: target public API and GUI ownership
 
-The current surface in `render/mesh_store.rs` has **13** public methods, not the
-11 quoted in the original issue. Map all of them rather than hide unchanged
-operations behind a new name:
+The old surface in `render/mesh_store.rs` had **13** public methods, not the
+11 quoted in the original issue. They migrate as follows, with `mesh_table()`
+additionally exposing the immutable initial CPU registrations:
 
 | Current operation | Target contract |
 |---|---|
@@ -251,14 +249,13 @@ Do not generalize this into multi-part model ownership.
 
 ## Ordering and delivery
 
-#366 lands this design first. The later implementation is one vertical
-handle/lifecycle migration, including its callers and inline/integration tests;
-do not merge a half-migrated raw-index/handle API. Align #225's N2 with this
+#366 was reviewed as a design before the vertical handle/lifecycle migration,
+including its callers and inline/integration tests. #225's N2 follows this
 contract: `MeshTableIndex` at the wire boundary and opaque `MeshId` afterwards,
 not a publicly constructible `MeshId(u32)` with `.index()`. #225's object-index
 and frame-ID work remains separate.
 
-Land that migration **before #222 step 3** so model/submesh grouping can use
+This migration lands **before #222 step 3** so model/submesh grouping can use
 stable resource identity. Handles alone do not make `import_glb` accept
 multi-primitive assets; grouping and per-part materials remain #222/#160/#161.
 New geometry representations (#222 step 2) remain out of scope.
@@ -288,6 +285,7 @@ unchanged by the identity migration.
   tolerance-based success alone does not establish this stronger requirement.
   Do not regenerate goldens to accommodate re-keying.
 
-This documentation-only PR is **L1**. Its acceptance is the recorded D1-D6
-contract and linked issue alignment, not a claim that the runtime migration
-or its L3 coverage has already happened.
+Use `TRD_STRICT_GOLDENS=1` with the existing golden-render suite to require exact
+RGBA equality rather than the usual cross-driver tolerance. The implementation
+is **L3**; results and any unavailable platform/device cases belong in the
+PR/issue matrix, never inferred from the earlier design-only L1 run.

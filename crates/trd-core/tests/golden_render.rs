@@ -52,6 +52,8 @@
 //! ```text
 //! TRD_DUMP_ACTUAL=1 cargo test -p trd-core --test golden_render -- --ignored
 //! ```
+//! Set `TRD_STRICT_GOLDENS=1` to require byte-identical RGBA instead of the
+//! normal cross-driver tolerance.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -59,10 +61,10 @@ use std::sync::Mutex;
 use arrow::array::{Array, FixedSizeListArray, UInt8Array};
 use arrow::ipc::reader::StreamReader;
 use trd_core::{
-    run_stream, Camera, DisneyMaterial, Draw, DrawSelection, EnvMapData, EnvironmentBackground,
-    EnvironmentLight, ImageBasedLighting, Lighting, Matrix4, Mesh, Msaa, PbrConfig, Point3,
-    RenderMode, RenderOptions, Renderer, Scene, SceneLayer, ToneMapping, Tonemap, Vector3, Vertex,
-    Viewport,
+    run_stream, Camera, DisneyMaterial, DrawSelection, EnvMapData, EnvironmentBackground,
+    EnvironmentLight, ImageBasedLighting, Lighting, Matrix4, Mesh, MeshTableIndex, Msaa, PbrConfig,
+    Point3, RenderMode, RenderOptions, Renderer, ResolvedDraw, Scene, SceneLayer, ToneMapping,
+    Tonemap, Vector3, Vertex, Viewport,
 };
 
 /// Golden render resolution (16:9; the fixtures' CV `k` is rescaled to match).
@@ -81,6 +83,10 @@ fn golden_dir() -> PathBuf {
 
 fn update_goldens() -> bool {
     std::env::var_os("TRD_UPDATE_GOLDENS").is_some()
+}
+
+fn strict_goldens() -> bool {
+    std::env::var_os("TRD_STRICT_GOLDENS").is_some()
 }
 
 /// Git-ignored `output/actual/` (relative to the repo root) where the *actual*
@@ -312,6 +318,12 @@ fn compare_or_update(actual: &[u8], golden: &Path) -> Result<(), String> {
     }
 
     let expected = expected.into_raw();
+    let channel_eps = if strict_goldens() { 0 } else { CHANNEL_EPS };
+    let max_diff_fraction = if strict_goldens() {
+        0.0
+    } else {
+        MAX_DIFF_FRACTION
+    };
     let total = (WIDTH * HEIGHT) as usize;
     let mut differing = 0usize;
     let mut max_diff = 0u8;
@@ -324,20 +336,20 @@ fn compare_or_update(actual: &[u8], golden: &Path) -> Result<(), String> {
             pixel_diff = pixel_diff.max(d);
         }
         max_diff = max_diff.max(pixel_diff);
-        if pixel_diff > CHANNEL_EPS {
+        if pixel_diff > channel_eps {
             differing += 1;
         }
     }
 
     let fraction = differing as f64 / total as f64;
-    if fraction > MAX_DIFF_FRACTION {
+    if fraction > max_diff_fraction {
         return Err(format!(
-            "{}: {differing}/{total} pixels differ beyond eps={CHANNEL_EPS} \
+            "{}: {differing}/{total} pixels differ beyond eps={channel_eps} \
              ({:.3}% > {:.3}%; max channel diff {max_diff}). \
              If this change is intentional, regenerate with TRD_UPDATE_GOLDENS=1",
             golden.display(),
             fraction * 100.0,
-            MAX_DIFF_FRACTION * 100.0,
+            max_diff_fraction * 100.0,
         ));
     }
     Ok(())
@@ -645,29 +657,35 @@ fn golden_environment_light_syncs_sky_and_reflection() {
     let (mut renderer, target) = pollster::block_on(Renderer::with_meshes(WIDTH, HEIGHT, &[mesh]))
         .expect("build renderer for the environment-light golden");
     renderer.set_env_map(quadrant_env());
-    renderer.set_appearance(
-        trd_core::MeshTarget::All,
-        trd_core::MeshAppearance {
-            material: DisneyMaterial {
-                base_color: [1.0, 1.0, 1.0],
-                metallic: 1.0,
-                roughness: 0.06,
-                specular: 1.0,
-                ..DisneyMaterial::default()
+    renderer
+        .set_appearance(
+            trd_core::MeshTarget::All,
+            trd_core::MeshAppearance {
+                material: DisneyMaterial {
+                    base_color: [1.0, 1.0, 1.0],
+                    metallic: 1.0,
+                    roughness: 0.06,
+                    specular: 1.0,
+                    ..DisneyMaterial::default()
+                },
+                ibl: ImageBasedLighting { intensity: 1.0 },
+                tone_mapping: ToneMapping {
+                    operator: Tonemap::Aces,
+                    exposure: 1.0,
+                },
+                ..Default::default()
             },
-            ibl: ImageBasedLighting { intensity: 1.0 },
-            tone_mapping: ToneMapping {
-                operator: Tonemap::Aces,
-                exposure: 1.0,
-            },
-            ..Default::default()
-        },
-    );
+        )
+        .expect("the sphere is resident");
+    let sphere = renderer
+        .mesh_table()
+        .id(MeshTableIndex::new(0))
+        .expect("the renderer has one registered sphere");
 
     // A yaw no symmetry can hide: 2.2 rad ≈ 126°, inside the second quadrant.
     let scene = Scene::from_draws(
-        &[Draw {
-            mesh_id: 0,
+        &[ResolvedDraw {
+            mesh_id: sphere,
             model: Matrix4::IDENTITY,
             selection: DrawSelection::Mesh(Some(RenderMode::Shaded)),
         }],

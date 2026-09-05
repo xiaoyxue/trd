@@ -3,14 +3,15 @@
 //! The shared, platform-agnostic model the interaction loop mutates: an orbit
 //! camera plus a single object transform, the render mode and overlay flags. It
 //! holds no GPU or egui state — it produces the two values `trd-core` consumes
-//! each frame, a [`FrameParams`](trd_core::FrameParams) camera and a [`Draw`] list.
+//! each frame, a [`FrameParams`](trd_core::FrameParams) camera and a [`ResolvedDraw`] list.
 //!
 //! Conventions follow `trd-core::math`: right-handed world, `+Y` up, radians; the
 //! mesh is preview-scaled by [`trd_core::Mesh::preview_transform`] about the origin.
 
 use trd_core::{
-    Camera, DisneyMaterial, Draw, DrawSelection, ImageBasedLighting, Lighting, Matrix4,
-    PbrDebugView, Point3, RenderMode, Rotation, ToneMapping, Transform, Vector3, Viewport,
+    Camera, DisneyMaterial, DrawSelection, ImageBasedLighting, Lighting, Matrix4, MeshAppearance,
+    MeshId, MeshTable, PbrDebugView, Point3, RenderMode, ResolvedDraw, Rotation, ToneMapping,
+    Transform, Vector3, Viewport,
 };
 
 /// Orbit limits: never cross the target, never reach the poles (`up = +Y` would
@@ -177,6 +178,15 @@ impl ObjectTransform {
     }
 }
 
+/// An object keeps its resource identity beside the state its UI row edits.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SceneObject {
+    pub mesh: MeshId,
+    pub transform: ObjectTransform,
+    pub mode: RenderMode,
+    pub appearance: MeshAppearance,
+}
+
 /// The full interactive scene: the orbit camera, the object placement, the mesh
 /// render mode, and the overlay toggles. Rebuilt into a [`FrameParams`](trd_core::FrameParams) + `draws`
 /// each frame the state changes, with **no per-primitive branching** — a single
@@ -185,34 +195,8 @@ impl ObjectTransform {
 pub struct SceneState {
     /// The orbit camera framing the object(s).
     pub camera: OrbitCamera,
-    /// The placement of each drawn object (one per loaded mesh), laid out
-    /// side-by-side by [`Self::draws`]. A single-object scene is the degenerate
-    /// one-element case. Transforms edit the [`selected`](Self::selected) object.
-    pub objects: Vec<ObjectTransform>,
-    /// The renderer mesh each object draws, parallel to [`objects`](Self::objects).
-    ///
-    /// Object row and mesh id used to be the *same* integer, which held only
-    /// while the scene could grow but never shrink: removing object 1 of 3 would
-    /// slide object 2 down into row 1 and silently make it draw the **removed**
-    /// object's mesh. The renderer's ids are stable for the life of the mesh, so
-    /// the row records which one it draws (#353).
-    pub mesh_ids: Vec<u32>,
-    /// How **each** object is drawn (parallel to [`objects`](Self::objects)):
-    /// filled / wireframe / textured / PBR — per-object, so each object can use a
-    /// different render mode. The UI edits the **selected** object's mode.
-    pub modes: Vec<RenderMode>,
-    /// The Disney PBR material of **each** object (parallel to [`objects`](Self::objects)),
-    /// applied to objects whose [`mode`](Self::modes) is [`RenderMode::Shaded`].
-    /// Interactive: the UI edits the **selected** object's material
-    /// (metallic/roughness/etc.); the bound HDR env probe lives on the renderer,
-    /// set once from `--env` / `?env=`.
-    pub materials: Vec<DisneyMaterial>,
-    /// Per-object image-based-lighting controls, parallel to `materials`.
-    pub image_based_lighting: Vec<ImageBasedLighting>,
-    /// Per-object tone mapping, parallel to `materials`.
-    pub tone_mappings: Vec<ToneMapping>,
-    /// Per-object PBR diagnostic output, parallel to `materials`.
-    pub pbr_debug_views: Vec<PbrDebugView>,
+    /// Rows selected by picking and edited by the UI, laid out side-by-side.
+    pub objects: Vec<SceneObject>,
     /// Scene light-rig controls shared by every PBR object.
     pub lighting: Lighting,
     /// Overlay each drawn mesh instance's axis-aligned bounding box (#42).
@@ -255,13 +239,7 @@ impl Default for SceneState {
     fn default() -> Self {
         Self {
             camera: OrbitCamera::default(),
-            objects: vec![ObjectTransform::default()],
-            mesh_ids: vec![0],
-            modes: vec![RenderMode::Filled],
-            materials: vec![DisneyMaterial::default()],
-            image_based_lighting: vec![ImageBasedLighting::default()],
-            tone_mappings: vec![ToneMapping::default()],
-            pbr_debug_views: vec![PbrDebugView::default()],
+            objects: Vec::new(),
             lighting: Lighting::default(),
             show_aabb: false,
             show_axes: false,
@@ -279,13 +257,8 @@ impl Default for SceneState {
 
 /// What a front-end wants the scene to start out looking like.
 ///
-/// Both delivery surfaces used to assemble [`SceneState`]'s parallel per-object
-/// vectors by hand — the native CLI in `trd-gui-app`'s `Cli::scene_state`, the
-/// browser in `start()` — which meant duplicating the rule that
-/// `objects` / `modes` / `materials` / `image_based_lighting` / `tone_mappings` /
-/// `pbr_debug_views` must all stay the **same length**, since `draws()` and the
-/// UI index into them positionally. This carries only the values that actually
-/// differ between front-ends; [`SceneState::seeded`] enforces the invariant.
+/// [`SceneState::seeded`] pairs these materials with the renderer's actual
+/// registrations, rejecting a mismatched count instead of dropping objects.
 #[derive(Debug, Clone)]
 pub struct SceneSeed {
     /// One material per object. Its length **is** the object count: glTF assets
@@ -311,28 +284,27 @@ pub struct SceneSeed {
 }
 
 impl SceneState {
-    /// Appends an object for a mesh just added to the renderer, keeping every
-    /// per-object vector the same length, and returns its index — which **is**
-    /// the renderer's new mesh id, since [`draws`](Self::draws) maps row `i` to
-    /// `mesh_id: i`.
+    /// Appends an object for a registered mesh and returns its UI row.
     ///
     /// The new object is selected, so the transform and PBR panels act on what
     /// was just loaded rather than on whatever was selected before.
     pub fn add_object(
         &mut self,
-        mesh_id: u32,
+        mesh_id: MeshId,
         material: DisneyMaterial,
         mode: RenderMode,
         tone_mapping: ToneMapping,
     ) -> u32 {
-        self.objects.push(ObjectTransform::default());
-        self.mesh_ids.push(mesh_id);
-        self.modes.push(mode);
-        self.materials.push(material);
-        self.image_based_lighting
-            .push(ImageBasedLighting::default());
-        self.tone_mappings.push(tone_mapping);
-        self.pbr_debug_views.push(PbrDebugView::default());
+        self.objects.push(SceneObject {
+            mesh: mesh_id,
+            transform: ObjectTransform::default(),
+            mode,
+            appearance: MeshAppearance {
+                material,
+                tone_mapping,
+                ..MeshAppearance::default()
+            },
+        });
         let index = (self.objects.len() - 1) as u32;
         self.selected = Some(index);
         index
@@ -344,44 +316,54 @@ impl SceneState {
     /// Only the scene rows go here; the mesh itself is the renderer's to drop,
     /// and it keeps every other id valid by leaving a hole rather than
     /// renumbering.
-    pub fn remove_selected_object(&mut self) -> Option<u32> {
+    pub fn remove_selected_object(&mut self) -> Option<MeshId> {
         let index = self.selected.map(|i| i as usize)?;
         if index >= self.objects.len() {
             return None;
         }
-        let mesh_id = self.mesh_ids.get(index).copied();
-        self.objects.remove(index);
-        self.mesh_ids.remove(index);
-        self.modes.remove(index);
-        self.materials.remove(index);
-        self.image_based_lighting.remove(index);
-        self.tone_mappings.remove(index);
-        self.pbr_debug_views.remove(index);
+        let object = self.objects.remove(index);
         // Every row above the hole shifted down, so the old index would now name
         // a different object: select nothing rather than something arbitrary.
         self.selected = None;
-        mesh_id
+        Some(object.mesh)
     }
 
-    /// The initial scene for [`SceneSeed`], with every per-object vector exactly
-    /// `seed.materials.len()` long.
-    pub fn seeded(seed: SceneSeed) -> Self {
-        let n = seed.materials.len();
-        Self {
-            objects: vec![ObjectTransform::default(); n],
-            mesh_ids: (0..n as u32).collect(),
-            modes: vec![seed.mode; n],
-            materials: seed.materials,
-            image_based_lighting: vec![seed.image_based_lighting; n],
-            tone_mappings: vec![seed.tone_mapping; n],
-            pbr_debug_views: vec![PbrDebugView::default(); n],
+    /// Whether an object still needs this mesh's residency after a row removal.
+    pub fn uses_mesh(&self, mesh: MeshId) -> bool {
+        self.objects.iter().any(|object| object.mesh == mesh)
+    }
+
+    /// Seeds one row per initial registration, preserving its imported material.
+    pub fn seeded(table: &MeshTable, seed: SceneSeed) -> Result<Self, crate::error::GuiError> {
+        if table.len() != seed.materials.len() {
+            return Err(crate::error::GuiError::SceneSeedCount {
+                meshes: table.len(),
+                materials: seed.materials.len(),
+            });
+        }
+        Ok(Self {
+            objects: table
+                .ids()
+                .zip(seed.materials)
+                .map(|(mesh, material)| SceneObject {
+                    mesh,
+                    transform: ObjectTransform::default(),
+                    mode: seed.mode,
+                    appearance: MeshAppearance {
+                        material,
+                        ibl: seed.image_based_lighting,
+                        tone_mapping: seed.tone_mapping,
+                        debug_view: PbrDebugView::default(),
+                    },
+                })
+                .collect(),
             lighting: seed.lighting,
             environment_available: seed.environment_available,
             show_environment_background: seed.show_environment_background,
             // Same starting point as the objects, then edited independently.
             environment_background_tone_mapping: seed.tone_mapping,
             ..Self::default()
-        }
+        })
     }
 }
 
@@ -410,48 +392,57 @@ impl SceneState {
 
     /// The per-frame draw list: one instance per object in
     /// [`objects`](Self::objects), drawing that object's
-    /// [`mesh_ids`](Self::mesh_ids) entry placed by its model matrix **shifted by
+    /// mesh placed by its model matrix **shifted by
     /// a per-object layout offset** so multiple objects spread side-by-side along
     /// world `X` (a single object stays at the origin). Each draw carries its
-    /// **own** render mode (`Some(modes[i])`), so objects can mix filled /
+    /// **own** render mode, so objects can mix filled /
     /// wireframe / textured / PBR.
-    pub fn draws(&self) -> Vec<Draw> {
+    pub fn draws(&self) -> Vec<ResolvedDraw> {
         let n = self.objects.len();
         self.objects
             .iter()
             .enumerate()
-            .map(|(i, obj)| Draw {
-                mesh_id: self.mesh_ids.get(i).copied().unwrap_or(i as u32),
-                model: obj.model_matrix_offset(layout_offset(i, n)),
-                selection: DrawSelection::Mesh(Some(self.mode_of(i))),
+            .map(|(i, obj)| ResolvedDraw {
+                mesh_id: obj.mesh,
+                model: obj.transform.model_matrix_offset(layout_offset(i, n)),
+                selection: DrawSelection::Mesh(Some(obj.mode)),
             })
             .collect()
     }
 
     /// The render mode of object `i` (defaults to [`RenderMode::Filled`] if the
-    /// index is out of range — should not happen, `modes` parallels `objects`).
+    /// index is out of range).
     pub fn mode_of(&self, i: usize) -> RenderMode {
-        self.modes.get(i).copied().unwrap_or(RenderMode::Filled)
+        self.objects
+            .get(i)
+            .map(|object| object.mode)
+            .unwrap_or(RenderMode::Filled)
     }
 
     /// A mutable reference to the selected object's render **mode**, or `None`
     /// when nothing is selected — so the Render-mode panel edits the selected
     /// object's mode and is disabled otherwise (#141).
     pub fn selected_mode_mut(&mut self) -> Option<&mut RenderMode> {
-        self.selected.and_then(|i| self.modes.get_mut(i as usize))
+        self.selected
+            .and_then(|i| self.objects.get_mut(i as usize))
+            .map(|object| &mut object.mode)
     }
 
     /// A shared reference to the selected object's transform, or `None` when
     /// nothing is selected (or the index is out of range).
     pub fn selected_object(&self) -> Option<&ObjectTransform> {
-        self.selected.and_then(|i| self.objects.get(i as usize))
+        self.selected
+            .and_then(|i| self.objects.get(i as usize))
+            .map(|object| &object.transform)
     }
 
     /// A mutable reference to the selected object's transform, or `None` when
     /// nothing is selected — the seam that makes transforms **require a
     /// selection**: with no selection there is nothing to edit.
     pub fn selected_object_mut(&mut self) -> Option<&mut ObjectTransform> {
-        self.selected.and_then(|i| self.objects.get_mut(i as usize))
+        self.selected
+            .and_then(|i| self.objects.get_mut(i as usize))
+            .map(|object| &mut object.transform)
     }
 
     /// A mutable reference to the selected object's PBR **material**, or `None`
@@ -466,11 +457,12 @@ impl SceneState {
         &mut PbrDebugView,
     )> {
         let i = self.selected? as usize;
+        let appearance = &mut self.objects.get_mut(i)?.appearance;
         Some((
-            self.materials.get_mut(i)?,
-            self.image_based_lighting.get_mut(i)?,
-            self.tone_mappings.get_mut(i)?,
-            self.pbr_debug_views.get_mut(i)?,
+            &mut appearance.material,
+            &mut appearance.ibl,
+            &mut appearance.tone_mapping,
+            &mut appearance.debug_view,
         ))
     }
 
@@ -491,6 +483,25 @@ impl SceneState {
 fn layout_offset(i: usize, n: usize) -> [f32; 3] {
     let centered = i as f32 - (n.saturating_sub(1) as f32) / 2.0;
     [centered * OBJECT_SPACING, 0.0, 0.0]
+}
+
+#[cfg(test)]
+pub(crate) fn test_scene(count: usize) -> SceneState {
+    let mesh = crate::assets::default_mesh().expect("test mesh");
+    let table = MeshTable::new(vec![mesh; count]).expect("test registration");
+    SceneState::seeded(
+        &table,
+        SceneSeed {
+            materials: vec![DisneyMaterial::default(); count],
+            mode: RenderMode::Filled,
+            image_based_lighting: ImageBasedLighting::default(),
+            tone_mapping: ToneMapping::default(),
+            lighting: Lighting::default(),
+            environment_available: false,
+            show_environment_background: false,
+        },
+    )
+    .expect("matching seed")
 }
 
 #[cfg(test)]
@@ -642,29 +653,28 @@ mod tests {
 
     #[test]
     fn draws_place_the_object_model() {
-        let mut state = SceneState::default();
-        state.objects[0].translation = [0.5, 0.0, 0.0];
+        let mut state = test_scene(1);
+        state.objects[0].transform.translation = [0.5, 0.0, 0.0];
         let draws = state.draws();
         // A single object stays at the origin (layout offset 0).
         assert_eq!(draws.len(), 1);
-        assert_eq!(draws[0].mesh_id, 0);
-        assert_eq!(draws[0].model, state.objects[0].model_matrix());
+        assert_eq!(draws[0].mesh_id, state.objects[0].mesh);
+        assert_eq!(draws[0].model, state.objects[0].transform.model_matrix());
     }
 
     #[test]
     fn multi_object_draws_spread_along_x() {
-        let state = SceneState {
-            objects: vec![ObjectTransform::default(); 3],
-            ..SceneState::default()
-        };
+        let state = test_scene(3);
         let draws = state.draws();
         assert_eq!(draws.len(), 3);
-        // mesh_id follows the object index; world X (model col 3, index 12) is
-        // centered and increasing left→right.
-        let x = |d: &Draw| d.model.to_cols_array()[12];
+        let x = |d: &ResolvedDraw| d.model.to_cols_array()[12];
         assert_eq!(
             (draws[0].mesh_id, draws[1].mesh_id, draws[2].mesh_id),
-            (0, 1, 2)
+            (
+                state.objects[0].mesh,
+                state.objects[1].mesh,
+                state.objects[2].mesh
+            )
         );
         assert!(x(&draws[0]) < 0.0 && x(&draws[2]) > 0.0);
         assert!((x(&draws[1])).abs() < 1e-6, "middle object centered at x≈0");
@@ -672,7 +682,7 @@ mod tests {
 
     #[test]
     fn selected_object_mut_requires_a_selection() {
-        let mut state = SceneState::default();
+        let mut state = test_scene(1);
         assert!(state.selected_object_mut().is_none(), "no selection → None");
         state.selected = Some(0);
         assert!(state.selected_object_mut().is_some());
@@ -681,27 +691,40 @@ mod tests {
         assert!(state.selected_object_mut().is_none());
     }
 
-    /// The whole point of [`SceneState::seeded`]: every per-object vector must
-    /// come out the same length as `materials`, because `draws()` and the UI
-    /// index into them positionally.
     #[test]
-    fn seeded_keeps_every_per_object_vector_the_same_length() {
-        for n in [1usize, 3] {
-            let state = SceneState::seeded(SceneSeed {
-                materials: vec![DisneyMaterial::default(); n],
-                mode: RenderMode::Shaded,
-                image_based_lighting: ImageBasedLighting::default(),
-                tone_mapping: ToneMapping::default(),
-                lighting: Lighting::default(),
-                environment_available: true,
-                show_environment_background: false,
-            });
+    fn seeded_colocates_registered_identity_and_appearance() {
+        for n in [0usize, 1, 3] {
+            let table = MeshTable::new(vec![crate::assets::default_mesh().unwrap(); n]).unwrap();
+            let materials: Vec<_> = (0..n)
+                .map(|i| DisneyMaterial {
+                    metallic: i as f32 * 0.25,
+                    ..Default::default()
+                })
+                .collect();
+            let state = SceneState::seeded(
+                &table,
+                SceneSeed {
+                    materials: materials.clone(),
+                    mode: RenderMode::Shaded,
+                    image_based_lighting: ImageBasedLighting::default(),
+                    tone_mapping: ToneMapping::default(),
+                    lighting: Lighting::default(),
+                    environment_available: true,
+                    show_environment_background: false,
+                },
+            )
+            .unwrap();
             assert_eq!(state.objects.len(), n);
-            assert_eq!(state.modes.len(), n);
-            assert_eq!(state.materials.len(), n);
-            assert_eq!(state.image_based_lighting.len(), n);
-            assert_eq!(state.tone_mappings.len(), n);
-            assert_eq!(state.pbr_debug_views.len(), n);
+            for (i, mesh) in table.ids().enumerate() {
+                let object = &state.objects[i];
+                assert_eq!(object.mesh, mesh);
+                assert_eq!(object.mode, RenderMode::Shaded);
+                assert_eq!(object.transform, ObjectTransform::default());
+                assert_eq!(object.appearance.material, materials[i]);
+                assert_eq!(object.appearance.ibl, ImageBasedLighting::default());
+                assert_eq!(object.appearance.tone_mapping, ToneMapping::default());
+                assert_eq!(object.appearance.debug_view, PbrDebugView::default());
+            }
             assert_eq!(state.draws().len(), n);
             // A probe enables the environment controls, but does not turn the
             // sky on: the viewer always has one, so coupling them would make the
@@ -711,44 +734,21 @@ mod tests {
         }
     }
 
-    /// The same invariant, on the runtime-add path: a model loaded into a live
-    /// scene must extend **every** per-object vector, or `draws()` and the PBR
-    /// panel start reading a different object's row than the one selected (#353).
     #[test]
-    fn add_object_keeps_every_per_object_vector_the_same_length() {
-        let mut state = SceneState::seeded(SceneSeed {
-            materials: vec![DisneyMaterial::default(); 2],
-            mode: RenderMode::Filled,
-            image_based_lighting: ImageBasedLighting::default(),
-            tone_mapping: ToneMapping::default(),
-            lighting: Lighting::default(),
-            environment_available: false,
-            show_environment_background: false,
-        });
-
+    fn adding_an_object_keeps_its_identity_with_its_ui_row() {
+        let mut state = test_scene(2);
+        let added_mesh = test_scene(1).objects[0].mesh;
         let index = state.add_object(
-            7,
+            added_mesh,
             DisneyMaterial::default(),
             RenderMode::Shaded,
             ToneMapping::default(),
         );
 
         assert_eq!(index, 2, "the new object is appended, keeping earlier rows");
-        for len in [
-            state.objects.len(),
-            state.mesh_ids.len(),
-            state.modes.len(),
-            state.materials.len(),
-            state.image_based_lighting.len(),
-            state.tone_mappings.len(),
-            state.pbr_debug_views.len(),
-            state.draws().len(),
-        ] {
-            assert_eq!(len, 3, "every per-object vector grew by exactly one");
-        }
-        // The row records which mesh it draws; the two are no longer the same
-        // integer once a scene can shrink.
-        assert_eq!(state.draws()[index as usize].mesh_id, 7);
+        assert_eq!(state.objects.len(), 3);
+        assert_eq!(state.draws()[index as usize].mesh_id, added_mesh);
+        assert_eq!(state.objects[index as usize].mode, RenderMode::Shaded);
         assert_eq!(
             state.selected,
             Some(index),
@@ -760,29 +760,20 @@ mod tests {
     /// different mode or material — only lay them out around the newcomer.
     #[test]
     fn add_object_leaves_the_existing_objects_alone() {
-        let mut state = SceneState::seeded(SceneSeed {
-            materials: vec![DisneyMaterial {
-                base_color: [1.0, 0.0, 0.0],
-                ..DisneyMaterial::default()
-            }],
-            mode: RenderMode::Wireframe,
-            image_based_lighting: ImageBasedLighting::default(),
-            tone_mapping: ToneMapping::default(),
-            lighting: Lighting::default(),
-            environment_available: false,
-            show_environment_background: false,
-        });
+        let mut state = test_scene(1);
+        state.objects[0].mode = RenderMode::Wireframe;
+        state.objects[0].appearance.material.base_color = [1.0, 0.0, 0.0];
+        let original = state.objects[0].clone();
 
         state.add_object(
-            7,
+            test_scene(1).objects[0].mesh,
             DisneyMaterial::default(),
             RenderMode::Shaded,
             ToneMapping::default(),
         );
 
-        assert_eq!(state.modes[0], RenderMode::Wireframe);
-        assert_eq!(state.materials[0].base_color, [1.0, 0.0, 0.0]);
-        assert_eq!(state.modes[1], RenderMode::Shaded);
+        assert_eq!(state.objects[0], original);
+        assert_eq!(state.objects[1].mode, RenderMode::Shaded);
     }
 
     /// The rig a loaded model is lit by is the video editor's Dragon rig: the
@@ -794,43 +785,32 @@ mod tests {
         assert_eq!(rig.ambient, 0.0, "and no ambient");
     }
 
-    /// Deleting the **middle** object must not make the ones after it draw a
-    /// different mesh (#353).
-    ///
-    /// This is why a row records its mesh id instead of being it: with row ==
-    /// mesh id, removing row 1 of 3 slides row 2 down into slot 1 and it would
-    /// silently start drawing the deleted object's mesh.
     #[test]
-    fn removing_an_object_keeps_the_survivors_on_their_own_meshes() {
-        let mut state = SceneState::seeded(SceneSeed {
-            materials: vec![DisneyMaterial::default(); 3],
-            mode: RenderMode::Filled,
-            image_based_lighting: ImageBasedLighting::default(),
-            tone_mapping: ToneMapping::default(),
-            lighting: Lighting::default(),
-            environment_available: false,
-            show_environment_background: false,
-        });
-        state.materials[2].base_color = [0.0, 0.0, 1.0];
+    fn delete_middle_add_fresh_and_edit_survivors_keep_identity() {
+        let mut state = test_scene(3);
+        state.objects[2].appearance.material.base_color = [0.0, 0.0, 1.0];
+        state.objects[2].transform.translation = [0.0, 1.0, 0.0];
+        state.objects[2].mode = RenderMode::Wireframe;
+        let original = state.objects.clone();
 
         state.selected = Some(1);
         assert_eq!(
             state.remove_selected_object(),
-            Some(1),
+            Some(original[1].mesh),
             "the removed row hands back the mesh it drew, for the caller to free"
         );
 
         assert_eq!(state.objects.len(), 2);
         assert_eq!(
-            state.mesh_ids,
-            vec![0, 2],
-            "the survivor keeps mesh 2, even though it now sits in row 1"
+            state.objects,
+            vec![original[0].clone(), original[2].clone()],
+            "all of a surviving object's state moves together"
         );
         let draws = state.draws();
         assert_eq!(draws.len(), 2);
-        assert_eq!(draws[1].mesh_id, 2, "row 1 still draws mesh 2");
+        assert_eq!(draws[1].mesh_id, original[2].mesh);
         assert_eq!(
-            state.materials[1].base_color,
+            state.objects[1].appearance.material.base_color,
             [0.0, 0.0, 1.0],
             "and keeps its own material"
         );
@@ -838,13 +818,73 @@ mod tests {
             state.selected, None,
             "the old index would now name a different object, so nothing stays selected"
         );
+        let fresh = test_scene(1).objects[0].mesh;
+        assert!(original.iter().all(|object| object.mesh != fresh));
+        state.add_object(
+            fresh,
+            DisneyMaterial::default(),
+            RenderMode::Shaded,
+            ToneMapping::default(),
+        );
+        assert_eq!(state.objects[1], original[2]);
+        assert_eq!(state.draws()[2].mesh_id, fresh);
+
+        // Picking returns the draw row, not an integer version of the handle.
+        state.selected = Some(1);
+        state.selected_object_mut().unwrap().roll = 0.25;
+        *state.selected_mode_mut().unwrap() = RenderMode::Textured;
+        state.selected_pbr_mut().unwrap().0.roughness = 0.2;
+        assert_eq!(state.objects[1].mesh, original[2].mesh);
+        assert_eq!(state.objects[1].appearance.material.roughness, 0.2);
+        assert_eq!(
+            state.draws()[1].selection,
+            DrawSelection::Mesh(Some(RenderMode::Textured))
+        );
+        assert_eq!(state.objects[0], original[0]);
+    }
+
+    #[test]
+    fn a_shared_mesh_stays_resident_until_the_last_row_is_removed() {
+        let mut state = test_scene(1);
+        let mesh = state.objects[0].mesh;
+        state.objects.push(state.objects[0].clone());
+        state.selected = Some(0);
+        assert_eq!(state.remove_selected_object(), Some(mesh));
+        assert!(state.uses_mesh(mesh));
+        state.selected = Some(0);
+        assert_eq!(state.remove_selected_object(), Some(mesh));
+        assert!(!state.uses_mesh(mesh));
+    }
+
+    #[test]
+    fn seeded_rejects_missing_and_extra_materials() {
+        let table = MeshTable::new(vec![crate::assets::default_mesh().unwrap()]).unwrap();
+        for count in [0, 2] {
+            let result = SceneState::seeded(
+                &table,
+                SceneSeed {
+                    materials: vec![DisneyMaterial::default(); count],
+                    mode: RenderMode::Filled,
+                    image_based_lighting: ImageBasedLighting::default(),
+                    tone_mapping: ToneMapping::default(),
+                    lighting: Lighting::default(),
+                    environment_available: false,
+                    show_environment_background: false,
+                },
+            );
+            assert!(
+                matches!(result, Err(crate::error::GuiError::SceneSeedCount { meshes: 1, materials }) if materials == count)
+            );
+        }
     }
 
     /// Delete is a no-op without a selection, and the last object may go —
     /// leaving an empty scene rather than refusing.
     #[test]
     fn removing_without_a_selection_does_nothing_and_the_last_object_may_go() {
-        let mut state = SceneState::default();
+        assert!(SceneState::default().objects.is_empty());
+        let mut state = test_scene(1);
+        let mesh = state.objects[0].mesh;
         assert_eq!(state.selected, None, "a fresh scene selects nothing");
         assert_eq!(
             state.remove_selected_object(),
@@ -854,7 +894,7 @@ mod tests {
         assert_eq!(state.objects.len(), 1);
 
         state.selected = Some(0);
-        assert_eq!(state.remove_selected_object(), Some(0));
+        assert_eq!(state.remove_selected_object(), Some(mesh));
         assert!(state.objects.is_empty(), "an empty scene is allowed");
         assert!(state.draws().is_empty());
 

@@ -37,7 +37,7 @@ pub struct OffscreenRenderer {
     renderer: Option<Renderer>,
     /// Texture target built alongside `renderer` (#203); `TextureTarget` since pixels are always read back.
     target: Option<trd_core::TextureTarget>,
-    /// Draw mode and overlay toggles; [`Scene::from_draws`] turns it into the scene.
+    /// Wire draw mode + overlay toggles, resolved by [`Scene::try_from_frame`].
     options: RenderOptions,
     /// Enable frame-plane compositing (#63); no-op until a background is uploaded.
     composite_frame: bool,
@@ -182,7 +182,7 @@ impl OffscreenRenderer {
         exposure: f32,
         ambient: f32,
         tonemap: &str,
-    ) {
+    ) -> Result<(), JsValue> {
         let material = DisneyMaterial {
             metallic,
             roughness,
@@ -206,12 +206,13 @@ impl OffscreenRenderer {
         };
         let pbr = PbrState::new(material, lighting, ibl, tone_mapping);
         if let Some(renderer) = self.renderer.as_mut() {
-            pbr.apply(renderer);
+            pbr.apply(renderer).map_err(crate::js_error)?;
         }
         self.pbr = Some(pbr);
         // The sky follows the same output transform as the objects in front of
         // it, so re-derive it whenever the tone mapping changes (#235 R2).
         self.refresh_env_background();
+        Ok(())
     }
 
     /// Draws the HDR probe as background sky. `blur`: 0.0 (sharp) … 1.0 (fully blurred).
@@ -381,11 +382,13 @@ impl OffscreenRenderer {
                 self.renderer
                     .as_mut()
                     .expect("renderer just built")
-                    .set_texture(texture);
+                    .set_texture(texture)
+                    .map_err(|error| error.to_string())?;
             }
 
             if let Some(pbr) = &self.pbr {
-                pbr.apply(self.renderer.as_mut().expect("renderer just built"));
+                pbr.apply(self.renderer.as_mut().expect("renderer just built"))
+                    .map_err(|error| error.to_string())?;
             }
             if let Some(env) = self.env_map.clone() {
                 self.renderer
@@ -408,10 +411,13 @@ impl OffscreenRenderer {
         let params = frame.params;
         let has_inline_frame = self.upload_inline_frame(frame.frame_id)?;
         let has_external_frame = std::mem::take(&mut self.external_frame_ready);
-        let mesh_count = self.ensure_renderer()?.mesh_count();
+        self.ensure_renderer()?;
         let scene = Scene::try_from_frame(
             frame,
-            mesh_count,
+            self.renderer
+                .as_ref()
+                .expect("renderer just built")
+                .mesh_table(),
             &self.options,
             (has_inline_frame || (self.composite_frame && has_external_frame))
                 .then_some(FrameFit::Stretch),

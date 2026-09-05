@@ -2,7 +2,7 @@
 //!
 //! This is the Rust port target of `examples/placement_quad_by_local_coord.py`.
 //! It is deliberately CPU-only: callers turn its resolved models into ordinary
-//! `Draw { mesh_id, model }` values for `trd-core` to render.
+//! [`trd_core::ResolvedDraw`] values using their registered mesh identities.
 
 use thiserror::Error;
 use trd_core::Matrix4;

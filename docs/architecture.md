@@ -136,20 +136,21 @@ that places it, so every primitive can be instanced.
 Geometry is owned once (decode-once mesh store + shared line-quad/arrow buffers).
 A drawable is a light handle naming *which* primitive + its per-frame model.
 
-The current mesh handle is still a raw store index. The
-[GPU mesh resource identity design](gpu-resources.md) (#366) specifies its
-replacement with opaque IDs, CPU-side wire-row resolution and explicit residency
-errors. That design is not implemented yet; the lifetime rules below describe
-the current renderer.
+Meshes carry opaque `MeshId`s, not store indices. A device-free `MeshTable`
+registers CPU meshes and resolves wire `MeshTableIndex` rows; the renderer's
+`MeshResources` separately resolves those identities to resident resources and
+private slots. Stale or foreign IDs are explicit errors, never silent skips or
+references to a replacement. See the [resource identity contract](gpu-resources.md)
+(#366).
 
 The store decodes each mesh once, but the **set** is not fixed at construction:
 `Renderer::add_mesh` uploads one at runtime and `remove_mesh` drops one, so a
 front-end can load and unload models without rebuilding the renderer (#353).
 Two consequences are structural rather than incidental:
 
-- **A removed mesh leaves a hole, and ids never shift.** Compacting would
-  renumber every mesh after it and silently repoint any scene holding an id, so
-  the slot is tombstoned and reused by the next upload instead.
+- **A removed mesh's identity is never reused.** Its private slot can be
+  refilled, but the next upload gets a fresh ID. Slot order is retained for
+  pixel-identical overlay submission; the public identity never exposes it.
 - **Adding one reallocates the PBR slot array.** A slot is chosen by a dynamic
   offset validated against the slot buffer, so slot `n` of an `n`-slot buffer is
   a wgpu error, not a mis-render — the buffer *and* its bind group are rebuilt,
@@ -160,8 +161,9 @@ front-end hands it to `Renderer::render` without per-type branching. The render
 core walks its objects into a flat list, batches by primitive — a batch key is a
 drawable minus its model, so the same taxonomy serves both (#204) — binds the
 shared `P·V` camera uniform (plus viewport size for gizmo lines), and records the
-draws in `Primitive::sort_key` order, which is the frame's z-order because every
-overlay pipeline disables depth.
+draws in `Primitive::sort_key` order using the resolved private slot and complete
+identity, which is the frame's z-order because every overlay pipeline disables
+depth. All layers are checked for resident handles before any layer writes.
 
 ### Scene background
 
@@ -214,9 +216,10 @@ Loaders sit beside it by format:
 - `mesh/gltf.rs`
 
 The geometry every source shares (`aabb`, `center`, `preview_transform`,
-`edge_indices`) lives in `mesh/mod.rs`. A mesh's GPU residency currently lives in
-`render/mesh_store.rs`; the [#366 design](gpu-resources.md) keeps that ownership
-renderer-side while separating resource identity from storage slots. The `Vertex`
+`edge_indices`) lives in `mesh/mod.rs`. `mesh/identity.rs` holds device-free
+registration; GPU residency lives in `render/mesh_store.rs`. The
+[#366 contract](gpu-resources.md) separates logical identity, wire rows and
+renderer-private storage slots. The `Vertex`
 layout stays with the other `repr(C)` + `Pod` types in `render/gpu_types.rs`.
 
 ### Arrow input and output

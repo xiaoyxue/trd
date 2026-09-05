@@ -9,6 +9,7 @@
 //! platforms.
 
 use super::{GridPlane, RenderMode};
+use crate::MeshTableIndex;
 
 /// The typed Disney PBR configuration threaded through [`RenderOptions`].
 #[derive(Debug, Clone, Default)]
@@ -56,8 +57,8 @@ impl Msaa {
 /// entry point threads a single struct instead of many positional flags (and
 /// stays within clippy's argument budget). [`Default`] is filled, no overlays,
 /// 4× MSAA.
-#[derive(Debug, Clone, Default)]
-pub struct RenderOptions {
+#[derive(Debug, Clone)]
+pub struct RenderOptions<M = MeshTableIndex> {
     /// How meshes are drawn (filled / wireframe / textured / PBR).
     pub mode: RenderMode,
     /// Overlay each drawn mesh instance's axis-aligned bounding box (#42).
@@ -72,9 +73,10 @@ pub struct RenderOptions {
     /// grid across a placement quad's local floor. `None` disables it.
     pub show_local_grid: Option<GridPlane>,
     /// Narrows [`show_local_grid`](Self::show_local_grid) to draws of a single
-    /// `mesh_id` (the placement quad), so a wireframe *content* mesh doesn't also
+    /// mesh (the placement quad), so a wireframe *content* mesh doesn't also
     /// pick up a floor grid. `None` keeps the grid on every wireframe draw (#114).
-    pub show_local_grid_mesh: Option<u32>,
+    /// Wire options use [`MeshTableIndex`]; registered scenes use [`crate::MeshId`].
+    pub show_local_grid_mesh: Option<M>,
     /// If `Some(plane)`, add one **world-origin** plane grid (a floor at the
     /// world origin), ungated by render mode.
     pub show_world_grid: Option<GridPlane>,
@@ -104,4 +106,23 @@ pub struct RenderOptions {
     pub env_background: Option<crate::EnvironmentBackground>,
     /// Mesh-pass multisample anti-aliasing (default [`Msaa::X4`]).
     pub msaa: Msaa,
+}
+
+impl<M> Default for RenderOptions<M> {
+    fn default() -> Self {
+        Self {
+            mode: RenderMode::default(),
+            show_aabb: false,
+            show_axes: false,
+            show_local_axes: false,
+            show_local_grid: None,
+            show_local_grid_mesh: None,
+            show_world_grid: None,
+            show_object_grid: None,
+            selected: None,
+            pbr: None,
+            env_background: None,
+            msaa: Msaa::default(),
+        }
+    }
 }

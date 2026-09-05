@@ -17,9 +17,9 @@ impl eframe::App for VideoEditingApp {
         if let Some(document) = self.shared.take_incoming_document() {
             self.set_document(document);
         }
+        self.consume_asset_defaults();
         self.consume_video_frame();
         self.consume_rendered_frame();
-        self.consume_asset_defaults();
         self.consume_pick_result();
         if !self.shared.video_loaded.get() {
             self.displayed_frame_ready = false;
@@ -422,8 +422,10 @@ impl VideoEditingApp {
         self.selected_asset = Some(asset);
         self.selected_quad = true;
         self.show_gizmos = true;
-        self.controller.state.objects[0] = crate::scene::ObjectTransform::default();
-        self.controller.state.selected = Some(0);
+        if let Some(object) = self.controller.state.objects.first_mut() {
+            object.transform = crate::scene::ObjectTransform::default();
+        }
+        self.controller.state.selected = None;
         self.controller.target = crate::interaction::InteractionTarget::Object;
         self.shared.renderer.borrow_mut().take();
         self.shared.asset_request.set(asset.code());

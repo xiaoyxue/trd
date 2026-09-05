@@ -78,7 +78,7 @@ pub struct ImageOutcome {
     /// "Load model…" was clicked: the host should open its file picker (#353).
     pub load_model: bool,
     /// A deleted object's mesh, for the host to free on its renderer (#353).
-    pub freed_mesh: Option<u32>,
+    pub freed_mesh: Option<trd_core::MeshId>,
 }
 
 /// The per-frame view [`show`] draws for the plain viewers.
@@ -153,7 +153,7 @@ pub struct ModelOutcome {
     /// The mesh the deleted object was drawing. The panel cannot free it —
     /// the renderer owns the GPU memory — so the host does, on its own
     /// renderer.
-    pub freed_mesh: Option<u32>,
+    pub freed_mesh: Option<trd_core::MeshId>,
 }
 
 /// "Load model…" / "Delete selected", plus the last load failure.
@@ -178,6 +178,9 @@ pub fn model_section(
             if delete.clicked() {
                 outcome.freed_mesh = controller.state.remove_selected_object();
                 outcome.needs_render = outcome.freed_mesh.is_some();
+                if outcome.needs_render {
+                    controller.rebase_reset();
+                }
             }
         });
         ui.weak("GLB — lit by the environment probe");

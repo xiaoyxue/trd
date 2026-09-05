@@ -60,16 +60,22 @@ fn main() {
     let texture = trd_core::ImageTexture::from_rgba(2048, 2048, vec![200u8; 2048 * 2048 * 4])
         .expect("a 2048² texture builds");
     let load = |renderer: &mut trd_core::Renderer| {
-        let id = renderer.add_mesh(&big);
-        renderer.set_mesh_texture(id, &texture);
-        renderer.set_mesh_metallic_roughness_texture(id, &texture);
-        renderer.set_mesh_normal_texture(id, &texture);
+        let id = renderer.add_mesh(&big).expect("the mesh uploads");
+        renderer
+            .set_mesh_texture(id, &texture)
+            .expect("the albedo uploads");
+        renderer
+            .set_mesh_metallic_roughness_texture(id, &texture)
+            .expect("the metallic-roughness map uploads");
+        renderer
+            .set_mesh_normal_texture(id, &texture)
+            .expect("the normal map uploads");
         id
     };
 
     let id = load(&mut renderer);
     let (loaded, loaded_reserved) = report(&device, "after add_mesh + 3 maps");
-    assert!(renderer.remove_mesh(id));
+    renderer.remove_mesh(id).expect("the mesh is resident");
     let (freed, freed_reserved) = report(&device, "after remove_mesh");
 
     let d = |after: u64, before: u64| (after as f64 - before as f64) / (1024.0 * 1024.0);
@@ -90,7 +96,7 @@ fn main() {
     println!("\nrepeating the load/delete cycle — `reserved` must plateau, not climb:");
     for cycle in 1..=5 {
         let id = load(&mut renderer);
-        renderer.remove_mesh(id);
+        renderer.remove_mesh(id).expect("the mesh is resident");
         device.poll(wgpu::PollType::wait_indefinitely()).ok();
         let r = device
             .generate_allocator_report()

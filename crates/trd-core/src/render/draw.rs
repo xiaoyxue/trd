@@ -3,9 +3,8 @@
 //! [`Draw`] is what the protocol's `draw_mesh` / `draw_model` / `draw_mode`
 //! columns decode into: which mesh to place, where, and what to draw there. It
 //! is deliberately separate from [`DrawableObject`](super::DrawableObject), the
-//! *renderer's* primitive — scene assembly
-//! ([`build_scene`](super::build_scene)) is the one place that turns the former
-//! into the latter.
+//! *renderer's* primitive. [`Scene::resolve_draws`](super::Scene::resolve_draws)
+//! binds wire rows to logical identities before scene assembly.
 //!
 //! The codec lives here rather than beside [`RenderMode`](super::RenderMode)
 //! (`draw_config.rs`) because it is wire knowledge: the byte values are
@@ -13,6 +12,7 @@
 
 use super::RenderMode;
 use crate::math::Matrix4;
+use crate::{MeshId, MeshTableIndex};
 
 /// A single instance placement decoded from a frame's protocol draw list
 /// (`draw_mesh` / `draw_model`): which mesh to draw (index into the leading mesh
@@ -23,7 +23,7 @@ use crate::math::Matrix4;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Draw {
     /// Index into the leading mesh table — which geometry this draw places.
-    pub mesh_id: u32,
+    pub mesh_id: MeshTableIndex,
     /// The per-instance placement, applied beneath that mesh's base (preview)
     /// model. Typed (#235 R3): the wire's raw `[f32; 16]` is converted once, at
     /// the protocol boundary, so no consumer has to remember whether an array is
@@ -31,6 +31,17 @@ pub struct Draw {
     pub model: Matrix4,
     /// What this draw places: a mesh (optionally overriding the global render
     /// mode) or a grounding shadow. Decoded from the optional `draw_mode` column.
+    pub selection: DrawSelection,
+}
+
+/// A registered mesh placement, independent of wire rows and GPU residency.
+///
+/// Wire callers obtain these through [`Scene::resolve_draws`](super::Scene::resolve_draws);
+/// interactive callers already hold the IDs returned by mesh registration.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ResolvedDraw {
+    pub mesh_id: MeshId,
+    pub model: Matrix4,
     pub selection: DrawSelection,
 }
 
@@ -55,7 +66,7 @@ pub enum DrawSelection {
     /// Draw a **contact / blob grounding shadow** on the placed mesh's ground
     /// plane instead of the mesh itself (#110 follow-up). Becomes a
     /// [`Primitive::BlobShadow`](super::Primitive::BlobShadow); the
-    /// draw's `mesh_id` is ignored, since the blob uses shared gizmo geometry.
+    /// wire row is still validated, although the blob uses shared gizmo geometry.
     Shadow,
 }
 
@@ -93,7 +104,7 @@ impl DrawSelection {
 /// Wire byte meaning "inherit the renderer's global mode" in the optional
 /// per-draw `draw_mode` (`List<UInt8>`) protocol column (see
 /// [`DrawSelection::from_wire`]). A draw carrying this value defers to the `mode`
-/// argument of [`build_scene`](super::build_scene), so a stream can override only
+/// option of [`Scene::from_draws`](super::Scene::from_draws), so a stream can override only
 /// *some* draws (e.g. draw a wireframe overlay quad while every other draw
 /// follows the front-end's global mode).
 pub const DRAW_MODE_INHERIT: u8 = 255;
