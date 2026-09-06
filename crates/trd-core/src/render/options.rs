@@ -9,6 +9,7 @@
 //! platforms.
 
 use super::{GridPlane, RenderMode};
+use crate::MeshId;
 
 /// The typed Disney PBR configuration threaded through [`RenderOptions`].
 #[derive(Debug, Clone, Default)]
@@ -72,9 +73,9 @@ pub struct RenderOptions {
     /// grid across a placement quad's local floor. `None` disables it.
     pub show_local_grid: Option<GridPlane>,
     /// Narrows [`show_local_grid`](Self::show_local_grid) to draws of a single
-    /// `mesh_id` (the placement quad), so a wireframe *content* mesh doesn't also
+    /// mesh (the placement quad), so a wireframe *content* mesh doesn't also
     /// pick up a floor grid. `None` keeps the grid on every wireframe draw (#114).
-    pub show_local_grid_mesh: Option<u32>,
+    pub show_local_grid_mesh: Option<MeshId>,
     /// If `Some(plane)`, add one **world-origin** plane grid (a floor at the
     /// world origin), ungated by render mode.
     pub show_world_grid: Option<GridPlane>,

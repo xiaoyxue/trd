@@ -61,28 +61,18 @@ pub fn scene_for(state: &SceneState) -> trd_core::Scene {
 
 /// Pushes `state`'s per-object PBR material state onto the renderer.
 ///
-/// Keyed by the object's **mesh id**, not its row: after a delete the two are no
-/// longer the same integer, and writing row `i` to mesh `i` would re-skin some
-/// other object (#353).
-pub fn apply_materials(renderer: &mut trd_core::Renderer, state: &SceneState) {
-    for (i, ((material, ibl), tone_mapping)) in state
-        .materials
-        .iter()
-        .zip(&state.image_based_lighting)
-        .zip(&state.tone_mappings)
-        .enumerate()
-    {
-        let mesh_id = state.mesh_ids.get(i).copied().unwrap_or(i as u32) as usize;
+/// Rows shift after deletion; resource identities and their appearances do not.
+pub fn apply_materials(
+    renderer: &mut trd_core::Renderer,
+    state: &SceneState,
+) -> Result<(), trd_core::MeshResourceError> {
+    for object in &state.objects {
         renderer.set_appearance(
-            trd_core::MeshTarget::One(mesh_id),
-            trd_core::MeshAppearance {
-                material: material.clone(),
-                ibl: *ibl,
-                tone_mapping: *tone_mapping,
-                debug_view: state.pbr_debug_views.get(i).copied().unwrap_or_default(),
-            },
-        );
+            trd_core::MeshTarget::One(object.mesh),
+            object.appearance.clone(),
+        )?;
     }
+    Ok(())
 }
 
 /// The optional PBR maps bound alongside one mesh's albedo — a named type rather
@@ -124,7 +114,7 @@ pub struct GuiRenderer {
 }
 
 impl GuiRenderer {
-    /// Builds the renderer for `meshes` (drawn by index) at a fixed
+    /// Builds the renderer for `meshes` at a fixed
     /// `width` × `height`; meshes are centered + scaled by their preview
     /// transform inside `trd-core`.
     ///
@@ -142,17 +132,30 @@ impl GuiRenderer {
     ) -> Result<Self, GuiError> {
         let (mut renderer, target) = trd_core::Renderer::with_meshes(width, height, meshes).await?;
         let had_env = env.is_some();
-        for (i, texture) in textures.iter().enumerate() {
-            if let Some(texture) = texture {
-                renderer.set_mesh_texture(i, *texture);
+        let ids = renderer.initial_mesh_ids().to_vec();
+        for (kind, bindings) in [
+            ("texture", textures.len()),
+            ("material-map", material_maps.len()),
+        ] {
+            if bindings > ids.len() {
+                return Err(GuiError::MaterialBindingCount {
+                    kind,
+                    bindings,
+                    meshes: ids.len(),
+                });
             }
         }
-        for (i, maps) in material_maps.iter().enumerate() {
+        for (mesh, texture) in ids.iter().copied().zip(textures) {
+            if let Some(texture) = texture {
+                renderer.set_mesh_texture(mesh, *texture)?;
+            }
+        }
+        for (mesh, maps) in ids.iter().copied().zip(material_maps) {
             if let Some(texture) = maps.metallic_roughness {
-                renderer.set_mesh_metallic_roughness_texture(i, texture);
+                renderer.set_mesh_metallic_roughness_texture(mesh, texture)?;
             }
             if let Some(texture) = maps.normal {
-                renderer.set_mesh_normal_texture(i, texture);
+                renderer.set_mesh_normal_texture(mesh, texture)?;
             }
         }
         if let Some(env) = env {
@@ -172,6 +175,11 @@ impl GuiRenderer {
         (self.width, self.height)
     }
 
+    /// Initial upload identities used to seed the scene; runtime additions are separate.
+    pub fn initial_mesh_ids(&self) -> &[trd_core::MeshId] {
+        self.renderer.initial_mesh_ids()
+    }
+
     /// Whether an HDR probe is bound — i.e. whether IBL can light a surface.
     ///
     /// A model loaded at runtime is lit **only** by the probe (#353), so a
@@ -189,41 +197,36 @@ impl GuiRenderer {
 
     /// Removes the mesh behind a deleted object, freeing its GPU memory (#353).
     ///
-    /// The id stays valid for every *other* object: the renderer leaves a hole
-    /// rather than renumbering, which is what lets
-    /// [`SceneState::mesh_ids`](crate::scene::SceneState::mesh_ids) keep
-    /// pointing at the right meshes after a delete.
-    pub fn remove_mesh(&mut self, mesh_id: usize) -> bool {
+    /// Callers must retain residency while another object shares this identity.
+    pub fn remove_mesh(
+        &mut self,
+        mesh_id: trd_core::MeshId,
+    ) -> Result<(), trd_core::MeshResourceError> {
         self.renderer.remove_mesh(mesh_id)
     }
 
     /// Uploads `asset`'s mesh as a **new** object and binds its imported material
     /// and glTF maps, returning the new mesh id (#353).
-    ///
-    /// The id is also the object's row in [`SceneState`](crate::scene::SceneState)'s
-    /// parallel vectors, because [`draws`](crate::scene::SceneState::draws) maps
-    /// row `i` to `mesh_id: i` — so the caller must register exactly one object
-    /// per call, in the same order.
-    pub fn add_model(&mut self, asset: &trd_core::GltfAsset) -> usize {
-        let mesh_id = self.renderer.add_mesh(&asset.mesh);
+    pub fn add_model(&mut self, asset: &trd_core::GltfAsset) -> Result<trd_core::MeshId, GuiError> {
+        let mesh_id = self.renderer.add_mesh(&asset.mesh)?;
         if let Some(texture) = asset.base_color_texture.as_ref() {
-            self.renderer.set_mesh_texture(mesh_id, texture);
+            self.renderer.set_mesh_texture(mesh_id, texture)?;
         }
         if let Some(texture) = asset.metallic_roughness_texture.as_ref() {
             self.renderer
-                .set_mesh_metallic_roughness_texture(mesh_id, texture);
+                .set_mesh_metallic_roughness_texture(mesh_id, texture)?;
         }
         if let Some(texture) = asset.normal_texture.as_ref() {
-            self.renderer.set_mesh_normal_texture(mesh_id, texture);
+            self.renderer.set_mesh_normal_texture(mesh_id, texture)?;
         }
         self.renderer
-            .set_disney_material(trd_core::MeshTarget::One(mesh_id), asset.material.clone());
-        mesh_id
+            .set_disney_material(trd_core::MeshTarget::One(mesh_id), asset.material.clone())?;
+        Ok(mesh_id)
     }
 
     /// Renders `state` to an RGBA image.
     pub async fn render(&mut self, state: &SceneState) -> Result<ImageRgba, GuiError> {
-        apply_materials(&mut self.renderer, state);
+        apply_materials(&mut self.renderer, state)?;
         let scene = scene_for(state);
         let layers = [trd_core::SceneLayer::new(
             state.camera(self.viewport()),
@@ -240,11 +243,17 @@ impl GuiRenderer {
     /// Resolves the object under render-target pixel `(x, y)` via the id-color
     /// picking pass (#141), returning its 0-based index into `state.draws()`, or
     /// `None` for the background.
-    pub async fn pick(&mut self, state: &SceneState, x: u32, y: u32) -> Option<u32> {
+    pub async fn pick(
+        &mut self,
+        state: &SceneState,
+        x: u32,
+        y: u32,
+    ) -> Result<Option<u32>, GuiError> {
         let camera = state.camera(self.viewport());
-        self.renderer
+        Ok(self
+            .renderer
             .pick(camera, &state.draws(), x, y, self.viewport())
-            .await
+            .await?)
     }
 
     fn viewport(&self) -> trd_core::Viewport {
@@ -313,18 +322,17 @@ mod tests {
     /// independent now.
     #[test]
     fn the_sky_is_graded_by_its_own_tone_mapping_not_mesh_zero() {
-        let state = SceneState {
+        let mut state = SceneState {
             show_environment_background: true,
             environment_background_tone_mapping: trd_core::ToneMapping {
                 exposure: 0.25,
                 operator: trd_core::Tonemap::Aces,
             },
-            // Mesh 0 is deliberately graded differently; the sky must ignore it.
-            tone_mappings: vec![trd_core::ToneMapping {
-                exposure: 3.5,
-                operator: trd_core::Tonemap::Reinhard,
-            }],
-            ..SceneState::default()
+            ..crate::scene::test_scene(1)
+        };
+        state.objects[0].appearance.tone_mapping = trd_core::ToneMapping {
+            exposure: 3.5,
+            operator: trd_core::Tonemap::Reinhard,
         };
 
         let sky = scene_for(&state)

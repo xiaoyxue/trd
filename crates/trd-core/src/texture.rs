@@ -68,7 +68,7 @@ pub struct ImageData {
 /// It is kept as an evaluation of a surface texture because that is what a
 /// procedural / bump / noise kind implements, and because it keeps `mesh` and
 /// `texture` symmetric: both are decoded assets at the root, each with a GPU
-/// face in `render/` (`mesh_store.rs`, `bound_texture.rs`). Deleting `sample`
+/// face in `render/` (`gpu_resources.rs`, `bound_texture.rs`). Deleting `sample`
 /// and moving this file are **one** decision, not two — take them together or
 /// not at all.
 pub trait Texture {

@@ -377,7 +377,7 @@ fn tracking_rows(_video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut d
 
 fn placement_rows(_video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut dyn Rows) {
     let scene = &facts.scene;
-    let object = scene.objects[0];
+    let object = scene.objects.first().map(|object| object.transform);
     let asset = facts
         .renderer
         .as_ref()
@@ -385,6 +385,13 @@ fn placement_rows(_video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut 
 
     r.row("selected quad", &facts.selected_quad.to_string());
     r.row("selected object", &option_u32(scene.selected));
+    r.row(
+        "mesh identity",
+        &scene
+            .objects
+            .first()
+            .map_or_else(|| "none".to_owned(), |object| format!("{:?}", object.mesh)),
+    );
     r.row(
         "catalog asset",
         facts
@@ -408,17 +415,31 @@ fn placement_rows(_video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut 
         &asset.map_or_else(|| "none".to_owned(), |a| format!("{:.6}", a.preview_scale)),
     );
     r.row("Olympic preset", "size 0.24, e1 1.30, e2 -1.70, lift 1.00");
-    r.row("object translation", &vec3_label(object.translation));
     r.row(
-        "object rotation",
-        &format!(
-            "yaw {:.3}, pitch {:.3}, roll {:.3} deg",
-            object.yaw.to_degrees(),
-            object.pitch.to_degrees(),
-            object.roll.to_degrees()
+        "object translation",
+        &object.map_or_else(
+            || "none".to_owned(),
+            |object| vec3_label(object.translation),
         ),
     );
-    r.row("object scale", &vec3_label(object.scale));
+    r.row(
+        "object rotation",
+        &object.map_or_else(
+            || "none".to_owned(),
+            |object| {
+                format!(
+                    "yaw {:.3}, pitch {:.3}, roll {:.3} deg",
+                    object.yaw.to_degrees(),
+                    object.pitch.to_degrees(),
+                    object.roll.to_degrees()
+                )
+            },
+        ),
+    );
+    r.row(
+        "object scale",
+        &object.map_or_else(|| "none".to_owned(), |object| vec3_label(object.scale)),
+    );
     r.row("movement basis", &facts.movement_basis.join(" / "));
     r.row("visibility", facts.visibility_reason);
     r.row(
@@ -431,16 +452,40 @@ fn placement_rows(_video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut 
 
 fn material_rows(_video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut dyn Rows) {
     let scene = &facts.scene;
-    let material = &scene.materials[0];
-    let ibl = scene.image_based_lighting[0];
-    let tone_mapping = scene.tone_mappings[0];
+    let Some(object) = scene.objects.first() else {
+        for name in [
+            "render mode",
+            "imported metallic",
+            "imported roughness",
+            "base-color map",
+            "metallic-roughness map",
+            "normal map",
+            "metallic",
+            "roughness",
+            "specular",
+            "clearcoat",
+            "IBL",
+            "IBL gain (object x scene)",
+            "environment yaw",
+            "direct light / ambient",
+            "exposure",
+            "tone map",
+            "PBR debug",
+        ] {
+            r.row(name, "none");
+        }
+        return;
+    };
+    let material = &object.appearance.material;
+    let ibl = object.appearance.ibl;
+    let tone_mapping = object.appearance.tone_mapping;
     let imported = facts
         .renderer
         .as_ref()
         .and_then(|renderer| renderer.asset.as_ref())
         .map(|asset| &asset.imported_material);
 
-    r.row("render mode", render_mode_label(scene.modes[0]));
+    r.row("render mode", render_mode_label(object.mode));
     r.row(
         "imported metallic",
         &option_f32(imported.map(|m| m.metallic)),
@@ -496,7 +541,10 @@ fn material_rows(_video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut d
     );
     r.row("exposure", &format!("{:.4}", tone_mapping.exposure));
     r.row("tone map", tone_map_label(tone_mapping.operator));
-    r.row("PBR debug", pbr_debug_view_label(scene.pbr_debug_views[0]));
+    r.row(
+        "PBR debug",
+        pbr_debug_view_label(object.appearance.debug_view),
+    );
     if facts.reflective_tracking_warning {
         r.warning(
             "tracking/material",
@@ -539,7 +587,14 @@ fn renderer_rows(video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut dy
             facts.render_target_size.0, facts.render_target_size.1
         ),
     );
-    r.row("mode", render_mode_label(facts.scene.modes[0]));
+    r.row(
+        "mode",
+        facts
+            .scene
+            .objects
+            .first()
+            .map_or("none", |object| render_mode_label(object.mode)),
+    );
     // Observed frame-path CPU↔GPU traffic for the last frame, so a later claim
     // that a copy is gone is read off a meter rather than asserted (#229).
     //

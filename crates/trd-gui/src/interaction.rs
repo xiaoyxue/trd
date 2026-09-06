@@ -238,7 +238,7 @@ mod tests {
     use super::*;
 
     fn selected_controller() -> InteractionController {
-        let mut c = InteractionController::new(SceneState::default());
+        let mut c = InteractionController::new(crate::scene::test_scene(1));
         c.target = InteractionTarget::Object;
         c.state.selected = Some(0);
         c
@@ -246,9 +246,9 @@ mod tests {
 
     #[test]
     fn primary_drag_orbits_camera_by_default() {
-        let mut c = InteractionController::new(SceneState::default());
+        let mut c = InteractionController::new(crate::scene::test_scene(1));
         let yaw0 = c.state.camera.yaw;
-        let obj0 = c.state.objects[0];
+        let obj0 = c.state.objects[0].clone();
         assert!(c.apply(InteractionEvent::Primary { dx: 0.5, dy: 0.0 }));
         assert!(c.state.camera.yaw > yaw0);
         assert_eq!(c.state.objects[0], obj0);
@@ -256,10 +256,10 @@ mod tests {
 
     #[test]
     fn object_transform_is_noop_without_a_selection() {
-        let mut c = InteractionController::new(SceneState::default());
+        let mut c = InteractionController::new(crate::scene::test_scene(1));
         c.target = InteractionTarget::Object;
         assert_eq!(c.state.selected, None);
-        let obj0 = c.state.objects[0];
+        let obj0 = c.state.objects[0].clone();
         assert!(!c.apply(InteractionEvent::Primary { dx: 0.5, dy: 0.2 }));
         c.mode = TransformMode::Move;
         assert!(!c.apply(InteractionEvent::Primary { dx: 0.3, dy: 0.3 }));
@@ -278,8 +278,8 @@ mod tests {
         let mut c = selected_controller();
         let cam0 = c.state.camera;
         assert!(c.apply(InteractionEvent::Primary { dx: 0.5, dy: 0.2 }));
-        assert!(c.state.objects[0].yaw > 0.0);
-        assert!(c.state.objects[0].pitch < 0.0);
+        assert!(c.state.objects[0].transform.yaw > 0.0);
+        assert!(c.state.objects[0].transform.pitch < 0.0);
         assert_eq!(c.state.camera, cam0);
     }
 
@@ -287,11 +287,20 @@ mod tests {
     fn object_move_mode_drag_translates() {
         let mut c = selected_controller();
         c.mode = TransformMode::Move;
-        let rot0 = (c.state.objects[0].yaw, c.state.objects[0].pitch);
+        let rot0 = (
+            c.state.objects[0].transform.yaw,
+            c.state.objects[0].transform.pitch,
+        );
         assert!(c.apply(InteractionEvent::Primary { dx: 0.25, dy: -0.5 }));
-        let t = c.state.objects[0].translation;
+        let t = c.state.objects[0].transform.translation;
         assert!(t[0] > 0.0 && t[1] > 0.0 && t[2] == 0.0);
-        assert_eq!((c.state.objects[0].yaw, c.state.objects[0].pitch), rot0);
+        assert_eq!(
+            (
+                c.state.objects[0].transform.yaw,
+                c.state.objects[0].transform.pitch
+            ),
+            rot0
+        );
     }
 
     #[test]
@@ -301,7 +310,7 @@ mod tests {
         c.move_direction = MoveDirection::Reference2;
         c.move_reference_axes[1] = [0.0, 0.0, -1.0];
         assert!(c.apply(InteractionEvent::Primary { dx: 0.25, dy: -0.5 }));
-        let t = c.state.objects[0].translation;
+        let t = c.state.objects[0].transform.translation;
         assert_eq!(t[0], 0.0);
         assert_eq!(t[1], 0.0);
         assert!(t[2] < 0.0);
@@ -312,7 +321,7 @@ mod tests {
         let mut c = selected_controller();
         c.mode = TransformMode::Scale;
         assert!(c.apply(InteractionEvent::Primary { dx: 0.0, dy: -0.3 }));
-        for s in c.state.objects[0].scale {
+        for s in c.state.objects[0].transform.scale {
             assert!(s > 1.0);
         }
     }
@@ -322,7 +331,7 @@ mod tests {
         let mut c = selected_controller();
         let dist0 = c.state.camera.distance;
         assert!(c.apply(InteractionEvent::Scale { delta: 1.0 }));
-        for s in c.state.objects[0].scale {
+        for s in c.state.objects[0].transform.scale {
             assert!(s > 1.0);
         }
         assert_eq!(c.state.camera.distance, dist0);
@@ -334,9 +343,9 @@ mod tests {
         c.mode = TransformMode::Rotate;
         c.axis = AxisConstraint::X;
         assert!(c.apply(InteractionEvent::Primary { dx: 0.3, dy: 0.1 }));
-        assert_ne!(c.state.objects[0].pitch, 0.0);
-        assert_eq!(c.state.objects[0].yaw, 0.0);
-        assert_eq!(c.state.objects[0].roll, 0.0);
+        assert_ne!(c.state.objects[0].transform.pitch, 0.0);
+        assert_eq!(c.state.objects[0].transform.yaw, 0.0);
+        assert_eq!(c.state.objects[0].transform.roll, 0.0);
     }
 
     #[test]
@@ -345,19 +354,19 @@ mod tests {
         c.mode = TransformMode::Rotate;
         c.axis = AxisConstraint::Z;
         assert!(c.apply(InteractionEvent::Primary { dx: 0.4, dy: 0.0 }));
-        assert_ne!(c.state.objects[0].roll, 0.0);
-        assert_eq!(c.state.objects[0].yaw, 0.0);
-        assert_eq!(c.state.objects[0].pitch, 0.0);
+        assert_ne!(c.state.objects[0].transform.roll, 0.0);
+        assert_eq!(c.state.objects[0].transform.yaw, 0.0);
+        assert_eq!(c.state.objects[0].transform.pitch, 0.0);
     }
 
     #[test]
     fn local_z_move_follows_rotated_object_basis() {
         let mut c = selected_controller();
         c.mode = TransformMode::Move;
-        c.state.objects[0].yaw = std::f32::consts::FRAC_PI_2;
+        c.state.objects[0].transform.yaw = std::f32::consts::FRAC_PI_2;
         c.move_direction = MoveDirection::LocalZ;
         assert!(c.apply(InteractionEvent::Primary { dx: 0.2, dy: -0.4 }));
-        let t = c.state.objects[0].translation;
+        let t = c.state.objects[0].transform.translation;
         assert!(t[0].abs() > 0.0);
         assert_eq!(t[1], 0.0);
         assert!(t[2].abs() < 1e-5);
@@ -368,7 +377,7 @@ mod tests {
         let mut c = selected_controller();
         let dist = c.state.camera.distance;
         assert!(c.apply(InteractionEvent::Pan { dx: 0.25, dy: -0.5 }));
-        let t = c.state.objects[0].translation;
+        let t = c.state.objects[0].transform.translation;
         assert!((t[0] - 0.25 * PAN_SPEED * dist).abs() < 1e-4);
         // Screen-up (dy < 0) → world +Y.
         assert!((t[1] - 0.5 * PAN_SPEED * dist).abs() < 1e-4);
@@ -392,8 +401,20 @@ mod tests {
         assert_ne!(c.state, c.initial);
         assert!(c.apply(InteractionEvent::Reset));
         assert_eq!(c.state, c.initial);
-        assert_eq!(c.state.objects[0].scale, [1.0, 1.0, 1.0]);
+        assert_eq!(c.state.objects[0].transform.scale, [1.0, 1.0, 1.0]);
         assert!(!c.apply(InteractionEvent::Reset));
+    }
+
+    #[test]
+    fn rebasing_after_deletion_cannot_restore_a_removed_identity() {
+        let mut c = InteractionController::new(crate::scene::test_scene(3));
+        c.state.selected = Some(1);
+        let removed = c.state.remove_selected_object().unwrap();
+        c.rebase_reset();
+        c.apply(InteractionEvent::Zoom { delta: 1.0 });
+        assert!(c.apply(InteractionEvent::Reset));
+        assert_eq!(c.state.objects.len(), 2);
+        assert!(!c.state.uses_mesh(removed));
     }
 
     #[test]

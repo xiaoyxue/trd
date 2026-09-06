@@ -95,6 +95,7 @@ impl TrdGuiApp {
             Ok(index) => {
                 log::info!("loaded '{}' as object {index}", request.name);
                 self.model_error = None;
+                self.controller.rebase_reset();
                 self.needs_render = true;
             }
             Err(error) => {
@@ -179,18 +180,31 @@ impl eframe::App for TrdGuiApp {
         // Free the deleted object's mesh. Rendering is synchronous here, so the
         // renderer is never mid-frame at this point.
         if let Some(mesh_id) = outcome.freed_mesh {
-            if self.renderer.remove_mesh(mesh_id as usize) {
-                log::info!("freed mesh {mesh_id}");
+            if !self.controller.state.uses_mesh(mesh_id) {
+                match self.renderer.remove_mesh(mesh_id) {
+                    Ok(()) => log::info!("freed mesh {mesh_id:?}"),
+                    Err(error) => {
+                        log::error!("mesh removal failed: {error}");
+                        self.model_error = Some(error.to_string());
+                    }
+                }
             }
         }
 
         // A click requested a pick: resolve the object under the cursor via the
         // id pass, update the selection, and re-render so its AABB shows (#141).
         if let Some((x, y)) = outcome.pick {
-            let hit = pollster::block_on(self.renderer.pick(&self.controller.state, x, y));
-            if hit != self.controller.state.selected {
-                self.controller.state.selected = hit;
-                self.needs_render = true;
+            match pollster::block_on(self.renderer.pick(&self.controller.state, x, y)) {
+                Ok(hit) => {
+                    if hit != self.controller.state.selected {
+                        self.controller.state.selected = hit;
+                        self.needs_render = true;
+                    }
+                }
+                Err(error) => {
+                    log::error!("scene pick failed: {error}");
+                    self.model_error = Some(error.to_string());
+                }
             }
         }
     }

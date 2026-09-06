@@ -8,6 +8,10 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Downstream CPU-only tests need distinct opaque IDs without acquiring a GPU.
+test-support = []
+
 [dependencies]
 wgpu = "30"
 log = "0.4"

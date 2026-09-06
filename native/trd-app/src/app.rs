@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 use trd_core::{
-    DisneyMaterial, EnvMapData, ImageBasedLighting, ImageTexture, Lighting, Mesh, PbrConfig,
-    RenderMode, RenderOptions, ToneMapping,
+    DisneyMaterial, EnvMapData, ImageBasedLighting, ImageTexture, Lighting, Mesh, MeshTableIndex,
+    PbrConfig, RenderMode, RenderOptions, Scene, ToneMapping,
 };
 use winit::application::ApplicationHandler;
 #[cfg(not(target_os = "windows"))]
@@ -33,9 +33,10 @@ struct App {
     gpu: Option<WindowRenderer>,
     /// Meshes + rate + frames arriving from the stdin reader thread.
     rx: Receiver<StreamMsg>,
-    /// The stream's mesh table (or the legacy built-in fallback), held until the
-    /// GPU surface exists so the renderer can be built.
+    /// CPU meshes are held only until the surface exists and uploads complete.
     pending_meshes: Option<Vec<Mesh>>,
+    /// A validated wire row, resolved only after the renderer has uploaded meshes.
+    pending_grid_mesh: Option<MeshTableIndex>,
     /// The stream's bound texture (`0.0.4`), held until the renderer is built so
     /// it can be uploaded; `None` for streams without a texture table.
     pending_texture: Option<ImageTexture>,
@@ -88,6 +89,7 @@ impl App {
             gpu: None,
             rx,
             pending_meshes: None,
+            pending_grid_mesh: None,
             pending_texture: None,
             texture_applied: false,
             frames: Vec::new(),
@@ -116,7 +118,10 @@ impl App {
     fn drain_stream(&mut self) {
         loop {
             match self.rx.try_recv() {
-                Ok(StreamMsg::Meshes(meshes)) => self.pending_meshes = Some(meshes),
+                Ok(StreamMsg::Meshes { meshes, grid_mesh }) => {
+                    self.pending_grid_mesh = grid_mesh;
+                    self.pending_meshes = Some(meshes);
+                }
                 Ok(StreamMsg::Texture(texture)) => self.pending_texture = Some(texture),
                 Ok(StreamMsg::Rate(rate)) => self.stream_rate = rate,
                 Ok(StreamMsg::Frame(frame)) => self.frames.push(*frame),
@@ -249,17 +254,32 @@ impl ApplicationHandler for App {
         self.drain_stream();
 
         // Build the scene renderer once both the GPU surface and the stream's
-        // mesh table (or built-in fallback) are available; then paint.
+        // CPU meshes are available; only the uploads mint runtime identities.
         if let Some(gpu) = self.gpu.as_mut() {
             if gpu.renderer.is_none() {
-                if let Some(meshes) = self.pending_meshes.as_ref() {
-                    match gpu.set_meshes(meshes) {
-                        Ok(()) => gpu.window.request_redraw(),
+                if let Some(meshes) = self.pending_meshes.take() {
+                    match gpu.set_meshes(&meshes) {
+                        Ok(()) => {
+                            if let Some(row) = self.pending_grid_mesh.take() {
+                                let ids = gpu
+                                    .renderer
+                                    .as_ref()
+                                    .expect("renderer just built")
+                                    .initial_mesh_ids();
+                                if let Err(error) = Scene::validate_mesh_index(row, ids.len()) {
+                                    log::error!("cannot resolve the stream's grid mesh: {error}");
+                                    event_loop.exit();
+                                    return;
+                                }
+                                self.options.show_local_grid_mesh = Some(ids[row.index()]);
+                            }
+                            gpu.window.request_redraw();
+                        }
                         // An unusable mesh table is a bad stream, not a crash:
                         // report it and stop retrying it every wake (#235 R8).
                         Err(error) => {
                             log::error!("cannot render this stream's meshes: {error}");
-                            self.pending_meshes = None;
+                            self.pending_grid_mesh = None;
                         }
                     }
                 }
@@ -268,7 +288,11 @@ impl ApplicationHandler for App {
             // texture can arrive before or after the mesh table).
             if !self.texture_applied && gpu.renderer.is_some() {
                 if let Some(texture) = self.pending_texture.as_ref() {
-                    gpu.set_texture(texture);
+                    if let Err(error) = gpu.set_texture(texture) {
+                        log::error!("cannot bind this stream's texture: {error}");
+                        event_loop.exit();
+                        return;
+                    }
                     self.texture_applied = true;
                     gpu.window.request_redraw();
                 }
@@ -277,12 +301,16 @@ impl ApplicationHandler for App {
             if !self.pbr_applied && gpu.renderer.is_some() {
                 if let Some(pbr) = self.pbr_config.take() {
                     gpu.set_lighting(pbr.lighting);
-                    gpu.set_appearance(trd_core::MeshAppearance {
+                    if let Err(error) = gpu.set_appearance(trd_core::MeshAppearance {
                         material: pbr.material,
                         ibl: pbr.ibl,
                         tone_mapping: pbr.tone_mapping,
                         ..Default::default()
-                    });
+                    }) {
+                        log::error!("cannot apply this stream's appearance: {error}");
+                        event_loop.exit();
+                        return;
+                    }
                     if let Some(env) = pbr.env_map {
                         gpu.set_env_map(env);
                     }
@@ -370,7 +398,11 @@ pub fn run() -> Result<(), AppError> {
     };
 
     let (tx, rx) = mpsc::channel();
-    spawn_stdin_reader(tx, cli.frames_base.clone());
+    spawn_stdin_reader(
+        tx,
+        cli.frames_base.clone(),
+        cli.grid_mesh.map(trd_core::MeshTableIndex::new),
+    );
 
     let event_loop = EventLoop::new()?;
     // Playback is paced with `ControlFlow::WaitUntil` in `about_to_wait`; start
@@ -389,7 +421,6 @@ pub fn run() -> Result<(), AppError> {
             show_axes: cli.axes,
             show_local_axes: cli.axes_local,
             show_local_grid: cli.grid_local.map(Into::into),
-            show_local_grid_mesh: cli.grid_mesh,
             env_background: cli.env_background.then(|| trd_core::EnvironmentBackground {
                 exposure: cli.exposure,
                 blur: cli.env_background_blur,

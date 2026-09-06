@@ -78,7 +78,7 @@ pub struct ImageOutcome {
     /// "Load model…" was clicked: the host should open its file picker (#353).
     pub load_model: bool,
     /// A deleted object's mesh, for the host to free on its renderer (#353).
-    pub freed_mesh: Option<u32>,
+    pub freed_mesh: Option<trd_core::MeshId>,
 }
 
 /// The per-frame view [`show`] draws for the plain viewers.
@@ -153,7 +153,7 @@ pub struct ModelOutcome {
     /// The mesh the deleted object was drawing. The panel cannot free it —
     /// the renderer owns the GPU memory — so the host does, on its own
     /// renderer.
-    pub freed_mesh: Option<u32>,
+    pub freed_mesh: Option<trd_core::MeshId>,
 }
 
 /// "Load model…" / "Delete selected", plus the last load failure.
@@ -178,6 +178,9 @@ pub fn model_section(
             if delete.clicked() {
                 outcome.freed_mesh = controller.state.remove_selected_object();
                 outcome.needs_render = outcome.freed_mesh.is_some();
+                if outcome.needs_render {
+                    controller.rebase_reset();
+                }
             }
         });
         ui.weak("GLB — lit by the environment probe");
@@ -630,11 +633,14 @@ pub fn image_panel(ui: &mut egui::Ui, image: Image<'_>) -> ImageOutcome {
         }
     };
     let add_image = |ui: &mut egui::Ui, size| {
-        ui.add(
-            egui::Image::new(texture.sized())
-                .fit_to_exact_size(size)
-                .sense(Sense::click_and_drag()),
-        )
+        // Justified allocation includes letterboxing; interact only with painted pixels.
+        let (id, allocated) = ui.allocate_space(size);
+        let rect = ui.layout().align_size_within_rect(size, allocated);
+        let mut response = ui.interact(rect, id, Sense::click_and_drag());
+        response.set_intrinsic_size(size);
+        response.widget_info(|| egui::WidgetInfo::new(egui::WidgetType::Image));
+        egui::Image::new(texture.sized()).paint_at(ui, rect);
+        response
     };
     let response = match sizing {
         ImageSizing::FitCanvas => {
@@ -726,6 +732,146 @@ pub fn image_panel(ui: &mut egui::Ui, image: Image<'_>) -> ImageOutcome {
 #[cfg(test)]
 mod tests {
     use super::section;
+
+    fn image_frame(
+        context: &egui::Context,
+        controller: &mut crate::interaction::InteractionController,
+        texture: &egui::TextureHandle,
+        render_size: (u32, u32),
+        sizing: super::ImageSizing,
+        events: Vec<egui::Event>,
+    ) -> super::ImageOutcome {
+        let mut outcome = None;
+        context
+            .run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1000.0, 1000.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    outcome = Some(super::image_panel(
+                        ui,
+                        super::Image {
+                            controller,
+                            texture: Some(super::DisplayTexture::Uploaded(texture)),
+                            render_size,
+                            sizing,
+                            camera_locked: true,
+                            hide_when_empty: false,
+                        },
+                    ));
+                },
+            )
+            .drop_without_applying_deltas();
+        outcome.unwrap()
+    }
+
+    #[test]
+    fn letterboxed_image_uses_its_painted_bounds_for_input() {
+        for (render_size, sizing) in [
+            ((1600, 900), super::ImageSizing::FitCanvas),
+            ((900, 1600), super::ImageSizing::FitCanvas),
+            ((1600, 900), super::ImageSizing::OriginalResolution),
+            ((900, 1600), super::ImageSizing::OriginalResolution),
+        ] {
+            let context = egui::Context::default();
+            context.set_fonts(egui::FontDefinitions::empty());
+            let texture = context.load_texture(
+                "image input",
+                egui::ColorImage::filled(
+                    [
+                        (render_size.0 / 100) as usize,
+                        (render_size.1 / 100) as usize,
+                    ],
+                    egui::Color32::WHITE,
+                ),
+                Default::default(),
+            );
+            let mut controller =
+                crate::interaction::InteractionController::new(crate::scene::test_scene(1));
+            let mut frame = |events| {
+                image_frame(
+                    &context,
+                    &mut controller,
+                    &texture,
+                    render_size,
+                    sizing,
+                    events,
+                )
+            };
+            let initial = frame(Vec::new());
+            let painted = initial.image_rect.unwrap();
+            match sizing {
+                super::ImageSizing::FitCanvas => {
+                    let scale = 1000.0 / render_size.0.max(render_size.1) as f32;
+                    assert_eq!(
+                        painted,
+                        egui::Rect::from_center_size(
+                            egui::pos2(500.0, 500.0),
+                            egui::vec2(render_size.0 as f32 * scale, render_size.1 as f32 * scale),
+                        )
+                    );
+                }
+                super::ImageSizing::OriginalResolution => {
+                    assert_eq!(
+                        painted.size(),
+                        egui::vec2(render_size.0 as f32, render_size.1 as f32)
+                    );
+                }
+            }
+
+            let point = painted.min + painted.size() * 0.25;
+            frame(vec![
+                egui::Event::PointerMoved(point),
+                egui::Event::PointerButton {
+                    pos: point,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Default::default(),
+                },
+            ]);
+            let picked = frame(vec![egui::Event::PointerButton {
+                pos: point,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Default::default(),
+            }]);
+            let (x, y) = picked.pick.expect("the image receives the click");
+            assert!(x.abs_diff(render_size.0 / 4) <= 1);
+            assert!(y.abs_diff(render_size.1 / 4) <= 1);
+
+            let bar = if render_size.0 > render_size.1 {
+                egui::pos2(500.0, 20.0)
+            } else {
+                egui::pos2(20.0, 500.0)
+            };
+            let hovered = frame(vec![egui::Event::PointerMoved(bar)]);
+            assert!(
+                hovered.hover.is_none(),
+                "letterbox space is not image content"
+            );
+            frame(vec![egui::Event::PointerButton {
+                pos: bar,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Default::default(),
+            }]);
+            let outside = frame(vec![egui::Event::PointerButton {
+                pos: bar,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Default::default(),
+            }]);
+            assert!(
+                outside.pick.is_none(),
+                "letterbox space must not generate a pick"
+            );
+        }
+    }
 
     /// Runs `body` inside one headless egui frame; used to test panel helpers.
     fn in_frame<R>(body: impl FnOnce(&mut egui::Ui) -> R) -> R {

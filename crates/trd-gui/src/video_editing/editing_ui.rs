@@ -17,9 +17,9 @@ impl eframe::App for VideoEditingApp {
         if let Some(document) = self.shared.take_incoming_document() {
             self.set_document(document);
         }
+        self.consume_asset_defaults();
         self.consume_video_frame();
         self.consume_rendered_frame();
-        self.consume_asset_defaults();
         self.consume_pick_result();
         if !self.shared.video_loaded.get() {
             self.displayed_frame_ready = false;
@@ -422,8 +422,10 @@ impl VideoEditingApp {
         self.selected_asset = Some(asset);
         self.selected_quad = true;
         self.show_gizmos = true;
-        self.controller.state.objects[0] = crate::scene::ObjectTransform::default();
-        self.controller.state.selected = Some(0);
+        if let Some(object) = self.controller.state.objects.first_mut() {
+            object.transform = crate::scene::ObjectTransform::default();
+        }
+        self.controller.state.selected = None;
         self.controller.target = crate::interaction::InteractionTarget::Object;
         self.shared.renderer.borrow_mut().take();
         self.shared.asset_request.set(asset.code());
@@ -539,8 +541,28 @@ fn video_progress_bar(ui: &mut egui::Ui, frame: &mut u32, last_frame: u32, enabl
         },
     );
     let mut changed = false;
-    if enabled && (response.clicked() || response.dragged()) {
-        if let Some(pointer) = response.interact_pointer_pos() {
+    if enabled && (response.clicked() || response.dragged() || response.drag_stopped()) {
+        let pointer = if response.drag_stopped() {
+            // A blocking seek can batch the release and later hover moves into one UI frame.
+            let released = ui.input(|input| {
+                input.raw.events.iter().rev().find_map(|event| match event {
+                    egui::Event::PointerButton {
+                        pos,
+                        pressed: false,
+                        ..
+                    } => Some(*pos),
+                    _ => None,
+                })
+            });
+            released.map(|pos| {
+                ui.ctx()
+                    .layer_transform_from_global(response.layer_id)
+                    .map_or(pos, |transform| transform * pos)
+            })
+        } else {
+            response.interact_pointer_pos()
+        };
+        if let Some(pointer) = pointer {
             let fraction = ((pointer.x - rect.left()) / rect.width().max(1.0)).clamp(0.0, 1.0);
             let next = (fraction * last_frame as f32).round() as u32;
             changed = next != *frame;
@@ -598,6 +620,214 @@ fn player_status_label(loaded: bool, frame: u32, video: &trd_core::VideoInfo) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn progress_frame(
+        context: &egui::Context,
+        frame: &mut u32,
+        last_frame: u32,
+        enabled: bool,
+        events: Vec<egui::Event>,
+    ) -> bool {
+        let mut changed = false;
+        context
+            .run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1000.0, 100.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| changed |= video_progress_bar(ui, frame, last_frame, enabled),
+            )
+            .drop_without_applying_deltas();
+        changed
+    }
+
+    fn pointer_button(x: f32, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos: egui::pos2(x, 9.0),
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        }
+    }
+
+    fn start_progress_drag(context: &egui::Context, frame: &mut u32) {
+        progress_frame(context, frame, 1000, true, Vec::new());
+        progress_frame(
+            context,
+            frame,
+            1000,
+            true,
+            vec![
+                egui::Event::PointerMoved(egui::pos2(100.0, 9.0)),
+                pointer_button(100.0, true),
+            ],
+        );
+        assert!(progress_frame(
+            context,
+            frame,
+            1000,
+            true,
+            vec![egui::Event::PointerMoved(egui::pos2(400.0, 9.0))],
+        ));
+        assert_eq!(*frame, 400);
+    }
+
+    #[test]
+    fn progress_drag_commits_a_final_move_and_release_in_one_frame() {
+        let context = egui::Context::default();
+        let mut frame = 0;
+        start_progress_drag(&context, &mut frame);
+        assert!(progress_frame(
+            &context,
+            &mut frame,
+            1000,
+            true,
+            vec![
+                egui::Event::PointerMoved(egui::pos2(650.0, 9.0)),
+                egui::Event::PointerMoved(egui::pos2(900.0, 9.0)),
+                pointer_button(900.0, false),
+            ],
+        ));
+        assert_eq!(frame, 900);
+        assert!(!progress_frame(
+            &context,
+            &mut frame,
+            1000,
+            true,
+            Vec::new()
+        ));
+    }
+
+    #[test]
+    fn progress_drag_commits_release_position_not_later_hover_motion() {
+        let context = egui::Context::default();
+        let mut frame = 0;
+        start_progress_drag(&context, &mut frame);
+        assert!(progress_frame(
+            &context,
+            &mut frame,
+            1000,
+            true,
+            vec![
+                egui::Event::PointerMoved(egui::pos2(900.0, 9.0)),
+                pointer_button(900.0, false),
+                egui::Event::PointerMoved(egui::pos2(50.0, 60.0)),
+            ],
+        ));
+        assert_eq!(frame, 900);
+        assert!(!progress_frame(
+            &context,
+            &mut frame,
+            1000,
+            true,
+            Vec::new()
+        ));
+    }
+
+    #[test]
+    fn progress_drag_release_clamps_to_the_timeline_edges() {
+        for (x, expected) in [(-50.0, 0), (1200.0, 1000)] {
+            let context = egui::Context::default();
+            let mut frame = 0;
+            start_progress_drag(&context, &mut frame);
+            assert!(progress_frame(
+                &context,
+                &mut frame,
+                1000,
+                true,
+                vec![
+                    egui::Event::PointerMoved(egui::pos2(x, 9.0)),
+                    pointer_button(x, false),
+                ],
+            ));
+            assert_eq!(frame, expected);
+        }
+    }
+
+    #[test]
+    fn progress_drag_release_does_not_repeat_a_held_target_or_seek_when_disabled() {
+        for enabled in [true, false] {
+            let context = egui::Context::default();
+            let mut frame = 0;
+            start_progress_drag(&context, &mut frame);
+            assert!(!progress_frame(
+                &context,
+                &mut frame,
+                1000,
+                enabled,
+                vec![pointer_button(if enabled { 400.0 } else { 900.0 }, false)],
+            ));
+            assert_eq!(frame, 400);
+        }
+    }
+
+    #[test]
+    fn progress_bar_keeps_click_to_seek() {
+        let context = egui::Context::default();
+        let mut frame = 0;
+        progress_frame(&context, &mut frame, 1000, true, Vec::new());
+        progress_frame(
+            &context,
+            &mut frame,
+            1000,
+            true,
+            vec![
+                egui::Event::PointerMoved(egui::pos2(750.0, 9.0)),
+                pointer_button(750.0, true),
+            ],
+        );
+        assert!(progress_frame(
+            &context,
+            &mut frame,
+            1000,
+            true,
+            vec![pointer_button(750.0, false)],
+        ));
+        assert_eq!(frame, 750);
+    }
+
+    #[test]
+    fn catalog_replacement_adopts_the_registered_object_and_its_material() {
+        let shared = std::rc::Rc::new(super::super::VideoEditingShared::default());
+        let mut app = VideoEditingApp::new(super::super::tests::document(), shared.clone());
+        assert!(app.controller.state.objects.is_empty());
+        let original = crate::scene::test_scene(1).objects.remove(0);
+        app.selected_asset = Some(CatalogAsset::CocaColaCan);
+        shared
+            .asset_defaults
+            .replace(Some((CatalogAsset::CocaColaCan, original.clone())));
+        app.consume_asset_defaults();
+        assert_eq!(app.controller.state.objects[0].mesh, original.mesh);
+        assert_eq!(app.controller.state.selected, Some(0));
+
+        app.select_catalog_asset(CatalogAsset::Dragon);
+        let mut replacement = crate::scene::test_scene(1).objects.remove(0);
+        replacement.mode = trd_core::RenderMode::Shaded;
+        replacement.appearance.material.metallic = 0.75;
+        let fresh = replacement.mesh;
+        assert_ne!(fresh, original.mesh);
+        shared
+            .asset_defaults
+            .replace(Some((CatalogAsset::Dragon, replacement)));
+        app.consume_asset_defaults();
+        assert_eq!(app.controller.state.objects.len(), 1);
+        let object = &app.controller.state.objects[0];
+        assert_eq!(object.mesh, fresh);
+        assert_eq!(object.appearance.material.metallic, 0.75);
+        assert_eq!(object.mode, trd_core::RenderMode::Shaded);
+        assert_eq!(app.controller.state.draws()[0].mesh_id, fresh);
+        assert_eq!(app.controller.state.lighting.scale, 0.0);
+        assert_eq!(app.controller.state.lighting.ambient, 0.0);
+        assert!(app.controller.state.environment_available);
+
+        app.set_document(None);
+        assert!(app.controller.state.objects.is_empty());
+        assert!(app.controller.state.selected.is_none());
+    }
 
     #[test]
     fn unloaded_player_status_is_zeroed() {

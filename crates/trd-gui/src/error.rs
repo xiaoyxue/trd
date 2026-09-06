@@ -42,6 +42,19 @@ pub enum GuiError {
     #[error(transparent)]
     CoreRender(#[from] trd_core::RenderError),
 
+    #[error(transparent)]
+    MeshResource(#[from] trd_core::MeshResourceError),
+
+    #[error("scene has {meshes} initial meshes but {materials} imported materials")]
+    SceneSeedCount { meshes: usize, materials: usize },
+
+    #[error("{bindings} {kind} bindings exceed the {meshes} initial meshes")]
+    MaterialBindingCount {
+        kind: &'static str,
+        bindings: usize,
+        meshes: usize,
+    },
+
     /// The texture image file could not be read from disk (native `--texture`).
     #[cfg(not(target_arch = "wasm32"))]
     #[error("failed to read texture file '{path}': {source}")]

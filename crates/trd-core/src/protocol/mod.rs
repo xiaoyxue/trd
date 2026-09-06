@@ -4,11 +4,11 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::{DataType, Schema};
 use arrow::error::ArrowError;
 
-use crate::render::{Draw, DrawSelection};
+use crate::render::{DrawSelection, WireDraw};
 use crate::texture::TextureError;
 #[cfg(test)]
 use crate::texture::TEXTURE_COLUMN;
-use crate::{FrameError, FrameParams, MeshError};
+use crate::{FrameError, FrameParams, MeshError, MeshTableIndex};
 
 mod arrow_decode;
 mod image_encode;
@@ -83,23 +83,24 @@ pub type FrameBatch = Vec<DecodedFrame>;
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecodedFrame {
     pub params: FrameParams,
-    pub draws: Option<Vec<Draw>>,
+    pub draws: Option<Vec<WireDraw>>,
     pub frame_ref: Option<String>,
     pub frame_id: Option<u32>,
 }
 
 impl DecodedFrame {
-    /// Resolves this frame's [`draws`](Self::draws) to the concrete instance list
-    /// the renderer draws. An **explicit** list (`Some`, including an empty one →
+    /// Expands this frame's [`draws`](Self::draws) into its wire instance list.
+    /// Mesh identities are resolved later by [`crate::Scene::resolve_draws`].
+    /// An **explicit** list (`Some`, including an empty one →
     /// background only) is used verbatim; an **absent** list (`None`, legacy
     /// single-object stream) becomes one default instance of mesh `0` placed by
     /// the frame's own [`FrameParams::model_matrix`]. Shared by the native and
     /// wasm render paths so they resolve draws identically.
-    pub fn resolved_draws(&self) -> Vec<Draw> {
+    pub fn resolved_draws(&self) -> Vec<WireDraw> {
         match &self.draws {
             Some(draws) => draws.clone(),
-            None => vec![Draw {
-                mesh_id: 0,
+            None => vec![WireDraw {
+                mesh_id: MeshTableIndex::new(0),
                 model: self.params.model_matrix(),
                 selection: DrawSelection::INHERIT,
             }],
@@ -1151,7 +1152,7 @@ mod tests {
         };
         let resolved = absent.resolved_draws();
         assert_eq!(resolved.len(), 1);
-        assert_eq!(resolved[0].mesh_id, 0);
+        assert_eq!(resolved[0].mesh_id, MeshTableIndex::new(0));
 
         // Explicit *empty* draw list ⇒ no meshes: the frame is just its
         // background plate (e.g. an AR frame where tracking dropped out).
@@ -1164,8 +1165,8 @@ mod tests {
         assert!(empty.resolved_draws().is_empty());
 
         // Explicit non-empty list ⇒ used verbatim.
-        let one = Draw {
-            mesh_id: 3,
+        let one = WireDraw {
+            mesh_id: MeshTableIndex::new(3),
             model: Matrix4::from_cols_array(&[1.0_f32; 16]),
             selection: DrawSelection::INHERIT,
         };
@@ -1195,13 +1196,13 @@ mod tests {
         assert_eq!(
             batches[0][0].draws,
             Some(vec![
-                Draw {
-                    mesh_id: 0,
+                WireDraw {
+                    mesh_id: MeshTableIndex::new(0),
                     model: Matrix4::from_cols_array(&a),
                     selection: DrawSelection::INHERIT
                 },
-                Draw {
-                    mesh_id: 1,
+                WireDraw {
+                    mesh_id: MeshTableIndex::new(1),
                     model: Matrix4::from_cols_array(&b),
                     selection: DrawSelection::INHERIT
                 },

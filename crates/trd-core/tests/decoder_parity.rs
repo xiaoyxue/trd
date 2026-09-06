@@ -38,9 +38,14 @@
 
 use std::path::{Path, PathBuf};
 
-use trd_core::{Draw, FrameParams, ImageData, InlineFrameCache, InputSession, InputStream};
+use trd_core::{FrameParams, ImageData, InlineFrameCache, InputSession, InputStream, WireDraw};
 
-type Frame = (FrameParams, Vec<Draw>, Option<String>, Option<ImageData>);
+type Frame = (
+    FrameParams,
+    Vec<WireDraw>,
+    Option<String>,
+    Option<ImageData>,
+);
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

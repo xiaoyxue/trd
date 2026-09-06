@@ -40,9 +40,10 @@ use super::{
     TABLE_KIND_KEY, TEXTURE_TABLE_KIND,
 };
 use crate::math::Matrix4;
-use crate::render::{Draw, DrawSelection, RenderMode};
+use crate::render::{DrawSelection, RenderMode, WireDraw};
 use crate::render::{FrameParams, Mesh};
 use crate::texture::{Texture, TEXTURE_COLUMN};
+use crate::MeshTableIndex;
 use crate::{InlineFrame, FRAME_BYTES_COLUMN, FRAME_PIXELS_COLUMN};
 
 /// A failure authoring an input Arrow stream.
@@ -289,14 +290,14 @@ fn all_or_none_f32(
 }
 
 /// Authors the **params** IPC stream from per-frame [`FrameParams`] and an
-/// optional per-frame [`Draw`] list. A camera/model column is emitted only when
+/// optional per-frame [`WireDraw`] list. A camera/model column is emitted only when
 /// **all** frames set that field (Arrow columns are non-null); `draws`, when
 /// given, emits the `draw_mesh`/`draw_model` (+ `draw_mode` when any override is
 /// present) instanced-draw columns. Decodes back via [`crate::decode_frames`]
 /// and the draw decoder. Tagged with the `0.0.6` protocol version.
 pub fn encode_params_stream(
     frames: &[FrameParams],
-    draws: Option<&[Vec<Draw>]>,
+    draws: Option<&[Vec<WireDraw>]>,
 ) -> Result<Vec<u8>, SceneEncodeError> {
     encode_params_stream_with_frame_ids(frames, draws, None)
 }
@@ -305,7 +306,7 @@ pub fn encode_params_stream(
 /// frames table.
 pub fn encode_params_stream_with_frame_ids(
     frames: &[FrameParams],
-    draws: Option<&[Vec<Draw>]>,
+    draws: Option<&[Vec<WireDraw>]>,
     frame_ids: Option<&[Option<u32>]>,
 ) -> Result<Vec<u8>, SceneEncodeError> {
     if let Some(draws) = draws {
@@ -356,7 +357,7 @@ pub fn encode_params_stream_with_frame_ids(
     if let Some(draws) = draws {
         let mesh_rows: Vec<Vec<u32>> = draws
             .iter()
-            .map(|row| row.iter().map(|d| d.mesh_id).collect())
+            .map(|row| row.iter().map(|d| d.mesh_id.get()).collect())
             .collect();
         let model_rows: Vec<Vec<f32>> = draws
             .iter()
@@ -550,7 +551,7 @@ pub fn encode_frames_stream(frames: &[InlineFrame]) -> Result<Vec<u8>, SceneEnco
 pub fn encode_scene(
     meshes: &[Mesh],
     frames: &[FrameParams],
-    draws: Option<&[Vec<Draw>]>,
+    draws: Option<&[Vec<WireDraw>]>,
 ) -> Result<Vec<u8>, SceneEncodeError> {
     let mut bytes = encode_mesh_stream(meshes)?;
     bytes.extend(encode_params_stream(frames, draws)?);
@@ -562,7 +563,7 @@ pub fn encode_scene_with_frames(
     meshes: &[Mesh],
     inline_frames: &[InlineFrame],
     frames: &[FrameParams],
-    draws: Option<&[Vec<Draw>]>,
+    draws: Option<&[Vec<WireDraw>]>,
     frame_ids: &[Option<u32>],
 ) -> Result<Vec<u8>, SceneEncodeError> {
     if let Some(frame_id) = frame_ids
@@ -638,8 +639,8 @@ mod tests {
             aspect: Some(1.5),
             ..FrameParams::IDENTITY
         };
-        let draws = vec![vec![Draw {
-            mesh_id: 0,
+        let draws = vec![vec![WireDraw {
+            mesh_id: MeshTableIndex::new(0),
             model: Matrix4::from_cols_array(&[
                 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.2, -0.1, 0.0, 1.0,
             ]),
@@ -655,6 +656,25 @@ mod tests {
         let decoded: Vec<_> = batches.into_iter().flatten().collect();
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0].params, frame);
+        assert_eq!(decoded[0].draws, Some(draws[0].clone()));
+    }
+
+    #[test]
+    fn wire_mesh_rows_keep_all_32_bits_and_shadow_encoding() {
+        let draws = vec![vec![WireDraw {
+            mesh_id: MeshTableIndex::new(u32::MAX),
+            model: Matrix4::IDENTITY,
+            selection: DrawSelection::Shadow,
+        }]];
+        let bytes = encode_scene(&[tri_mesh()], &[FrameParams::IDENTITY], Some(&draws)).unwrap();
+        let mut session = InputSession::new();
+        let decoded: Vec<_> = session
+            .push(&bytes)
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .collect();
+        session.finish().unwrap();
         assert_eq!(decoded[0].draws, Some(draws[0].clone()));
     }
 
@@ -703,15 +723,15 @@ mod tests {
             },
         ];
         let draws = vec![
-            vec![Draw {
-                mesh_id: 0,
+            vec![WireDraw {
+                mesh_id: MeshTableIndex::new(0),
                 model: Matrix4::from_cols_array(&[
                     1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.2, -0.1, 0.0, 1.0,
                 ]),
                 selection: DrawSelection::INHERIT,
             }],
-            vec![Draw {
-                mesh_id: 0,
+            vec![WireDraw {
+                mesh_id: MeshTableIndex::new(0),
                 model: Matrix4::from_cols_array(&[
                     0.5, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 1.0,
                 ]),
@@ -738,8 +758,8 @@ mod tests {
         // present and the empty list survives (rather than collapsing to "absent
         // ⇒ default instance"). Guards the FIBA tail (untracked frames).
         let frames = vec![FrameParams::IDENTITY, FrameParams::IDENTITY];
-        let placed = Draw {
-            mesh_id: 0,
+        let placed = WireDraw {
+            mesh_id: MeshTableIndex::new(0),
             model: Matrix4::from_cols_array(&[
                 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.2, -0.1, 0.0, 1.0,
             ]),

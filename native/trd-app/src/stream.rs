@@ -6,15 +6,18 @@ use std::sync::mpsc;
 use std::sync::Arc;
 
 use trd_core::{
-    Draw, FrameParams, ImageData, ImageTexture, InlineFrameCache, InputStream, Mesh, SceneError,
+    FrameParams, ImageData, ImageTexture, InlineFrameCache, InputStream, Mesh, MeshTableIndex,
+    Scene, WireDraw,
 };
 
-/// A message from the stdin reader thread: the decoded mesh table (sent once,
-/// first), then the optional bound texture (once, only for a `0.0.4` stream
-/// carrying a texture table), then the stream's declared playback rate (once),
+/// A message from the stdin reader thread: the decoded CPU mesh table (sent
+/// once, first), then the optional bound texture, then the playback rate,
 /// then each decoded frame.
 pub(crate) enum StreamMsg {
-    Meshes(Vec<Mesh>),
+    Meshes {
+        meshes: Vec<Mesh>,
+        grid_mesh: Option<MeshTableIndex>,
+    },
     // Only sent when the stream carries a texture table; small (width/height +
     // an RGBA byte buffer), so it needs no boxing.
     Texture(ImageTexture),
@@ -24,7 +27,7 @@ pub(crate) enum StreamMsg {
     Frame(Box<FrameData>),
 }
 
-/// One decoded frame: its camera/transform params and resolved instanced draw
+/// One decoded frame: its camera/transform params and validated wire draw
 /// list, built into a [`trd_core::Scene`] at render time. `frame_image` holds a
 /// per-frame background image (#63) decoded to RGBA at full source
 /// resolution off the render thread (from `frame_path` + `--frames-base`),
@@ -35,7 +38,7 @@ pub(crate) enum StreamMsg {
 #[derive(Clone)]
 pub(crate) struct FrameData {
     pub(crate) params: FrameParams,
-    pub(crate) draws: Vec<Draw>,
+    pub(crate) draws: Vec<WireDraw>,
     pub(crate) frame_image: Option<Arc<ImageData>>,
 }
 
@@ -48,12 +51,16 @@ pub(crate) struct FrameData {
 /// held in an `Arc` so cloning a frame for loop playback never re-copies the
 /// pixel buffer; per-frame decode is cheap because deps build with `opt-level=3`
 /// even in dev (see the root `Cargo.toml`).
-pub(crate) fn spawn_stdin_reader(tx: mpsc::Sender<StreamMsg>, frames_base: Option<PathBuf>) {
+pub(crate) fn spawn_stdin_reader(
+    tx: mpsc::Sender<StreamMsg>,
+    frames_base: Option<PathBuf>,
+    grid_mesh: Option<MeshTableIndex>,
+) {
     let spawned = std::thread::Builder::new()
         .name("trd-stdin-reader".to_string())
         .spawn(move || {
             // A send error just means the window closed; stop reading in that case.
-            if let Err(err) = read_stdin(&tx, frames_base) {
+            if let Err(err) = read_stream(std::io::stdin().lock(), &tx, frames_base, grid_mesh) {
                 log::error!("input stream error: {err}");
             }
         });
@@ -67,14 +74,22 @@ pub(crate) fn spawn_stdin_reader(tx: mpsc::Sender<StreamMsg>, frames_base: Optio
 /// The loop lives here rather than behind a callback API in `trd-core` because
 /// it is three lines and this shell is the only thing that knows what to do with
 /// each frame — forward it to the window thread, which paces playback itself.
-fn read_stdin(
+fn read_stream<R: std::io::Read>(
+    source: R,
     tx: &mpsc::Sender<StreamMsg>,
     frames_base: Option<PathBuf>,
+    grid_mesh: Option<MeshTableIndex>,
 ) -> Result<(), trd_core::StreamError> {
-    let mut input = InputStream::new(std::io::stdin().lock());
+    let mut input = InputStream::new(source);
     let prologue = input.prologue()?;
     let mesh_count = prologue.meshes.len();
-    let _ = tx.send(StreamMsg::Meshes(prologue.meshes.to_vec()));
+    if let Some(row) = grid_mesh {
+        Scene::validate_mesh_index(row, mesh_count)?;
+    }
+    let _ = tx.send(StreamMsg::Meshes {
+        meshes: prologue.meshes.to_vec(),
+        grid_mesh,
+    });
     if let Some(texture) = prologue.texture {
         let _ = tx.send(StreamMsg::Texture(texture.clone()));
     }
@@ -84,13 +99,7 @@ fn read_stdin(
     while let Some(batch) = input.next_batch() {
         for frame in batch? {
             let draws = frame.resolved_draws();
-            if let Some(bad) = draws.iter().find(|d| d.mesh_id as usize >= mesh_count) {
-                return Err(SceneError::MeshIndexOutOfRange {
-                    mesh_id: bad.mesh_id,
-                    mesh_count,
-                }
-                .into());
-            }
+            Scene::validate_draws(&draws, mesh_count)?;
             let frame_image = inline_cache
                 .resolve(frame.frame_id, input.frames())?
                 .map(|(image, _changed)| image)
@@ -130,5 +139,72 @@ fn load_frame_image(path: &std::path::Path) -> Option<ImageData> {
             log::warn!("skipping frame background {}: {err}", path.display());
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use trd_core::SceneError;
+
+    fn fixture() -> Vec<u8> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("crates")
+            .join("trd-core")
+            .join("tests")
+            .join("golden")
+            .join("stage2.arrow");
+        std::fs::read(path).unwrap()
+    }
+
+    #[test]
+    fn reader_sends_cpu_meshes_once_and_validated_wire_draws() {
+        let bytes = fixture();
+        let (tx, rx) = mpsc::channel();
+        read_stream(bytes.as_slice(), &tx, None, Some(MeshTableIndex::new(0))).unwrap();
+        let StreamMsg::Meshes { meshes, grid_mesh } = rx.try_recv().unwrap() else {
+            panic!("the CPU meshes must precede all frames");
+        };
+        assert_eq!(grid_mesh, Some(MeshTableIndex::new(0)));
+        let received: Vec<_> = rx
+            .try_iter()
+            .filter_map(|message| match message {
+                StreamMsg::Frame(frame) => Some(frame),
+                StreamMsg::Meshes { .. } => panic!("meshes must be sent only once"),
+                _ => None,
+            })
+            .collect();
+        let mut input = trd_core::InputSession::new();
+        let decoded: Vec<_> = input.push(&bytes).unwrap().into_iter().flatten().collect();
+        input.finish().unwrap();
+        assert_eq!(meshes.len(), input.meshes().len());
+        assert!(!received.is_empty());
+        assert_eq!(received.len(), decoded.len());
+        for (received, wire) in received.iter().zip(&decoded) {
+            assert_eq!(received.params, wire.params);
+            assert_eq!(received.draws, wire.resolved_draws());
+            Scene::validate_draws(&received.draws, meshes.len()).unwrap();
+        }
+    }
+
+    #[test]
+    fn reader_rejects_a_bad_grid_row_before_sending_resources_or_frames() {
+        let bytes = fixture();
+        let (tx, rx) = mpsc::channel();
+        let error = read_stream(
+            bytes.as_slice(),
+            &tx,
+            None,
+            Some(MeshTableIndex::new(u32::MAX)),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            trd_core::StreamError::Scene(SceneError::MeshIndexOutOfRange { mesh_id, .. })
+                if mesh_id == MeshTableIndex::new(u32::MAX)
+        ));
+        assert!(rx.try_iter().next().is_none());
     }
 }

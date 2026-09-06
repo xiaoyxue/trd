@@ -91,7 +91,14 @@ fn main() -> eframe::Result<()> {
         }
     };
 
-    let controller = InteractionController::new(cli.scene_state(&loaded, has_env));
+    let scene = match cli.scene_state(&loaded, has_env, renderer.initial_mesh_ids()) {
+        Ok(scene) => scene,
+        Err(error) => {
+            log::error!("failed to seed scene: {error}");
+            std::process::exit(1);
+        }
+    };
+    let controller = InteractionController::new(scene);
     let app = TrdGuiApp::new(controller, renderer);
 
     // Size the window to the render plus the side panel, so a high `--width`/

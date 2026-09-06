@@ -4,7 +4,7 @@
 //! Under the crate's module boundary (#224) the root holds the universal domain
 //! vocabulary — what any renderer would have — so the mesh and its three
 //! loaders live here, device-free, while their GPU residency stays in
-//! `render/mesh_store.rs`:
+//! `render/gpu_resources.rs`:
 //!
 //! - [`mesh`] — [`Mesh`] / [`MeshShading`], the container every source converges on
 //! - [`obj`] — Wavefront OBJ text, trd's default authorable format (#36)
@@ -17,6 +17,7 @@
 
 mod arrow;
 mod gltf;
+mod identity;
 // `mesh::mesh` holds the type this module is named for; the loaders around it
 // are named for their formats, so the inner module keeps the type's own name.
 #[allow(clippy::module_inception)]
@@ -24,6 +25,7 @@ mod mesh;
 mod obj;
 
 pub use gltf::{import_glb, import_gltf_materials, GltfAsset, GltfImportError};
+pub use identity::{MeshId, MeshResourceError, MeshTableIndex};
 pub use mesh::{Mesh, MeshShading};
 
 // `::arrow` (leading `::`) is the external Arrow crate, not this module's
