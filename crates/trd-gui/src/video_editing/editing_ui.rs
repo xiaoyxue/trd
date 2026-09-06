@@ -541,8 +541,28 @@ fn video_progress_bar(ui: &mut egui::Ui, frame: &mut u32, last_frame: u32, enabl
         },
     );
     let mut changed = false;
-    if enabled && (response.clicked() || response.dragged()) {
-        if let Some(pointer) = response.interact_pointer_pos() {
+    if enabled && (response.clicked() || response.dragged() || response.drag_stopped()) {
+        let pointer = if response.drag_stopped() {
+            // A blocking seek can batch the release and later hover moves into one UI frame.
+            let released = ui.input(|input| {
+                input.raw.events.iter().rev().find_map(|event| match event {
+                    egui::Event::PointerButton {
+                        pos,
+                        pressed: false,
+                        ..
+                    } => Some(*pos),
+                    _ => None,
+                })
+            });
+            released.map(|pos| {
+                ui.ctx()
+                    .layer_transform_from_global(response.layer_id)
+                    .map_or(pos, |transform| transform * pos)
+            })
+        } else {
+            response.interact_pointer_pos()
+        };
+        if let Some(pointer) = pointer {
             let fraction = ((pointer.x - rect.left()) / rect.width().max(1.0)).clamp(0.0, 1.0);
             let next = (fraction * last_frame as f32).round() as u32;
             changed = next != *frame;
@@ -600,6 +620,175 @@ fn player_status_label(loaded: bool, frame: u32, video: &trd_core::VideoInfo) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn progress_frame(
+        context: &egui::Context,
+        frame: &mut u32,
+        last_frame: u32,
+        enabled: bool,
+        events: Vec<egui::Event>,
+    ) -> bool {
+        let mut changed = false;
+        context
+            .run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1000.0, 100.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| changed |= video_progress_bar(ui, frame, last_frame, enabled),
+            )
+            .drop_without_applying_deltas();
+        changed
+    }
+
+    fn pointer_button(x: f32, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos: egui::pos2(x, 9.0),
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        }
+    }
+
+    fn start_progress_drag(context: &egui::Context, frame: &mut u32) {
+        progress_frame(context, frame, 1000, true, Vec::new());
+        progress_frame(
+            context,
+            frame,
+            1000,
+            true,
+            vec![
+                egui::Event::PointerMoved(egui::pos2(100.0, 9.0)),
+                pointer_button(100.0, true),
+            ],
+        );
+        assert!(progress_frame(
+            context,
+            frame,
+            1000,
+            true,
+            vec![egui::Event::PointerMoved(egui::pos2(400.0, 9.0))],
+        ));
+        assert_eq!(*frame, 400);
+    }
+
+    #[test]
+    fn progress_drag_commits_a_final_move_and_release_in_one_frame() {
+        let context = egui::Context::default();
+        let mut frame = 0;
+        start_progress_drag(&context, &mut frame);
+        assert!(progress_frame(
+            &context,
+            &mut frame,
+            1000,
+            true,
+            vec![
+                egui::Event::PointerMoved(egui::pos2(650.0, 9.0)),
+                egui::Event::PointerMoved(egui::pos2(900.0, 9.0)),
+                pointer_button(900.0, false),
+            ],
+        ));
+        assert_eq!(frame, 900);
+        assert!(!progress_frame(
+            &context,
+            &mut frame,
+            1000,
+            true,
+            Vec::new()
+        ));
+    }
+
+    #[test]
+    fn progress_drag_commits_release_position_not_later_hover_motion() {
+        let context = egui::Context::default();
+        let mut frame = 0;
+        start_progress_drag(&context, &mut frame);
+        assert!(progress_frame(
+            &context,
+            &mut frame,
+            1000,
+            true,
+            vec![
+                egui::Event::PointerMoved(egui::pos2(900.0, 9.0)),
+                pointer_button(900.0, false),
+                egui::Event::PointerMoved(egui::pos2(50.0, 60.0)),
+            ],
+        ));
+        assert_eq!(frame, 900);
+        assert!(!progress_frame(
+            &context,
+            &mut frame,
+            1000,
+            true,
+            Vec::new()
+        ));
+    }
+
+    #[test]
+    fn progress_drag_release_clamps_to_the_timeline_edges() {
+        for (x, expected) in [(-50.0, 0), (1200.0, 1000)] {
+            let context = egui::Context::default();
+            let mut frame = 0;
+            start_progress_drag(&context, &mut frame);
+            assert!(progress_frame(
+                &context,
+                &mut frame,
+                1000,
+                true,
+                vec![
+                    egui::Event::PointerMoved(egui::pos2(x, 9.0)),
+                    pointer_button(x, false),
+                ],
+            ));
+            assert_eq!(frame, expected);
+        }
+    }
+
+    #[test]
+    fn progress_drag_release_does_not_repeat_a_held_target_or_seek_when_disabled() {
+        for enabled in [true, false] {
+            let context = egui::Context::default();
+            let mut frame = 0;
+            start_progress_drag(&context, &mut frame);
+            assert!(!progress_frame(
+                &context,
+                &mut frame,
+                1000,
+                enabled,
+                vec![pointer_button(if enabled { 400.0 } else { 900.0 }, false)],
+            ));
+            assert_eq!(frame, 400);
+        }
+    }
+
+    #[test]
+    fn progress_bar_keeps_click_to_seek() {
+        let context = egui::Context::default();
+        let mut frame = 0;
+        progress_frame(&context, &mut frame, 1000, true, Vec::new());
+        progress_frame(
+            &context,
+            &mut frame,
+            1000,
+            true,
+            vec![
+                egui::Event::PointerMoved(egui::pos2(750.0, 9.0)),
+                pointer_button(750.0, true),
+            ],
+        );
+        assert!(progress_frame(
+            &context,
+            &mut frame,
+            1000,
+            true,
+            vec![pointer_button(750.0, false)],
+        ));
+        assert_eq!(frame, 750);
+    }
 
     #[test]
     fn catalog_replacement_adopts_the_registered_object_and_its_material() {
