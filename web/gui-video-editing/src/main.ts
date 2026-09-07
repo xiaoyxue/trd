@@ -329,7 +329,7 @@ async function main(): Promise<void> {
     } else if (command === 4) {
       documentInput.value = "";
       documentInput.click();
-    } else if (command === 5) {
+    } else if (command === 5 || command === 7) {
       void (async () => {
         // The video timeline must land before a protocol scene is validated
         // against it; native follows the same video-then-Arrow ordering.
@@ -355,10 +355,17 @@ async function main(): Promise<void> {
             { filename: file.name, byteLength: file.size },
           );
         }
-        if (!videoRequested || sourceReady) {
+        if (command === 7 && !videoRequested) {
+          reportError("media", "Select a video file or URL first");
+        }
+        if (command === 5 && (!videoRequested || sourceReady)) {
           await loadSelectedDocument();
         }
-      })().catch((error: unknown) => reportError("document", String(error)));
+      })().catch((error: unknown) =>
+        reportError(command === 7 ? "media" : "document", String(error)),
+      );
+    } else if (command === 8) {
+      void loadSelectedDocument().catch((error: unknown) => reportError("document", String(error)));
     } else if (command === 6) {
       const filename = editor.pendingArrowExportFilename();
       try {

@@ -61,6 +61,12 @@ mode, the shared **Source models** controls edit the selected row/instance and
 **Export Arrow** writes the retained document. These controls do not currently
 propagate an edit across a whole track; the UI states the row-local scope.
 
+The editor has separate **Open Video** and **Load Arrow** buttons, each with
+local-file and HTTP(S) URL selection. Loading/replacing Arrow does not reopen
+the video. Arrow may also be loaded before a video; it is validated against
+the video timeline when one becomes available. Clearing the Arrow selection
+and choosing **Unload Arrow** leaves the video running independently.
+
 ## Native video editor
 
 ```powershell
@@ -98,3 +104,18 @@ so source placement is not silently preview-scaled or re-centered.
 Internal OBJ loading and the original CG camera path remain intact. The GLB
 importer's current capability limits still apply; this work does not silently
 claim animation, skinning or arbitrary multi-primitive import support.
+
+## Primary end-to-end cases
+
+Run these on native and Chrome/wasm surfaces on both Windows and Linux:
+
+| Case | Input | Acceptance |
+|---|---|---|
+| 1 | Params only | Show the quad outline, local axes and origin-centered wireframe cube together. |
+| 2 | Params plus one mesh | Edit the active model matrix, export updated params, reload with the same GLB and compare the edited/reopened rendering at identical frames and camera/lighting settings. Unrelated columns and untouched models survive. |
+| 3 | Params plus multiple mesh rows | Verify asset IDs, independent transforms and each GLB's material/textures; no swapped or missing assets. |
+
+Multiple meshes occupy rows of one `mesh_id`/`glb` table. These cases organize
+the feature acceptance; the remaining L3 gates, CG/OBJ regressions and video/
+large-file seek coverage still apply. The full planned evidence matrix is
+recorded on #367 and #370.

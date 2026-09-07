@@ -3,7 +3,10 @@ use trd_core::{
     Scene, SceneDocument, Vertex, Viewport,
 };
 
-use crate::{quad_frame, quad_origin_model, CameraIntrinsics, PlacementError, PlacementQuad};
+use crate::{
+    quad_frame, quad_origin_model, quad_outline_model, CameraIntrinsics, PlacementError,
+    PlacementQuad,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum DocumentSceneError {
@@ -104,6 +107,12 @@ pub fn document_scene(
     for (index, object) in frame.objects.iter().enumerate() {
         let origin = if let Some(points_px) = object.quad {
             let quad = quad_frame(intrinsics, PlacementQuad { points_px })?;
+            if reference_only {
+                reference.push(DrawableObject::quad_outline(
+                    pose * quad_outline_model(quad),
+                    false,
+                ));
+            }
             pose * quad_origin_model(quad)
         } else {
             Matrix4::IDENTITY
@@ -245,6 +254,38 @@ mod tests {
                 trd_core::Primitive::AabbBox { mesh_id: 0 },
                 trd_core::Primitive::CoordinateAxes,
             ]
+        );
+    }
+
+    #[test]
+    fn placement_reference_includes_quad_axes_and_cube() {
+        let document = cg_source();
+        let (_, scene) = document_scene(
+            &document,
+            &frame(),
+            Viewport {
+                width: 1920,
+                height: 1080,
+            },
+            &RenderOptions::default(),
+            None,
+        )
+        .unwrap();
+        let objects = scene.objects();
+        assert_eq!(objects.len(), 3);
+        assert_eq!(
+            objects[0].primitive(),
+            trd_core::Primitive::QuadOutline { selected: false }
+        );
+        assert_eq!(
+            objects[1].primitive(),
+            trd_core::Primitive::AabbBox { mesh_id: 0 }
+        );
+        assert_eq!(objects[2].primitive(), trd_core::Primitive::CoordinateAxes);
+        assert_eq!(objects[1].model(), objects[2].model());
+        assert_eq!(
+            &objects[0].model().to_cols_array()[12..15],
+            &objects[1].model().to_cols_array()[12..15],
         );
     }
 

@@ -104,6 +104,30 @@ const COMMAND_PAUSE: u8 = 3;
 const COMMAND_PICK_DOCUMENT: u8 = 4;
 const COMMAND_LOAD_SELECTION: u8 = 5;
 const COMMAND_EXPORT_ARROW: u8 = 6;
+const COMMAND_LOAD_VIDEO: u8 = 7;
+const COMMAND_LOAD_ARROW: u8 = 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceDialog {
+    Video,
+    Arrow,
+}
+
+impl SourceDialog {
+    fn can_load(self, video_selected: bool, arrow_selected: bool, arrow_loaded: bool) -> bool {
+        match self {
+            Self::Video => video_selected,
+            Self::Arrow => arrow_selected || arrow_loaded,
+        }
+    }
+
+    fn command(self) -> u8 {
+        match self {
+            Self::Video => COMMAND_LOAD_VIDEO,
+            Self::Arrow => COMMAND_LOAD_ARROW,
+        }
+    }
+}
 
 /// A source the dialog has selected but not loaded: picking and loading are separate steps (#264).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -324,6 +348,8 @@ pub enum VideoEditingCommand {
     OpenLocalDocument,
     /// Load the dialog's selection (video + optional document). Picking alone never loads.
     LoadSelection,
+    LoadVideo,
+    LoadArrow,
     Play,
     Pause,
     ExportArrow,
@@ -716,6 +742,8 @@ impl VideoEditingShared {
             COMMAND_PICK_VIDEO => Some(VideoEditingCommand::OpenLocalVideo),
             COMMAND_PICK_DOCUMENT => Some(VideoEditingCommand::OpenLocalDocument),
             COMMAND_LOAD_SELECTION => Some(VideoEditingCommand::LoadSelection),
+            COMMAND_LOAD_VIDEO => Some(VideoEditingCommand::LoadVideo),
+            COMMAND_LOAD_ARROW => Some(VideoEditingCommand::LoadArrow),
             COMMAND_PLAY => Some(VideoEditingCommand::Play),
             COMMAND_PAUSE => Some(VideoEditingCommand::Pause),
             COMMAND_EXPORT_ARROW => Some(VideoEditingCommand::ExportArrow),
@@ -896,7 +924,7 @@ pub struct VideoEditingApp {
     source_selected_instance: usize,
     image_sizing: crate::ui::ImageSizing,
     fitted_render_size: (u32, u32),
-    show_video_source_dialog: bool,
+    source_dialog: Option<SourceDialog>,
     video_url: String,
     /// URL input and last validation result (`Ok` = selected, `Err` = rejected).
     video_status: Option<Result<String, String>>,
@@ -960,7 +988,7 @@ impl VideoEditingApp {
             source_selected_instance: 0,
             image_sizing: crate::ui::ImageSizing::FitCanvas,
             fitted_render_size: source_size,
-            show_video_source_dialog: false,
+            source_dialog: None,
             video_url: String::new(),
             video_status: None,
             document_url: String::new(),
@@ -1168,31 +1196,35 @@ impl VideoEditingApp {
     }
 
     fn video_source_dialog(&mut self, context: &egui::Context) {
-        if !self.show_video_source_dialog {
+        let Some(kind) = self.source_dialog else {
             return;
-        }
+        };
         let mut open = true;
         let mut close = false;
-        egui::Window::new("Open source")
-            .collapsible(false)
-            .resizable(false)
-            .open(&mut open)
-            .show(context, |ui| {
-                ui.set_min_width(460.0);
-                // The rows scroll; the Load button does not. A dialog whose
-                // commit point can be pushed off-screen by its own explanatory
-                // text is a dialog with no commit point.
-                egui::ScrollArea::vertical()
-                    .max_height(360.0)
-                    .show(ui, |ui| {
-                        self.video_source_row(ui);
-                        ui.separator();
-                        self.document_source_row(ui);
-                    });
-                ui.separator();
-                close = self.load_row(ui);
-            });
-        self.show_video_source_dialog = open && !close;
+        egui::Window::new(match kind {
+            SourceDialog::Video => "Open Video",
+            SourceDialog::Arrow => "Load Arrow",
+        })
+        .collapsible(false)
+        .resizable(false)
+        .open(&mut open)
+        .show(context, |ui| {
+            ui.set_min_width(460.0);
+            // The rows scroll; the Load button does not. A dialog whose
+            // commit point can be pushed off-screen by its own explanatory
+            // text is a dialog with no commit point.
+            egui::ScrollArea::vertical()
+                .max_height(360.0)
+                .show(ui, |ui| match kind {
+                    SourceDialog::Video => self.video_source_row(ui),
+                    SourceDialog::Arrow => self.document_source_row(ui),
+                });
+            ui.separator();
+            close = self.load_row(ui, kind);
+        });
+        if !open || close {
+            self.source_dialog = None;
+        }
     }
 
     /// The video row. Selecting a file or URL waits for the Load button (#264).
@@ -1240,9 +1272,9 @@ impl VideoEditingApp {
 
     /// Optional annotation document or exported protocol scene.
     fn document_source_row(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Arrow input (optional)");
+        ui.heading("Arrow input");
         ui.label("An Arrow annotation document or params scene. Parquet is not supported.");
-        ui.weak("Annotations are editable; an exported scene replays over the selected video.");
+        ui.weak("Load or replace Arrow data without reopening the video.");
 
         ui.horizontal(|ui| {
             if ui.button("Select local file...").clicked() {
@@ -1254,7 +1286,7 @@ impl VideoEditingApp {
                 self.shared.set_pending_document(None);
             }
         });
-        ui.weak("Load applies the whole selection: with no Arrow input the video plays unchanged.");
+        ui.weak("Clear the selection and choose Unload Arrow to keep only the video.");
 
         ui.label("Arrow input URL");
         let response = ui.add(
@@ -1287,20 +1319,23 @@ impl VideoEditingApp {
 
     /// The single commit point. Returns whether it was pressed, so the dialog
     /// closes only on an actual load.
-    fn load_row(&mut self, ui: &mut egui::Ui) -> bool {
-        let ready = load_is_available(
+    fn load_row(&mut self, ui: &mut egui::Ui, kind: SourceDialog) -> bool {
+        let ready = kind.can_load(
             self.shared.pending_video().is_some(),
-            self.shared.video_loaded.get(),
+            self.shared.pending_document().is_some(),
+            self.document.is_some() || self.arrow_scene.is_some(),
         );
+        let label = match kind {
+            SourceDialog::Video => "Open Video",
+            SourceDialog::Arrow if self.shared.pending_document().is_none() => "Unload Arrow",
+            SourceDialog::Arrow => "Load Arrow",
+        };
         let clicked = ui
-            .add_enabled(ready, egui::Button::new("Load"))
-            .on_disabled_hover_text("Select a video first — the document is optional")
+            .add_enabled(ready, egui::Button::new(label))
+            .on_disabled_hover_text("Select a local file or an HTTP(S) URL")
             .clicked();
         if clicked {
-            self.shared.command.set(COMMAND_LOAD_SELECTION);
-        }
-        if !ready {
-            ui.weak("Load becomes available once a video is selected.");
+            self.shared.command.set(kind.command());
         }
         clicked
     }
@@ -2307,6 +2342,20 @@ pub(super) mod tests {
             shared.take_command(),
             Some(VideoEditingCommand::LoadSelection)
         );
+    }
+
+    #[test]
+    fn video_and_arrow_dialogs_load_independently() {
+        assert!(SourceDialog::Arrow.can_load(false, true, false));
+        assert!(SourceDialog::Arrow.can_load(false, false, true));
+        assert!(!SourceDialog::Arrow.can_load(true, false, false));
+        assert!(SourceDialog::Video.can_load(true, false, false));
+        assert!(!SourceDialog::Video.can_load(false, true, true));
+        let shared = VideoEditingShared::default();
+        shared.command.set(SourceDialog::Video.command());
+        assert_eq!(shared.take_command(), Some(VideoEditingCommand::LoadVideo));
+        shared.command.set(SourceDialog::Arrow.command());
+        assert_eq!(shared.take_command(), Some(VideoEditingCommand::LoadArrow));
     }
 
     #[test]

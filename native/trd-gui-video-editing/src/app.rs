@@ -307,6 +307,10 @@ impl NativeVideoEditingApp {
                 VideoEditingCommand::OpenLocalVideo => self.pick_local_video(),
                 VideoEditingCommand::OpenLocalDocument => self.pick_local_document(),
                 VideoEditingCommand::LoadSelection => self.load_selection(),
+                VideoEditingCommand::LoadVideo => {
+                    self.load_selected_video();
+                }
+                VideoEditingCommand::LoadArrow => self.load_selected_document(),
                 VideoEditingCommand::Play => self.play(),
                 VideoEditingCommand::Pause => self.pause(),
                 VideoEditingCommand::ExportArrow => self.save_arrow_export(),
@@ -417,18 +421,29 @@ impl NativeVideoEditingApp {
     /// Both are applied in one act, so "open this video *with* this document" is
     /// expressible — which is why picking never loads on its own (#264).
     fn load_selection(&mut self) {
+        if self.load_selected_video() {
+            self.load_selected_document();
+        }
+    }
+
+    fn load_selected_video(&mut self) -> bool {
         let Some(pending) = self.shared.pending_video() else {
-            return;
+            self.shared
+                .set_error(ErrorScope::Media, "Select a video file or URL first");
+            return false;
         };
         let source = match pending.kind {
             VideoSourceKind::LocalFile => match self.picked_video.clone() {
                 Some(path) => NativeVideoSource::Local(path),
-                None => return,
+                None => {
+                    self.shared
+                        .set_error(ErrorScope::Media, "The selected video file is unavailable");
+                    return false;
+                }
             },
             VideoSourceKind::HttpUrl => NativeVideoSource::Url(pending.name),
         };
-        self.open_video_source(source);
-        self.load_selected_document();
+        self.open_video_source(source)
     }
 
     /// Reads the selected annotation document — a local file or an HTTP(S) URL —
@@ -504,7 +519,7 @@ impl NativeVideoEditingApp {
         }
     }
 
-    fn open_video_source(&mut self, source: NativeVideoSource) {
+    fn open_video_source(&mut self, source: NativeVideoSource) -> bool {
         self.stop_playback();
         // With a document the source must match it; without one the container is
         // the timeline, so probe and adopt what it says (#264).
@@ -524,14 +539,14 @@ impl NativeVideoEditingApp {
             Ok(opened) => opened,
             Err(error) => {
                 self.shared.set_error(ErrorScope::Media, error.to_string());
-                return;
+                return false;
             }
         };
         let frame = match video.decode_one(0) {
             Ok(frame) => frame,
             Err(error) => {
                 self.shared.set_error(ErrorScope::Media, error.to_string());
-                return;
+                return false;
             }
         };
         self.shared.set_video_status(false, false);
@@ -549,6 +564,7 @@ impl NativeVideoEditingApp {
         self.pending_frame = None;
         self.submit_frame(frame);
         self.sync_video_status();
+        true
     }
 
     fn play(&mut self) {

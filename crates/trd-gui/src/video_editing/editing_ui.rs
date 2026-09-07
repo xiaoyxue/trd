@@ -297,10 +297,16 @@ impl VideoEditingApp {
     /// Source heading, the Open button, and the loaded-source readout.
     fn source_controls(&mut self, ui: &mut egui::Ui) {
         ui.heading("Video");
-        if ui.button("Open source...").clicked() {
-            self.show_video_source_dialog = true;
-            ui.ctx().request_repaint();
-        }
+        ui.horizontal(|ui| {
+            if ui.button("Open Video").clicked() {
+                self.source_dialog = Some(super::SourceDialog::Video);
+                ui.ctx().request_repaint();
+            }
+            if ui.button("Load Arrow").clicked() {
+                self.source_dialog = Some(super::SourceDialog::Arrow);
+                ui.ctx().request_repaint();
+            }
+        });
         ui.weak("Display: fit right pane (16:9)");
         ui.collapsing("Source", |ui| {
             let video = &self.video;
