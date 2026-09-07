@@ -12,8 +12,6 @@ use super::video::VideoInfo;
 use arrow::datatypes::{DataType, Schema};
 use arrow::ipc::reader::StreamReader;
 use arrow::record_batch::RecordBatch;
-use bytes::Bytes;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use thiserror::Error;
 
 pub const VIDEO_EDIT_VERSION: &str = "0.2.0";
@@ -142,84 +140,31 @@ pub enum VideoEditingError {
     },
     #[error("poster image must only appear on the first row")]
     ExtraPoster,
-    #[error("not an annotation document: expected Arrow IPC or Parquet, got bytes {head:02x?}")]
+    #[error("not an annotation document: expected Arrow IPC, got bytes {head:02x?}")]
     UnknownFormat { head: Vec<u8> },
-    #[error("Parquet decode failed: {0}")]
-    Parquet(#[from] parquet::errors::ParquetError),
+    #[error("Parquet input is not supported; convert the document to Arrow IPC first")]
+    ParquetUnsupported,
 }
 
-/// Which container the annotation document arrived in.
-///
-/// Sniffed from the bytes, never from the file name: a URL need not carry a
-/// useful suffix, and a mislabelled file should be read for what it is rather
-/// than rejected for what it is called (#264).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DocumentFormat {
-    /// Arrow IPC **stream** — what `scripts/` emits and what the editor has
-    /// always read.
-    ArrowIpc,
-    /// Parquet — what tracking and calibration pipelines emit.
-    Parquet,
-}
-
-impl DocumentFormat {
-    /// Parquet brackets the file with this magic, at both ends.
-    const PARQUET_MAGIC: &'static [u8] = b"PAR1";
-    /// An Arrow IPC stream opens with a continuation marker, followed by the
-    /// length of the schema message.
-    const ARROW_IPC_CONTINUATION: [u8; 4] = [0xff, 0xff, 0xff, 0xff];
-
-    /// Identifies `bytes`, or `None` if it is neither format.
-    pub fn sniff(bytes: &[u8]) -> Option<Self> {
-        // Both ends for Parquet, because a bare `PAR1` prefix is also how a
-        // *truncated* Parquet file starts, and reading one of those produces a
-        // far worse error than saying so here.
-        if bytes.len() >= 8
-            && bytes.starts_with(Self::PARQUET_MAGIC)
-            && bytes.ends_with(Self::PARQUET_MAGIC)
-        {
-            return Some(Self::Parquet);
-        }
-        if bytes.starts_with(&Self::ARROW_IPC_CONTINUATION) {
-            return Some(Self::ArrowIpc);
-        }
-        None
-    }
-}
-
-/// Decodes an annotation document from either supported container.
-///
-/// The format is sniffed, both readers produce the **same** `RecordBatch`es, and
-/// everything after that is shared — so a document cannot mean two different
-/// things depending on how it was written.
+/// Decodes an Arrow IPC annotation document, identified by its bytes rather
+/// than its file name.
 pub fn decode_video_editing_document(
     bytes: &[u8],
 ) -> Result<VideoEditingDocument, VideoEditingError> {
-    match DocumentFormat::sniff(bytes) {
-        Some(DocumentFormat::ArrowIpc) => {
-            let mut reader = StreamReader::try_new(Cursor::new(bytes), None)?;
-            let schema = reader.schema();
-            let batches = (&mut reader).collect::<Result<Vec<_>, _>>()?;
-            build_document(&schema, &batches)
-        }
-        Some(DocumentFormat::Parquet) => {
-            let builder = ParquetRecordBatchReaderBuilder::try_new(Bytes::copy_from_slice(bytes))?;
-            // Parquet carries the schema's key-value metadata, so the same
-            // version / table-kind contract applies untouched. Taken from the
-            // builder because building the reader consumes it.
-            let schema = builder.schema().clone();
-            let batches = builder.build()?.collect::<Result<Vec<_>, _>>()?;
-            build_document(&schema, &batches)
-        }
-        None => Err(VideoEditingError::UnknownFormat {
-            head: bytes.iter().take(4).copied().collect(),
-        }),
+    if bytes.starts_with(b"PAR1") {
+        return Err(VideoEditingError::ParquetUnsupported);
     }
+    if !bytes.starts_with(&[0xff; 4]) {
+        return Err(VideoEditingError::UnknownFormat {
+            head: bytes.iter().take(4).copied().collect(),
+        });
+    }
+    let mut reader = StreamReader::try_new(Cursor::new(bytes), None)?;
+    let schema = reader.schema();
+    let batches = (&mut reader).collect::<Result<Vec<_>, _>>()?;
+    build_document(&schema, &batches)
 }
 
-/// Everything after the container: the checks and the row walk that both
-/// formats share. Having exactly one of these is what makes Arrow and Parquet
-/// decode to the same document by construction rather than by agreement.
 fn build_document(
     schema: &Schema,
     batches: &[RecordBatch],
@@ -396,12 +341,6 @@ mod tests {
             .to_path_buf()
     }
 
-    /// Where the generated Parquet fixtures are looked for. `std::env::temp_dir`
-    /// rather than `TMP`, which only Windows sets.
-    fn parquet_fixture_dir() -> PathBuf {
-        fixture_path("TRD_DOC_DIR", std::env::temp_dir)
-    }
-
     fn document_batch(version: &str, partial_geometry: bool) -> (Schema, RecordBatch) {
         let metadata = [
             (VIDEO_EDIT_VERSION_KEY.to_owned(), version.to_owned()),
@@ -473,17 +412,6 @@ mod tests {
         writer.write(&batch).unwrap();
         writer.finish().unwrap();
         drop(writer);
-        bytes
-    }
-
-    /// The same rows as Parquet — what tracking and calibration pipelines emit.
-    fn document_parquet_bytes(version: &str, partial_geometry: bool) -> Vec<u8> {
-        let (schema, batch) = document_batch(version, partial_geometry);
-        let mut bytes = Vec::new();
-        let mut writer =
-            parquet::arrow::ArrowWriter::try_new(&mut bytes, Arc::new(schema), None).unwrap();
-        writer.write(&batch).unwrap();
-        writer.close().unwrap();
         bytes
     }
 
@@ -733,139 +661,37 @@ mod tests {
         );
     }
 
-    /// The slice's contract: the *same rows* written as Arrow IPC and as
-    /// Parquet must decode to the *same document*. Both readers feed one
-    /// `build_document`, so this pins that the containers really are
-    /// interchangeable — including the schema key-value metadata, which is the
-    /// part a Parquet round-trip could plausibly drop.
     #[test]
-    fn arrow_and_parquet_decode_to_the_same_document() {
-        let from_arrow =
-            decode_video_editing_document(&document_bytes(VIDEO_EDIT_VERSION, false)).unwrap();
-        let from_parquet =
-            decode_video_editing_document(&document_parquet_bytes(VIDEO_EDIT_VERSION, false))
-                .unwrap();
-        assert_eq!(from_arrow, from_parquet);
-    }
-
-    /// The version and table-kind checks are the contract, and they have to
-    /// survive the Parquet round-trip too — otherwise a Parquet document could
-    /// smuggle in a version the Arrow path would reject.
-    #[test]
-    fn parquet_is_held_to_the_same_version_contract() {
-        let error = decode_video_editing_document(&document_parquet_bytes("0.0.1", false))
-            .expect_err("an old version must be rejected whatever the container");
-        assert!(
-            matches!(error, VideoEditingError::UnsupportedVersion { .. }),
-            "expected UnsupportedVersion, got {error}"
-        );
-    }
-
-    /// Format comes from the bytes, not the name — a URL need not carry a
-    /// useful suffix, and a `.arrow`-named Parquet file is still Parquet.
-    #[test]
-    fn format_is_sniffed_from_the_bytes() {
-        assert_eq!(
-            DocumentFormat::sniff(&document_bytes(VIDEO_EDIT_VERSION, false)),
-            Some(DocumentFormat::ArrowIpc)
-        );
-        assert_eq!(
-            DocumentFormat::sniff(&document_parquet_bytes(VIDEO_EDIT_VERSION, false)),
-            Some(DocumentFormat::Parquet)
-        );
-        // Whatever it is called, it decodes as what it is.
-        let parquet_named_arrow = document_parquet_bytes(VIDEO_EDIT_VERSION, false);
-        assert!(decode_video_editing_document(&parquet_named_arrow).is_ok());
-    }
-
-    /// A truncated Parquet file keeps the opening magic but loses the closing
-    /// one. Saying so beats handing the bytes to a reader that will fail deep
-    /// inside a footer parse.
-    #[test]
-    fn a_truncated_parquet_file_is_not_mistaken_for_one() {
-        let full = document_parquet_bytes(VIDEO_EDIT_VERSION, false);
-        let truncated = &full[..full.len() - 8];
-        assert_eq!(DocumentFormat::sniff(truncated), None);
-        let error =
-            decode_video_editing_document(truncated).expect_err("a truncated file must not decode");
-        assert!(
-            matches!(error, VideoEditingError::UnknownFormat { .. }),
-            "expected UnknownFormat, got {error}"
-        );
-    }
-
-    #[test]
-    fn neither_format_is_reported_as_such() {
-        for bytes in [
-            b"".as_slice(),
-            b"PAR1".as_slice(),
-            b"not a document".as_slice(),
-        ] {
-            assert_eq!(DocumentFormat::sniff(bytes), None, "bytes {bytes:02x?}");
+    fn parquet_input_is_explicitly_unsupported() {
+        for bytes in [b"PAR1".as_slice(), b"PAR1anythingPAR1".as_slice()] {
+            assert!(matches!(
+                decode_video_editing_document(bytes),
+                Err(VideoEditingError::ParquetUnsupported)
+            ));
         }
     }
 
-    /// The synthetic parity test uses one hand-built row. This one uses the
-    /// real FIBA document — 222 sparse rows with poster, K and quads — because
-    /// a round-trip bug in a column type or in the sparse-index checks would
-    /// only show on real data.
-    ///
-    /// Ignored by default: it needs the generated document, which is not
-    /// committed. Run it after `scripts/fiba_video_editing_bundle.py`;
-    /// `TRD_DOC_ARROW` / `TRD_DOC_PARQUET` override where they are looked for.
     #[test]
-    #[ignore = "needs generated fixtures: web/gui-video-editing/data/fiba-shot1.{arrow,parquet}"]
-    fn the_real_document_decodes_identically_from_both_containers() {
+    fn unknown_input_is_reported_as_such() {
+        for bytes in [b"".as_slice(), b"not a document".as_slice()] {
+            assert!(matches!(
+                decode_video_editing_document(bytes),
+                Err(VideoEditingError::UnknownFormat { .. })
+            ));
+        }
+    }
+
+    #[test]
+    #[ignore = "needs generated fixture: web/gui-video-editing/data/fiba-shot1.arrow"]
+    fn the_real_arrow_document_preserves_sparse_rows() {
         let arrow = fixture_path("TRD_DOC_ARROW", || {
             repository_root().join("web/gui-video-editing/data/fiba-shot1.arrow")
         });
-        let parquet = fixture_path("TRD_DOC_PARQUET", || {
-            parquet_fixture_dir().join("fiba-shot1.parquet")
-        });
-        let (Some(arrow), Some(parquet)) = (generated_fixture(&arrow), generated_fixture(&parquet))
-        else {
+        let Some(arrow) = generated_fixture(&arrow) else {
             return;
         };
         let from_arrow = decode_video_editing_document(&arrow).unwrap();
-        let from_parquet = decode_video_editing_document(&parquet).unwrap();
         assert_eq!(from_arrow.frames.len(), 222, "the FIBA document is sparse");
-        assert_eq!(from_arrow, from_parquet);
-    }
-
-    /// Which Parquet compressions the wasm-safe feature set can actually read.
-    ///
-    /// `snap` and uncompressed work; `zstd`/`gzip`/`brotli`/`lz4` are excluded
-    /// because their C shims do not cross-compile to wasm32. This documents the
-    /// trade and pins that an unsupported codec produces parquet's own clear
-    /// "Disabled feature at compile time" message rather than something opaque.
-    ///
-    /// Reads `fiba-<codec>.parquet` from `TRD_DOC_DIR` (default: the platform
-    /// temp dir); each codec absent from there is skipped.
-    #[test]
-    #[ignore = "needs generated fixtures written with several codecs"]
-    fn unsupported_compression_says_so_clearly() {
-        for (codec, supported) in [
-            ("snappy", true),
-            ("none", true),
-            ("zstd", false),
-            ("gzip", false),
-        ] {
-            let path = parquet_fixture_dir().join(format!("fiba-{codec}.parquet"));
-            let Some(bytes) = generated_fixture(&path) else {
-                continue;
-            };
-            assert_eq!(DocumentFormat::sniff(&bytes), Some(DocumentFormat::Parquet));
-            match (decode_video_editing_document(&bytes), supported) {
-                (Ok(document), true) => assert_eq!(document.frames.len(), 222),
-                (Err(error), false) => {
-                    let text = error.to_string();
-                    assert!(
-                        text.contains("Disabled feature at compile time"),
-                        "{codec} should name the missing codec, got: {text}"
-                    );
-                }
-                (result, _) => panic!("{codec}: unexpected {result:?}"),
-            }
-        }
+        assert!(from_arrow.frame(222).is_none());
     }
 }

@@ -60,14 +60,22 @@ impl eframe::App for VideoEditingApp {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     self.source_controls(ui);
                     ui.separator();
-                    needs_render |= crate::ui::controls_sections(
-                        ui,
-                        &mut self.controller,
-                        crate::ui::Controls {
-                            camera_locked: true,
-                            move_reference_labels: Some(["e1", "e2", "e3"]),
-                        },
-                    );
+                    if self
+                        .arrow_scene
+                        .as_ref()
+                        .is_some_and(|scene| scene.source.is_some())
+                    {
+                        needs_render |= self.source_model_controls(ui);
+                    } else {
+                        needs_render |= crate::ui::controls_sections(
+                            ui,
+                            &mut self.controller,
+                            crate::ui::Controls {
+                                camera_locked: true,
+                                move_reference_labels: Some(["e1", "e2", "e3"]),
+                            },
+                        );
+                    }
                     ui.separator();
                     self.shot_controls(ui);
                     self.quad_controls(ui, overlay_frame_index, quad_frame);
@@ -139,6 +147,112 @@ impl eframe::App for VideoEditingApp {
 }
 
 impl VideoEditingApp {
+    fn source_model_controls(&mut self, ui: &mut egui::Ui) -> bool {
+        ui.heading("Source models");
+        let Some(scene) = self.arrow_scene.as_ref() else {
+            return false;
+        };
+        let Some(source) = scene.source.clone() else {
+            return false;
+        };
+        let Some(row) = scene.source_row(self.displayed_frame_index) else {
+            ui.weak("No params row for this video frame.");
+            return false;
+        };
+        if source.borrow().meshes().is_empty() {
+            ui.weak("Reference coordinates only. Load GLB resources to edit a model.");
+            return false;
+        }
+        let frame = match source.borrow().frame(row) {
+            Ok(frame) => frame,
+            Err(error) => {
+                self.shared
+                    .set_error(super::ErrorScope::Document, error.to_string());
+                return false;
+            }
+        };
+        if frame.objects.is_empty() {
+            ui.weak("This params row has no objects.");
+            return false;
+        }
+        self.source_selected_instance = self.source_selected_instance.min(frame.objects.len() - 1);
+        let mut changed = false;
+        let mut matrix = frame.objects[self.source_selected_instance]
+            .model
+            .to_cols_array();
+        ui.add_enabled_ui(!self.shared.video_playing.get(), |ui| {
+            let label = |index: usize| {
+                frame.objects[index]
+                    .track_id
+                    .clone()
+                    .unwrap_or_else(|| format!("Object {}", index + 1))
+            };
+            egui::ComboBox::from_id_salt("source-instance")
+                .selected_text(label(self.source_selected_instance))
+                .show_ui(ui, |ui| {
+                    for index in 0..frame.objects.len() {
+                        ui.selectable_value(
+                            &mut self.source_selected_instance,
+                            index,
+                            label(index),
+                        );
+                    }
+                });
+            matrix = frame.objects[self.source_selected_instance]
+                .model
+                .to_cols_array();
+            ui.weak(format!(
+                "Params row {row}; edits affect this row and object only."
+            ));
+            ui.label("Local translation");
+            ui.horizontal(|ui| {
+                for (axis, value) in ["X", "Y", "Z"].into_iter().zip(&mut matrix[12..15]) {
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(value)
+                                .prefix(format!("{axis} "))
+                                .speed(0.01),
+                        )
+                        .changed();
+                }
+            });
+            ui.collapsing("Model matrix", |ui| {
+                egui::Grid::new("source-model-matrix").show(ui, |ui| {
+                    for row in 0..3 {
+                        for column in 0..4 {
+                            changed |= ui
+                                .add(
+                                    egui::DragValue::new(&mut matrix[column * 4 + row]).speed(0.01),
+                                )
+                                .changed();
+                        }
+                        ui.end_row();
+                    }
+                });
+            });
+            if ui.button("Reset model to local origin").clicked() {
+                matrix = trd_core::Matrix4::IDENTITY.to_cols_array();
+                changed = true;
+            }
+        });
+        if changed {
+            let result = source
+                .borrow_mut()
+                .apply_model_edits(&[trd_core::ModelEdit {
+                    row,
+                    object: self.source_selected_instance,
+                    model: trd_core::Matrix4::from_cols_array(&matrix),
+                }]);
+            if let Err(error) = result {
+                self.shared
+                    .set_error(super::ErrorScope::Document, error.to_string());
+                return false;
+            }
+            self.shared.clear_error(super::ErrorScope::Document);
+        }
+        changed
+    }
+
     /// Scene revision settles before the pick captures it (#205).
     pub(super) fn settle_frame(
         &mut self,
@@ -214,7 +328,11 @@ impl VideoEditingApp {
                         scene.frames.len(),
                         scene.frame_rate
                     ));
-                    ui.weak("Replay mode: the exported models are rendered over this video.");
+                    ui.weak(if scene.source.is_some() {
+                        "Source editing: model changes preserve the other Arrow columns."
+                    } else {
+                        "Replay mode: the exported models are rendered over this video."
+                    });
                 }
                 (None, None) => {
                     ui.weak("No document loaded: every frame is plain video");

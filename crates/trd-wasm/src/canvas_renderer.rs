@@ -14,6 +14,12 @@ enum CanvasState {
     Failed,
 }
 
+#[derive(Clone, Copy)]
+enum PresentationCamera {
+    Params(FrameParams),
+    Resolved(trd_core::Camera),
+}
+
 #[wasm_bindgen]
 pub struct CanvasRenderer {
     instance: wgpu::Instance,
@@ -38,6 +44,7 @@ pub struct CanvasRenderer {
     /// together with the tone mapping, since the sky shares its exposure.
     env_background_blur: Option<f32>,
     input: trd_core::InputSession,
+    document: Option<std::rc::Rc<std::cell::RefCell<trd_core::SceneDocument>>>,
     /// Loaded by [`load_ipc`](Self::load_ipc) and replayed on demand, so the JS
     /// shell can upload each frame's background before rendering it.
     frames: Vec<DecodedFrame>,
@@ -94,6 +101,7 @@ impl CanvasRenderer {
             gpu,
             target,
             input: trd_core::InputSession::new(),
+            document: None,
             frames: Vec::new(),
             inline_frames: trd_core::InlineFrameCache::default(),
             external_frame_ready: false,
@@ -104,6 +112,11 @@ impl CanvasRenderer {
     #[wasm_bindgen(js_name = pushIpc)]
     pub fn push_ipc(&mut self, chunk: &[u8]) -> Result<u32, JsValue> {
         self.require_open()?;
+        if self.document.is_some() {
+            return Err(js_error(
+                "loadSceneDocument mode does not accept incremental IPC",
+            ));
+        }
 
         let result = (|| {
             let batches = measure("trd.ipc.decode", || {
@@ -140,6 +153,11 @@ impl CanvasRenderer {
     #[wasm_bindgen(js_name = loadIpc)]
     pub fn load_ipc(&mut self, chunk: &[u8]) -> Result<u32, JsValue> {
         self.require_open()?;
+        if self.document.is_some() {
+            return Err(js_error(
+                "loadSceneDocument mode does not accept incremental IPC",
+            ));
+        }
         let result = (|| {
             let batches = self
                 .input
@@ -161,11 +179,41 @@ impl CanvasRenderer {
     /// The number of frames buffered by [`load_ipc`](Self::load_ipc).
     #[wasm_bindgen(js_name = frameCount)]
     pub fn frame_count(&self) -> u32 {
+        if let Some(document) = &self.document {
+            return u32::try_from(document.borrow().row_count()).unwrap_or(u32::MAX);
+        }
         u32::try_from(self.frames.len()).unwrap_or(u32::MAX)
+    }
+
+    #[wasm_bindgen(js_name = loadSceneDocument)]
+    pub fn load_scene_document(
+        &mut self,
+        document: &crate::ArrowSceneDocument,
+    ) -> Result<u32, JsValue> {
+        self.require_open()?;
+        let source = document.inner.borrow();
+        let count = u32::try_from(source.row_count()).map_err(|_| js_error("too many rows"))?;
+        source.frames().map_err(js_error)?;
+        let renderer = crate::scene_document::document_renderer(
+            &source,
+            self.gpu.clone(),
+            self.target.view_format(),
+            self.pbr.as_ref(),
+            self.env_map.as_ref(),
+        )?;
+        self.renderer = Some(renderer);
+        self.document = Some(std::rc::Rc::clone(&document.inner));
+        self.frames.clear();
+        self.inline_frames.invalidate();
+        self.external_frame_ready = false;
+        Ok(count)
     }
 
     #[wasm_bindgen(js_name = meshResourceCount)]
     pub fn mesh_resource_count(&self) -> u32 {
+        if let Some(document) = &self.document {
+            return u32::try_from(document.borrow().meshes().len()).unwrap_or(u32::MAX);
+        }
         u32::try_from(self.input.mesh_resource_count()).unwrap_or(u32::MAX)
     }
 
@@ -209,6 +257,30 @@ impl CanvasRenderer {
     #[wasm_bindgen(js_name = renderIndex)]
     pub fn render_index(&mut self, index: u32) -> Result<(), JsValue> {
         self.require_open()?;
+        if let Some(document) = self.document.clone() {
+            let (camera, scene) = {
+                let source = document.borrow();
+                let frame = source.frame(index as usize).map_err(js_error)?;
+                let fit = (self.composite_frame && self.external_frame_ready)
+                    .then_some(FrameFit::Stretch);
+                trd_placement::document_scene(
+                    &source,
+                    &frame,
+                    self.target.viewport(),
+                    &self.options,
+                    fit,
+                )
+                .map_err(js_error)?
+            };
+            self.external_frame_ready = false;
+            let scene = scene.with_lighting(
+                self.pbr
+                    .as_ref()
+                    .map(PbrState::lighting)
+                    .unwrap_or_default(),
+            );
+            return self.present_camera(PresentationCamera::Resolved(camera), &scene);
+        }
         let frame = match self.frames.get(index as usize).cloned() {
             Some(frame) => frame,
             None => {
@@ -227,6 +299,10 @@ impl CanvasRenderer {
 
     pub fn finish(&mut self) -> Result<(), JsValue> {
         self.require_open()?;
+        if self.document.is_some() {
+            self.state = CanvasState::Finished;
+            return Ok(());
+        }
         match self
             .input
             .finish()
@@ -425,7 +501,7 @@ impl CanvasRenderer {
         }
         // Building the renderer needs the leading mesh table already decoded
         // (the protocol is mesh-first; the mesh renderer requires ≥1 mesh).
-        if !self.input.has_meshes() {
+        if self.document.is_none() && !self.input.has_meshes() {
             return Err(js_error(
                 "input is missing the required leading mesh table (protocol is mesh-first)",
             ));
@@ -495,6 +571,10 @@ impl CanvasRenderer {
     /// once. That policy is the front-end's; the harness only reports what
     /// happened (#180).
     fn present(&mut self, params: FrameParams, scene: &Scene) -> Result<(), JsValue> {
+        self.present_camera(PresentationCamera::Params(params), scene)
+    }
+
+    fn present_camera(&mut self, params: PresentationCamera, scene: &Scene) -> Result<(), JsValue> {
         match self.present_once(params, scene) {
             // Presented. A repair (the surface no longer matches the canvas) is
             // applied now so the *next* frame is clean; this one is on screen.
@@ -531,7 +611,12 @@ impl CanvasRenderer {
         }
     }
 
-    fn retry(&mut self, params: FrameParams, scene: &Scene, recovery: &str) -> Result<(), JsValue> {
+    fn retry(
+        &mut self,
+        params: PresentationCamera,
+        scene: &Scene,
+        recovery: &str,
+    ) -> Result<(), JsValue> {
         match self.present_once(params, scene) {
             Ok(repair) => {
                 if repair.is_some() {
@@ -549,12 +634,15 @@ impl CanvasRenderer {
     /// no `async fn` may cross the `wasm_bindgen` boundary.
     fn present_once(
         &mut self,
-        params: FrameParams,
+        params: PresentationCamera,
         scene: &Scene,
     ) -> Result<Option<SurfaceRepair>, RenderError> {
         // Wire-decoded params: resolve against the surface's own size, so the
         // camera's viewport cannot disagree with the attachments (#203).
-        let camera = params.to_camera(self.target.viewport())?;
+        let camera = match params {
+            PresentationCamera::Params(params) => params.to_camera(self.target.viewport())?,
+            PresentationCamera::Resolved(camera) => camera,
+        };
         let renderer = self
             .renderer
             .as_mut()
@@ -630,7 +718,9 @@ impl CanvasRenderer {
                     .set_env_map(env);
             }
         }
-        self.apply_stream_tonemap();
+        if self.document.is_none() {
+            self.apply_stream_tonemap();
+        }
         Ok(self.renderer.as_mut().expect("renderer just built"))
     }
 }

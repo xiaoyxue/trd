@@ -157,13 +157,60 @@ impl VideoPlacementRenderer {
         width: u32,
         height: u32,
     ) -> Result<Self, String> {
+        Self::new_assets_with_gpu(gpu, assets, env_bytes, width, height, true)
+    }
+
+    pub async fn new_arrow_scene(
+        scene: &crate::video_editing::ArrowScene,
+        env_bytes: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<Self, String> {
+        Self::new_arrow_scene_with_gpu(Self::own_gpu().await?, scene, env_bytes, width, height)
+    }
+
+    pub fn new_arrow_scene_with_gpu(
+        gpu: std::sync::Arc<trd_core::GpuContext>,
+        scene: &crate::video_editing::ArrowScene,
+        env_bytes: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<Self, String> {
+        Self::new_assets_with_gpu(
+            gpu,
+            &scene.mesh_assets()?,
+            env_bytes,
+            width,
+            height,
+            scene.source.is_none(),
+        )
+    }
+
+    fn new_assets_with_gpu(
+        gpu: std::sync::Arc<trd_core::GpuContext>,
+        assets: &[trd_core::MeshAsset],
+        env_bytes: &[u8],
+        width: u32,
+        height: u32,
+        preview: bool,
+    ) -> Result<Self, String> {
         let facts = gpu.adapter_facts();
         let meshes = assets
             .iter()
             .map(|asset| asset.mesh.clone())
             .collect::<Vec<_>>();
-        let (mut renderer, target) = trd_core::Renderer::with_gpu(gpu, width, height, &meshes)
-            .map_err(|error| error.to_string())?;
+        let (mut renderer, target) = if preview {
+            trd_core::Renderer::with_gpu(gpu, width, height, &meshes)
+                .map_err(|error| error.to_string())?
+        } else {
+            let renderer =
+                trd_core::Renderer::with_assets(gpu, trd_core::TEXTURE_TARGET_FORMAT, assets)
+                    .map_err(|error| error.to_string())?;
+            let target = renderer
+                .create_texture_target(width, height)
+                .map_err(|error| error.to_string())?;
+            (renderer, target)
+        };
         configure_mesh_assets(&mut renderer, assets);
         renderer.set_env_map(assets::decode_env_hdr(env_bytes).map_err(|error| error.to_string())?);
         let replay_lighting = if assets.iter().any(|asset| {
@@ -489,6 +536,51 @@ impl VideoPlacementRenderer {
             &self.target,
         );
         Ok(())
+    }
+
+    pub fn draw_document_frame(
+        &mut self,
+        source: FrameSource<'_>,
+        frame_width: u32,
+        frame_height: u32,
+        document: &trd_core::SceneDocument,
+        frame: &trd_core::DocumentFrame,
+    ) -> Result<(), String> {
+        self.upload_frame(source, frame_width, frame_height);
+        if let Some(operator) = document
+            .tonemap_override()
+            .map_err(|error| error.to_string())?
+        {
+            self.renderer
+                .set_tonemap_operator(trd_core::MeshTarget::All, operator);
+        }
+        let options = trd_core::RenderOptions {
+            mode: trd_core::RenderMode::Shaded,
+            ..Default::default()
+        };
+        let (camera, scene) = trd_placement::document_scene(
+            document,
+            frame,
+            self.viewport(),
+            &options,
+            Some(trd_core::FrameFit::Stretch),
+        )
+        .map_err(|error| error.to_string())?;
+        let scene = scene.with_lighting(self.replay_lighting);
+        self.renderer
+            .draw_layers(&[trd_core::SceneLayer::new(camera, &scene)], &self.target);
+        Ok(())
+    }
+
+    pub async fn read_document_pixels(&mut self) -> Result<Vec<u8>, String> {
+        let pixels = self
+            .renderer
+            .read_pixels(&self.target)
+            .await
+            .map_err(|error| error.to_string())?;
+        self.transfers.readback = pixels.len();
+        self.transfers.ui_upload = pixels.len();
+        Ok(pixels)
     }
 
     fn upload_frame(&mut self, source: FrameSource<'_>, width: u32, height: u32) {

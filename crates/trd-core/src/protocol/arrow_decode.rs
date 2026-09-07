@@ -14,9 +14,11 @@
 //! the native drivers (`io/input_stream.rs`, `stream_filter/`) map them onto
 //! their `StreamError` at the framing boundary.
 
+use std::sync::Arc;
+
 use arrow::array::{
-    Array, FixedSizeListArray, Float32Array, ListArray, RecordBatch, StringArray, UInt32Array,
-    UInt8Array,
+    Array, ArrayRef, FixedSizeListArray, FixedSizeListBuilder, Float32Array, Float32Builder,
+    ListArray, ListBuilder, RecordBatch, StringArray, UInt32Array, UInt32Builder, UInt8Array,
 };
 use arrow::datatypes::{DataType, Field, Schema};
 
@@ -139,6 +141,105 @@ pub(crate) fn decode_frame_ids(
 /// [`DrawSelection::from_wire`] (`255` = inherit); an absent column leaves every
 /// [`Draw::mode`] `None`. Mirrors the native `stream::decode_draws`.
 pub(crate) fn decode_draws(batch: &RecordBatch) -> Result<Option<Vec<Vec<Draw>>>, ProtocolError> {
+    decode_explicit_draws(batch)
+}
+
+pub(crate) fn decode_draws_for_meshes(
+    batch: &RecordBatch,
+    mesh_ids: &[u32],
+) -> Result<Option<Vec<Vec<Draw>>>, ProtocolError> {
+    let has_meshes = batch.column_by_name("draw_mesh").is_some();
+    let has_models = batch.column_by_name("draw_model").is_some();
+    if has_meshes && has_models {
+        return decode_explicit_draws(batch);
+    }
+    if !has_meshes
+        && !has_models
+        && mesh_ids.is_empty()
+        && batch.column_by_name("draw_mode").is_none()
+    {
+        return Ok(None);
+    }
+
+    let mut ordered_ids = mesh_ids.to_vec();
+    ordered_ids.sort_unstable();
+    if ordered_ids.windows(2).any(|ids| ids[0] == ids[1]) {
+        return Err(parse_error("external mesh IDs must be unique"));
+    }
+    let count_column = ["draw_mesh", "draw_model", "draw_mode"]
+        .into_iter()
+        .find_map(|name| batch.column_by_name(name).map(|column| (name, column)))
+        .map(|(name, column)| {
+            column
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .ok_or_else(|| ProtocolError::ColumnType {
+                    column: name,
+                    expected: "List",
+                    actual: column.data_type().clone(),
+                })
+        })
+        .transpose()?;
+    let fallback = optional_fixed_list(batch, "model", 16)?;
+    let mut ids = ListBuilder::new(UInt32Builder::new());
+    let mut models = ListBuilder::new(FixedSizeListBuilder::new(Float32Builder::new(), 16));
+
+    for row in 0..batch.num_rows() {
+        let count = count_column.map_or(ordered_ids.len().max(1), |list| {
+            list.value_length(row) as usize
+        });
+        if !has_meshes {
+            if count == 0 {
+                ids.append(true);
+            } else {
+                if ordered_ids.is_empty() {
+                    for index in 0..count {
+                        ids.values().append_value(
+                            u32::try_from(index)
+                                .map_err(|_| parse_error("too many implicit mesh IDs"))?,
+                        );
+                    }
+                } else {
+                    ids.values().append_slice(&ordered_ids);
+                }
+                ids.append(true);
+            }
+        }
+        if !has_models {
+            let model = fallback.map_or(Matrix4::IDENTITY.to_cols_array(), |(list, values)| {
+                read_fixed::<16>(list, values, row)
+            });
+            for _ in 0..count {
+                models.values().values().append_slice(&model);
+                models.values().append(true);
+            }
+            models.append(true);
+        }
+    }
+
+    // Supply decoding defaults without changing the retained source columns.
+    let mut fields = batch.schema().fields().to_vec();
+    let mut columns = batch.columns().to_vec();
+    let mut append = |name, column: ArrayRef| {
+        fields.push(Arc::new(Field::new(
+            name,
+            column.data_type().clone(),
+            false,
+        )));
+        columns.push(column);
+    };
+    if !has_meshes {
+        append("draw_mesh", Arc::new(ids.finish()));
+    }
+    if !has_models {
+        append("draw_model", Arc::new(models.finish()));
+    }
+    let schema = Schema::new_with_metadata(fields, batch.schema().metadata().clone());
+    let normalized = RecordBatch::try_new(Arc::new(schema), columns)?;
+    decode_explicit_draws(&normalized)
+}
+
+fn decode_explicit_draws(batch: &RecordBatch) -> Result<Option<Vec<Vec<Draw>>>, ProtocolError> {
     let (mesh_col, model_col) = match (
         batch.column_by_name("draw_mesh"),
         batch.column_by_name("draw_model"),

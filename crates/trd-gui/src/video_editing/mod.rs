@@ -117,18 +117,16 @@ pub struct PendingSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DocumentFormat {
     ArrowIpc,
-    Parquet,
 }
 
 impl DocumentFormat {
-    pub const EXTENSIONS: [&'static str; 2] = ["arrow", "parquet"];
+    pub const EXTENSIONS: [&'static str; 1] = ["arrow"];
 
     /// The format an extension suggests, or `None` for anything else.
     pub fn from_name(name: &str) -> Option<Self> {
         let extension = name.rsplit_once('.')?.1.to_ascii_lowercase();
         match extension.as_str() {
             "arrow" => Some(Self::ArrowIpc),
-            "parquet" => Some(Self::Parquet),
             _ => None,
         }
     }
@@ -136,7 +134,6 @@ impl DocumentFormat {
     pub const fn label(self) -> &'static str {
         match self {
             Self::ArrowIpc => "Arrow IPC",
-            Self::Parquet => "Parquet",
         }
     }
 }
@@ -312,11 +309,7 @@ pub fn document_url_selection(url: &str) -> Result<DocumentFormat, String> {
         .next()
         .unwrap_or(url);
     DocumentFormat::from_name(path).ok_or_else(|| {
-        format!(
-            "document URL should name a .{} or .{} file",
-            DocumentFormat::EXTENSIONS[0],
-            DocumentFormat::EXTENSIONS[1]
-        )
+        "document URL should name an .arrow file; Parquet is not supported".to_owned()
     })
 }
 
@@ -327,7 +320,7 @@ pub(crate) fn protocol_k_from_row_major(k: [f32; 9]) -> [f32; 9] {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoEditingCommand {
     OpenLocalVideo,
-    /// Pick a local annotation document (`.arrow` / `.parquet`); optional (#264).
+    /// Pick a local Arrow annotation document; optional (#264).
     OpenLocalDocument,
     /// Load the dialog's selection (video + optional document). Picking alone never loads.
     LoadSelection,
@@ -900,6 +893,7 @@ pub struct VideoEditingApp {
     show_placement_quads: bool,
     was_playing: bool,
     selected_asset: Option<CatalogAsset>,
+    source_selected_instance: usize,
     image_sizing: crate::ui::ImageSizing,
     fitted_render_size: (u32, u32),
     show_video_source_dialog: bool,
@@ -963,6 +957,7 @@ impl VideoEditingApp {
             show_placement_quads: true,
             was_playing: false,
             selected_asset: None,
+            source_selected_instance: 0,
             image_sizing: crate::ui::ImageSizing::FitCanvas,
             fitted_render_size: source_size,
             show_video_source_dialog: false,
@@ -1014,6 +1009,7 @@ impl VideoEditingApp {
     }
 
     pub fn set_arrow_scene(&mut self, scene: Option<Rc<ArrowScene>>) {
+        self.source_selected_instance = 0;
         if self.shared.video_loaded.get() {
             if let Some(error) = scene
                 .as_deref()
@@ -1104,6 +1100,9 @@ impl VideoEditingApp {
 
     fn arrow_scene_validation_error(&self, scene: &ArrowScene) -> Option<String> {
         let stored = self.video.frame_count as usize;
+        if scene.source.is_some() && scene.frames.is_empty() {
+            return None;
+        }
         if scene.is_frame_indexed() {
             return scene
                 .frames
@@ -1242,7 +1241,7 @@ impl VideoEditingApp {
     /// Optional annotation document or exported protocol scene.
     fn document_source_row(&mut self, ui: &mut egui::Ui) {
         ui.heading("Arrow input (optional)");
-        ui.label("An annotation Arrow/Parquet document, or an exported protocol 0.0.6 scene.");
+        ui.label("An Arrow annotation document or params scene. Parquet is not supported.");
         ui.weak("Annotations are editable; an exported scene replays over the selected video.");
 
         ui.horizontal(|ui| {
@@ -1405,6 +1404,27 @@ impl VideoEditingApp {
             .as_ref()
             .and_then(|scene| scene.frame(video.frame_index))
             .cloned();
+        let source_payload = self
+            .arrow_scene
+            .as_ref()
+            .and_then(|scene| {
+                scene
+                    .source
+                    .as_ref()
+                    .zip(scene.source_row(video.frame_index))
+            })
+            .map(|(source, row)| {
+                let source = source.borrow();
+                source.frame(row).map(|frame| (source.clone(), frame))
+            })
+            .transpose();
+        let source_payload = match source_payload {
+            Ok(payload) => payload,
+            Err(error) => {
+                self.shared.set_error(ErrorScope::Render, error.to_string());
+                return;
+            }
+        };
         let quad_frame = self.quad_frame_at(video.frame_index);
         // Overlay follows the toggles, not play state (#264).
         let tracked = background_frame.as_ref().is_some_and(|frame| frame.tracked);
@@ -1492,7 +1512,19 @@ impl VideoEditingApp {
                 Some(frame) => crate::video_editing_renderer::FrameSource::External(frame),
                 None => crate::video_editing_renderer::FrameSource::Rgba(&video.rgba),
             };
-            let result = if shared.skip_readback.get() {
+            let result = if let Some((document, frame)) = source_payload.as_ref() {
+                match renderer.draw_document_frame(
+                    source,
+                    video.width,
+                    video.height,
+                    document,
+                    frame,
+                ) {
+                    Ok(()) if shared.skip_readback.get() => Ok(Vec::new()),
+                    Ok(()) => renderer.read_document_pixels().await,
+                    Err(error) => Err(error),
+                }
+            } else if shared.skip_readback.get() {
                 // Shared-device: no readback; empty Vec signals `set_display_frame` to skip upload.
                 match replay_frame.as_ref() {
                     Some(frame) => renderer.draw_scene_frame(
@@ -2234,10 +2266,7 @@ pub(super) mod tests {
 
     #[test]
     fn document_url_selection_names_the_format_or_says_why_not() {
-        assert_eq!(
-            document_url_selection("https://example.com/shot.parquet"),
-            Ok(DocumentFormat::Parquet)
-        );
+        assert!(document_url_selection("https://example.com/shot.parquet").is_err());
         assert_eq!(
             document_url_selection("  http://example.com/a/b/shot.ARROW  "),
             Ok(DocumentFormat::ArrowIpc),
@@ -2260,10 +2289,7 @@ pub(super) mod tests {
             DocumentFormat::from_name("fiba-shot1.arrow"),
             Some(DocumentFormat::ArrowIpc)
         );
-        assert_eq!(
-            DocumentFormat::from_name("tracks.Parquet"),
-            Some(DocumentFormat::Parquet)
-        );
+        assert_eq!(DocumentFormat::from_name("tracks.Parquet"), None);
         assert_eq!(DocumentFormat::from_name("tracks"), None);
         assert_eq!(DocumentFormat::from_name("tracks.csv"), None);
     }
@@ -2294,7 +2320,7 @@ pub(super) mod tests {
         }));
         shared.set_pending_document(Some(PendingSource {
             kind: VideoSourceKind::HttpUrl,
-            name: "https://example.com/shot.parquet".to_owned(),
+            name: "https://example.com/shot.arrow".to_owned(),
         }));
 
         shared.set_pending_document(None);

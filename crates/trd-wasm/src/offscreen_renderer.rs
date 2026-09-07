@@ -48,6 +48,7 @@ pub struct OffscreenRenderer {
     /// Sky blur (0.0–1.0) or `None` for no sky; re-derived with tone mapping on change (#235).
     env_background_blur: Option<f32>,
     input: InputSession,
+    document: Option<std::rc::Rc<std::cell::RefCell<trd_core::SceneDocument>>>,
     /// Frames decoded by [`load_ipc`] for paced replay by [`render_index`].
     frames: Vec<DecodedFrame>,
     /// Last inline frames-table resource uploaded to the frame-plane texture.
@@ -94,6 +95,7 @@ impl OffscreenRenderer {
             env_map: None,
             env_background_blur: None,
             input: InputSession::new(),
+            document: None,
             frames: Vec::new(),
             inline_frames: InlineFrameCache::default(),
             external_frame_ready: false,
@@ -106,6 +108,11 @@ impl OffscreenRenderer {
     pub async fn push_ipc(&mut self, chunk: Vec<u8>) -> Result<Vec<u8>, JsValue> {
         if let Err(message) = self.state.ensure_open() {
             return Err(crate::js_error(message));
+        }
+        if self.document.is_some() {
+            return Err(crate::js_error(
+                "loadSceneDocument mode does not accept incremental IPC",
+            ));
         }
 
         match self.push_open(chunk).await {
@@ -120,9 +127,11 @@ impl OffscreenRenderer {
         }
 
         let result = (|| {
-            self.input
-                .finish()
-                .map_err(|error| error_message("input IPC finish failed", error))?;
+            if self.document.is_none() {
+                self.input
+                    .finish()
+                    .map_err(|error| error_message("input IPC finish failed", error))?;
+            }
             self.output
                 .finish()
                 .map_err(|error| error_message("output IPC finish failed", error))?;
@@ -170,6 +179,9 @@ impl OffscreenRenderer {
 
     #[wasm_bindgen(js_name = meshResourceCount)]
     pub fn mesh_resource_count(&self) -> u32 {
+        if let Some(document) = &self.document {
+            return u32::try_from(document.borrow().meshes().len()).unwrap_or(u32::MAX);
+        }
         u32::try_from(self.input.mesh_resource_count()).unwrap_or(u32::MAX)
     }
 
@@ -326,7 +338,7 @@ impl OffscreenRenderer {
             )));
         }
         // Protocol is mesh-first: needs the leading mesh table before a renderer can be built.
-        if !self.input.has_meshes() {
+        if self.document.is_none() && !self.input.has_meshes() {
             return Err(crate::js_error(
                 "input is missing the required leading mesh table (protocol is mesh-first)",
             ));
@@ -345,6 +357,11 @@ impl OffscreenRenderer {
     pub fn load_ipc(&mut self, chunk: Vec<u8>) -> Result<u32, JsValue> {
         if let Err(message) = self.state.ensure_open() {
             return Err(crate::js_error(message));
+        }
+        if self.document.is_some() {
+            return Err(crate::js_error(
+                "loadSceneDocument mode does not accept incremental IPC",
+            ));
         }
         let result = (|| {
             let batches = self
@@ -366,7 +383,39 @@ impl OffscreenRenderer {
     /// The number of frames buffered by [`load_ipc`](Self::load_ipc).
     #[wasm_bindgen(js_name = frameCount)]
     pub fn frame_count(&self) -> u32 {
+        if let Some(document) = &self.document {
+            return u32::try_from(document.borrow().row_count()).unwrap_or(u32::MAX);
+        }
         u32::try_from(self.frames.len()).unwrap_or(u32::MAX)
+    }
+
+    #[wasm_bindgen(js_name = loadSceneDocument)]
+    pub fn load_scene_document(
+        &mut self,
+        document: &crate::ArrowSceneDocument,
+    ) -> Result<u32, JsValue> {
+        self.state.ensure_open().map_err(crate::js_error)?;
+        let source = document.inner.borrow();
+        let count =
+            u32::try_from(source.row_count()).map_err(|_| crate::js_error("too many rows"))?;
+        source.frames().map_err(crate::js_error)?;
+        let renderer = crate::scene_document::document_renderer(
+            &source,
+            self.gpu.clone(),
+            trd_core::TEXTURE_TARGET_FORMAT,
+            self.pbr.as_ref(),
+            self.env_map.as_ref(),
+        )?;
+        let target = renderer
+            .create_texture_target(self.width, self.height)
+            .map_err(crate::js_error)?;
+        self.renderer = Some(renderer);
+        self.target = Some(target);
+        self.document = Some(std::rc::Rc::clone(&document.inner));
+        self.frames.clear();
+        self.inline_frames.invalidate();
+        self.external_frame_ready = false;
+        Ok(count)
     }
 
     /// External background reference for the buffered frame at `index`; `None` if absent.
@@ -382,6 +431,42 @@ impl OffscreenRenderer {
     pub async fn render_index(&mut self, index: u32) -> Result<Vec<u8>, JsValue> {
         if let Err(message) = self.state.ensure_open() {
             return Err(crate::js_error(message));
+        }
+        if let Some(document) = self.document.clone() {
+            let (camera, scene) = {
+                let source = document.borrow();
+                let frame = source.frame(index as usize).map_err(crate::js_error)?;
+                let fit = (self.composite_frame && self.external_frame_ready)
+                    .then_some(FrameFit::Stretch);
+                trd_placement::document_scene(
+                    &source,
+                    &frame,
+                    trd_core::Viewport {
+                        width: self.width,
+                        height: self.height,
+                    },
+                    &self.options,
+                    fit,
+                )
+                .map_err(crate::js_error)?
+            };
+            self.external_frame_ready = false;
+            let target = self
+                .target
+                .as_ref()
+                .expect("document target was created on load");
+            let renderer = self
+                .renderer
+                .as_mut()
+                .expect("document renderer was created on load");
+            let scene = scene.with_lighting(
+                self.pbr
+                    .as_ref()
+                    .map(PbrState::lighting)
+                    .unwrap_or_default(),
+            );
+            renderer.draw_layers(&[trd_core::SceneLayer::new(camera, &scene)], target);
+            return renderer.read_pixels(target).await.map_err(crate::js_error);
         }
         let frame = match self.frames.get(index as usize).cloned() {
             Some(frame) => frame,
@@ -447,7 +532,9 @@ impl OffscreenRenderer {
                     .set_env_map(env);
             }
         }
-        self.apply_stream_tonemap();
+        if self.document.is_none() {
+            self.apply_stream_tonemap();
+        }
         Ok(self.renderer.as_mut().expect("renderer just built"))
     }
 

@@ -49,8 +49,9 @@ pub use protocol::{
     encode_scene_resources_with_frame_indices,
     encode_scene_resources_with_frame_indices_and_tonemap, encode_scene_resources_with_tonemap,
     encode_scene_with_tonemap, encode_texture_assets, frame_rate_from_metadata, output_schema,
-    read_image_stream, DecodedFrame, FrameBatch, InputSession, OutputError, OutputSession,
-    ProtocolError, SceneEncodeError, SceneMesh, SceneTexture, DEFAULT_FRAME_RATE, FRAME_RATE_KEY,
+    read_image_stream, DecodedFrame, DocumentFrame, DocumentMesh, DocumentObject, FrameBatch,
+    GlbMesh, InputSession, ModelEdit, OutputError, OutputSession, ProtocolError, SceneDocument,
+    SceneEncodeError, SceneMesh, SceneTexture, DEFAULT_FRAME_RATE, FRAME_RATE_KEY,
     PROTOCOL_VERSION, PROTOCOL_VERSION_KEY, TABLE_KIND_KEY,
 };
 // Material models are plain data (no wgpu, no bytemuck), so they sit beside

@@ -155,19 +155,15 @@ impl NativeVideoEditingApp {
         // With eframe's device the rendered texture is bound straight into egui;
         // without one (no wgpu render state) the portable readback path stands.
         let renderer = match (gpu.clone(), arrow_scene.as_ref()) {
-            (Some(gpu), Some(scene)) => VideoPlacementRenderer::new_scene_with_gpu(
+            (Some(gpu), Some(scene)) => VideoPlacementRenderer::new_arrow_scene_with_gpu(
                 gpu,
-                &scene
-                    .mesh_assets()
-                    .map_err(NativeVideoEditingError::Input)?,
+                scene,
                 replay_env.as_deref().expect("scene env loaded above"),
                 render_size.0,
                 render_size.1,
             ),
-            (None, Some(scene)) => pollster::block_on(VideoPlacementRenderer::new_scene(
-                &scene
-                    .mesh_assets()
-                    .map_err(NativeVideoEditingError::Input)?,
+            (None, Some(scene)) => pollster::block_on(VideoPlacementRenderer::new_arrow_scene(
+                scene,
                 replay_env.as_deref().expect("scene env loaded above"),
                 render_size.0,
                 render_size.1,
@@ -480,7 +476,6 @@ impl NativeVideoEditingApp {
             trd_gui::video_editing::VideoEditingInput::Scene(scene) => {
                 let mut scene = scene;
                 resolve_arrow_scene(&mut scene)?;
-                let assets = scene.mesh_assets()?;
                 if self.env_bytes.is_none() {
                     self.env_bytes = Some(read_asset(
                         &self.assets_root,
@@ -494,11 +489,11 @@ impl NativeVideoEditingApp {
                     .map(|video| (video.width, video.height))
                     .unwrap_or_else(|| preview_size(&self.video_info, self.preview_width));
                 let renderer = match self.shared.shared_gpu() {
-                    Some(gpu) => {
-                        VideoPlacementRenderer::new_scene_with_gpu(gpu, &assets, env, width, height)
-                    }
-                    None => pollster::block_on(VideoPlacementRenderer::new_scene(
-                        &assets, env, width, height,
+                    Some(gpu) => VideoPlacementRenderer::new_arrow_scene_with_gpu(
+                        gpu, &scene, env, width, height,
+                    ),
+                    None => pollster::block_on(VideoPlacementRenderer::new_arrow_scene(
+                        &scene, env, width, height,
                     )),
                 }?;
                 self.document = None;

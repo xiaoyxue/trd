@@ -11,10 +11,19 @@ use crate::texture::TEXTURE_COLUMN;
 use crate::{FrameError, FrameParams, MeshError};
 
 mod arrow_decode;
+mod document_edit;
+mod document_params;
+mod glb_mesh;
 mod image_encode;
 mod input_session;
 mod output_session;
+mod scene_document;
 mod scene_encode;
+
+pub use document_edit::ModelEdit;
+pub use document_params::{DocumentFrame, DocumentMesh, DocumentObject};
+pub use glb_mesh::GlbMesh;
+pub use scene_document::SceneDocument;
 
 pub(crate) use arrow_decode::{
     check_version, decode_batch, decode_draws, decode_frame_ids, decode_frame_refs, decode_tonemap,

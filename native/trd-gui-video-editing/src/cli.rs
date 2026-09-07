@@ -5,7 +5,7 @@ use clap::Parser;
 #[derive(Debug, Parser)]
 #[command(name = "trd-gui-video-editing", version, about)]
 pub struct Cli {
-    /// Annotation Arrow/Parquet input or an exported protocol `0.0.6` Arrow scene.
+    /// Arrow annotation input or a params scene. Videos remain separate.
     ///
     /// The bytes are sniffed against the exact current video-editing version
     /// first, then the exact current render-protocol version. Other versions are
@@ -15,6 +15,24 @@ pub struct Cli {
     /// enables editing; a protocol scene replays over the selected video.
     #[arg(long, value_name = "ARROW_INPUT")]
     pub document: Option<PathBuf>,
+
+    /// One GLB resource for the params input; reuse its UUID or create a new binding.
+    #[arg(
+        long,
+        value_name = "GLB",
+        requires = "document",
+        conflicts_with = "glb_mesh"
+    )]
+    pub glb: Option<PathBuf>,
+
+    /// UUID-keyed GLB resources. Repeat as --glb-mesh UUID=PATH.
+    #[arg(
+        long,
+        value_name = "UUID=GLB",
+        requires = "document",
+        conflicts_with = "glb"
+    )]
+    pub glb_mesh: Vec<String>,
 
     /// Local MP4 matching the timeline metadata. Without a source, the editor
     /// starts with an empty canvas until Open video is used.

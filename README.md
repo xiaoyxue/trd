@@ -316,6 +316,8 @@ MP4 opens and seeks in megabytes.
 - [`assets/schemas/trd-render-sub-schema.md`](assets/schemas/trd-render-sub-schema.md)
   — the approved params/GLB simplification being implemented in #367; selected
   source fields, CG camera compatibility, and source-preserving editing.
+- [`docs/protocol/scene-documents.md`](docs/protocol/scene-documents.md) — current
+  Rust/wasm document APIs, native GLB inputs and implementation limitations.
 - [`docs/frame-extraction.md`](docs/frame-extraction.md) — background-frame
   extraction, external references, and inline frames-table authoring.
 - [`docs/gui-design.md`](docs/gui-design.md) — the `trd-gui` interactive-viewer design.

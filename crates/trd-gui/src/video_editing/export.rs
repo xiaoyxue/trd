@@ -6,10 +6,59 @@ pub struct ArrowScene {
     pub frames: Vec<trd_core::DecodedFrame>,
     pub frame_rate: f64,
     pub tonemap: Option<trd_core::Tonemap>,
+    pub source: Option<std::rc::Rc<std::cell::RefCell<trd_core::SceneDocument>>>,
 }
 
 impl ArrowScene {
+    pub fn from_source(source: trd_core::SceneDocument) -> Result<Self, String> {
+        let rows = source.frames().map_err(|error| error.to_string())?;
+        let mut frames = Vec::with_capacity(rows.len());
+        for row in rows {
+            let video_frame_index = row
+                .present_index
+                .map(|index| {
+                    u32::try_from(index).map_err(|_| {
+                        "source present_index exceeds the video's supported index range".to_owned()
+                    })
+                })
+                .transpose()?;
+            frames.push(trd_core::DecodedFrame {
+                video_frame_index,
+                params: row.params,
+                draws: Some(Vec::new()),
+                frame_ref: None,
+                frame_id: None,
+            });
+        }
+        let frame_rate = trd_core::frame_rate_from_metadata(source.schema().metadata());
+        let tonemap = source
+            .tonemap_override()
+            .map_err(|error| error.to_string())?;
+        Ok(Self {
+            mesh_resources: Vec::new(),
+            frames,
+            frame_rate,
+            tonemap,
+            source: Some(std::rc::Rc::new(std::cell::RefCell::new(source))),
+        })
+    }
+
+    pub fn source_row(&self, video_frame_index: u32) -> Option<usize> {
+        if self.is_frame_indexed() {
+            self.frames
+                .iter()
+                .position(|frame| frame.video_frame_index == Some(video_frame_index))
+        } else {
+            ((video_frame_index as usize) < self.frames.len()).then_some(video_frame_index as usize)
+        }
+    }
+
     pub fn frame(&self, video_frame_index: u32) -> Option<&trd_core::DecodedFrame> {
+        if self.source.is_some() {
+            return self
+                .source_row(video_frame_index)
+                .map(|row| &self.frames[row]);
+        }
         if self
             .frames
             .first()
@@ -59,6 +108,10 @@ impl ArrowScene {
     }
 
     pub fn mesh_assets(&self) -> Result<Vec<trd_core::MeshAsset>, String> {
+        if let Some(source) = &self.source {
+            return trd_placement::document_assets(&source.borrow())
+                .map_err(|error| error.to_string());
+        }
         self.mesh_resources
             .iter()
             .enumerate()
@@ -103,6 +156,10 @@ pub fn decode_video_editing_input(bytes: &[u8]) -> Result<VideoEditingInput, Str
 }
 
 fn decode_arrow_scene(bytes: &[u8]) -> Result<ArrowScene, String> {
+    if trd_core::SceneDocument::starts_with_params(bytes).map_err(|error| error.to_string())? {
+        let source = trd_core::SceneDocument::read(bytes).map_err(|error| error.to_string())?;
+        return ArrowScene::from_source(source);
+    }
     let mut session = trd_core::InputSession::new();
     let batches = session.push(bytes).map_err(|error| error.to_string())?;
     session.finish().map_err(|error| error.to_string())?;
@@ -130,11 +187,16 @@ fn decode_arrow_scene(bytes: &[u8]) -> Result<ArrowScene, String> {
         frames,
         frame_rate: session.frame_rate().unwrap_or(trd_core::DEFAULT_FRAME_RATE),
         tonemap: session.tonemap_override(),
+        source: None,
     })
 }
 
 #[derive(Debug, thiserror::Error)]
 enum ArrowExportError {
+    #[error("too many source rows to export through this editor")]
+    TooManyRows,
+    #[error(transparent)]
+    Source(trd_core::ProtocolError),
     #[error("load a video before exporting")]
     NoVideo,
     #[error("load an annotation document before exporting")]
@@ -216,6 +278,13 @@ impl VideoEditingApp {
         if !self.shared.video_loaded.get() {
             return Some(ArrowExportError::NoVideo.to_string());
         }
+        if self
+            .arrow_scene
+            .as_ref()
+            .is_some_and(|scene| scene.source.is_some())
+        {
+            return None;
+        }
         let Some(document) = self.document.as_ref() else {
             return Some(ArrowExportError::NoDocument.to_string());
         };
@@ -261,6 +330,21 @@ impl VideoEditingApp {
     fn build_arrow_export(&self) -> Result<ArrowExport, ArrowExportError> {
         if !self.shared.video_loaded.get() {
             return Err(ArrowExportError::NoVideo);
+        }
+        if let Some(source) = self
+            .arrow_scene
+            .as_ref()
+            .and_then(|scene| scene.source.as_ref())
+        {
+            let source = source.borrow();
+            let count =
+                u32::try_from(source.row_count()).map_err(|_| ArrowExportError::TooManyRows)?;
+            return Ok(ArrowExport {
+                filename: export_filename(&self.video.source_name),
+                bytes: source.write().map_err(ArrowExportError::Source)?,
+                frame_count: count,
+                placed_frame_count: count,
+            });
         }
         let document = self.document.as_ref().ok_or(ArrowExportError::NoDocument)?;
         self.selected_asset
@@ -660,6 +744,7 @@ mod tests {
             }],
             frame_rate: 24.0,
             tonemap: None,
+            source: None,
         })));
 
         assert!(app.arrow_scene.is_none());
@@ -689,6 +774,7 @@ mod tests {
             }],
             frame_rate: 24.0,
             tonemap: None,
+            source: None,
         }));
         assert!(shared.take_incoming_scene().unwrap().is_some());
         assert!(shared.take_incoming_document().is_none());

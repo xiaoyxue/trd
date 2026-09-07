@@ -148,11 +148,10 @@ pub async fn start(
                     );
                     let renderer = match creator_scene.as_ref() {
                         Some(scene) => {
-                            let assets = scene.mesh_assets()?;
                             trd_gui::video_editing_renderer::VideoPlacementRenderer::
-                                new_scene_with_gpu(
+                                new_arrow_scene_with_gpu(
                                     gpu.clone(),
-                                    &assets,
+                                    scene,
                                     &env_bytes,
                                     width,
                                     height,
@@ -678,23 +677,20 @@ impl VideoEditingHandle {
             }
             trd_gui::video_editing::VideoEditingInput::Scene(mut scene) => {
                 resolve_video_editing_scene(&mut scene, &gltf_bytes)?;
-                let assets = scene
-                    .mesh_assets()
-                    .map_err(|error| wasm_bindgen::JsValue::from_str(&error))?;
                 let timeline = self.timeline.get();
                 let renderer = match self.shared.shared_gpu() {
                     Some(gpu) => {
-                        trd_gui::video_editing_renderer::VideoPlacementRenderer::new_scene_with_gpu(
+                        trd_gui::video_editing_renderer::VideoPlacementRenderer::new_arrow_scene_with_gpu(
                             gpu,
-                            &assets,
+                            &scene,
                             &env_bytes,
                             timeline.width,
                             timeline.height,
                         )
                     }
                     None => {
-                        trd_gui::video_editing_renderer::VideoPlacementRenderer::new_scene(
-                            &assets,
+                        trd_gui::video_editing_renderer::VideoPlacementRenderer::new_arrow_scene(
+                            &scene,
                             &env_bytes,
                             timeline.width,
                             timeline.height,

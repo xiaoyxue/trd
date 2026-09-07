@@ -56,6 +56,47 @@ fn run() -> Result<(), error::NativeVideoEditingError> {
                 .map_err(error::NativeVideoEditingError::Input)
         })
         .transpose()?;
+    if cli.glb.is_some() || !cli.glb_mesh.is_empty() {
+        let source = match input.as_ref() {
+            Some(trd_gui::video_editing::VideoEditingInput::Scene(scene)) => scene.source.as_ref(),
+            _ => None,
+        }
+        .ok_or_else(|| {
+            error::NativeVideoEditingError::Input(
+                "GLB byte resources require a params Arrow input".to_owned(),
+            )
+        })?;
+        let read = |path: &std::path::Path| {
+            std::fs::read(path).map_err(|source| error::NativeVideoEditingError::Read {
+                path: path.display().to_string(),
+                source,
+            })
+        };
+        if let Some(path) = &cli.glb {
+            let id = source
+                .borrow_mut()
+                .bind_glb(&read(path)?)
+                .map_err(|error| error::NativeVideoEditingError::Input(error.to_string()))?;
+            log::info!("bound GLB as mesh {id}");
+        } else {
+            let mut meshes = Vec::new();
+            for binding in &cli.glb_mesh {
+                let (id, path) = binding.split_once('=').ok_or_else(|| {
+                    error::NativeVideoEditingError::Input("--glb-mesh expects UUID=PATH".to_owned())
+                })?;
+                meshes.push(
+                    trd_core::GlbMesh::new(id, &read(std::path::Path::new(path))?).map_err(
+                        |error| error::NativeVideoEditingError::Input(error.to_string()),
+                    )?,
+                );
+            }
+            meshes.sort_by_key(trd_core::GlbMesh::id);
+            source
+                .borrow_mut()
+                .bind_meshes(meshes)
+                .map_err(|error| error::NativeVideoEditingError::Input(error.to_string()))?;
+        }
+    }
     if let Some(trd_gui::video_editing::VideoEditingInput::Scene(scene)) = input.as_mut() {
         app::resolve_arrow_scene(scene).map_err(error::NativeVideoEditingError::Input)?;
     }

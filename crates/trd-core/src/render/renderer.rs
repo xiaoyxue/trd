@@ -249,6 +249,32 @@ pub struct Renderer {
 }
 
 impl Renderer {
+    /// Uploads already-resolved assets in slice order without preview normalization.
+    pub fn with_assets(
+        gpu: Arc<GpuContext>,
+        format: wgpu::TextureFormat,
+        assets: &[crate::MeshAsset],
+    ) -> Result<Self, RenderError> {
+        let meshes = assets
+            .iter()
+            .map(|asset| asset.mesh.clone())
+            .collect::<Vec<_>>();
+        let mut renderer = Self::new(gpu, format, &meshes, &vec![Matrix4::IDENTITY; meshes.len()])?;
+        for (slot, asset) in assets.iter().enumerate() {
+            renderer.set_disney_material(MeshTarget::One(slot), asset.material.clone());
+            if let Some(texture) = &asset.base_color_texture {
+                renderer.set_mesh_texture(slot, texture);
+            }
+            if let Some(texture) = &asset.metallic_roughness_texture {
+                renderer.set_mesh_metallic_roughness_texture(slot, texture);
+            }
+            if let Some(texture) = &asset.normal_texture {
+                renderer.set_mesh_normal_texture(slot, texture);
+            }
+        }
+        Ok(renderer)
+    }
+
     /// Constructs a `Renderer` that derives each mesh's base (preview) model
     /// automatically via [`Mesh::preview_transform`]
     /// ([`crate::DEFAULT_PREVIEW_TARGET`]) — center + uniform scale-to-fit — so an

@@ -7,6 +7,9 @@
 use thiserror::Error;
 use trd_core::Matrix4;
 
+mod document_scene;
+pub use document_scene::{document_assets, document_scene, DocumentSceneError};
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CameraIntrinsics {
     /// Row-major OpenCV K.
@@ -67,6 +70,8 @@ pub enum PlacementError {
     BehindCamera,
     #[error("placement scale must be positive")]
     InvalidScale,
+    #[error("placement geometry must be finite")]
+    NonFiniteGeometry,
 }
 
 /// Reconstructs the camera-space orthonormal local frame used by the Python
@@ -75,6 +80,15 @@ pub fn quad_frame(
     intrinsics: CameraIntrinsics,
     quad: PlacementQuad,
 ) -> Result<QuadFrame, PlacementError> {
+    if !intrinsics.row_major.iter().all(|value| value.is_finite())
+        || !quad
+            .points_px
+            .iter()
+            .flatten()
+            .all(|value| value.is_finite())
+    {
+        return Err(PlacementError::NonFiniteGeometry);
+    }
     let k = column_major_intrinsics(intrinsics.row_major);
     let k_inv = inverse3(k).ok_or(PlacementError::SingularIntrinsics)?;
     let h = homography_unit_square_to_quad(quad.points_px)?;
@@ -116,6 +130,28 @@ pub fn quad_frame(
         half_edge2: scale3(r2, 0.5),
         axis_length,
     })
+}
+
+/// A unit Y-up basis at the quad center, with no demo offset, scale or lift.
+pub fn quad_origin_model(frame: QuadFrame) -> Matrix4 {
+    Matrix4::from_cols_array(&[
+        frame.e1[0],
+        -frame.e1[1],
+        -frame.e1[2],
+        0.0,
+        frame.e3[0],
+        -frame.e3[1],
+        -frame.e3[2],
+        0.0,
+        -frame.e2[0],
+        frame.e2[1],
+        frame.e2[2],
+        0.0,
+        frame.origin_camera[0],
+        -frame.origin_camera[1],
+        -frame.origin_camera[2],
+        1.0,
+    ])
 }
 
 /// Matches the Python placement formula and returns a column-major GL camera
