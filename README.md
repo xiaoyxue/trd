@@ -313,6 +313,9 @@ MP4 opens and seeks in megabytes.
 - [`docs/protocol/0.0.6.md`](docs/protocol/0.0.6.md) — the full stream-protocol spec,
   with [`0.0.6.schema.json`](docs/protocol/0.0.6.schema.json) beside it as the
   machine-readable form producers can generate against.
+- [`assets/schemas/trd-render-sub-schema.md`](assets/schemas/trd-render-sub-schema.md)
+  — the approved params/GLB simplification being implemented in #367; selected
+  source fields, CG camera compatibility, and source-preserving editing.
 - [`docs/frame-extraction.md`](docs/frame-extraction.md) — background-frame
   extraction, external references, and inline frames-table authoring.
 - [`docs/gui-design.md`](docs/gui-design.md) — the `trd-gui` interactive-viewer design.
