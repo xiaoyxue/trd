@@ -42,10 +42,30 @@ impl eframe::App for VideoEditingApp {
         self.video_source_dialog(ui.ctx());
 
         let overlay_frame_index = self.displayed_frame_index;
-        let quad = self
-            .frame_row(overlay_frame_index)
-            .and_then(|frame| frame.placement_quad);
-        let quad_frame = self.quad_frame_at(overlay_frame_index);
+        let source_mode = self
+            .arrow_scene
+            .as_ref()
+            .is_some_and(|scene| scene.source.is_some());
+        if source_mode {
+            if let Err(error) = self.sync_source_controller() {
+                self.shared.set_error(super::ErrorScope::Document, error);
+            }
+        }
+        let quad = if source_mode {
+            self.displayed_diagnostics
+                .as_ref()
+                .and_then(|facts| facts.source_frame.as_ref())
+                .and_then(|frame| frame.objects.get(self.source_selected_instance))
+                .and_then(|object| object.quad)
+        } else {
+            self.frame_row(overlay_frame_index)
+                .and_then(|frame| frame.placement_quad)
+        };
+        let quad_frame = if source_mode {
+            self.displayed_facts().quad
+        } else {
+            self.quad_frame_at(overlay_frame_index)
+        };
         let mut needs_render = false;
         let mut pick = None;
         let mut hover = None;
@@ -60,11 +80,7 @@ impl eframe::App for VideoEditingApp {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     self.source_controls(ui);
                     ui.separator();
-                    if self
-                        .arrow_scene
-                        .as_ref()
-                        .is_some_and(|scene| scene.source.is_some())
-                    {
+                    if source_mode {
                         needs_render |= self.source_model_controls(ui);
                     } else {
                         needs_render |= crate::ui::controls_sections(
@@ -72,14 +88,16 @@ impl eframe::App for VideoEditingApp {
                             &mut self.controller,
                             crate::ui::Controls {
                                 camera_locked: true,
-                                move_reference_labels: Some(["e1", "e2", "e3"]),
+                                move_reference_labels: Some(super::QUAD_MOVE_LABELS),
                             },
                         );
                     }
                     ui.separator();
-                    self.shot_controls(ui);
-                    self.quad_controls(ui, overlay_frame_index, quad_frame);
-                    self.catalog_controls(ui);
+                    if !source_mode {
+                        self.shot_controls(ui);
+                        self.quad_controls(ui, overlay_frame_index, quad_frame);
+                        self.catalog_controls(ui);
+                    }
                     self.export_controls(ui);
                     self.details_controls(ui);
                     needs_render |= crate::ui::reset_button(ui, &mut self.controller);
@@ -126,7 +144,7 @@ impl eframe::App for VideoEditingApp {
                     controller: &mut self.controller,
                     texture,
                     render_size: self.display_size,
-                    sizing: self.image_sizing,
+                    sizing: crate::ui::ImageSizing::FitCanvas,
                     camera_locked: true,
                     hide_when_empty: true,
                 },
@@ -148,20 +166,48 @@ impl eframe::App for VideoEditingApp {
 
 impl VideoEditingApp {
     fn source_model_controls(&mut self, ui: &mut egui::Ui) -> bool {
-        ui.heading("Source models");
+        ui.heading("Placement / source models");
         let Some(scene) = self.arrow_scene.as_ref() else {
             return false;
         };
         let Some(source) = scene.source.clone() else {
             return false;
         };
+        let mut overlay_changed = ui
+            .checkbox(&mut self.show_placement_quads, "Show quad")
+            .changed();
+        overlay_changed |= ui
+            .add_enabled(
+                self.selected_quad,
+                egui::Checkbox::new(&mut self.show_gizmos, "Show Coordinate"),
+            )
+            .changed();
+        overlay_changed |= ui
+            .add_enabled(
+                self.selected_quad,
+                egui::Checkbox::new(&mut self.show_plane_grid, "Show Plane"),
+            )
+            .changed();
+        let reference_only = source.borrow().meshes().is_empty();
+        if reference_only {
+            overlay_changed |= ui
+                .add_enabled(
+                    self.selected_quad,
+                    egui::Checkbox::new(&mut self.show_reference_cube, "Show reference cube"),
+                )
+                .changed();
+        }
         let Some(row) = scene.source_row(self.displayed_frame_index) else {
             ui.weak("No params row for this video frame.");
-            return false;
+            return overlay_changed;
         };
-        if source.borrow().meshes().is_empty() {
-            ui.weak("Reference coordinates only. Load GLB resources to edit a model.");
-            return false;
+        if reference_only {
+            ui.weak(if self.selected_quad {
+                "Selected quad: the cube's bottom center is at the local origin."
+            } else {
+                "Click a quad to show its local coordinates, plane grid and cube."
+            });
+            return overlay_changed;
         }
         let frame = match source.borrow().frame(row) {
             Ok(frame) => frame,
@@ -177,9 +223,6 @@ impl VideoEditingApp {
         }
         self.source_selected_instance = self.source_selected_instance.min(frame.objects.len() - 1);
         let mut changed = false;
-        let mut matrix = frame.objects[self.source_selected_instance]
-            .model
-            .to_cols_array();
         ui.add_enabled_ui(!self.shared.video_playing.get(), |ui| {
             let label = |index: usize| {
                 frame.objects[index]
@@ -187,6 +230,7 @@ impl VideoEditingApp {
                     .clone()
                     .unwrap_or_else(|| format!("Object {}", index + 1))
             };
+            let previous = self.source_selected_instance;
             egui::ComboBox::from_id_salt("source-instance")
                 .selected_text(label(self.source_selected_instance))
                 .show_ui(ui, |ui| {
@@ -198,59 +242,35 @@ impl VideoEditingApp {
                         );
                     }
                 });
-            matrix = frame.objects[self.source_selected_instance]
-                .model
-                .to_cols_array();
+            if previous != self.source_selected_instance {
+                self.controller.state.selected = Some(self.source_selected_instance as u32);
+                self.selected_quad = true;
+                self.show_gizmos = true;
+                self.show_plane_grid = true;
+                changed = true;
+            }
             ui.weak(format!(
                 "Params row {row}; edits affect this row and object only."
             ));
-            ui.label("Local translation");
-            ui.horizontal(|ui| {
-                for (axis, value) in ["X", "Y", "Z"].into_iter().zip(&mut matrix[12..15]) {
-                    changed |= ui
-                        .add(
-                            egui::DragValue::new(value)
-                                .prefix(format!("{axis} "))
-                                .speed(0.01),
-                        )
-                        .changed();
-                }
+            ui.weak("Pick the mesh to edit it. Controls adjust its existing local model.");
+            changed |= crate::ui::interaction_section(
+                ui,
+                &mut self.controller,
+                crate::ui::Controls {
+                    camera_locked: true,
+                    move_reference_labels: Some(super::QUAD_MOVE_LABELS),
+                },
+            );
+            changed |= crate::ui::transform_section(ui, &mut self.controller);
+            ui.collapsing("Model matrix (advanced)", |ui| {
+                ui.monospace(super::diagnostics::format_matrix(
+                    frame.objects[self.source_selected_instance]
+                        .model
+                        .to_cols_array(),
+                ));
             });
-            ui.collapsing("Model matrix", |ui| {
-                egui::Grid::new("source-model-matrix").show(ui, |ui| {
-                    for row in 0..3 {
-                        for column in 0..4 {
-                            changed |= ui
-                                .add(
-                                    egui::DragValue::new(&mut matrix[column * 4 + row]).speed(0.01),
-                                )
-                                .changed();
-                        }
-                        ui.end_row();
-                    }
-                });
-            });
-            if ui.button("Reset model to local origin").clicked() {
-                matrix = trd_core::Matrix4::IDENTITY.to_cols_array();
-                changed = true;
-            }
         });
-        if changed {
-            let result = source
-                .borrow_mut()
-                .apply_model_edits(&[trd_core::ModelEdit {
-                    row,
-                    object: self.source_selected_instance,
-                    model: trd_core::Matrix4::from_cols_array(&matrix),
-                }]);
-            if let Err(error) = result {
-                self.shared
-                    .set_error(super::ErrorScope::Document, error.to_string());
-                return false;
-            }
-            self.shared.clear_error(super::ErrorScope::Document);
-        }
-        changed
+        changed || overlay_changed
     }
 
     /// Scene revision settles before the pick captures it (#205).
@@ -263,6 +283,10 @@ impl VideoEditingApp {
         quad: Option<[[f32; 2]; 4]>,
     ) {
         if needs_render {
+            if let Err(error) = self.apply_source_transforms() {
+                self.shared.set_error(super::ErrorScope::Document, error);
+                return;
+            }
             self.shared.request_overlay();
             ctx.request_repaint();
         }
@@ -274,6 +298,33 @@ impl VideoEditingApp {
 
     /// Updates hover state; only re-renders on a change.
     fn update_quad_hover(&mut self, hover: Option<(u32, u32)>, quad: Option<[[f32; 2]; 4]>) {
+        if self
+            .arrow_scene
+            .as_ref()
+            .is_some_and(|scene| scene.source.is_some())
+        {
+            let hovered = hover.and_then(|point| {
+                self.displayed_diagnostics
+                    .as_ref()
+                    .and_then(|facts| facts.source_frame.as_ref())
+                    .and_then(|frame| {
+                        frame
+                            .objects
+                            .iter()
+                            .enumerate()
+                            .rev()
+                            .find(|(_, object)| self.point_hits_quad(point, object.quad))
+                            .map(|(index, _)| index)
+                    })
+            });
+            if hovered != self.source_hovered_instance {
+                self.source_hovered_instance = hovered;
+                self.hovered_quad = hovered.is_some();
+                self.shared.request_overlay();
+                self.shared.request_repaint();
+            }
+            return;
+        }
         let hovered = hover.is_some_and(|point| self.point_hits_quad(point, quad));
         if hovered != self.hovered_quad {
             self.hovered_quad = hovered;
@@ -286,9 +337,18 @@ impl VideoEditingApp {
     /// back to source-video coordinates first.
     fn point_hits_quad(&self, (x, y): (u32, u32), quad: Option<[[f32; 2]; 4]>) -> bool {
         quad.is_some_and(|points| {
+            let source_size = self
+                .displayed_diagnostics
+                .as_ref()
+                .and_then(|facts| facts.source_frame.as_ref())
+                .and_then(|frame| frame.source_size)
+                .unwrap_or(trd_core::Viewport {
+                    width: self.video.width,
+                    height: self.video.height,
+                });
             let source = [
-                x as f32 * self.video.width as f32 / self.display_size.0 as f32,
-                y as f32 * self.video.height as f32 / self.display_size.1 as f32,
+                x as f32 * source_size.width as f32 / self.display_size.0 as f32,
+                y as f32 * source_size.height as f32 / self.display_size.1 as f32,
             ];
             point_in_quad(source, points)
         })
@@ -316,6 +376,10 @@ impl VideoEditingApp {
                     VideoSourceKind::LocalFile => format!("Arrow input: {} (local)", source.name),
                     VideoSourceKind::HttpUrl => format!("Arrow input: {}", source.name),
                 },
+                None if self.arrow_scene.is_some() => {
+                    "Arrow input: source params loaded".to_owned()
+                }
+                None if self.document.is_some() => "Arrow input: annotation loaded".to_owned(),
                 None => "Arrow input: none — the video plays as-is".to_owned(),
             });
             match (self.document.as_ref(), self.arrow_scene.as_ref()) {
@@ -610,7 +674,14 @@ impl VideoEditingApp {
         let Some(frame) = quad_frame else {
             return;
         };
-        let Some(k) = self.frame_row(frame_index).and_then(|row| row.k) else {
+        let Some(k) = self
+            .displayed_diagnostics
+            .as_ref()
+            .and_then(|facts| facts.source_frame.as_ref())
+            .and_then(|frame| frame.params.k)
+            .map(super::protocol_k_from_row_major)
+            .or_else(|| self.frame_row(frame_index).and_then(|row| row.k))
+        else {
             return;
         };
         let intrinsics = trd_placement::CameraIntrinsics { row_major: k };
@@ -659,7 +730,7 @@ impl VideoEditingApp {
     /// Re-imposes the source aspect so the render target stays the video's shape (#282).
     fn resize_render_target(&mut self, ctx: &egui::Context, fitted: (u32, u32)) {
         let fitted = fit_to_source_aspect(fitted, (self.video.width, self.video.height));
-        if self.image_sizing != crate::ui::ImageSizing::FitCanvas
+        if self.render_sizing != crate::ui::ImageSizing::FitCanvas
             || fitted == self.fitted_render_size
         {
             return;
@@ -676,6 +747,52 @@ impl VideoEditingApp {
     /// Resolves a click into a quad selection or GPU pick. Selection bumps before
     /// pick so the pick captures the updated revision (#205).
     pub(super) fn handle_pick(&mut self, (x, y): (u32, u32), quad: Option<[[f32; 2]; 4]>) {
+        if self
+            .arrow_scene
+            .as_ref()
+            .and_then(|scene| scene.source.as_ref())
+            .is_some_and(|source| !source.borrow().meshes().is_empty())
+        {
+            if !self.shared.video_playing.get() {
+                self.shared.request_pick((x, y));
+            }
+            return;
+        }
+        if self
+            .arrow_scene
+            .as_ref()
+            .is_some_and(|scene| scene.source.is_some())
+        {
+            if self.shared.video_playing.get() {
+                return;
+            }
+            let selected = self
+                .displayed_diagnostics
+                .as_ref()
+                .and_then(|facts| facts.source_frame.as_ref())
+                .and_then(|frame| {
+                    frame
+                        .objects
+                        .iter()
+                        .enumerate()
+                        .rev()
+                        .find(|(_, object)| self.point_hits_quad((x, y), object.quad))
+                        .map(|(index, _)| index)
+                });
+            if self.selected_quad != selected.is_some()
+                || selected.is_some_and(|index| index != self.source_selected_instance)
+            {
+                self.selected_quad = selected.is_some();
+                if let Some(index) = selected {
+                    self.source_selected_instance = index;
+                }
+                self.show_gizmos = self.selected_quad;
+                self.show_plane_grid = self.selected_quad;
+                self.show_reference_cube = self.selected_quad;
+                self.shared.request_overlay();
+            }
+            return;
+        }
         if self.selected_asset.is_some() {
             self.shared.request_pick((x, y));
             return;

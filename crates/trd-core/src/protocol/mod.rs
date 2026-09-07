@@ -22,6 +22,8 @@ mod scene_encode;
 
 pub use document_edit::ModelEdit;
 pub use document_params::{DocumentFrame, DocumentMesh, DocumentObject};
+#[cfg(test)]
+pub(crate) use glb_mesh::triangle_glb;
 pub use glb_mesh::GlbMesh;
 pub use scene_document::SceneDocument;
 

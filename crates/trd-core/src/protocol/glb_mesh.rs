@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use arrow::array::{Array, FixedSizeBinaryArray, LargeBinaryArray, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
@@ -10,11 +10,26 @@ use super::{parse_error, ProtocolError, PROTOCOL_VERSION, PROTOCOL_VERSION_KEY, 
 use crate::MeshAsset;
 
 /// An immutable source asset. Its UUID is independent of a renderer's slot.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct GlbMesh {
     id: Uuid,
     bytes: Arc<[u8]>,
+    decoded: Arc<OnceLock<DecodedGlb>>,
 }
+
+#[derive(Debug)]
+struct DecodedGlb {
+    asset: crate::GltfAsset,
+    bounds: crate::Aabb3,
+}
+
+impl PartialEq for GlbMesh {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id && self.bytes == other.bytes
+    }
+}
+
+impl Eq for GlbMesh {}
 
 impl GlbMesh {
     pub fn new(id: &str, bytes: &[u8]) -> Result<Self, ProtocolError> {
@@ -31,12 +46,32 @@ impl GlbMesh {
     }
 
     pub fn decode(&self, slot: u32) -> Result<MeshAsset, ProtocolError> {
-        crate::import_glb(&self.bytes)
-            .map(|asset| MeshAsset::from_gltf_with_id(slot, asset))
-            .map_err(|source| ProtocolError::GltfImport {
-                index: slot,
-                source,
-            })
+        Ok(MeshAsset::from_gltf_with_id(
+            slot,
+            self.decoded(slot)?.asset.clone(),
+        ))
+    }
+
+    pub fn bounds(&self) -> Result<crate::Aabb3, ProtocolError> {
+        Ok(self.decoded(0)?.bounds)
+    }
+
+    pub fn material(&self) -> Result<&crate::DisneyMaterial, ProtocolError> {
+        Ok(&self.decoded(0)?.asset.material)
+    }
+
+    fn decoded(&self, slot: u32) -> Result<&DecodedGlb, ProtocolError> {
+        if let Some(decoded) = self.decoded.get() {
+            return Ok(decoded);
+        }
+        let asset = crate::import_glb(&self.bytes).map_err(|source| ProtocolError::GltfImport {
+            index: slot,
+            source,
+        })?;
+        let bounds = asset.mesh.aabb();
+        // Concurrent readers may initialize first; either result describes the same bytes.
+        let _ = self.decoded.set(DecodedGlb { asset, bounds });
+        Ok(self.decoded.get().expect("decoded asset was initialized"))
     }
 
     fn from_uuid(id: Uuid, bytes: Arc<[u8]>) -> Result<Self, ProtocolError> {
@@ -64,7 +99,11 @@ impl GlbMesh {
                 "mesh {id} must be a self-contained GLB"
             )));
         }
-        Ok(Self { id, bytes })
+        Ok(Self {
+            id,
+            bytes,
+            decoded: Arc::new(OnceLock::new()),
+        })
     }
 }
 
@@ -139,7 +178,7 @@ pub(super) fn encode_mesh_batch(meshes: &[GlbMesh]) -> Result<RecordBatch, Proto
 }
 
 #[cfg(test)]
-pub(super) fn triangle_glb() -> Vec<u8> {
+pub(crate) fn triangle_glb() -> Vec<u8> {
     let json = serde_json::json!({
         "asset": {"version": "2.0"},
         "buffers": [{"byteLength": 36}],

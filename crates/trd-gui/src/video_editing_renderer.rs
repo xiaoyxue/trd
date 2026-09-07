@@ -176,14 +176,25 @@ impl VideoPlacementRenderer {
         width: u32,
         height: u32,
     ) -> Result<Self, String> {
-        Self::new_assets_with_gpu(
+        let mut renderer = Self::new_assets_with_gpu(
             gpu,
             &scene.mesh_assets()?,
             env_bytes,
             width,
             height,
             scene.source.is_none(),
-        )
+        )?;
+        if scene
+            .source
+            .as_ref()
+            .is_some_and(|source| source.borrow().meshes().is_empty())
+        {
+            renderer
+                .renderer
+                .set_mesh_aabb_color(0, trd_core::Mesh::REFERENCE_CUBE_COLOR)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(renderer)
     }
 
     fn new_assets_with_gpu(
@@ -397,6 +408,20 @@ impl VideoPlacementRenderer {
             .await)
     }
 
+    pub async fn pick_document(
+        &mut self,
+        document: &trd_core::SceneDocument,
+        frame: &trd_core::DocumentFrame,
+        point: (u32, u32),
+    ) -> Result<Option<u32>, String> {
+        let (camera, draws) = trd_placement::document_pick_draws(document, frame, self.viewport())
+            .map_err(|error| error.to_string())?;
+        Ok(self
+            .renderer
+            .pick(camera, &draws, point.0, point.1, self.viewport())
+            .await)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn render(
         &mut self,
@@ -541,12 +566,13 @@ impl VideoPlacementRenderer {
     pub fn draw_document_frame(
         &mut self,
         source: FrameSource<'_>,
-        frame_width: u32,
-        frame_height: u32,
+        frame_size: (u32, u32),
         document: &trd_core::SceneDocument,
         frame: &trd_core::DocumentFrame,
+        overlays: trd_placement::PlacementOverlays,
+        selected: Option<u32>,
     ) -> Result<(), String> {
-        self.upload_frame(source, frame_width, frame_height);
+        self.upload_frame(source, frame_size.0, frame_size.1);
         if let Some(operator) = document
             .tonemap_override()
             .map_err(|error| error.to_string())?
@@ -556,19 +582,25 @@ impl VideoPlacementRenderer {
         }
         let options = trd_core::RenderOptions {
             mode: trd_core::RenderMode::Shaded,
+            selected,
             ..Default::default()
         };
-        let (camera, scene) = trd_placement::document_scene(
+        let (camera, scenes) = trd_placement::document_scene_with_overlays(
             document,
             frame,
             self.viewport(),
             &options,
             Some(trd_core::FrameFit::Stretch),
+            overlays,
         )
         .map_err(|error| error.to_string())?;
-        let scene = scene.with_lighting(self.replay_lighting);
-        self.renderer
-            .draw_layers(&[trd_core::SceneLayer::new(camera, &scene)], &self.target);
+        let scenes = scenes.map(|scene| scene.with_lighting(self.replay_lighting));
+        self.renderer.draw_layers(
+            &scenes
+                .each_ref()
+                .map(|scene| trd_core::SceneLayer::new(camera, scene)),
+            &self.target,
+        );
         Ok(())
     }
 

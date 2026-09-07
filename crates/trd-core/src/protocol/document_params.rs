@@ -281,14 +281,8 @@ fn decode_tracked(batch: &RecordBatch) -> Result<Vec<DocumentFrame>, ProtocolErr
                     let h = component(points, "h", point)?;
                     let x = component(points, "x", point)?;
                     let y = component(points, "y", point)?;
-                    if w != sizes[row].width as f32
-                        || h != sizes[row].height as f32
-                        || x.abs() > w
-                        || y.abs() > h
-                    {
-                        return Err(parse_error(
-                            "quad points must lie in the camera's FHC frame",
-                        ));
+                    if w != sizes[row].width as f32 || h != sizes[row].height as f32 {
+                        return Err(parse_error("quad points must use the camera's FHC frame"));
                     }
                     *pixel = [(x + w) / 2.0, (y + h) / 2.0];
                 }
@@ -463,15 +457,6 @@ fn validate_quad(quad: [[f32; 2]; 4]) -> Result<(), ProtocolError> {
             ));
         }
     }
-    if quad
-        .iter()
-        .skip(1)
-        .any(|point| point[1] < quad[0][1] || (point[1] == quad[0][1] && point[0] < quad[0][0]))
-    {
-        return Err(parse_error(
-            "bottom_quads must start at minimum y, then minimum x",
-        ));
-    }
     Ok(())
 }
 
@@ -496,6 +481,10 @@ mod tests {
     }
 
     fn fhc_document() -> SceneDocument {
+        fhc_document_offset(0.0)
+    }
+
+    fn fhc_document_offset(x_offset: f32) -> SceneDocument {
         let k_fields = ["fx", "fy", "cx", "cy", "skew", "w", "h"]
             .map(|name| Arc::new(Field::new(name, DataType::Float32, false)));
         let k = StructArray::new(
@@ -510,7 +499,11 @@ mod tests {
         let points = StructArray::new(
             point_fields.to_vec().into(),
             vec![
-                floats(vec![-200.0, 200.0, 200.0, -200.0]),
+                floats(
+                    [-200.0, 200.0, 200.0, -200.0]
+                        .map(|x| x + x_offset)
+                        .to_vec(),
+                ),
                 floats(vec![-200.0, -200.0, 200.0, 200.0]),
                 floats(vec![1920.0; 4]),
                 floats(vec![1080.0; 4]),
@@ -573,6 +566,16 @@ mod tests {
         );
         assert_eq!(frames[0].objects[0].model, Matrix4::IDENTITY);
         assert_eq!(doc.schema().fields().len(), 4);
+    }
+
+    #[test]
+    fn offscreen_tracking_quad_is_preserved_instead_of_clamped() {
+        let document = fhc_document_offset(2000.0);
+        let quad = document.frame(0).unwrap().objects[0].quad.unwrap();
+        assert_eq!(quad[1][0], 2060.0);
+        assert!(quad[1][0] > 1920.0);
+        let reopened = SceneDocument::read(&document.write().unwrap()).unwrap();
+        assert_eq!(reopened.frame(0).unwrap().objects[0].quad, Some(quad));
     }
 
     #[test]

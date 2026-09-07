@@ -150,6 +150,8 @@ pub enum RenderError {
     /// incomplete CG look-at), so no camera could be resolved.
     #[error(transparent)]
     CameraForm(#[from] super::CameraFormError),
+    #[error("overlay color must contain finite RGB values in [0, 1]")]
+    InvalidOverlayColor,
 }
 
 /// Validates a render size before anything is allocated for it.
@@ -249,17 +251,63 @@ pub struct Renderer {
 }
 
 impl Renderer {
+    /// Changes only this mesh's diagnostic box, leaving other AABB colors intact.
+    pub fn set_mesh_aabb_color(
+        &mut self,
+        mesh_id: usize,
+        color: [f32; 3],
+    ) -> Result<(), RenderError> {
+        if !color
+            .iter()
+            .all(|value| value.is_finite() && (0.0..=1.0).contains(value))
+        {
+            return Err(RenderError::InvalidOverlayColor);
+        }
+        let mesh = self
+            .meshes
+            .get_mut(mesh_id)
+            .ok_or_else(|| RenderError::InvalidMeshSet {
+                reason: format!("AABB mesh {mesh_id} is not loaded"),
+            })?;
+        let corners = mesh
+            .geometry
+            .aabb_bounds
+            .corners()
+            .map(|point| point.to_array());
+        let vertices = super::gizmo::colored_aabb_line_vertices(&corners, color);
+        let replacement =
+            VertexBuffer::new(&self.gpu.device, "trd colored aabb line buffer", &vertices);
+        mesh.geometry.aabb.destroy();
+        mesh.geometry.aabb = replacement;
+        Ok(())
+    }
+
     /// Uploads already-resolved assets in slice order without preview normalization.
     pub fn with_assets(
         gpu: Arc<GpuContext>,
         format: wgpu::TextureFormat,
         assets: &[crate::MeshAsset],
     ) -> Result<Self, RenderError> {
+        Self::with_assets_sample_count(gpu, format, assets, MSAA_SAMPLE_COUNT)
+    }
+
+    pub fn with_assets_sample_count(
+        gpu: Arc<GpuContext>,
+        format: wgpu::TextureFormat,
+        assets: &[crate::MeshAsset],
+        sample_count: u32,
+    ) -> Result<Self, RenderError> {
         let meshes = assets
             .iter()
             .map(|asset| asset.mesh.clone())
             .collect::<Vec<_>>();
-        let mut renderer = Self::new(gpu, format, &meshes, &vec![Matrix4::IDENTITY; meshes.len()])?;
+        let mut renderer = Self::with_sample_count(
+            gpu,
+            format,
+            &meshes,
+            &vec![Matrix4::IDENTITY; meshes.len()],
+            sample_count,
+        )?;
         for (slot, asset) in assets.iter().enumerate() {
             renderer.set_disney_material(MeshTarget::One(slot), asset.material.clone());
             if let Some(texture) = &asset.base_color_texture {

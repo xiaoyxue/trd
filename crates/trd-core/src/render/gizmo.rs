@@ -95,13 +95,20 @@ fn push_line(
 /// Six triangle-list vertices per AABB edge, expanded to
 /// [`AABB_LINE_WIDTH_PX`] in the gizmo shader.
 pub(crate) fn aabb_line_vertices(corners: &[[f32; 3]; 8]) -> Vec<GizmoLineVertex> {
+    colored_aabb_line_vertices(corners, AABB_COLOR)
+}
+
+pub(crate) fn colored_aabb_line_vertices(
+    corners: &[[f32; 3]; 8],
+    color: [f32; 3],
+) -> Vec<GizmoLineVertex> {
     let mut vertices = Vec::with_capacity(12 * LINE_QUAD_CORNERS.len());
     for edge in AABB_EDGE_INDICES.chunks_exact(2) {
         push_line(
             &mut vertices,
             corners[edge[0]],
             corners[edge[1]],
-            AABB_COLOR,
+            color,
             AABB_LINE_WIDTH_PX,
         );
     }
@@ -366,6 +373,26 @@ impl GizmoGeometry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reference_box_color_does_not_change_default_aabbs() {
+        let corners = crate::Mesh::reference_cube()
+            .unwrap()
+            .aabb()
+            .corners()
+            .map(|p| p.to_array());
+        let normal = aabb_line_vertices(&corners);
+        let reference = colored_aabb_line_vertices(&corners, crate::Mesh::REFERENCE_CUBE_COLOR);
+        assert!(normal.iter().all(|vertex| vertex.color == AABB_COLOR));
+        assert!(reference
+            .iter()
+            .all(|vertex| vertex.color == crate::Mesh::REFERENCE_CUBE_COLOR));
+        for (normal, reference) in normal.iter().zip(&reference) {
+            assert_eq!(normal.start, reference.start);
+            assert_eq!(normal.end, reference.end);
+            assert_eq!(normal.extrusion, reference.extrusion);
+        }
+    }
 
     #[test]
     fn line_geometry_expands_every_segment_to_two_triangles() {

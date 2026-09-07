@@ -243,7 +243,14 @@ fn timeline_rows(video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut dy
     );
     r.row(
         "Arrow present_index",
-        &option_u32(frame.map(|f| f.present_index)),
+        &facts
+            .source_frame
+            .as_ref()
+            .and_then(|frame| frame.present_index)
+            .map_or_else(
+                || option_u32(frame.map(|f| f.present_index)),
+                |index| index.to_string(),
+            ),
     );
     r.row(
         "Arrow timestamp_us",
@@ -261,7 +268,15 @@ fn timeline_rows(video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut dy
     );
     r.row(
         "tracking state",
-        frame.map_or("none", |f| if f.tracked { "tracked" } else { "video-only" }),
+        if facts
+            .source_frame
+            .as_ref()
+            .is_some_and(|frame| frame.objects.iter().any(|object| object.quad.is_some()))
+        {
+            "tracked source"
+        } else {
+            frame.map_or("none", |f| if f.tracked { "tracked" } else { "video-only" })
+        },
     );
     r.row("source size", &format!("{}x{}", video.width, video.height));
     r.row(
@@ -297,10 +312,16 @@ fn timeline_rows(video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut dy
 
 fn tracking_rows(_video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut dyn Rows) {
     match facts
-        .timeline_frame
+        .source_frame
         .as_ref()
-        .and_then(|frame| frame.placement_quad)
-    {
+        .and_then(|frame| frame.objects.first())
+        .and_then(|object| object.quad)
+        .or_else(|| {
+            facts
+                .timeline_frame
+                .as_ref()
+                .and_then(|frame| frame.placement_quad)
+        }) {
         Some(points) => {
             for (label, point) in ["TL", "TR", "BR", "BL"].into_iter().zip(points) {
                 r.row(label, &vec2_label(point));
@@ -308,7 +329,13 @@ fn tracking_rows(_video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut d
         }
         None => r.row("quad points", "none"),
     }
-    match facts.timeline_frame.as_ref().and_then(|frame| frame.k) {
+    match facts
+        .source_frame
+        .as_ref()
+        .and_then(|frame| frame.params.k)
+        .map(super::protocol_k_from_row_major)
+        .or_else(|| facts.timeline_frame.as_ref().and_then(|frame| frame.k))
+    {
         Some(k) => r.row(
             "K (fx, fy, cx, cy)",
             &format!("{:.4}, {:.4}, {:.4}, {:.4}", k[0], k[4], k[2], k[5]),
@@ -407,7 +434,14 @@ fn placement_rows(_video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut 
         "preview scale",
         &asset.map_or_else(|| "none".to_owned(), |a| format!("{:.6}", a.preview_scale)),
     );
-    r.row("Olympic preset", "size 0.24, e1 1.30, e2 -1.70, lift 1.00");
+    r.row(
+        "placement",
+        if facts.source_frame.is_some() {
+            "source quad; no preset offset or lift"
+        } else {
+            "Olympic preset: size 0.24, e1 1.30, e2 -1.70, lift 1.00"
+        },
+    );
     r.row("object translation", &vec3_label(object.translation));
     r.row(
         "object rotation",

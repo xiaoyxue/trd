@@ -204,6 +204,7 @@ async function main(): Promise<void> {
           return;
         }
         try {
+          editor.setVideoMediaState(4, false);
           editor.presentVideoFrame(
             frame,
             editor.frameIndexAtMediaTime(mediaSeconds),
@@ -221,6 +222,7 @@ async function main(): Promise<void> {
       ended(): void {
         if (generation === sourceGeneration) {
           editor.setVideoStatus(sourceReady, false);
+          editor.setVideoMediaState(4, true);
         }
       },
       failed(message: string): void {
@@ -322,7 +324,7 @@ async function main(): Promise<void> {
       input.click();
     } else if (command === 2) {
       player?.play();
-      editor.setVideoStatus(sourceReady, sourceReady && player !== undefined);
+      editor.setVideoStatus(sourceReady, sourceReady && (player?.playing ?? false));
     } else if (command === 3) {
       player?.pause();
       editor.setVideoStatus(sourceReady, false);

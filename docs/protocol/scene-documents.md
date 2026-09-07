@@ -56,18 +56,90 @@ the single-resource case. `meshIds()` exposes generated/preserved bindings.
 Both renderers observe edits to the same document handle; they do not re-upload
 meshes for matrix-only changes.
 
-The native and wasm video-editor loaders also accept scene documents. In source
-mode, the shared **Source models** controls edit the selected row/instance and
-**Export Arrow** writes the retained document. These controls do not currently
-propagate an edit across a whole track; the UI states the row-local scope.
+The native and wasm video-editor loaders also accept scene documents. A
+single-mesh/single-quad input binds and selects its quad on load. Clicking the
+mesh uses the same grounded geometry in the GPU pick pass as in rendering and
+selects its owning quad. The original **Interaction** and **Transform** sections
+provide Translate, Rotate, Scale, axis constraints and mouse gestures. They author an
+adjustment to the stored local matrix without decomposing or losing arbitrary
+source transforms. Translate offers only the quad basis, in the order **e1 (quad X)**,
+**e2 (-quad Z)**, **e3 (normal)**, matching the placement basis rather than
+relabeling model XYZ as e1/e2/e3; there is no object-local basis selector.
+The reference wireframe cube uses the same
+default extent-1 size as an imported model, with its bottom center on the plane.
+The read-only **Model matrix** section is an advanced view.
+**Export Arrow** writes the retained document. Edits remain row-local, not
+automatically propagated over a whole track; the UI states that scope.
 
 The editor has separate **Open Video** and **Load Arrow** buttons, each with
 local-file and HTTP(S) URL selection. Loading/replacing Arrow does not reopen
 the video. Arrow may also be loaded before a video; it is validated against
 the video timeline when one becomes available. Clearing the Arrow selection
 and choosing **Unload Arrow** leaves the video running independently.
+Playback can resume within the buffered video tail even after the reader reaches
+EOF. At the end, Details reports `playing: false` and `ended: true`; seeking
+back to a presented frame clears the ended state.
 
 ## Native video editor
+
+Convert the real FIBA annotation before running the editor round trip; do not
+replace it with a synthetic golden scene:
+
+```powershell
+uv run --with pyarrow python scripts\timeline_to_params.py `
+  assets\videos\fiba\fiba-shot1.arrow -o output\fiba-roundtrip\fiba.params.arrow
+uv run --with pyarrow python scripts\timeline_to_params.py `
+  assets\videos\fiba\fiba-shot1.arrow -o output\fiba-roundtrip\fiba.dragon.arrow `
+  --glb assets\meshes\glb\Meshy_AI_Dragon_0804104424_texture.glb --identity-model
+```
+
+The explicit conversion preserves the sparse source rows and unrelated columns,
+converts row-major pixel K to FHC `k`, adds FHC `bottom_quads` without changing
+the source corner order, and
+widens `present_index` to the source sub-schema's int64. It preserves the original
+`timestamp_us`; it does **not** relabel that FPS-derived value as real packet PTS.
+The original annotation and MP4 remain unchanged. The same conversion without
+`--identity-model` exercises adding a missing model column on edit.
+FIBA's finite convex tracking quads may extend outside the video image. The
+rendering subset preserves them instead of clamping their corners and changing
+the placement reconstruction.
+
+For placement acceptance, regenerate the annotation from the actual calibration
+and matching video first; a pre-existing Arrow may name a different source
+render. Then compare all rows against the repository's original Python method:
+
+```powershell
+uv run --with pyarrow python scripts\fiba_video_editing_bundle.py `
+  --video "E:\Asset\Video\shot_0001.mp4" `
+  --calibration assets\videos\fiba\per_frame_KVP_cube_best.parquet `
+  --method 2VP_4510 -o output\fiba-case1\fiba.source.arrow
+uv run --with pyarrow python scripts\timeline_to_params.py `
+  output\fiba-case1\fiba.source.arrow -o output\fiba-case1\fiba.params.arrow
+uv run --with pyarrow --with numpy python scripts\placement_reference.py `
+  output\fiba-case1\fiba.source.arrow -o output\fiba-case1\reference.json
+$env:TRD_FIBA_PARAMS = "$PWD\output\fiba-case1\fiba.params.arrow"
+$env:TRD_FIBA_REFERENCE = "$PWD\output\fiba-case1\reference.json"
+cargo test -p trd-placement --test fiba_placement -- --ignored --nocapture
+```
+
+The reference calls `normal_basis_from_quad` and `pose_from_quad` using original
+K and quad order. The Rust comparison checks all four reprojected corners, the
+origin, gizmo matrix and cube bottom-center anchor for all 222 rows. A cyclic corner
+rotation is not harmless: it changes the first edge used to set basis and scale.
+In the source editor, start with **Show quad**, then **click the quad** to select
+and highlight it. Selection shows the local axes, plane grid and reference cube;
+clicking empty image space deselects it. Visibility toggles remain available for
+the selected reference. The existing internal `cube.obj` is parsed by the OBJ
+loader and uses the same placement method as other Y-up models. Its bottom
+center maps to the quad origin and its +Y follows the normal. No GLB or Arrow
+OBJ resource is needed for Case 1.
+
+**Show Coordinate** and **Show Plane** are independent controls; hover feedback
+is separate from selection. The reference cube has light-blue edges, without
+changing the green AABBs of ordinary models. The renderer stays at source
+resolution while the full video image fits the available panel with its aspect
+ratio intact. Pointer coordinates are mapped from that painted image rectangle,
+excluding letterbox bars.
 
 ```powershell
 cargo run -p trd-gui-video-editing -- `
@@ -97,9 +169,23 @@ can still convert source data to Arrow separately.
 
 `trd_placement::document_scene` resolves both adapters to the existing core
 camera and scene types. FHC geometry is converted only in that view. Reference
-mode draws a centered cube and axes; GLB mode composes the placement origin
-with each local model. `Renderer::with_assets` uses identity asset base matrices
-so source placement is not silently preview-scaled or re-centered.
+mode draws a bottom-anchored cube and axes. For a quad-bound GLB, the existing
+Python placement convention supplies the basis and half-edge scale; the asset's
+AABB is proportionally fit to extent 1 with its bottom center at local zero.
+`DEFAULT_PLACEMENT_EXTENT` is shared with the wireframe cube; the ordinary mesh
+viewer's preview size is unchanged.
+The final transform is `placement * edited_local_model * grounded_asset_base`.
+The base is derived from immutable GLB geometry on both authoring and replay,
+never accumulated into the exported matrix. `Renderer::with_assets` itself
+uses identity bases, so placement is not applied twice. No-quad CG/CV scenes
+retain their prior transforms. All placement math stays in `trd-placement`.
+
+The editable document path uses `document_scene_with_overlays` to assemble two
+back-to-front scenes for `Renderer::draw_layers`: video plus quad fill, outline,
+grid and coordinate axes first; meshes, reference cubes and their AABBs/gizmos
+second. Quad guides never tint or cover model content. Meshes still share depth
+within the foreground scene, and their AABBs remain on top. This avoids changing
+the global primitive order used by ordinary CG/OBJ scenes.
 
 Internal OBJ loading and the original CG camera path remain intact. The GLB
 importer's current capability limits still apply; this work does not silently
@@ -111,7 +197,7 @@ Run these on native and Chrome/wasm surfaces on both Windows and Linux:
 
 | Case | Input | Acceptance |
 |---|---|---|
-| 1 | Params only | Show the quad outline, local axes and origin-centered wireframe cube together. |
+| 1 | Params only | Click the quad to show highlight, local axes, plane grid and a cube whose bottom center is at the local origin; click away to deselect. |
 | 2 | Params plus one mesh | Edit the active model matrix, export updated params, reload with the same GLB and compare the edited/reopened rendering at identical frames and camera/lighting settings. Unrelated columns and untouched models survive. |
 | 3 | Params plus multiple mesh rows | Verify asset IDs, independent transforms and each GLB's material/textures; no swapped or missing assets. |
 
@@ -119,3 +205,22 @@ Multiple meshes occupy rows of one `mesh_id`/`glb` table. These cases organize
 the feature acceptance; the remaining L3 gates, CG/OBJ regressions and video/
 large-file seek coverage still apply. The full planned evidence matrix is
 recorded on #367 and #370.
+
+The pixel snapshot gate now includes both crates:
+
+```text
+cargo test -p trd-core -p trd-placement --test golden_render -- --ignored
+```
+
+The original seven core regressions keep their expected PNGs and camera/draw
+values. Three placement snapshots add the cases above, using Uffizi and the
+same image-difference tolerance. The single-model case additionally requires
+exact same-device pixels across export/reload. This headless gate does not
+substitute for the visible native/Chrome round trips.
+
+For the real editor case, open the converted FIBA params with its matching
+`shot_0001.mp4` (1920x1080, 24 fps, 288 frames), edit a GLB on a tracked row,
+export, and reload in **video-editing**. Compare the edited and reopened
+rendering at the same tracked row and inspect the first/middle/last tracked
+rows plus the video-only 222-287 tail. Converted source-document editing uses
+the video frame's original render resolution, independent of window size/DPI.

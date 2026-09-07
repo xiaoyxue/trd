@@ -159,7 +159,7 @@ have run.
 | Level | What it is | Adds over the level below |
 |---|---|---|
 | **L1** | **UT + IT** — everything needing no GPU and no display. | **Exactly `nix flake check`**: fmt, clippy native, clippy wasm32, `cargo test --workspace`, rustdoc (`-D rustdoc::broken_intra_doc_links`), `tsc --noEmit` + Biome. **The commands live in `flake.nix`, not here** — copying them is what let this file understate the wasm gate for weeks (#316/#181), so read the flake for exact arguments. |
-| **L2** | **normal** — L1 plus the pixel-level regression net. Needs a real GPU. | `cargo test -p trd-core --test golden_render -- --ignored` (MSAA on **and** off, plus the PBR tone-map variants); `cargo test -p trd-core -- --ignored` (`render::gpu_tests`); `cargo test -p trd-gui --test gui_render -- --ignored` |
+| **L2** | **normal** — L1 plus the pixel-level regression net. Needs a real GPU. | `cargo test -p trd-core -p trd-placement --test golden_render -- --ignored` (MSAA/PBR and the three params/GLB cases); `cargo test -p trd-core -- --ignored` (`render::gpu_tests`); `cargo test -p trd-placement --lib -- --ignored`; `cargo test -p trd-gui --test gui_render -- --ignored` |
 | **L3** | **full** — L2 plus end-to-end on a real device. | The [§3 e2e list and the §4 Windows matrix](#the-tiers-in-full) (4.1 `trd-cli` · 4.2 `trd-app` window · 4.3 `trd-gui` window · 4.4 both web renderers · 4.5 native video editor · 4.6 browser video editor · 4.7 large-file seek) |
 
 **The floor table.** Run `git diff --name-only origin/main` and take the
@@ -249,8 +249,10 @@ shell auto-configures this on WSL.
 ### The golden render test (#88)
 
 **The primary pixel-level regression net.** `crates/trd-core/tests/golden_render.rs`
-feeds committed Arrow fixtures through the real `run_stream` pipeline and
-pixel-diffs the frames against committed golden PNGs.
+keeps the existing camera/MSAA/PBR regressions, while
+`crates/trd-placement/tests/golden_render.rs` covers the three params/GLB input
+forms through the actual placement adapter. Both use one shared image comparator
+with unchanged channel/pixel tolerances. Placement stays in `trd-placement`.
 
 It is GPU-gated (`#[ignore]`); run it via the nixGL wrapper (Linux) or directly
 on a Windows box with a discrete GPU.
@@ -258,9 +260,12 @@ on a Windows box with a discrete GPU.
 #### What it covers
 
 Fixtures are `crates/trd-core/tests/golden/stage{1,2}.arrow` (the reduced
-two-stage cornellbox placement demo), with goldens in the same dir. Each params
-row selects an inline `0.0.6` frames-table resource by `frame_id` (stage 1
-encoded Binary, stage 2 raw tensor), composited **under** the scene.
+two-stage cornellbox placement demo), with goldens in the same dir. Migrated
+fixtures contain params followed by GLB mesh resources and reference the
+committed stills under `frames/`; no inline frames table is required. Their
+camera and draw arrays and pre-existing expected PNGs are preserved. The old
+preview normalization is baked into these fixture GLBs, not into draw matrices
+that would also change local gizmos.
 
 | Variant | Why it exists |
 |---|---|
@@ -268,6 +273,13 @@ encoded Binary, stage 2 raw tensor), composited **under** the scene.
 | `stageN_noaa_*` — MSAA off (`Msaa::Off`, single-sample) | the raw single-sample path |
 | `golden_stage2_pbr_{aces,reinhard}` | PBR tone-map variants |
 | `golden_environment_light_syncs_sky_and_reflection` | a hand-built scene (no fixture can draw a sky) pinning that the scene's one `EnvironmentLight.rotation` drives the visible sky **and** the reflections on a near-mirror ball in front of it (#182) |
+| `golden_params_reference_quad_axes_cube` | params only: the quad outline, local axes and centered wireframe cube |
+| `golden_params_single_glb_edit_roundtrip` | absent/identity model → edit → export → reload, with exact same-device pixels and retained source data |
+| `golden_params_multiple_glb_bindings` | two distinguishable GLBs with independent transforms; reversing mesh rows cannot change UUID bindings |
+
+The three new baselines live under `crates/trd-placement/tests/golden/` and use
+Uffizi for model shading. They are headless pixel regressions, **not** the
+native/Chrome UI end-to-end cases. L3 still owes those windows and interactions.
 
 #### Regenerating
 
@@ -277,22 +289,27 @@ Only after an *intended* visual change or a fixture change:
 # 1. rebuild the .arrow fixtures + stills (needs uv + ffmpeg on PATH)
 python3 scripts/golden_fixtures.py
 # 2. refresh the golden PNGs from the current renderer (GPU box)
-TRD_UPDATE_GOLDENS=1 cargo test -p trd-core --test golden_render -- --ignored
+TRD_UPDATE_GOLDENS=1 cargo test -p trd-core -p trd-placement --test golden_render -- --ignored
 ```
+
+When adding a new baseline, select only that new test while setting
+`TRD_UPDATE_GOLDENS`; then unset it and compare the complete suite. Do not
+refresh existing expected images or weaken tolerances to conceal a migration
+regression.
 
 #### The companion non-GPU gate — `tests/decoder_parity.rs`
 
-It decodes the same fixtures through both **public API surfaces** — the native
-`InputStream` (`io/input_stream.rs`, a byte transport owning a `Read`) and the
-browser's push `InputSession` — and asserts identical *assembled frames*. It runs
-in `nix flake check`.
+It decodes the same `[params][mesh]` fixtures through the current **public
+document entry points**: native `SceneDocument::read_from(Read)`, used by
+`run_stream`, and `SceneDocument::read(&[u8])`, used by browser
+`ArrowSceneDocument.fromArrow`. It runs in `nix flake check`.
 
-Neither the column decode nor the framing is duplicated: both run the one decoder
-in `protocol/arrow_decode.rs` through the one `InputSession`. What this guards is
-that the two surfaces a caller assembles a frame through agree —
-`prologue`/`next_batch`/`finish` versus a bare `push`, and `InlineFrameCache`
-versus `InlineFrame::decode` — the shape of failure the `center` non-nullable bug
-had.
+Fragmented native reads (including one-byte chunks) must agree with the complete
+browser buffer on retained schemas/batches, original UUID/GLB resources,
+per-row camera/object views, resolved mesh bindings and external background
+references. Both paths share the document decoder; this pins transport and
+frame-assembly parity, not a second copy of the parser. The legacy mesh-first
+`InputSession` is not the entry point for these migrated fixtures.
 
 ### Where a test lives — by kind, not by size (#305)
 
@@ -324,12 +341,13 @@ file.
 The contents of the test levels: tiers 1–2 are **L2**, tiers 3–4 are **L3**.
 
 1. **Golden test — MSAA enabled *and* disabled (must — L2).**
-   `cargo test -p trd-core --test golden_render -- --ignored` runs both the 4×
-   MSAA (`stageN_*`) and single-sample (`stageN_noaa_*`) goldens plus the PBR
-   tone-map variants. Mandatory for any render-path change, on every platform
+   `cargo test -p trd-core -p trd-placement --test golden_render -- --ignored`
+   runs the 4× MSAA, single-sample and PBR variants plus the three params/GLB
+   placement cases. Mandatory for any render-path change, on every platform
    with a GPU — see [the golden render test](#the-golden-render-test-88).
 2. **GPU-gated tests (must — L2).** Every `#[ignore]` test, on a real GPU:
-   `cargo test -p trd-core -- --ignored` (golden + `render::gpu_tests`) and
+   `cargo test -p trd-core -- --ignored` (golden + `render::gpu_tests`),
+   `cargo test -p trd-placement --lib -- --ignored`, and
    `cargo test -p trd-gui --test gui_render -- --ignored`
 
 #### 3. End-to-end — Linux *and* Windows (L3)
@@ -585,7 +603,7 @@ excludes those gates.
 | 🔀 `decoder_parity` (2)        | ✅ | 🤝 |
 | 📚 rustdoc (0 broken links)    | ✅ | 🤝 |
 | 🌐 `tsc --noEmit` + Biome      | ✅ | 🤝 |
-| 🖼️ `golden_render` (6/6, GPU)  | ✅ | 🤝 |
+| 🖼️ `golden_render` (10/10, GPU) | ✅ | 🤝 |
 | 🎮 `gpu_tests` + `gui_render`  | ✅ | 🤝 |
 | 🖥️ window e2e (§4.2/4.3)       | n/a (L2) | n/a (L2) |
 | 🎬 video-editor e2e (§4.5/4.6) | n/a (L2) | n/a (L2) |
@@ -593,7 +611,7 @@ excludes those gates.
 
 ## 🤝 Handoff — 🐧 Linux/Nix
 - [ ] `nix flake check -L`
-- [ ] nixGL-wrapped `cargo test -p trd-core --test golden_render -- --ignored`
+- [ ] nixGL-wrapped `cargo test -p trd-core -p trd-placement --test golden_render -- --ignored`
 
 > Expected: all green — behaviour-preserving change.
 ```

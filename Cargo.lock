@@ -4054,6 +4054,7 @@ dependencies = [
  "image",
  "log",
  "trd-core",
+ "trd-placement",
  "ureq",
 ]
 
@@ -4138,7 +4139,9 @@ version = "0.1.0"
 dependencies = [
  "approx",
  "arrow",
+ "image",
  "pollster 0.4.0",
+ "serde_json",
  "thiserror 2.0.18",
  "trd-core",
 ]

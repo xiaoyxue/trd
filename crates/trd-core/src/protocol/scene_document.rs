@@ -20,6 +20,23 @@ pub struct SceneDocument {
 }
 
 impl SceneDocument {
+    pub fn read_from(mut reader: impl std::io::Read) -> Result<Self, ProtocolError> {
+        let mut marker = [0u8; 4];
+        reader
+            .read_exact(&mut marker)
+            .map_err(|error| parse_error(error.to_string()))?;
+        if marker != [0xff; 4] {
+            return Err(parse_error(
+                "input must be Arrow IPC, not a video or Parquet file",
+            ));
+        }
+        let mut bytes = marker.to_vec();
+        reader
+            .read_to_end(&mut bytes)
+            .map_err(|error| parse_error(error.to_string()))?;
+        Self::read(&bytes)
+    }
+
     pub fn starts_with_params(bytes: &[u8]) -> Result<bool, ProtocolError> {
         let reader = StreamReader::try_new(Cursor::new(bytes), None)?;
         let schema = reader.schema();
@@ -98,8 +115,41 @@ impl SceneDocument {
         &self.meshes
     }
 
+    pub fn decoded_assets(&self) -> Result<Vec<crate::MeshAsset>, ProtocolError> {
+        if self.meshes.is_empty() {
+            return Ok(vec![crate::MeshAsset::embedded(
+                crate::Mesh::reference_cube()?,
+                crate::DisneyMaterial::default(),
+            )]);
+        }
+        self.meshes
+            .iter()
+            .enumerate()
+            .map(|(slot, mesh)| {
+                mesh.decode(
+                    u32::try_from(slot).map_err(|_| parse_error("too many mesh resources"))?,
+                )
+            })
+            .collect()
+    }
+
     pub fn row_count(&self) -> usize {
         self.batches.iter().map(RecordBatch::num_rows).sum()
+    }
+
+    pub fn frame_ref(&self, row: usize) -> Result<Option<String>, ProtocolError> {
+        let mut local = row;
+        for batch in &self.batches {
+            if local < batch.num_rows() {
+                if super::document_params::is_tracked(batch) {
+                    return Ok(None);
+                }
+                let refs = super::decode_frame_refs(&batch.slice(local, 1))?;
+                return Ok(refs.and_then(|mut values| values.pop()).flatten());
+            }
+            local -= batch.num_rows();
+        }
+        Err(parse_error(format!("params row {row} is out of range")))
     }
 
     pub fn tonemap_override(&self) -> Result<Option<crate::Tonemap>, ProtocolError> {

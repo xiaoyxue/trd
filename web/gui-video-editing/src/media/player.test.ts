@@ -202,6 +202,74 @@ describe("VideoPlayer pacing", () => {
     expect(player.playing).toBe(false);
   });
 
+  test("plays and resumes buffered tail frames after the reader reaches EOF", async () => {
+    const reader = new FakeReader(100);
+    const sink = recordingSink();
+    const player = VideoPlayer.attach(reader, sink.sink);
+    await player.seekToSeconds(3.84);
+    await settle();
+
+    player.play();
+    expect(player.playing).toBe(true);
+    time.set(40);
+    await time.tick();
+    expect(sink.shown.at(-1)).toBeCloseTo(3.88, 5);
+    player.pause();
+    time.set(1000);
+    player.play();
+    expect(player.playing).toBe(true);
+    time.set(1080);
+    await time.tick();
+
+    expect(sink.shown.at(-1)).toBeCloseTo(3.96, 5);
+    expect(player.playing).toBe(false);
+    expect(player.ended).toBe(true);
+    expect(sink.ended).toBe(1);
+    player.play();
+    await time.tick();
+    expect(player.playing).toBe(false);
+    expect(sink.ended).toBe(1);
+  });
+
+  test("playing after a paused seek to the last frame ends without claiming playback", async () => {
+    const reader = new FakeReader(100);
+    const sink = recordingSink();
+    const player = VideoPlayer.attach(reader, sink.sink);
+    await player.seekToSeconds(3.96);
+    await settle();
+    expect(player.ended).toBe(false);
+
+    player.play();
+    expect(player.playing).toBe(false);
+    expect(player.ended).toBe(true);
+    expect(sink.ended).toBe(1);
+
+    await player.seekToSeconds(0);
+    await settle();
+    expect(player.ended).toBe(false);
+    player.play();
+    expect(player.playing).toBe(true);
+    player.close();
+  });
+
+  test("an empty seek while playing stops and reports EOF only once", async () => {
+    const reader = new FakeReader(100);
+    const sink = recordingSink();
+    const player = VideoPlayer.attach(reader, sink.sink);
+    await player.seekToSeconds(0);
+    player.play();
+    await settle();
+
+    await player.seekToSeconds(4);
+    expect(player.playing).toBe(false);
+    expect(player.ended).toBe(true);
+    expect(sink.ended).toBe(1);
+    await time.tick();
+    expect(sink.ended).toBe(1);
+    player.close();
+    expect(reader.handedOut.every((frame) => frame.closed)).toBe(true);
+  });
+
   test("reports a reader failure once rather than once per animation frame", async () => {
     // The regression this pins: `#fill` runs on every frame, so a reader that
     // throws — a decoder that has errored throws on every call — produced one

@@ -5,6 +5,7 @@ mod details_ui;
 mod diagnostics;
 mod editing_ui;
 mod export;
+mod source_editing;
 
 pub use diagnostics::{PoseDeltaDiagnostics, QuadFrameDiagnostics, TrackingPlacementError};
 pub use export::{decode_video_editing_input, ArrowExport, ArrowScene, VideoEditingInput};
@@ -15,6 +16,10 @@ use std::rc::Rc;
 use web_time::Instant;
 
 use diagnostics::{dot3, pose_delta};
+
+// Placement maps model (X, Y, Z) to (e1, e3, -e2).
+const QUAD_MOVE_AXES: [[f32; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]];
+const QUAD_MOVE_LABELS: [&str; 3] = ["e1 (quad X)", "e2 (-quad Z)", "e3 (normal)"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -411,6 +416,10 @@ struct RenderedFrameDiagnostics {
     /// Pinned to the displayed frame (same reason as `media_time_seconds`).
     duration_seconds: f64,
     scene: crate::scene::SceneState,
+    source_frame: Option<trd_core::DocumentFrame>,
+    source_reference: bool,
+    show_reference_cube: bool,
+    show_plane_grid: bool,
     selected_asset: Option<CatalogAsset>,
     selected_quad: bool,
     move_direction: crate::interaction::MoveDirection,
@@ -428,6 +437,11 @@ struct PickRequest {
     point: (u32, u32),
     source_generation: u64,
     render_revision: u64,
+}
+
+enum PickFrame {
+    Annotation(trd_core::VideoEditingFrame, trd_core::Matrix4),
+    Source(trd_core::SceneDocument, Box<trd_core::DocumentFrame>),
 }
 
 struct PickResult {
@@ -922,7 +936,14 @@ pub struct VideoEditingApp {
     was_playing: bool,
     selected_asset: Option<CatalogAsset>,
     source_selected_instance: usize,
-    image_sizing: crate::ui::ImageSizing,
+    source_controller_row: Option<usize>,
+    source_model_baselines: Vec<trd_core::Matrix4>,
+    source_applied_adjustments: Vec<trd_core::Matrix4>,
+    source_hovered_instance: Option<usize>,
+    show_reference_cube: bool,
+    show_plane_grid: bool,
+    /// GPU target sizing; the displayed image always fits its available region.
+    render_sizing: crate::ui::ImageSizing,
     fitted_render_size: (u32, u32),
     source_dialog: Option<SourceDialog>,
     video_url: String,
@@ -963,7 +984,7 @@ impl VideoEditingApp {
         let mut controller = crate::interaction::InteractionController::new(scene);
         controller.target = crate::interaction::InteractionTarget::Object;
         controller.move_direction = crate::interaction::MoveDirection::Reference1;
-        controller.move_reference_axes = [[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]];
+        controller.move_reference_axes = QUAD_MOVE_AXES;
         controller.state.camera.distance = 1.0;
         Self {
             video,
@@ -986,7 +1007,13 @@ impl VideoEditingApp {
             was_playing: false,
             selected_asset: None,
             source_selected_instance: 0,
-            image_sizing: crate::ui::ImageSizing::FitCanvas,
+            source_controller_row: None,
+            source_model_baselines: Vec::new(),
+            source_applied_adjustments: Vec::new(),
+            source_hovered_instance: None,
+            show_reference_cube: false,
+            show_plane_grid: false,
+            render_sizing: crate::ui::ImageSizing::FitCanvas,
             fitted_render_size: source_size,
             source_dialog: None,
             video_url: String::new(),
@@ -1038,6 +1065,13 @@ impl VideoEditingApp {
 
     pub fn set_arrow_scene(&mut self, scene: Option<Rc<ArrowScene>>) {
         self.source_selected_instance = 0;
+        self.source_controller_row = None;
+        self.source_model_baselines.clear();
+        self.source_applied_adjustments.clear();
+        self.source_hovered_instance = None;
+        self.show_reference_cube = false;
+        self.show_plane_grid = false;
+        self.show_gizmos = false;
         if self.shared.video_loaded.get() {
             if let Some(error) = scene
                 .as_deref()
@@ -1049,6 +1083,9 @@ impl VideoEditingApp {
         }
         self.document = None;
         if let Some(scene) = scene.as_ref() {
+            if scene.source.is_some() {
+                self.render_sizing = crate::ui::ImageSizing::OriginalResolution;
+            }
             if let Some(operator) = scene.tonemap {
                 self.controller.state.tone_mappings[0].operator = operator;
                 self.controller
@@ -1082,6 +1119,22 @@ impl VideoEditingApp {
         self.last_pick_result = None;
         self.controller.state.selected = None;
         self.controller.state.objects[0] = crate::scene::ObjectTransform::default();
+        let initial = self
+            .arrow_scene
+            .as_ref()
+            .and_then(|scene| scene.source.as_ref())
+            .and_then(|source| {
+                let source = source.borrow();
+                source.frame(0).ok().and_then(|frame| {
+                    source_editing::initial_bound_instance(&frame, source.meshes().len())
+                })
+            });
+        if let Some(index) = initial {
+            self.selected_quad = true;
+            self.show_gizmos = true;
+            self.show_plane_grid = true;
+            self.controller.state.selected = Some(index);
+        }
         self.shared.clear_export_asset();
         self.shared.cancel_arrow_export();
         self.shared.clear_error(ErrorScope::Document);
@@ -1096,6 +1149,9 @@ impl VideoEditingApp {
         self.last_pick_result = None;
         self.show_placement_quads = true;
         self.show_gizmos = false;
+        self.show_reference_cube = false;
+        self.show_plane_grid = false;
+        self.source_hovered_instance = None;
         self.controller.state = crate::scene::SceneState::default();
         self.controller.target = crate::interaction::InteractionTarget::Camera;
         self.controller.mode = crate::interaction::TransformMode::default();
@@ -1416,8 +1472,25 @@ impl VideoEditingApp {
         }
         let hit = result.hit;
         self.last_pick_result = Some(hit);
-        if hit != self.controller.state.selected {
-            self.controller.state.selected = hit;
+        let mut selection_changed = hit != self.controller.state.selected;
+        if self
+            .arrow_scene
+            .as_ref()
+            .is_some_and(|scene| scene.source.is_some())
+        {
+            if let Some(index) = hit {
+                selection_changed |= !self.selected_quad
+                    || !self.show_gizmos
+                    || !self.show_plane_grid
+                    || self.source_selected_instance != index as usize;
+                self.source_selected_instance = index as usize;
+                self.selected_quad = true;
+                self.show_gizmos = true;
+                self.show_plane_grid = true;
+            }
+        }
+        self.controller.state.selected = hit;
+        if selection_changed {
             self.shared.request_overlay();
         }
     }
@@ -1487,7 +1560,7 @@ impl VideoEditingApp {
         // Size from the decoded frame (not the document): `--preview-width` may decode below
         // source res. Calibration K stays at document size; `frame_camera` rescales it (#168/#170).
         let decoded_size = (video.width.max(1), video.height.max(1));
-        let requested_size = match self.image_sizing {
+        let requested_size = match self.render_sizing {
             crate::ui::ImageSizing::FitCanvas => (
                 self.fitted_render_size.0.min(decoded_size.0).max(1),
                 self.fitted_render_size.1.min(decoded_size.1).max(1),
@@ -1540,6 +1613,18 @@ impl VideoEditingApp {
         let background_duration = video.duration_seconds;
         let answers_seek = video.answers_seek;
         let render_started = Instant::now();
+        let source_overlays = trd_placement::PlacementOverlays {
+            quad: self.show_placement_quads,
+            axes: self.show_gizmos,
+            cube: self.show_reference_cube,
+            grid: self.show_plane_grid,
+            selected: self.selected_quad.then_some(self.source_selected_instance),
+            hovered: self.source_hovered_instance,
+        };
+        let source_frame = source_payload.as_ref().map(|(_, frame)| frame.clone());
+        let source_reference = source_payload
+            .as_ref()
+            .is_some_and(|(document, _)| document.meshes().is_empty());
         // GPU-path: `present_external_frame` frame has no RGBA bytes; always None natively (#302).
         let external_frame = shared.external_frame().filter(|_| video.rgba.is_empty());
         let render = async move {
@@ -1550,10 +1635,11 @@ impl VideoEditingApp {
             let result = if let Some((document, frame)) = source_payload.as_ref() {
                 match renderer.draw_document_frame(
                     source,
-                    video.width,
-                    video.height,
+                    (video.width, video.height),
                     document,
                     frame,
+                    source_overlays,
+                    state.selected,
                 ) {
                     Ok(()) if shared.skip_readback.get() => Ok(Vec::new()),
                     Ok(()) => renderer.read_document_pixels().await,
@@ -1648,12 +1734,22 @@ impl VideoEditingApp {
                             media_time_seconds: background_media_time,
                             duration_seconds: background_duration,
                             scene: state,
+                            source_frame: source_frame.clone(),
+                            source_reference,
+                            show_reference_cube: source_reference && source_overlays.cube,
+                            show_plane_grid: if source_frame.is_some() {
+                                source_overlays.grid
+                            } else {
+                                show_gizmos
+                            },
                             selected_asset,
                             selected_quad,
                             move_direction,
                             playing: rendered_playing,
-                            show_quad,
-                            show_gizmos,
+                            show_quad: show_quad
+                                || (source_frame.is_some() && source_overlays.quad),
+                            show_gizmos: show_gizmos
+                                || (source_frame.is_some() && source_overlays.axes),
                             hovered_quad,
                             draw_model: rendered_model,
                             renderer: renderer_diagnostics,
@@ -1686,11 +1782,28 @@ impl VideoEditingApp {
         let Some(request) = self.shared.pending_pick.take() else {
             return;
         };
-        let Some(frame) = self.frame_row(self.displayed_frame_index).cloned() else {
-            return;
-        };
-        let Some(model) = self.placement_model_at(self.displayed_frame_index) else {
-            return;
+        let pick_frame = if let Some((source, row)) = self.arrow_scene.as_ref().and_then(|scene| {
+            scene
+                .source
+                .as_ref()
+                .zip(scene.source_row(self.displayed_frame_index))
+        }) {
+            let source = source.borrow();
+            match source.frame(row) {
+                Ok(frame) => PickFrame::Source(source.clone(), Box::new(frame)),
+                Err(error) => {
+                    self.shared.set_error(ErrorScope::Pick, error.to_string());
+                    return;
+                }
+            }
+        } else {
+            let Some(frame) = self.frame_row(self.displayed_frame_index).cloned() else {
+                return;
+            };
+            let Some(model) = self.placement_model_at(self.displayed_frame_index) else {
+                return;
+            };
+            PickFrame::Annotation(frame, model)
         };
         let Some(mut renderer) = self.shared.renderer.borrow_mut().take() else {
             self.shared.pending_pick.set(Some(request));
@@ -1706,9 +1819,16 @@ impl VideoEditingApp {
         let shared = self.shared.clone();
         let renderer_generation = shared.renderer_generation.get();
         let pick = async move {
-            let result = renderer
-                .pick(&frame, source_size, model, target_point)
-                .await;
+            let result = match &pick_frame {
+                PickFrame::Annotation(frame, model) => {
+                    renderer
+                        .pick(frame, source_size, *model, target_point)
+                        .await
+                }
+                PickFrame::Source(document, frame) => {
+                    renderer.pick_document(document, frame, target_point).await
+                }
+            };
             let renderer_diagnostics = renderer.diagnostics();
             if shared.renderer_generation.get() != renderer_generation {
                 shared.pick_in_flight.set(false);
@@ -1794,6 +1914,10 @@ impl VideoEditingApp {
             .displayed_frame_ready
             .then_some(self.displayed_frame_index);
         let timeline_frame = displayed_frame_index.and_then(|index| self.frame_row(index));
+        let source_frame = self
+            .displayed_diagnostics
+            .as_ref()
+            .and_then(|facts| facts.source_frame.as_ref());
         let media_time_seconds = self
             .displayed_frame_ready
             .then(|| {
@@ -1818,14 +1942,32 @@ impl VideoEditingApp {
             presented_frame_index.filter(|presented| *presented != in_flight)
         });
 
-        let (quad, placement_error) = match displayed_frame_index {
-            Some(index) if timeline_frame.is_some_and(|frame| frame.tracked) => {
-                match self.quad_frame_result_at(index) {
-                    Ok(frame) => (Some(frame), None),
-                    Err(error) => (None, Some(error)),
-                }
+        let (quad, placement_error) = if let Some((points_px, k)) = source_frame.and_then(|frame| {
+            frame
+                .objects
+                .get(self.source_selected_instance)?
+                .quad
+                .zip(frame.params.k)
+        }) {
+            match trd_placement::quad_frame(
+                trd_placement::CameraIntrinsics {
+                    row_major: protocol_k_from_row_major(k),
+                },
+                trd_placement::PlacementQuad { points_px },
+            ) {
+                Ok(quad) => (Some(quad), None),
+                Err(error) => (None, Some(error.into())),
             }
-            _ => (None, None),
+        } else {
+            match displayed_frame_index {
+                Some(index) if timeline_frame.is_some_and(|frame| frame.tracked) => {
+                    match self.quad_frame_result_at(index) {
+                        Ok(frame) => (Some(frame), None),
+                        Err(error) => (None, Some(error)),
+                    }
+                }
+                _ => (None, None),
+            }
         };
         let previous_quad = displayed_frame_index.and_then(|index| {
             (0..index).rev().find_map(|previous_index| {
@@ -1855,9 +1997,17 @@ impl VideoEditingApp {
             .map(|d| d.renderer.clone())
             .or_else(|| self.shared.renderer_diagnostics.borrow().clone());
 
-        let tracked = timeline_frame.is_some_and(|frame| frame.tracked);
+        let tracked = timeline_frame.is_some_and(|frame| frame.tracked)
+            || source_frame
+                .is_some_and(|frame| frame.objects.iter().any(|object| object.quad.is_some()));
         let visibility_reason = if playing {
             "playing"
+        } else if source_frame.is_some() {
+            if displayed.is_some_and(|facts| facts.source_reference) {
+                "placement reference"
+            } else {
+                "source model"
+            }
         } else if selected_asset.is_none() {
             "no asset"
         } else if !tracked {
@@ -1895,9 +2045,9 @@ impl VideoEditingApp {
         let show_quad = displayed.is_some_and(|d| d.show_quad);
         let show_gizmos = displayed.is_some_and(|d| d.show_gizmos);
         let quad_washed = show_quad && displayed.is_some_and(|d| d.hovered_quad || d.selected_quad);
-        let background_drawables =
+        let mut background_drawables =
             1 + u32::from(show_quad) + u32::from(quad_washed) + if show_gizmos { 2 } else { 0 };
-        let foreground_drawables = if object_visible {
+        let mut foreground_drawables = if object_visible {
             1 + u32::from(scene.show_local_axes)
                 + u32::from(scene.show_axes)
                 + u32::from(scene.show_local_grid)
@@ -1905,6 +2055,28 @@ impl VideoEditingApp {
         } else {
             0
         };
+        if let Some(frame) = source_frame {
+            let count = frame.objects.len() as u32;
+            background_drawables = 1
+                + u32::from(show_quad)
+                    * frame
+                        .objects
+                        .iter()
+                        .filter(|object| object.quad.is_some())
+                        .count() as u32
+                + u32::from(show_gizmos) * count
+                + u32::from(displayed.is_some_and(|facts| facts.show_plane_grid)) * count
+                + u32::from(
+                    show_quad
+                        && (selected_quad || displayed.is_some_and(|facts| facts.hovered_quad)),
+                )
+                + u32::from(displayed.is_some_and(|facts| facts.show_reference_cube)) * count;
+            foreground_drawables = if displayed.is_some_and(|facts| facts.source_reference) {
+                0
+            } else {
+                count
+            };
+        }
         let selection_drawables =
             u32::from(object_visible && (scene.show_aabb || scene.selected == Some(0)));
         let render_target_size = renderer
@@ -1917,6 +2089,7 @@ impl VideoEditingApp {
             media_time_seconds,
             frame_duration_seconds,
             timeline_frame: timeline_frame.cloned(),
+            source_frame: source_frame.cloned(),
             presented_frame_index,
             in_flight_frame_index,
             coalesced_frame_index,
@@ -1953,6 +2126,7 @@ pub(super) struct DisplayedFacts {
     /// could not say.
     pub frame_duration_seconds: Option<f64>,
     pub timeline_frame: Option<trd_core::VideoEditingFrame>,
+    pub source_frame: Option<trd_core::DocumentFrame>,
     pub presented_frame_index: Option<u32>,
     pub in_flight_frame_index: Option<u32>,
     pub coalesced_frame_index: Option<u32>,
@@ -2356,6 +2530,65 @@ pub(super) mod tests {
         assert_eq!(shared.take_command(), Some(VideoEditingCommand::LoadVideo));
         shared.command.set(SourceDialog::Arrow.command());
         assert_eq!(shared.take_command(), Some(VideoEditingCommand::LoadArrow));
+    }
+
+    #[test]
+    fn source_quad_click_selects_reference_and_empty_click_hides_it() {
+        let shared = Rc::new(VideoEditingShared::default());
+        let mut app = VideoEditingApp::player(document().video, shared);
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../trd-core/tests/golden/stage1.arrow");
+        let source = trd_core::SceneDocument::read(&std::fs::read(fixture).unwrap()).unwrap();
+        let source = trd_core::SceneDocument::from_batches(
+            source.schema().clone(),
+            source.batches().to_vec(),
+            Vec::new(),
+        )
+        .unwrap();
+        app.arrow_scene = Some(Rc::new(ArrowScene::from_source(source).unwrap()));
+        let mut displayed = test_rendered_frame_diagnostics();
+        displayed.source_frame = Some(trd_core::DocumentFrame {
+            params: trd_core::FrameParams::IDENTITY,
+            source_size: Some(trd_core::Viewport {
+                width: 1920,
+                height: 1080,
+            }),
+            present_index: Some(0),
+            pts: None,
+            objects: vec![trd_core::DocumentObject {
+                mesh: None,
+                model: trd_core::Matrix4::IDENTITY,
+                quad: Some([
+                    [200.0, 200.0],
+                    [400.0, 200.0],
+                    [400.0, 400.0],
+                    [200.0, 400.0],
+                ]),
+                track_id: None,
+                selection: trd_core::DrawSelection::INHERIT,
+            }],
+        });
+        app.displayed_diagnostics = Some(displayed);
+        app.display_size = (960, 540);
+        let context = egui::Context::default();
+        app.settle_frame(&context, false, None, Some((150, 150)), None);
+        assert_eq!(app.source_hovered_instance, Some(0));
+        assert!(app.hovered_quad);
+        assert!(!app.selected_quad);
+        app.handle_pick((150, 150), None);
+        assert!(app.selected_quad);
+        assert!(app.show_gizmos);
+        assert!(app.show_plane_grid);
+        assert!(app.show_reference_cube);
+        app.settle_frame(&context, false, None, None, None);
+        assert_eq!(app.source_hovered_instance, None);
+        assert!(!app.hovered_quad);
+        assert!(app.selected_quad);
+        app.handle_pick((20, 20), None);
+        assert!(!app.selected_quad);
+        assert!(!app.show_gizmos);
+        assert!(!app.show_plane_grid);
+        assert!(!app.show_reference_cube);
     }
 
     #[test]
@@ -2819,6 +3052,10 @@ pub(super) mod tests {
             media_time_seconds: 0.25,
             duration_seconds: 272.0 / TIMESCALE,
             scene: crate::scene::SceneState::default(),
+            source_frame: None,
+            source_reference: false,
+            show_reference_cube: false,
+            show_plane_grid: false,
             selected_asset: None,
             selected_quad: false,
             move_direction: crate::interaction::MoveDirection::Reference1,

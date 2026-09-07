@@ -90,8 +90,8 @@ pub use texture::{
 mod stream_filter;
 #[cfg(not(target_arch = "wasm32"))]
 pub use stream_filter::{
-    decode_frames, run_stream, run_stream_with_mesh_resolver, FrameResolver, MeshResolver,
-    StreamError,
+    decode_frames, run_stream, run_stream_with_mesh_resolver, run_stream_with_scene_builder,
+    FrameResolver, MeshResolver, SceneBuilder, StreamError,
 };
 
 /// Returns the project greeting used by the CLI and web entry points.

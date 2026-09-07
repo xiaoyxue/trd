@@ -8,7 +8,13 @@ use thiserror::Error;
 use trd_core::Matrix4;
 
 mod document_scene;
-pub use document_scene::{document_assets, document_scene, DocumentSceneError};
+pub use document_scene::{
+    document_assets, document_pick_draws, document_scene, document_scene_with_overlays,
+    DocumentSceneError, PlacementOverlays,
+};
+
+/// Longest asset edge in quad half-edge units, shared by GLBs and the reference cube.
+pub const DEFAULT_PLACEMENT_EXTENT: f32 = 1.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CameraIntrinsics {
@@ -132,26 +138,55 @@ pub fn quad_frame(
     })
 }
 
-/// A unit Y-up basis at the quad center, with no demo offset, scale or lift.
-pub fn quad_origin_model(frame: QuadFrame) -> Matrix4 {
-    Matrix4::from_cols_array(&[
-        frame.e1[0],
-        -frame.e1[1],
-        -frame.e1[2],
-        0.0,
-        frame.e3[0],
-        -frame.e3[1],
-        -frame.e3[2],
-        0.0,
-        -frame.e2[0],
-        frame.e2[1],
-        frame.e2[2],
-        0.0,
-        frame.origin_camera[0],
-        -frame.origin_camera[1],
-        -frame.origin_camera[2],
-        1.0,
-    ])
+/// The Python placement basis at the quad origin, in quad half-edge units.
+pub fn quad_origin_model(frame: QuadFrame) -> Result<Matrix4, PlacementError> {
+    placement_model(
+        frame,
+        LocalPlacement {
+            lift: 0.0,
+            ..LocalPlacement::default()
+        },
+    )
+}
+
+/// Fits raw asset geometry to the placement default size and puts its AABB
+/// bottom center at zero. The original GLB and the editable model stay untouched.
+pub fn grounded_asset_model(bounds: trd_core::Aabb3) -> Result<Matrix4, PlacementError> {
+    let min = bounds.min().to_array();
+    let max = bounds.max().to_array();
+    let size = bounds.size().to_array();
+    let extent = size[0].max(size[1]).max(size[2]);
+    if !min.iter().chain(&max).all(|value| value.is_finite())
+        || !extent.is_finite()
+        || extent <= trd_core::EPSILON
+    {
+        return Err(PlacementError::InvalidScale);
+    }
+    let scale = DEFAULT_PLACEMENT_EXTENT / extent;
+    Ok(
+        trd_core::Transform::from_translation(trd_core::Vector3::new(
+            -(min[0] + max[0]) * 0.5,
+            -min[1],
+            -(min[2] + max[2]) * 0.5,
+        ))
+        .then(trd_core::Transform::from_scale(trd_core::Vector3::new(
+            scale, scale, scale,
+        )))
+        .matrix(),
+    )
+}
+
+/// Places the internal Y-up cube's bottom center at the quad origin, using the
+/// same default normalized size as GLB assets and the Python placement basis.
+pub fn reference_cube_model(frame: QuadFrame) -> Result<Matrix4, PlacementError> {
+    placement_model(
+        frame,
+        LocalPlacement {
+            lift: 0.5, // cube.obj spans y = [-0.5, 0.5].
+            size_factor: DEFAULT_PLACEMENT_EXTENT,
+            ..LocalPlacement::default()
+        },
+    )
 }
 
 /// Matches the Python placement formula and returns a column-major GL camera
@@ -400,6 +435,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn asset_normalization_preserves_proportions_and_grounds_the_aabb() {
+        let bounds = trd_core::Aabb3::new(
+            trd_core::Point3::new(2.0, -3.0, 5.0),
+            trd_core::Point3::new(6.0, 5.0, 7.0),
+        );
+        let model = trd_core::Transform::from_matrix(grounded_asset_model(bounds).unwrap());
+        let grounded = model.transform_aabb(bounds);
+        assert_relative_eq!(grounded.min().y(), 0.0, epsilon = 1e-6);
+        assert_relative_eq!(grounded.size().y(), 1.0, epsilon = 1e-6);
+        assert_relative_eq!(grounded.size().x(), 0.5, epsilon = 1e-6);
+        assert_relative_eq!(grounded.size().z(), 0.25, epsilon = 1e-6);
+        assert_eq!(
+            model.transform_point(trd_core::Point3::new(4.0, -3.0, 6.0)),
+            trd_core::Point3::ORIGIN,
+        );
+    }
+
+    #[test]
     fn rectified_unit_square_recovers_orthonormal_frame() {
         let k = CameraIntrinsics {
             row_major: [1000.0, 0.0, 960.0, 0.0, 1000.0, 540.0, 0.0, 0.0, 1.0],
@@ -439,6 +492,46 @@ mod tests {
         };
         let model = placement_model(frame, LocalPlacement::default()).unwrap();
         assert!(model.to_cols_array().iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
+    fn reference_cube_uses_default_asset_size_and_keeps_bottom_grounded() {
+        let bounds = trd_core::Mesh::reference_cube().unwrap().aabb();
+        for axis_length in [0.25, 0.5, 1.0, 2.0] {
+            let frame = QuadFrame {
+                origin_camera: [0.0, 0.0, 5.0],
+                e1: [1.0, 0.0, 0.0],
+                e2: [0.0, 1.0, 0.0],
+                e3: [0.0, 0.0, 1.0],
+                half_edge1: [axis_length, 0.0, 0.0],
+                half_edge2: [0.0, axis_length, 0.0],
+                axis_length,
+            };
+            let placement = quad_origin_model(frame).unwrap();
+            let model = reference_cube_model(frame).unwrap();
+            let expected = placement * grounded_asset_model(bounds).unwrap();
+            for (actual, expected) in model
+                .to_cols_array()
+                .into_iter()
+                .zip(expected.to_cols_array())
+            {
+                assert_relative_eq!(actual, expected, epsilon = 1e-6);
+            }
+            let columns = model.to_cols_array();
+            let origin = placement.to_cols_array();
+            for index in 0..3 {
+                assert_relative_eq!(
+                    columns[12 + index] + bounds.min().y() * columns[4 + index],
+                    origin[12 + index],
+                    epsilon = 1e-6
+                );
+            }
+            assert_relative_eq!(
+                length([columns[4], columns[5], columns[6]]),
+                axis_length,
+                epsilon = 1e-6
+            );
+        }
     }
 
     #[test]

@@ -75,6 +75,19 @@ Keep the source's clockwise quad ordering, canonical FHC image frame, finite
 coordinates and aligned per-placement lists. Do not reinterpret FHC as pixel
 coordinates or the source's row-major `model` as column-major data.
 
+Preserve the source's starting corner as well as winding. The placement
+reference derives its first basis axis and reconstruction scale from the first
+edge; rotating the list to the smallest image y changes both. An upstream table
+already using its prescribed first corner keeps it, while converted legacy
+FIBA quads keep their original UL/UR/LR/LL order. The renderer must not sort
+either input.
+
+The rendering subset also accepts finite, convex tracked quads extending
+outside the image (the existing FIBA tracking contains them). Preserve those
+coordinates and let rasterization clip the visible result; clamping corners
+would change the reconstructed placement. This is a rendering-input allowance,
+not a change to the upstream business schema's in-frame annotation constraint.
+
 ### Mapping to the existing rendering vocabulary
 
 These are adapter conversions, not new columns added to source data:
@@ -95,14 +108,49 @@ cx_px = (k.cx + k.w) / 2     cy_px = (k.cy + k.h) / 2
 skew_px = k.skew / 2
 ```
 
-Identity `model` places an object at the placement-local origin:
+Identity `model` places the object's AABB bottom center at the placement-local
+origin, using the size convention of `placement_quad_by_local_coord.py`:
 
 ```text
-world_model = placement_frame * object_model
+asset_base = scale_to_extent_1 * translate(-aabb_center_x, -aabb_min_y, -aabb_center_z)
+placement_frame = Python placement basis * scale(quad.axis_length)
+world_model = placement_frame * object_model * asset_base
 ```
 
-No demo offset, lift or hidden preview normalization is part of that formula.
-The wireframe cube uses the same origin without requiring an imported asset.
+`asset_base` is derived from the unchanged GLB, not baked back into it or into
+the editable `model`. The same deterministic base is applied on load and replay.
+The shared placement default fits the longest asset edge to one quad half-edge
+unit, independently of the ordinary mesh viewer's preview size. It preserves
+proportions and grounds the unedited AABB. The initial quad
+placement has zero in-plane offset and no preset lift; later user translations,
+rotations and scales can intentionally move the mesh off its initial contact.
+Ordinary CG/CV scenes without a quad retain their existing matrix semantics and
+do not receive this placement-specific base.
+
+For one mesh and one quad, loading establishes their binding and selects the
+quad. Clicking the mesh performs GPU picking and selects both that instance
+and its owning quad. Retain the original object editor's Translate, Rotate, Scale,
+axis constraints, numeric controls and mouse gestures; a read-only matrix view
+is an advanced aid, not a replacement for those controls. Translate offers only
+the quad basis: **e1 (quad X)**, **e2 (-quad Z)** and **e3 (normal)** in that order,
+without a separate object-local basis selector.
+
+The internal `assets/meshes/cube/cube.obj` is placed by the existing placement
+method with the same default extent-1 normalization as imported models: its
+**bottom-face center**, not body center, is at the quad origin, and its +Y points
+along the plane normal. This reference asset never enters Arrow.
+Clicking a quad selects/highlights it and shows its local axes, plane grid and
+cube; clicking empty image space deselects it and hides those local references.
+Hovering fills the quad without selecting it; moving away clears only the hover
+feedback. **Show Coordinate** and **Show Plane** independently control axes and
+grid for the selected quad. The reference cube's wireframe is dark blue;
+ordinary model AABBs retain their existing green styling.
+
+Rendering resolution is separate from presentation: a 1920x1080 target is
+displayed fully inside the available canvas region with its original aspect
+ratio, using letterboxing rather than cropping. Hover and picking use the
+painted image bounds, not the surrounding black bars.
+
 The source `model` column remains row-major on export; `draw_model` is the
 internal correspondence, not a reason to rename that source column.
 

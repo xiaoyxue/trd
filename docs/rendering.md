@@ -260,7 +260,7 @@ controls. Everything is **per-object**: click an object to select it, then edit
   (default) or **Object**. Left-drag orbits the camera; right/middle-drag always
   **moves the selected object**; scroll **zooms** (dollies the camera).
 - **Transform the selected object.** With *Primary drag → Object*, pick a
-  **Manipulate** mode — **Rotate / Move / Scale** — and an optional **Axis lock**
+  **Manipulate** mode — **Rotate / Translate / Scale** — and an optional **Axis lock**
   (**Free / X / Y / Z**): a locked drag rotates **about** or translates **along**
   that one axis (scroll scales in Scale mode). The **Transform** panel mirrors this
   with numeric **Translation** (x/y/z), **Rotation** (X/Y/Z°), and **Scale**

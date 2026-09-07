@@ -150,6 +150,11 @@ pub(crate) fn document_renderer(
     let assets = trd_placement::document_assets(document).map_err(crate::js_error)?;
     let mut renderer =
         trd_core::Renderer::with_assets(gpu, format, &assets).map_err(crate::js_error)?;
+    if document.meshes().is_empty() {
+        renderer
+            .set_mesh_aabb_color(0, trd_core::Mesh::REFERENCE_CUBE_COLOR)
+            .map_err(crate::js_error)?;
+    }
     if let Some(pbr) = pbr {
         pbr.apply(&mut renderer);
     }
