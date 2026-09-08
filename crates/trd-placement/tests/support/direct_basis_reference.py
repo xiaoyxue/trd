@@ -130,6 +130,7 @@ def comparison_row(reference, row):
         "k_row_major": intrinsics.flatten().tolist(),
         "quad": quad.tolist(),
         "origin_camera": origin.tolist(),
+        "origin_px": project(intrinsics, origin).tolist(),
         "r1": r1.tolist(),
         "r2": r2.tolist(),
         "e3": e3.tolist(),
@@ -149,6 +150,9 @@ def comparison_row(reference, row):
         "unit_axes_camera": [
             expand(origin, r1, r2, e3, point).tolist() for point in unit_axes
         ],
+        "unit_axes_pixels": project(intrinsics, [
+            expand(origin, r1, r2, e3, point) for point in unit_axes
+        ]).tolist(),
     }
 
 

@@ -138,7 +138,8 @@ the placement reconstruction.
 
 For placement acceptance, regenerate the annotation from the actual calibration
 and matching video first; a pre-existing Arrow may name a different source
-render. Then compare all rows against the repository's original Python method:
+render. Then compare all rows against the equal-length raw-direction Python
+reference, keeping the original reconstruction method:
 
 ```powershell
 uv run --with pyarrow python scripts\fiba_video_editing_bundle.py `
@@ -147,16 +148,19 @@ uv run --with pyarrow python scripts\fiba_video_editing_bundle.py `
   --method 2VP_4510 -o output\fiba-case1\fiba.source.arrow
 uv run --with pyarrow python scripts\timeline_to_params.py `
   output\fiba-case1\fiba.source.arrow -o output\fiba-case1\fiba.params.arrow
-uv run --with pyarrow --with numpy python scripts\placement_reference.py `
-  output\fiba-case1\fiba.source.arrow -o output\fiba-case1\reference.json
+uv run --with pyarrow --with numpy python crates\trd-placement\tests\support\direct_basis_reference.py `
+  output\fiba-case1\fiba.params.arrow -o output\fiba-case1\reference.json
 $env:TRD_FIBA_PARAMS = "$PWD\output\fiba-case1\fiba.params.arrow"
 $env:TRD_FIBA_REFERENCE = "$PWD\output\fiba-case1\reference.json"
 cargo test -p trd-placement --test fiba_placement -- --ignored --nocapture
 ```
 
-The reference calls `normal_basis_from_quad` and `pose_from_quad` using original
-K and quad order. The Rust comparison checks all four reprojected corners, the
-origin, gizmo matrix and cube bottom-center anchor for all 222 rows. A cyclic corner
+The reference converts FHC camera/quad values back to pixels, calls
+`normal_basis_from_quad` and `pose_from_quad`, and independently expands
+vertices along the raw directions with all axis lengths equal to `|0.5*r1|`.
+The Rust comparison checks all four reprojected corners, the origin, gizmo/cube
+matrices, cube bottom-center anchor, equal column lengths, and independently
+expanded unit vertices for all 222 rows. A cyclic corner
 rotation is not harmless: it changes the first edge used to set basis and scale.
 In the source editor, start with **Show quad**, then **click the quad** to select
 and highlight it. Selection shows the local axes, plane grid and reference cube;
