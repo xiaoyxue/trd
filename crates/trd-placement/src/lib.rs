@@ -138,31 +138,46 @@ pub fn quad_frame(
     })
 }
 
-/// Expands mesh coordinates through the same raw edges as the quad gizmo.
-/// `P(u,v,w) = O + u*r1 + v*r2 + w*c*e3`, with `c = axis_length`.
+/// Expands along the raw quad directions, with every axis scaled to `|r1|`.
+/// `P = O + u*r1 + v*(|r1|/|r2|)*r2 + w*(|r1|/|e3|)*e3`.
 /// A Y-up mesh maps to `(u,v,w) = (x, -handedness*z, y)`.
 pub fn quad_origin_model(frame: QuadFrame) -> Result<Matrix4, PlacementError> {
-    let c = frame.axis_length;
-    if c <= 0.0 {
-        return Err(PlacementError::InvalidScale);
-    }
-    let axes = quad_axes_model(frame).to_cols_array();
-    let orientation = dot(cross(frame.half_edge1, frame.half_edge2), frame.e3);
-    if !axes.iter().all(|value| value.is_finite()) || !orientation.is_finite() {
+    let r1 = scale3(frame.half_edge1, 2.0);
+    let r2 = scale3(frame.half_edge2, 2.0);
+    let lengths = [length(r1), length(r2), length(frame.e3)];
+    if !r1
+        .iter()
+        .chain(&r2)
+        .chain(&frame.e3)
+        .chain(&frame.origin_camera)
+        .chain(&lengths)
+        .all(|value| value.is_finite())
+    {
         return Err(PlacementError::NonFiniteGeometry);
     }
+    if lengths.contains(&0.0) {
+        return Err(PlacementError::DegenerateQuad);
+    }
+    let r2_direction = scale3(r2, 1.0 / lengths[1]);
+    let normal_direction = scale3(frame.e3, 1.0 / lengths[2]);
+    let orientation = dot(
+        cross(scale3(r1, 1.0 / lengths[0]), r2_direction),
+        normal_direction,
+    );
     if orientation == 0.0 {
         return Err(PlacementError::DegenerateQuad);
     }
     // The image-up normal can flip the raw triad; do not mirror the mesh with it.
-    let forward = -orientation.signum();
+    let forward = scale3(r2_direction, -orientation.signum() * lengths[0]);
+    let up = scale3(normal_direction, lengths[0]);
     let mut model = [0.0; 16];
-    model[4..8].copy_from_slice(&axes[8..12]);
-    for row in 0..4 {
-        model[row] = 2.0 * axes[row];
-        model[8 + row] = 2.0 * axes[4 + row] * forward;
+    for (row, camera_sign) in [1.0, -1.0, -1.0].into_iter().enumerate() {
+        model[row] = r1[row] * camera_sign;
+        model[4 + row] = up[row] * camera_sign;
+        model[8 + row] = forward[row] * camera_sign;
+        model[12 + row] = frame.origin_camera[row] * camera_sign;
     }
-    model[12..16].copy_from_slice(&axes[12..16]);
+    model[15] = 1.0;
     Ok(Matrix4::from_cols_array(&model))
 }
 
@@ -469,19 +484,27 @@ mod tests {
     }
 
     #[test]
-    fn direct_origin_expands_raw_edges_for_both_normal_signs() {
+    fn direct_origin_equalizes_lengths_without_changing_directions() {
         for normal_sign in [-1.0, 1.0] {
             let frame = QuadFrame {
                 origin_camera: [0.2, -0.1, 3.0],
                 e1: [1.0, 0.0, 0.0],
                 e2: [0.0, normal_sign, 0.0],
-                e3: [0.0, 0.0, normal_sign],
-                half_edge1: [0.5, 0.0, 0.0],
-                half_edge2: [0.125, 0.5, 0.0],
-                axis_length: 0.5,
+                e3: [0.0, 0.0, 3.0 * normal_sign],
+                half_edge1: [1.0, 0.0, 0.0],
+                half_edge2: [1.5, 2.0, 0.0],
+                axis_length: 1.0,
             };
             let matrix = quad_origin_model(frame).unwrap();
             assert!(matrix.determinant() > 0.0);
+            let columns = matrix.to_cols_array();
+            for start in [0, 4, 8] {
+                assert_relative_eq!(
+                    length([columns[start], columns[start + 1], columns[start + 2]]),
+                    2.0,
+                    epsilon = 1e-6
+                );
+            }
             let model = trd_core::Transform::from_matrix(matrix);
             for local in [
                 [0.0, 0.0, 0.0],
@@ -493,10 +516,10 @@ mod tests {
                 let expected = add(
                     frame.origin_camera,
                     add(
-                        scale3(frame.half_edge1, 2.0 * local[0]),
+                        scale3([2.0, 0.0, 0.0], local[0]),
                         add(
-                            scale3(frame.half_edge2, -2.0 * normal_sign * local[2]),
-                            scale3(frame.e3, frame.axis_length * local[1]),
+                            scale3([1.2, 1.6, 0.0], -normal_sign * local[2]),
+                            scale3([0.0, 0.0, 2.0 * normal_sign], local[1]),
                         ),
                     ),
                 );
@@ -607,7 +630,7 @@ mod tests {
             }
             assert_relative_eq!(
                 length([columns[4], columns[5], columns[6]]),
-                axis_length,
+                2.0 * axis_length,
                 epsilon = 1e-6
             );
         }
