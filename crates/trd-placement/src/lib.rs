@@ -138,15 +138,31 @@ pub fn quad_frame(
     })
 }
 
-/// The Python placement basis at the quad origin, in quad half-edge units.
+/// Expands mesh coordinates through the same raw edges as the quad gizmo.
+/// In `O + u*r1 + v*r2 + k*e3`, the default coefficients are
+/// `(x/2, -handedness*z/2, axis_length*y)` for a Y-up mesh.
 pub fn quad_origin_model(frame: QuadFrame) -> Result<Matrix4, PlacementError> {
-    placement_model(
-        frame,
-        LocalPlacement {
-            lift: 0.0,
-            ..LocalPlacement::default()
-        },
-    )
+    if frame.axis_length <= 0.0 {
+        return Err(PlacementError::InvalidScale);
+    }
+    let axes = quad_axes_model(frame).to_cols_array();
+    let orientation = dot(cross(frame.half_edge1, frame.half_edge2), frame.e3);
+    if !axes.iter().all(|value| value.is_finite()) || !orientation.is_finite() {
+        return Err(PlacementError::NonFiniteGeometry);
+    }
+    if orientation == 0.0 {
+        return Err(PlacementError::DegenerateQuad);
+    }
+    // The image-up normal can flip the raw triad; do not mirror the mesh with it.
+    let forward = -orientation.signum();
+    let mut model = [0.0; 16];
+    model[0..4].copy_from_slice(&axes[0..4]);
+    model[4..8].copy_from_slice(&axes[8..12]);
+    for row in 0..4 {
+        model[8 + row] = axes[4 + row] * forward;
+    }
+    model[12..16].copy_from_slice(&axes[12..16]);
+    Ok(Matrix4::from_cols_array(&model))
 }
 
 /// Fits raw asset geometry to the placement default size and puts its AABB
@@ -177,16 +193,15 @@ pub fn grounded_asset_model(bounds: trd_core::Aabb3) -> Result<Matrix4, Placemen
 }
 
 /// Places the internal Y-up cube's bottom center at the quad origin, using the
-/// same default normalized size as GLB assets and the Python placement basis.
+/// same default normalized size and direct quad-edge frame as GLB assets.
 pub fn reference_cube_model(frame: QuadFrame) -> Result<Matrix4, PlacementError> {
-    placement_model(
-        frame,
-        LocalPlacement {
-            lift: 0.5, // cube.obj spans y = [-0.5, 0.5].
-            size_factor: DEFAULT_PLACEMENT_EXTENT,
-            ..LocalPlacement::default()
-        },
-    )
+    let grounded = trd_core::Transform::from_translation(trd_core::Vector3::new(0.0, 0.5, 0.0))
+        .then(trd_core::Transform::from_scale(trd_core::Vector3::new(
+            DEFAULT_PLACEMENT_EXTENT,
+            DEFAULT_PLACEMENT_EXTENT,
+            DEFAULT_PLACEMENT_EXTENT,
+        )));
+    Ok(quad_origin_model(frame)? * grounded.matrix())
 }
 
 /// Matches the Python placement formula and returns a column-major GL camera
@@ -449,6 +464,69 @@ mod tests {
         assert_eq!(
             model.transform_point(trd_core::Point3::new(4.0, -3.0, 6.0)),
             trd_core::Point3::ORIGIN,
+        );
+    }
+
+    #[test]
+    fn direct_origin_expands_raw_edges_for_both_normal_signs() {
+        for normal_sign in [-1.0, 1.0] {
+            let frame = QuadFrame {
+                origin_camera: [0.2, -0.1, 3.0],
+                e1: [1.0, 0.0, 0.0],
+                e2: [0.0, normal_sign, 0.0],
+                e3: [0.0, 0.0, normal_sign],
+                half_edge1: [0.5, 0.0, 0.0],
+                half_edge2: [0.125, 0.5, 0.0],
+                axis_length: 0.5,
+            };
+            let matrix = quad_origin_model(frame).unwrap();
+            assert!(matrix.determinant() > 0.0);
+            let model = trd_core::Transform::from_matrix(matrix);
+            for local in [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 0.0, 1.0],
+                [0.25, 1.0, -0.5],
+            ] {
+                let expected = add(
+                    frame.origin_camera,
+                    add(
+                        scale3(frame.half_edge1, local[0]),
+                        add(
+                            scale3(frame.half_edge2, -normal_sign * local[2]),
+                            scale3(frame.e3, frame.axis_length * local[1]),
+                        ),
+                    ),
+                );
+                let actual = model
+                    .transform_point(trd_core::Point3::new(local[0], local[1], local[2]))
+                    .to_array();
+                for (actual, expected) in
+                    actual
+                        .into_iter()
+                        .zip([expected[0], -expected[1], -expected[2]])
+                {
+                    assert_relative_eq!(actual, expected, epsilon = 1e-6);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn direct_origin_rejects_a_collapsed_frame() {
+        let frame = QuadFrame {
+            origin_camera: [0.0, 0.0, 3.0],
+            e1: [1.0, 0.0, 0.0],
+            e2: [0.0, 1.0, 0.0],
+            e3: [0.0, 0.0, 1.0],
+            half_edge1: [0.5, 0.0, 0.0],
+            half_edge2: [1.0, 0.0, 0.0],
+            axis_length: 0.5,
+        };
+        assert_eq!(
+            quad_origin_model(frame),
+            Err(PlacementError::DegenerateQuad)
         );
     }
 

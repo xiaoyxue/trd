@@ -77,15 +77,15 @@ struct VsOut {
 fn vs_main(in: VsIn) -> VsOut {
     let model = mat4x4<f32>(in.model_col0, in.model_col1, in.model_col2, in.model_col3);
     let world = model * vec4<f32>(in.position, 1.0);
-    // Normal matrix: the model's upper-left 3×3. Correct for the rotation +
-    // uniform-scale + translation transforms trd builds (preview scale-to-fit is
-    // uniform), so a plain 3×3 multiply preserves direction (renormalized in fs).
     let m3 = mat3x3<f32>(in.model_col0.xyz, in.model_col1.xyz, in.model_col2.xyz);
+    // Cofactors preserve inverse-transpose direction under affine placement.
+    let cofactor = mat3x3<f32>(cross(m3[1], m3[2]), cross(m3[2], m3[0]), cross(m3[0], m3[1]));
+    let handedness = select(-1.0, 1.0, dot(m3[0], cofactor[0]) >= 0.0);
 
     var out: VsOut;
     out.clip_position = u.view_proj * world;
     out.world_position = world.xyz;
-    out.world_normal = m3 * in.normal;
+    out.world_normal = (cofactor * in.normal) * handedness;
     out.uv = in.uv;
     return out;
 }

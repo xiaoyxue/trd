@@ -64,76 +64,57 @@ rows. Each row retains its own camera and quad. `track_id` survives reordered
 instances and gaps; without IDs, consistent ordered bindings are required.
 Ambiguous correspondence is an error, not permission to edit another object.
 
-### Opt-in placement-basis experiment
+### Direct-basis WASM preview
 
-`crates/trd-placement/tests/basis_experiment.rs` compares three Rust placement
-paths without changing the editor, protocol, source assets or golden baselines:
+The experimental placement branch uses the requested expansion in the actual
+Rust document renderer, including the WASM editor:
 
-| Variant | Displayed axes | Mesh / unit-quad basis |
-|---|---|---|
-| `legacy` | Raw quad half-edges | Existing orthonormal placement |
-| `shared_orthonormal` | Orthonormal placement frame | The same orthonormal frame |
-| `shared_raw` | Raw quad half-edges | The same raw frame; potentially affine/sheared |
-
-The requested experimental expansion is
-`P(u,v,k) = O + u*r1 + v*r2 + k*e3`, using the full reconstructed edges
-`r1 = 2*half_edge1`, `r2 = 2*half_edge2` and the existing plane normal `e3`.
-Mesh-axis conversion and the existing default asset size are explicit operations
-on the local coefficients before this expansion; `r2` is not normalized or
-replaced by a cross-product direction. The other variants are controls.
-
-The source quad outline/grid remains unchanged as an observation reference.
-The unit quad uses an identity local model; its projected edges are compared
-with projected axes at the **same starting point**. A shared basis proves
-consistency, not correct camera calibration. In particular, `shared_raw` must
-not be described as preserving a rigid cube when the raw frame is nonorthogonal.
-
-Run the synthetic case without external inputs:
-
-```powershell
-cargo test -p trd-placement --test basis_experiment
+```text
+P(u,v,k) = O + u*r1 + v*r2 + k*e3
+homogeneous_pixel = K * P
+pixel = homogeneous_pixel.xy / homogeneous_pixel.z
 ```
 
-The real-source cases require the matching external params, Dragon bundle and
-1920x1080 video. From the repository root, prepare the three named source frames
-and run the CPU observations plus real-GPU render:
+`r1 = 2*half_edge1` and `r2 = 2*half_edge2` retain the reconstructed quad
+directions; `e3` is its plane normal. For a Y-up mesh, the existing default-size
+coefficients are `(x/2, -handedness*z/2, axis_length*y)`. The mesh, its AABB and
+the reference cube use this same frame. The quad/grid/gizmo remain unchanged.
+The raw triad's normal-flip sign is handled once, without mirroring the mesh.
+
+This changes placement behavior on the experimental branch; it is not only a
+test-driver mode. Nonorthogonal input remains affine rather than being called a
+rigid cube. PBR/Disney normals use inverse-transpose directions for this affine
+transform. Source Arrow, GLB, camera calibration and golden baselines are not
+rewritten.
+
+Build and launch the real editor, then open the matching video and either
+`fiba.params.arrow` or `fiba.dragon.no-model.arrow` through **Load Arrow**:
 
 ```powershell
-$env:TRD_FIBA_PARAMS = 'D:\Code\trd-assets\fiba.params.arrow'
-$env:TRD_DRAGON_PARAMS = 'D:\Code\trd-assets\fiba.dragon.no-model.arrow'
-$env:TRD_BASIS_OUTPUT = Join-Path $PWD 'output\placement-basis-experiment'
-$env:TRD_BASIS_FRAMES = Join-Path $env:TRD_BASIS_OUTPUT 'frames'
-$env:TRD_BASIS_REFERENCE = Join-Path $env:TRD_BASIS_OUTPUT 'direct_basis_python.json'
-New-Item -ItemType Directory -Force $env:TRD_BASIS_FRAMES | Out-Null
-foreach ($frame in 168, 204, 220) {
-    $name = 'frame_{0:D6}.png' -f $frame
-    ffmpeg -v error -y -i 'E:\Asset\Video\shot_0001.mp4' `
-        -vf "select=eq(n\,$frame)" -frames:v 1 -update 1 `
-        (Join-Path $env:TRD_BASIS_FRAMES $name)
-    if ($LASTEXITCODE -ne 0) { throw "Frame $frame extraction failed" }
-}
+bun run --cwd web\gui-video-editing build:wasm
+cd web\gui-video-editing
+$env:BUN_PORT = '8085'
+bun .\index.html
+```
+
+URL loading also supports `?document=<params-or-bundle-url>&video=<video-url>`.
+Inspect source frames 168, 204 and 220 (player labels 169, 205 and 221), with
+quad coordinates and cube/Dragon AABB visible. Compare corresponding projected
+directions at a common anchor, not a corner direction against center axes.
+
+The separate Python candidate keeps the original
+`examples/placement_quad_by_local_coord.py` unchanged. It reuses reconstruction
+but independently expands the requested coefficients and writes reference JSON:
+
+```powershell
 python crates\trd-placement\tests\support\direct_basis_reference.py `
-    $env:TRD_FIBA_PARAMS -o $env:TRD_BASIS_REFERENCE
-if ($LASTEXITCODE -ne 0) { throw 'Python direct-basis generation failed' }
-cargo test -p trd-placement --test basis_experiment -- `
-    --include-ignored --nocapture --test-threads=1
+    'D:\Code\trd-assets\fiba.params.arrow' `
+    -o output\placement-basis-experiment\direct_basis_python.json
 ```
 
-`TRD_BASIS_OUTPUT` receives `basis_metrics.csv` and original 1080p PNGs named
-`{case}_{source_frame:06}_{variant}.png` for the unit quad, cube and Dragon.
-Source indices 168, 204 and 220 are player labels 169, 205 and 221. Dragon
-observations use unlit filled geometry so affine normal-matrix assumptions
-cannot be mistaken for a geometry result. These are headless observations,
-not editor UI E2E or new golden images.
-
-The Python companion is a separate placement implementation, not a modification
-of `examples/placement_quad_by_local_coord.py`. It reuses camera/quad
-reconstruction, then independently expands full-edge `(u,v,k)` coefficients,
-emits camera/GL matrices and projected unit vertices, and supplies the ignored
-`direct_basis_matches_python` Rust case. It writes reference JSON, not an
-application Arrow document. It requires the existing NumPy/PyArrow tooling;
-where those imports are unavailable, run the same command through
-`uv run --with numpy --with pyarrow python`.
+The helper uses NumPy/PyArrow; where those imports are unavailable, use
+`uv run --with numpy --with pyarrow python`. It does not generate or overwrite an
+application Arrow document.
 
 ## Arrow scene export and round-trip
 
