@@ -13,7 +13,7 @@ pub use document_scene::{
     DocumentSceneError, PlacementOverlays,
 };
 
-/// Longest asset edge in quad half-edge units, shared by GLBs and the reference cube.
+/// Longest asset edge in normalized local coordinates before quad placement.
 pub const DEFAULT_PLACEMENT_EXTENT: f32 = 1.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -139,10 +139,11 @@ pub fn quad_frame(
 }
 
 /// Expands mesh coordinates through the same raw edges as the quad gizmo.
-/// In `O + u*r1 + v*r2 + k*e3`, the default coefficients are
-/// `(x/2, -handedness*z/2, axis_length*y)` for a Y-up mesh.
+/// `P(u,v,w) = O + u*r1 + v*r2 + w*c*e3`, with `c = axis_length`.
+/// A Y-up mesh maps to `(u,v,w) = (x, -handedness*z, y)`.
 pub fn quad_origin_model(frame: QuadFrame) -> Result<Matrix4, PlacementError> {
-    if frame.axis_length <= 0.0 {
+    let c = frame.axis_length;
+    if c <= 0.0 {
         return Err(PlacementError::InvalidScale);
     }
     let axes = quad_axes_model(frame).to_cols_array();
@@ -156,10 +157,10 @@ pub fn quad_origin_model(frame: QuadFrame) -> Result<Matrix4, PlacementError> {
     // The image-up normal can flip the raw triad; do not mirror the mesh with it.
     let forward = -orientation.signum();
     let mut model = [0.0; 16];
-    model[0..4].copy_from_slice(&axes[0..4]);
     model[4..8].copy_from_slice(&axes[8..12]);
     for row in 0..4 {
-        model[8 + row] = axes[4 + row] * forward;
+        model[row] = 2.0 * axes[row];
+        model[8 + row] = 2.0 * axes[4 + row] * forward;
     }
     model[12..16].copy_from_slice(&axes[12..16]);
     Ok(Matrix4::from_cols_array(&model))
@@ -492,9 +493,9 @@ mod tests {
                 let expected = add(
                     frame.origin_camera,
                     add(
-                        scale3(frame.half_edge1, local[0]),
+                        scale3(frame.half_edge1, 2.0 * local[0]),
                         add(
-                            scale3(frame.half_edge2, -normal_sign * local[2]),
+                            scale3(frame.half_edge2, -2.0 * normal_sign * local[2]),
                             scale3(frame.e3, frame.axis_length * local[1]),
                         ),
                     ),

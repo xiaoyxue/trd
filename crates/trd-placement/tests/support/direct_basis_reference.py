@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Independent Python candidate: P(u,v,k) = O + u*r1 + v*r2 + k*e3.
+"""Independent candidate: P(u,v,w) = O + u*r1 + v*r2 + w*c*e3; c = axis_length.
 
 Read current params-only FHC input and write comparison matrices/vertices, not
 an application document. Keep the original placement reference unchanged.
@@ -26,9 +26,9 @@ def load_module(name, path):
     return module
 
 
-def expand(origin, r1, r2, e3, coordinates):
-    u, v, k = coordinates
-    return origin + u * r1 + v * r2 + k * e3
+def expand(origin, r1, r2, e3, c, coordinates):
+    u, v, w = coordinates
+    return origin + u * r1 + v * r2 + w * c * e3
 
 
 def project(intrinsics, points):
@@ -88,7 +88,7 @@ def comparison_row(reference, row):
     normal_frame = reference.normal_basis_from_quad(quad, intrinsics)
     if normal_frame is None:
         raise ValueError(f"source frame {frame} has no finite plane frame")
-    origin, orthogonal_axes, _, coefficient_scale = normal_frame
+    origin, orthogonal_axes, _, c = normal_frame
     r1, r2, _ = reference.pose_from_quad(quad, intrinsics)
     e3 = orthogonal_axes[2]
     raw = np.eye(4)
@@ -106,15 +106,18 @@ def comparison_row(reference, row):
         [0.0, 1.0, 0.0, 0.0],
         [0.0, 0.0, 0.0, 1.0],
     ])
-    size = np.diag([coefficient_scale] * 3 + [1.0])
-    placement = CV_TO_GL @ raw @ mesh_to_coefficients @ size
-    axis = CV_TO_GL @ raw @ np.diag([0.5, 0.5, coefficient_scale, 1.0])
+    height = np.diag([1.0, 1.0, c, 1.0])
+    scaled_basis = CV_TO_GL @ raw @ height
+    placement = scaled_basis @ mesh_to_coefficients
+    axis = CV_TO_GL @ raw @ np.diag([0.5, 0.5, c, 1.0])
     grounding = np.eye(4)
     grounding[1, 3] = 0.5
     cube = placement @ grounding
     coefficients = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0],
                              [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]])
-    vertices = np.array([expand(origin, r1, r2, e3, point) for point in coefficients])
+    vertices = np.array([expand(origin, r1, r2, e3, c, point) for point in coefficients])
+    unit_axes = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0],
+                          [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
     return {
         "video_frame_index": frame,
         "present_index": row.get("present_index"),
@@ -126,9 +129,10 @@ def comparison_row(reference, row):
         "r1": r1.tolist(),
         "r2": r2.tolist(),
         "e3": e3.tolist(),
-        "coefficient_scale": float(coefficient_scale),
+        "c": float(c),
         "handedness": handedness,
         "raw_basis_model": reference.colmajor(CV_TO_GL @ raw),
+        "scaled_basis_model": reference.colmajor(scaled_basis),
         "mesh_to_coefficients": reference.colmajor(mesh_to_coefficients),
         "axis_model": reference.colmajor(axis),
         "placement_model": reference.colmajor(placement),
@@ -136,6 +140,10 @@ def comparison_row(reference, row):
         "unit_quad_coefficients": coefficients.tolist(),
         "unit_quad_camera": vertices.tolist(),
         "unit_quad_pixels": project(intrinsics, vertices).tolist(),
+        "unit_axes_coefficients": unit_axes.tolist(),
+        "unit_axes_camera": [
+            expand(origin, r1, r2, e3, c, point).tolist() for point in unit_axes
+        ],
     }
 
 
@@ -171,7 +179,7 @@ def main():
     if any(right <= left for left, right in zip(indices, indices[1:])):
         raise ValueError("source frame identities must be strictly increasing")
     result = {
-        "formula": "P(u,v,k) = O + u*r1 + v*r2 + k*e3",
+        "formula": "P(u,v,w) = O + u*r1 + v*r2 + w*c*e3; c = frame.axis_length",
         "matrix_layout": "column-major GL camera models; k_row_major is pixel OpenCV K",
         "source_name": metadata.get(b"trd.video.source_name", b"").decode(),
         "source_sha256": metadata.get(b"trd.video.sha256", b"").decode(),

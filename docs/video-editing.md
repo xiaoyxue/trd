@@ -70,14 +70,16 @@ The experimental placement branch uses the requested expansion in the actual
 Rust document renderer, including the WASM editor:
 
 ```text
-P(u,v,k) = O + u*r1 + v*r2 + k*e3
+c = frame.axis_length
+P(u,v,w) = O + u*r1 + v*r2 + w*c*e3
 homogeneous_pixel = K * P
 pixel = homogeneous_pixel.xy / homogeneous_pixel.z
 ```
 
 `r1 = 2*half_edge1` and `r2 = 2*half_edge2` retain the reconstructed quad
-directions; `e3` is its plane normal. For a Y-up mesh, the existing default-size
-coefficients are `(x/2, -handedness*z/2, axis_length*y)`. The mesh, its AABB and
+directions; `e3` is its plane normal. A Y-up mesh maps to
+`(u,v,w) = (x, -handedness*z, y)`: the model uses full `r1/r2` and scales
+only its normal column by `c`. The mesh, its AABB and
 the reference cube use this same frame. The quad/grid/gizmo remain unchanged.
 The raw triad's normal-flip sign is handled once, without mirroring the mesh.
 
