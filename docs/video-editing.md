@@ -1,14 +1,15 @@
 # Video editing
 
-Native and browser video editing share one Rust-owned **params/GLB** editor.
+Native and browser video editing share one Rust-owned **protocol 0.0.7 params/GLB** editor.
 There is no old annotation/catalog interface, automatic old-format conversion,
 or implicit FIBA document on startup. Open Video and Load Arrow are independent.
 The browser always uses [mediabunny]; native uses ffmpeg/ffprobe.
 
-The rendering/editing contract is
-[editable scene documents](protocol/scene-documents.md). The global atomic
-protocol-version migration remains tracked in #367; current-only editor
-delivery must not be confused with completion of every protocol producer.
+The rendering/editing contract is [protocol 0.0.7](protocol/0.0.7.md), with
+[editable document APIs](protocol/scene-documents.md). Remaining runtime/
+generator stamps are listed in the
+[atomic migration status](protocol/README.md#implementation-migration-status);
+the old annotation schema is not the current editor protocol.
 
 ## Data set
 

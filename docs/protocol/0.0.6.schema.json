@@ -1,9 +1,11 @@
 {
   "protocol_version": "0.0.6",
+  "status": "historical contract; not the current application protocol",
+  "superseded_by": "docs/protocol/0.0.7.schema.json",
   "generated_by": "scripts/protocol_schema.py",
   "prose_spec": "docs/protocol/0.0.6.md",
   "row_model": "one params row is one rendered scene sample. Rows may be sparse when video_frame_index keys them to a sidecar video; output is 1:1 with the params rows",
-  "compatibility": "none — the renderer accepts exactly this version and hard-rejects any other or missing one",
+  "compatibility": "historical rule only; no 0.0.6 compatibility mode is part of the current 0.0.7 contract",
   "stream": {
     "container": "concatenated Apache Arrow IPC streams on one byte channel",
     "order": [

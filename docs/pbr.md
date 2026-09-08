@@ -9,8 +9,11 @@ rim, in world space, so a spinning object is lit from changing angles) plus an
 optional **HDR environment probe**, derives smooth per-vertex shading normals, and
 tone-maps the linear radiance to the sRGB target.
 
-`--pbr` requires a **texture table** for the albedo (like `--textured`), and
-conflicts with `--wireframe` / `--textured`.
+Under [protocol 0.0.7](protocol/0.0.7.md), albedo/material maps are embedded in
+the GLB resource, not an Arrow texture table. The demo wrapper's `--texture`
+option embeds an OBJ's albedo during offline GLB conversion. `--pbr` conflicts
+with `--wireframe` / `--textured`; ordinary internal viewers still accept OBJ
+plus a separate image outside the Arrow scene-input contract.
 
 ## Contents
 

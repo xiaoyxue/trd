@@ -10,8 +10,12 @@
 > still exercised end-to-end by `run_stream` and pinned by the golden suite.
 > Sections below are kept as the design record.
 
+**Current protocol:** [0.0.7 params/GLB](protocol/0.0.7.md).
+Historical backend milestones below are not current producer instructions.
+The current editor's retained-document export and all-sparse-frame roundtrip
+are documented in [scene documents](protocol/scene-documents.md).
 
-Status: **in progress** (in-process interaction loop implemented; Arrow
+Historical design status: **in progress** (in-process interaction loop implemented; Arrow
 round-trip + wasm pending) · Owner: @xiaoyxue · Branch: `feat/trd-gui-design`
 
 ## Contents
@@ -132,9 +136,9 @@ FrameParams { model?, k?, pose?, eye?, target?, fovy?, ... }  // camera
 ```
 
 The **model matrix lives per-draw** (`Draw.model`, composed under the mesh's
-preview base model). The wire protocol is mesh-first Arrow
-`[mesh][texture?][frames?][params]` at `PROTOCOL_VERSION = 0.0.6`. This is exactly the
-value the interaction loop needs to recompute.
+preview base model). Current wire input is 0.0.7 `[params][mesh?]`; tracked-source
+`model` remains row-major and converts at the adapter boundary. The interaction
+loop changes local models, not camera/quad values or original GLB resources.
 
 `trd-gui` is a **new front-end peer** to `trd-app` — it owns UI + interaction,
 and delegates *all* rendering to `trd-core`, honoring the AGENTS.md invariant
@@ -303,33 +307,29 @@ environment background.
 
 <a id="section-53-new-piece-of-work-a-rust-input-scene-encoder"></a>
 
-### 5.3 New piece of work: a Rust **input**-scene encoder
+### 5.3 Current input-document editing and export
 
-trd-core today only *decodes* the input scene Arrow (`Mesh::from_arrow_all`,
-`decode_frames`, `decode_draws`) and *encodes* the **image output**
-(`OutputSession`). The input `[mesh][texture?][frames?][params]` stream is currently
-authored only by the Python producers (`scripts/*_to_arrow.py`) and by test
-code. An Arrow round-trip backend would need to author that input stream **in Rust**
-(arrow `StreamWriter` + the 0.0.6 schema/metadata). That backend was removed in
-#180, so nothing needs this today; the encoder itself survives as
-`trd_core`'s test-only `protocol::scene_encode` module (the encode half of the
-wire format, beside `protocol::arrow_decode`), which keeps the protocol
-round-trip tests honest. Should the backend return, make that module public
-again rather than writing a second encoder. `GuiRenderer` avoids this entirely.
+`SceneDocument` already reads and writes retained params/GLB inputs in Rust.
+It preserves unknown columns, schemas, batches and original GLB bytes while
+`apply_model_edits` changes addressed matrices. The editor expands a selected
+object to its matching sparse rows before writing; replay consumes saved
+matrices without double application. This is not resurrection of the removed
+`ArrowRoundTripRenderer` or a general serialization of transient UI gizmos.
+The ordinary `GuiRenderer` still renders its in-process scene directly.
 
 <a id="section-6-reverse-channel-the-interactionevent-protocol"></a>
 
 ## 6. Reverse channel — the interaction/event protocol
 
-Today the Arrow protocol is **one-directional** (scene in → image out). The GUI
-adds a **reverse** flow (events GUI → producer). Design:
+Scene input/image output and retained-document editing are not an interaction
+event stream. A future out-of-process event flow is a separate design:
 
 * **Native, in-proc:** a typed `InteractionEvent` enum passed directly to the
   controller. No serialization, no protocol change.
 * **Out-of-process producer (future):** define a **separate**, small event
   channel (Arrow event schema or JSON lines) so a Python/ML producer can consume
   events and emit the next scene frame. This is a *new, independent* protocol —
-  **do not** fold it into the image/scene `PROTOCOL_VERSION` (0.0.6) or bump
+  **do not** fold it into the image/scene protocol (0.0.7) or bump
   that version for it. Version the event channel on its own.
 
 Recommendation: ship the in-proc enum first; standardize an Arrow event schema
@@ -501,7 +501,7 @@ scene authoring, and the image-display texture. All pixels come from trd-core.
 
 <a id="section-13-verified-facts-behind-this-design"></a>
 
-## 13. Verified facts behind this design
+## 13. Historical facts behind the original design
 
 * `trd-core` = `wgpu = "30"`; egui/egui-wgpu/eframe **0.35.0** (latest) depend on
   `wgpu ^29`, egui-winit 0.35 on `winit ^0.30.13` (crates.io, this session).

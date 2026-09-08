@@ -1,50 +1,57 @@
-# trd stream protocol
+# trd scene protocol
 
-The **trd stream protocol** defines the columnar wire format the rendering core
-consumes and produces. It is an **Apache Arrow IPC stream**: one schema message
-followed by N record-batch messages, on stdin (input) and stdout (output).
+**The current contract is 0.0.7**, agreed in #367 and implemented through #370:
+
+```text
+[params] [mesh?]
+```
+
+Each bracket is a complete Apache Arrow IPC stream. Params come first; the
+optional mesh table stores only UUID `mesh_id` and original self-contained
+`glb` bytes. There are no Arrow OBJ geometry, texture, inline-frame or GLB
+path/URL resource tables. Video remains an independent input.
 
 | Topic | Rule |
 |---|---|
-| **Semantics** | one **params** row = one rendered frame. Mesh/texture/frames rows are indexed resources. Output is 1:1 with params, and output batch boundaries mirror params batches. |
-| **Versioning** | the protocol version is carried in schema-level metadata under the key `trd.protocol.version` and follows `MAJOR.MINOR.PATCH`. **The renderer supports exactly one version — currently `0.0.6` — and hard-rejects any other or missing version.** The protocol is deliberately not backward compatible (see the [policy](../../AGENTS.md)). |
-| **Table identity** | every input sub-stream declares `trd.table.kind`; schemas are not guessed from column names. |
-| **Playback rate** | an optional schema-metadata key `trd.stream.frame_rate` (float, frames/sec, default **30**) declares the stream's intended playback frame rate — like a video file's fps. Front-ends play at this rate (speed = fps); `trd-cli`'s rendered image stream copies it through so `scripts/encode.py` encodes the GIF/WebP at the same rate. |
-| **Global conventions** | matrices are **column-major** and right-handed; projections target **wgpu clip space** (`z ∈ [0, 1]`); the vertex transform is the MVP chain `clip = P · V · M · (position, 1)`. |
+| Specification | **[0.0.7](0.0.7.md)** and **[machine-readable contract](0.0.7.schema.json)** |
+| Params-only | Placement/reference cube without an external mesh resource |
+| One/multiple GLBs | One resource row per UUID, shared by corresponding object bindings |
+| Rendering subset | [FHC placement/camera/model/binding fields](../../assets/schemas/trd-render-sub-schema.md), plus the retained separate CG/CV adapter |
+| Matrices | Tracked source `model` is row-major; CG/CV arrays and internal renderer matrices are column-major. Never silently reinterpret one as the other. |
+| Editing/export | Preserve complete source arrays, metadata and batch boundaries. Editor transforms persist in all corresponding existing sparse rows. |
+| Video | External decoding/player; missing source row means video-only, not a fabricated placement |
+| Output | One planar RGBA image row per params row, preserving params batch boundaries |
+| Compatibility | No backward compatibility. Versioned 0.0.7 input must reject other/missing versions; unversioned FHC source ingestion is an explicit adapter, not a legacy fallback. |
+
+## Implementation migration status
+
+**Documentation defines 0.0.7; this is not a claim that the atomic runtime
+cutover is complete.** At the `c284478` implementation checkpoint,
+`crates/trd-core/src/protocol/mod.rs`, `scripts/protocol_schema.py` and several
+legacy producers still stamp `0.0.6`, despite current applications reading the
+params/GLB shape. That mismatch remains a release blocker on #367/#370.
+
+The runtime constant, all current producers, fixture metadata and generator must
+move together before publishing 0.0.7 acceptance. Do not re-enable old application
+paths or merely restamp old mesh/texture/frames payloads. The existing
+`protocol_schema.py` still describes the archived format; its `--check` is not
+a validator for the new `0.0.7.schema.json` contract yet.
 
 ## Timing model
 
-The animation is a **sequence of frames** (one row = one frame); playback follows
-the classic video-player model:
+The standalone scene viewer advances params rows at `trd.stream.frame_rate`
+(positive frames/second, default 30). Native `--fps` overrides that presentation
+rate; vsync remains separate.
 
-- **`frame_rate` (the stream's fps) sets the speed** — advancing `frame_rate`
-  frames per second. A higher fps plays faster. `trd-app` accepts `--fps` to
-  override it.
-- **Presentation is decoupled from the monitor refresh (vsync).** `trd-app`
-  presents at the playback fps by default (non-vsync present mode); pass `--vsync`
-  to lock to the refresh rate (Fifo).
-- The same content at the same fps plays at the **same speed**.
+The video editor instead uses the external video's actual timeline and the
+source's explicit frame identity/PTS mapping. It must not derive a made-up
+timestamp or duplicate sparse rows to match the full video frame count.
 
+## Historical specification
 
-## Specification
+[0.0.6](0.0.6.md) and [its schema](0.0.6.schema.json) are retained only as
+historical documentation of `[mesh][texture?][frames?][params]`. They are not
+the current contract or instructions for a compatibility mode.
 
-The protocol is **`0.0.6`-only**; there is a single, self-contained spec:
-
-- **[0.0.6](./0.0.6.md)** — `[mesh][texture?][frames?][params]`. Per-mesh
-  geometry (`position`/`color`/`uv`/`index`), an optional **texture** table
-  (`rgba`), optional inline background **frames** (`frame_bytes` /
-  `frame_pixels`), and per-frame params: `model`, a **camera** (CV `k`/`pose` or CG
-  `eye`/`target`/`direction`/`up`/`fovy`/`aspect`/`znear`/`zfar`), an instanced
-  **draw list** (`draw_mesh`/`draw_model`), and an optional background selected
-  by inline `frame_id` or external `frame_path`/`frame_url`.
-- **[`0.0.6.schema.json`](./0.0.6.schema.json)** — the same contract as data:
-  table kinds, column names, Arrow types, required/optional flags, the
-  `draw_mode` byte values, and the cross-column constraints. Generated by
-  `scripts/protocol_schema.py`; `--check` fails if it is stale or if a committed
-  fixture contradicts a declared type.
-
-Earlier iterations were removed; the renderer hard-rejects any version other
-than `0.0.6`.
-
-The accepted input version and current output version are defined in
-`crates/trd-core/src/protocol/mod.rs` (`SUPPORTED_INPUT_VERSIONS`, `PROTOCOL_VERSION`).
+Application APIs, placement, all-frame editing and the two-round workflow are
+documented in [scene documents](scene-documents.md).

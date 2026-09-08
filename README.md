@@ -24,13 +24,13 @@ from JS.
 
 ## [How it fits together](docs/architecture.md)
 
-Everything shares **one render function** and one mesh-first render format. The
-video editor additionally reads a separate `0.2.0` authoring timeline and
-derives normal render scenes from it in Rust:
+Everything shares **one render core** and the **0.0.7 params/GLB contract**.
+The video editor uses the same retained scene document plus an independent
+video timeline; legacy annotation is converted offline:
 
 ```
 input-stream ─┬─ trd-cli  → trd-core → offscreen readback → image-stream   (headless)
-(mesh-first)  ├─ trd-app  → trd-core → window surface                      (native playback)
+(params/GLB)  ├─ trd-app  → trd-core → window surface                      (native playback)
               ├─ trd-wasm → trd-core → canvas surface                      (browser)
               └─ trd-gui  → trd-core → offscreen → egui image      (interactive, native + browser)
 
@@ -41,9 +41,9 @@ input-stream ─┬─ trd-cli  → trd-core → offscreen readback → image-st
 |---|---|---|---|
 | **`trd-cli`** | Arrow stream (stdin) | offscreen texture → read-back | Arrow image stream (stdout) |
 | **`trd-app`** | Arrow stream (stdin) | live window swapchain | frames on screen |
-| **`trd-wasm`** | Arrow stream (via `loadIpc`) | live canvas (or offscreen texture) | frames in the browser |
+| **`trd-wasm`** | `ArrowSceneDocument` via `loadSceneDocument` | live canvas (or offscreen texture) | frames in the browser |
 | **`trd-gui`** | a mesh + live gestures | offscreen → egui image | an interactive orbit/zoom viewer |
-| **video editor** | `0.2.0` timeline + external video | offscreen → egui image | quad-local 3D editing over video |
+| **video editor** | 0.0.7 params/GLB + external video | offscreen → egui image | sparse-frame editing/export/replay |
 
 Each front-end is a *thin shell* that only supplies a render target and calls the
 core — no per-front-end rendering logic. Primitive dispatch and draw-kind
@@ -166,35 +166,28 @@ Full setup — Windows `dev-env.ps1`, GPU-driver notes (nixGL / `WGPU_BACKEND=gl
 and the `wrappers ⇄ cargo run` mapping — is in
 [`docs/rendering.md`](docs/rendering.md).
 
-## [Stream protocol](docs/protocol/0.0.6.md)
+## [Scene protocol](docs/protocol/0.0.7.md)
 
 Frame parameters are plain columnar data, so **any** tool that emits the input
-columns as an Arrow IPC stream can drive the renderer. The current — and **only
-supported** — version is **0.0.6**:
-`[mesh][texture?][frames?][params]`, with every table explicitly tagged by
-`trd.table.kind`. It is not backward-compatible; every other or missing version
-is hard-rejected.
+columns as Arrow IPC can drive the renderer. The current agreed protocol is
+**0.0.7**: `[params][mesh?]`.
 
-- a leading **mesh** table (`position`/`color`/`uv`/`index`) — one row per mesh;
-- an optional **texture** table (`rgba` tensor) for textured/PBR albedo;
-- an optional indexed **frames** resource table (`frame_bytes` Binary or
-  `frame_pixels` tensor) for self-contained backgrounds;
-- the per-frame **params** table — an optional **camera** (**CV** `k`+`pose`, or
-  **CG** `eye`/`target`/`up`+`fovy`…), an optional **draw list** (`draw_mesh` +
-  `draw_model`) instancing several meshes, and an optional **background frame**
-  (`frame_id` for inline data, or external `frame_path`/`frame_url`) composited
-  beneath the scene.
+Params contain the rendering subset plus retained upstream columns. Mesh
+resources contain only unique UUID `mesh_id` and original self-contained `glb`
+bytes; geometry, materials and textures stay inside GLB. Params-only input
+renders reference geometry. Video is external, and a missing sparse row remains
+video-only.
 
-The standard inline e2e packs all 250 native 1920×1080 frames of the Cornell-box
-clip as a raw RGBA tensor table and renders only the correctly placed textured bunny; see
-[`docs/frame-extraction.md`](docs/frame-extraction.md).
+Tracked FHC `model` is row-major on the wire; the separate CG/CV adapter retains
+column-major matrices and existing camera behavior. Editor transforms persist
+in all corresponding sparse rows and survive a fresh play/seek roundtrip.
+OBJ conversion is offline; ordinary OBJ viewers remain supported.
 
-All params columns are optional/additive and drive `clip = P · V · M · (pos, 1)`.
-Rendering appearance (filled / wireframe / textured / **PBR**) is a render-time
-choice, **not** a wire column, so the same stream renders any way.
-
-**Full column-by-column specification:
-[`docs/protocol/0.0.6.md`](docs/protocol/0.0.6.md).**
+**[0.0.7 specification](docs/protocol/0.0.7.md)** and
+**[machine-readable contract](docs/protocol/0.0.7.schema.json)** define the new
+format. The [implementation migration status](docs/protocol/README.md#implementation-migration-status)
+tracks remaining old runtime/generator stamps; this documentation update alone
+does not complete that atomic cutover.
 
 ## [Material (PBR)](docs/pbr.md)
 
@@ -311,16 +304,17 @@ MP4 opens and seeks in megabytes.
   AR demos, the native window, the interactive viewer, web, and Windows setup.
 - [`docs/pbr.md`](docs/pbr.md) — the Disney principled-BRDF material model, all PBR
   parameters + defaults, tone mapping, and the HDR environment probe.
-- [`docs/protocol/0.0.6.md`](docs/protocol/0.0.6.md) — the full stream-protocol spec,
-  with [`0.0.6.schema.json`](docs/protocol/0.0.6.schema.json) beside it as the
-  machine-readable form producers can generate against.
+- [`docs/protocol/0.0.7.md`](docs/protocol/0.0.7.md) — the current params/GLB contract,
+  with [`0.0.7.schema.json`](docs/protocol/0.0.7.schema.json). The
+  [protocol index](docs/protocol/README.md) distinguishes the agreed contract,
+  implementation cutover and archived specifications.
 - [`assets/schemas/trd-render-sub-schema.md`](assets/schemas/trd-render-sub-schema.md)
   — the approved params/GLB simplification being implemented in #367; selected
   source fields, CG camera compatibility, and source-preserving editing.
 - [`docs/protocol/scene-documents.md`](docs/protocol/scene-documents.md) — current
   Rust/wasm document APIs, native GLB inputs and implementation limitations.
 - [`docs/frame-extraction.md`](docs/frame-extraction.md) — background-frame
-  extraction, external references, and inline frames-table authoring.
+  extraction and external references; retired inline resources are identified as historical.
 - [`docs/gui-design.md`](docs/gui-design.md) — the `trd-gui` interactive-viewer design.
 - [`docs/video-editing.md`](docs/video-editing.md) — FIBA timeline document,
   the browser media boundary (mediabunny + ranged reads), quad-local placement,

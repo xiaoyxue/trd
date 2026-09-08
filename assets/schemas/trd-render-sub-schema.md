@@ -1,7 +1,10 @@
 # trd rendering sub-schema
 
 **Purpose:** the minimal data trd consumes, not the complete upstream business
-schema. Target: the simplified scene input discussed in #367 / #368.
+schema. This is the **0.0.7** params/GLB contract agreed in #367 / #370.
+The [formal specification](../../docs/protocol/0.0.7.md) and
+[implementation cutover status](../../docs/protocol/README.md#implementation-migration-status)
+distinguish the contract from any remaining old producer/runtime stamps.
 
 Selected source fields follow the supplied `field_definition_design 2.md`.
 That complete upstream business document is not redistributed here. This document
@@ -21,7 +24,7 @@ when supplied, follows params; it is not repeated for every params row.
 The caller may instead supply GLB bytes or ID-keyed GLB buffers through the
 native/wasm API. Both delivery forms produce the same in-memory mesh bindings.
 
-No separate texture or inline-video-frame table is required. Video remains an
+Separate texture and inline-video-frame tables are not accepted. Video remains an
 external input. Parquet is not an application input container.
 
 ## 2. Params: four rendering field groups
@@ -263,6 +266,13 @@ permission to remove or change the renderer's ability to draw OBJ-loaded meshes.
 4. Reuse every untouched column, including unknown data, original types,
    nulls, field/schema metadata, row order and batch boundaries.
 5. Preserve untouched matrices without TRS decomposition or recomposition.
+
+Interactive move/rotate/scale edits target the same object across all its
+existing sparse rows, not only the displayed row. Store
+`adjustment * original_local_model` in each row; keep its own K/quad and preserve
+other objects. Use `track_id` across reorder/gaps, or a validated consistent
+ordered binding list where identities are absent. Fresh replay consumes the
+saved matrices with identity adjustments and must reproduce them during play/seek.
 
 The tracked-source adapter writes source `model`/`mesh_id`; the CG/CV adapter
 uses its own existing column names. Neither exports internal GPU indices over

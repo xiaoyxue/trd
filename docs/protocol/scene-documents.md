@@ -1,9 +1,11 @@
-# Editable params and GLB scene documents
+# Editable protocol 0.0.7 params and GLB scene documents
 
-This is the in-progress implementation on #370, based on #368. The final wire
-version/fixture migration is not complete; the existing stream reader is not
-yet retired. The agreed target is the
-[render sub-schema](../../assets/schemas/trd-render-sub-schema.md).
+This page describes the **0.0.7** contract and current document APIs agreed in
+#367/#370, based on #368. See the [formal specification](0.0.7.md),
+[machine-readable contract](0.0.7.schema.json), and
+[atomic implementation migration status](README.md#implementation-migration-status).
+The latter tracks remaining old runtime/generator stamps; this is not an old
+mesh-first compatibility mode.
 
 Both native and browser video editors expose only this current workflow.
 The old annotation/catalog UI, implicit default annotation and runtime
@@ -24,7 +26,7 @@ stream are emitted in a canonical single batch.
 `SceneDocument::read` reads `[params][mesh?]`. A source table using the minimal
 FHC `bottom_quads`/`k` schema can be read without inventing trd metadata. When a
 stream declares trd protocol metadata, it must match the currently supported
-version. A legacy CG/CV params source keeps the existing camera fields and
+0.0.7 version. A CG/CV params source keeps the existing camera fields and
 conventions.
 
 `SceneDocument::frames` exposes decoded rendering views. `frame(row)` decodes

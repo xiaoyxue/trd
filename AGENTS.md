@@ -37,30 +37,29 @@ violate without anything noticing:
   (#290). The boundary and its one exception (the raw `moov` walk, because Rust
   needs a **rational** frame rate) are in
   [`docs/video-editing.md`](docs/video-editing.md#reader-boundary).
-- **The input protocol is NOT backward compatible.** Only the current
-  `trd_core::protocol::PROTOCOL_VERSION` (`0.0.6`) is accepted; anything else is
-  hard-rejected, never silently upgraded. To evolve it, **bump the version and
-  migrate all producers + fixtures in one change** (`scripts/*_to_arrow.py` stamp
-  it; regenerate `stage{1,2}.arrow`). Never re-add retired versions (#82/#90).
+- **The current scene contract is [0.0.7](docs/protocol/0.0.7.md), not backward
+  compatible.** Versioned input must match exactly; unversioned FHC source
+  ingestion is an explicit adapter, not permission to upgrade old wire formats.
+  **Move runtime constants, producers, schemas and fixtures atomically.**
+  Remaining old stamps are recorded in the
+  [migration status](docs/protocol/README.md#implementation-migration-status);
+  never claim a docs-only version change completes that release gate.
 - **Native and browser video-editing accept only current params/GLB documents.**
   No old annotation/catalog UI or runtime fallback is retained. The independent
   `trd.video_edit.version = 0.2.0` annotation remains offline source data:
   explicitly convert it with `scripts/timeline_to_params.py` before loading.
-- **Protocol `0.0.6` asset rule:** embedded OBJ geometry uses the mesh columns,
-  the mesh row index is its `mesh_id`, the material on that row belongs to that
-  ID, and keyed texture rows carry the same `mesh_id`. A legacy texture table
-  defaults to mesh 0. GLB/glTF 2.0 is reference-only
-  (`gltf_path` / `gltf_url`): do not duplicate its geometry or material columns,
-  because the glTF file is authoritative. Every native and browser consumer must
-  resolve the reference before rendering and must report an unresolved resource
-  as an error rather than substituting a placeholder. Mesh rendering and protocol
-  acceptance tests use `assets/envmap/uffizi-large.hdr` as the default IBL probe.
+- **Protocol `0.0.7` asset rule:** `[params][mesh?]`; a mesh row has only UUID
+  `mesh_id` and original `glb: LargeBinary`. No Arrow OBJ geometry, texture
+  table, inline-frame table or GLB path/URL reference resources. Preserve
+  original GLB bytes and UUID bindings; renderer-local slots are not source IDs.
+  Invalid or unresolved assets are errors, never placeholders. Internal OBJ
+  loading/viewers remain supported. Use `assets/envmap/uffizi-large.hdr` for IBL.
 - **Video scene export stays sparse.** Export only tracked placement rows and
-  carry their strictly increasing `video_frame_index`; do not pad the params
-  stream with empty rows. Video replay looks up this key, and a missing row means
-  video-only playback. Keep `k` and `draw_model` as separate columns—never
-  serialize a combined MVP matrix. Export the selected `tonemap` operator on
-  every sparse params row; an absent field defaults to Reinhard.
+  retain their source `present_index`/PTS or CG/CV `video_frame_index` helpers;
+  do not pad the params stream. Missing rows mean video-only playback. Keep
+  camera and model separate, never serialize MVP. Tracked `model` stays
+  row-major; CG/CV `draw_model` stays column-major. Apply editor transforms
+  across all matching sparse rows; fresh replay must not apply them twice.
 - **Comments say *why*, not *what*, and stay short enough to see what they attach
   to.** Guidance rather than a gate, with the reasoning and a measuring script in
   [`docs/comments.md`](docs/comments.md) — run

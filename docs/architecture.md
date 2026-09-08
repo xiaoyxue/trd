@@ -5,21 +5,26 @@ in every front-end (headless CLI, native window, browser, interactive viewer) by
 drawing into whatever render target each one provides. JavaScript/TypeScript is a
 thin bootstrap only — the WebGPU API is never called from JS.
 
-Everything shares **one render function** and one mesh-first **render format**.
-The video editor additionally reads a separate versioned authoring timeline and
-derives ordinary render scenes from it in Rust:
+Everything shares **one render core** and the **0.0.7 params/GLB contract**.
+The video editor uses the retained document plus an independent container
+timeline. Old annotation is offline source data, not another application UI:
 
 ```
 input-stream ─┬─ trd-cli  → trd-core → offscreen readback → image-stream   (headless)
-(mesh-first)  ├─ trd-app  → trd-core → window surface                      (native playback)
+(params/GLB)  ├─ trd-app  → trd-core → window surface                      (native playback)
               ├─ trd-wasm → trd-core → canvas surface                      (browser)
               └─ trd-gui  → trd-core → offscreen → egui image      (interactive, native + browser)
 
                   image-stream → scripts/encode.py → ffmpeg → GIF / WebP / MP4
 
-video-edit timeline + VideoFrame RGBA
+params/GLB document + external VideoFrame/RGBA
               → trd-placement + trd-gui → trd-core → egui image    (browser editor)
 ```
+
+The [protocol specification](protocol/0.0.7.md) defines the current contract.
+See [migration status](protocol/README.md#implementation-migration-status) for
+remaining old runtime/producer stamps rather than assuming a documentation
+change completes the atomic cutover.
 
 ## Contents
 
@@ -196,8 +201,11 @@ canonical `Mesh`/`MeshShading` container lives in `mesh/mesh.rs`.
 Loaders sit beside it by format:
 
 - `mesh/obj.rs` (#36)
-- `mesh/arrow.rs` (#37)
 - `mesh/gltf.rs`
+
+The old Arrow geometry loader is legacy migration code, not a 0.0.7 resource
+surface. Current wire assets are self-contained GLBs; OBJ is still available to
+ordinary native/internal viewers and offline converters.
 
 The geometry every source shares (`aabb`, `center`, `preview_transform`,
 `edge_indices`) lives in `mesh/mod.rs`. A mesh's GPU residency is its face in
@@ -212,20 +220,19 @@ live in `io/`.
 
 Input path:
 
-- `protocol/input_session.rs`'s `InputSession` is the **single framing driver**
-  (native + wasm) and is deliberately transport-free.
-- It feeds byte chunks through `arrow`'s `StreamDecoder`, validates explicit
-  `0.0.6` `trd.table.kind` metadata, decodes `[mesh][texture?][frames?][params]`
-  via the one column decoder in `protocol/arrow_decode.rs`, and yields one
-  `FrameBatch` per params record batch.
-- `io/input_stream.rs`'s `InputStream<R: Read>` wraps it for the blocking case:
-  it owns the `Read`, exposes the prologue via inherent methods and implements
-  `Iterator<Item = Result<FrameBatch, StreamError>>`, so the 64 KiB read loop
-  exists once.
-- `stream_filter/` drives that for the CLI (`run_stream`) and `native/trd-app`
-  for the window.
-- Params stay one batch in flight; optional indexed frames resources are retained
-  for playback/reuse (encoded Binary stays compressed until selected).
+- `protocol/scene_document.rs` retains the complete params batches and immutable
+  GLB resources from `[params][mesh?]`, including metadata and resource batch layout.
+- Native `SceneDocument::read_from(Read)` and browser `SceneDocument::read(&[u8])`
+  share this decoder. `document_params` provides per-row views through explicit
+  tracked FHC and CG/CV adapters, without projecting away unknown source fields.
+- `document_edit` writes selected model entries atomically. Editor track edits
+  target all matching sparse rows; the original per-frame camera/quad remains.
+- `stream_filter/` uses this path for the CLI; `native/trd-app` forwards the
+  document and per-frame views to the window and wakes it when data arrives.
+- Mesh UUIDs resolve to renderer-local slots without rewriting the source.
+  `trd-placement` owns grounding and scene assembly, not protocol or JS.
+- Old mesh-first `InputSession`/`InputStream` code is not the current application
+  path; remaining retirement belongs to the atomic protocol migration.
 
 Output path:
 
@@ -247,13 +254,13 @@ count, duration — and there are **two** sources for them:
 
 | Source | Location |
 |---|---|
-| `0.2.0` authoring document | `media/video_document/`, read from Arrow IPC or Parquet |
+| Offline `0.2.0` source annotation | `media/video_document/`; convert before editor ingestion |
 | Container metadata | `media/mp4_probe/`, walked for its `moov` box |
 
-They are alternative answers to one question rather than unrelated parsers, so
-they share one `VideoTiming` (`media/video.rs`) and the columnar helpers in
-`media/arrow_columns.rs`. The document is **optional** (#264): without one the
-editor is a player whose timeline comes from the container.
+They share the `VideoTiming`/`VideoInfo` domain (`media/video.rs`) and columnar
+helpers in `media/arrow_columns.rs`, but only the container supplies live
+application playback timing. Sparse scene input is optional; with none, the
+current editor is a plain player.
 
 `trd-core` does no codec work — demuxing and decoding belong to the delivery
 surfaces (mediabunny in the browser, ffmpeg natively). Deliberately **not** under
@@ -278,9 +285,9 @@ Each is a *thin shell* that only supplies a render target and calls the core:
 |---|---|---|---|
 | **`trd-cli`** | Arrow stream (stdin) | offscreen texture → read-back | Arrow image stream (stdout) |
 | **`trd-app`** | Arrow stream (stdin) | live window swapchain | frames on screen |
-| **`trd-wasm`** | Arrow stream (buffered via `loadIpc`) | live canvas (or offscreen texture) | frames in the browser |
+| **`trd-wasm`** | `ArrowSceneDocument` via `loadSceneDocument` | live canvas (or offscreen texture) | frames in the browser |
 | **`trd-gui`** | a mesh + live gestures | offscreen texture → egui image | an interactive orbit/zoom viewer (native + browser) |
-| **video editor** | `0.2.0` timeline + external video | offscreen texture → egui image | quad-local 3D editing over video |
+| **video editor** | current params/GLB + external video | offscreen texture → egui image | sparse-track editing/export/replay |
 
 ### Front-end roles
 
@@ -291,7 +298,7 @@ platform lifecycle, and delegates pixels to `trd-core`.
   texture and writes the pixels as an Arrow image stream. It does **not** encode
   video; pipe the stream to [`scripts/encode.py`](../scripts/encode.py) (ffmpeg)
   for a GIF/WebP/MP4.
-- **`trd-app`** — native window: a background thread reads the mesh-first stream
+- **`trd-app`** — native window: a background thread reads the params/GLB document
   from stdin; the window plays it at `--fps`, drawing each frame straight into
   the swapchain surface. No read-back, no file.
 - **`trd-gui`** — interactive viewer (native + browser): turns orbit/zoom/pan
@@ -361,8 +368,9 @@ frame copy now reaches the render core through `trd_core::ExternalFrame`
 
 Runtime shape:
 
-- `CanvasRenderer.create(canvas)` holds a persistent `Renderer` + `InputSession`
-  and renders the **same** `Scene` as the CLI.
+- `CanvasRenderer.create(canvas)` and `OffscreenRenderer.create(...)` retain a
+  `Renderer`; `loadSceneDocument` binds the shared editable document and
+  `renderIndex` assembles through the same placement adapter as the CLI.
 - There is **one** config-driven front-end: `render.sh --web` writes the demo's
   `stream.arrow` + `config.json`, and
   [`web/viewer/src/viewer.ts`](../web/viewer/src/viewer.ts) fetches both and
@@ -388,9 +396,10 @@ Runtime shape:
 | `web/gui-viewer` | browser eframe shell around the `trd_wasm` GUI entry points |
 | `web/gui-video-editing` | browser video-editing surface with its own copy of the generated `trd_wasm` package |
 | `web/package.json` | shared Bun workspace for all browser delivery surfaces |
-| `scripts/fiba_video_editing_bundle.py` | FIBA video/parquet → `0.2.0` timeline document |
+| `scripts/fiba_video_editing_bundle.py` | matching FIBA calibration/video → offline `0.2.0` annotation source |
+| `scripts/timeline_to_params.py` | explicit offline annotation → params/GLB conversion |
 | `examples/` | demo streams + `render.sh` / `render.ps1` wrappers + producer scripts |
-| `scripts/` | pyarrow producers (`obj`/`texture`/`jsonl`/perception `_to_arrow.py`), `encode.py`, `extract_frames.py`, `dev-env.ps1` |
+| `scripts/` | params and offline OBJ-to-GLB bundling (`jsonl_to_arrow.py`, `scene_to_arrow.py`), explicit annotation conversion (`timeline_to_params.py`), `encode.py`, extraction and dev tooling; legacy producers are not the 0.0.7 contract |
 
 Tests are placed by **kind, not size**: a unit test sits inline in the module it
 pins, as `#[cfg(test)] mod tests`, however long it grows; an integration test

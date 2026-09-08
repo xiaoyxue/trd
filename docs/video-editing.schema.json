@@ -1,5 +1,8 @@
 {
   "video_edit_version": "0.2.0",
+  "status": "offline legacy annotation source, not native/browser editor input",
+  "current_editor_protocol": "docs/protocol/0.0.7.schema.json",
+  "conversion": "scripts/timeline_to_params.py",
   "generated_by": "scripts/protocol_schema.py",
   "prose_spec": "docs/video-editing.md",
   "independent_of": "trd.protocol.version — the two versions move separately on purpose; editor state never bumps the stream protocol and vice versa",
@@ -7,7 +10,7 @@
     "Arrow IPC stream",
     "Parquet"
   ],
-  "container_note": "both decode through one path; the format is sniffed, not declared. Parquet compression is limited to uncompressed and snappy, because zstd/gzip/lz4/brotli are C shims that would break the wasm build",
+  "container_note": "Historical source serializations only. Current editors reject annotation/Parquet input and require explicit offline conversion to params/GLB; the native/browser applications do not choose a legacy UI from this schema.",
   "row_model": {
     "shape": "sparse",
     "rule": "the timeline table stores only frames with ad-placement quads; everything else is ordinary video and is played as such. A frame with no row is looked up as None and rendered as plain video",

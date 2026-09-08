@@ -37,7 +37,7 @@ Windows use `render.ps1` with `-CLI` / `-Native` / `-Web` and `-InputPath` /
 
 ## Native CLI (headless)
 
-`trd-cli` (package `trd-cli`) is a pure Arrow filter: mesh-first stream on stdin →
+`trd-cli` (package `trd-cli`) is a pure Arrow filter: params/GLB document on stdin →
 image stream on stdout. It does not encode video — pipe the output to
 [`scripts/encode.py`](../scripts/encode.py), which picks the codec from the `-o`
 extension (`.mp4`/`.mov` → H.264, `.webp` → animated WebP, else GIF). Use `.mp4`
@@ -51,12 +51,14 @@ examples/render.sh [MODE] [INPUT.jsonl] [OUT.gif|.webp|.mp4] [WIDTH] [HEIGHT] [F
 # Defaults: examples/frames.bunny_dolly.cg.jsonl → output/out.gif, 256×256 @ 30 fps
 ```
 
-The exact `producer → renderer → encoder` pipeline it runs (no intermediate files):
+The **[0.0.7](protocol/0.0.7.md)** contract is params-first. Runtime/producer
+stamp migration is recorded [separately](protocol/README.md#implementation-migration-status).
+The producer → offline asset bundler → renderer → encoder pipeline is:
 
 ```sh
-uv run --with pyarrow scripts/obj_to_arrow.py assets/meshes/bunny.obj  > /tmp/stream.arrow
-uv run --with pyarrow scripts/jsonl_to_arrow.py examples/frames.bunny_dolly.cg.jsonl >> /tmp/stream.arrow
-cat /tmp/stream.arrow \
+uv run --with pyarrow scripts/jsonl_to_arrow.py examples/frames.bunny_dolly.cg.jsonl \
+  | uv run --with pyarrow --with numpy --with pillow scripts/scene_to_arrow.py \
+      --mesh assets/meshes/bunny.obj \
   | cargo run -q -p trd-cli -- --width 256 --height 256 \
   | uv run --with pyarrow --with numpy scripts/encode.py --fps 30 -o output/out.gif
 ```
@@ -71,13 +73,13 @@ them (`… | trd --width 1024 --wireframe --aabb | …`):
 
 | Flag | Effect |
 |---|---|
-| `--mesh <obj>` | Prepend a mesh built from `<obj>` by [`obj_to_arrow.py`](../scripts/obj_to_arrow.py); renders centered + scaled-to-fit. **Repeatable** — several meshes load in order; a frame's `draws` list references them by 0-based index. |
-| `--texture <img>` | Splice a texture stream from `<img>` and render **textured** (samples the image at each vertex UV). Requires `--mesh` with UVs. |
+| `--mesh <obj>` | Convert OBJ offline to self-contained GLB via [`scene_to_arrow.py`](../scripts/scene_to_arrow.py), retaining preview fit. **Repeatable**; CG draw indices retain their ordered resource semantics. No Arrow geometry table is emitted. |
+| `--texture <img>` | Embed albedo in the first converted GLB and render **textured**. Requires `--mesh` with UVs; no separate texture stream. |
 | `--wireframe` | Draw mesh **edges** as a line list instead of filled triangles. |
 | `--pbr` | Physically-based **Disney principled BRDF** shading (see [Rendering appearance](#rendering-appearance)). |
 | `--aabb` | Overlay each drawn instance's green, thickness-controlled, anti-aliased axis-aligned **bounding box**. |
 | `--axes` / `--axes-local` | Overlay smooth R/G/B axes with cone arrowheads at the **world** origin / at **each** drawn object's own model frame. |
-| `--frames-base <dir>` | Resolve external `frame_path` backgrounds. Inline `frame_id` resources need no base directory. |
+| `--frames-base <dir>` | Resolve external `frame_path` backgrounds. Inline `frame_id`/frames tables are retired inputs. |
 | `--no-msaa` | Disable 4× MSAA (default on the mesh pass). Mesh silhouettes/wireframes become single-sampled; gizmo lines retain analytic AA. |
 | `--placement-quad`, `--grid-local xy\|xz\|yz` | AR-placement overlays used by the broadcast demos below. |
 
@@ -218,15 +220,16 @@ Opens a window and plays the *same* stream live:
 examples/render.sh --native            # Linux/macOS/WSL
 examples\render.ps1 -Native            # Windows (PowerShell 7)
 
-# …or pipe a mesh-first stream straight into trd-app:
-cat <(uv run --with pyarrow scripts/obj_to_arrow.py assets/meshes/bunny.obj) \
-    <(uv run --with pyarrow scripts/jsonl_to_arrow.py examples/frames.bunny_dolly.cg.jsonl) \
+# …or generate the same params/GLB document for the native window:
+uv run --with pyarrow scripts/jsonl_to_arrow.py examples/frames.bunny_dolly.cg.jsonl \
+  | uv run --with pyarrow --with numpy --with pillow scripts/scene_to_arrow.py \
+      --mesh assets/meshes/bunny.obj \
   | cargo run -q -p trd-app -- --fps 30
 ```
 
 Options: `--width`/`--height` (initial size), `--fps`, `--once` (hold the last
 frame instead of looping). Honours `WGPU_BACKEND` / `RUST_LOG`. Close the window to
-exit; neither `uv` nor `ffmpeg` is needed.
+exit. The binary itself needs no encoder; the offline recipe above uses `uv`.
 
 ## Interactive viewer — `trd-gui`
 
@@ -334,8 +337,8 @@ http://localhost:8080/?mesh=/assets/meshes/can/coke.obj&texture=/assets/meshes/c
 ## Video editor — `web/gui-video-editing`
 
 The dedicated FIBA editor is a sibling of the generic stream viewer and GUI
-viewer in the shared `web/` Bun workspace. Generate the ignored
-`web/gui-video-editing/data/fiba-shot1.arrow` document first using
+viewer in the shared `web/` Bun workspace. Explicitly convert the matching
+source annotation to a params/GLB document using
 [`video-editing.md`](video-editing.md#generate-the-document), then:
 
 ```sh
@@ -348,12 +351,13 @@ bun run --cwd gui-video-editing dev  # http://localhost:8085
 The same commands run natively in PowerShell 7 on Windows; no WSL or Nix is
 required.
 
-Open the local `shot_0001.mp4` or an HTTP(S) video URL, select the tracked quad,
-then place/edit Coke, beer, or Dragon. mediabunny owns demux/decode and
-`VideoPlayer` owns playback; Rust maps each
-presented frame to the separate `0.2.0` Arrow timeline and renders the video,
-placed mesh, and editor overlays. This is not the `0.0.6` render protocol:
-edited-scene export to `[mesh][texture?][frames][params]` remains future work.
+Open the local MP4 or an HTTP(S) video URL and load current `[params][mesh?]`.
+The empty page loads no old example. The annotation/catalog UI is removed;
+old annotation/Parquet/mesh-first inputs are rejected. Mediabunny owns demux/decode,
+`VideoPlayer` owns pacing, and Rust selects each sparse params row against the
+presented video identity. Editing persists across all corresponding source
+models. Export the retained document and freshly reload it; seek/play must
+reproduce those matrices without applying the edit twice.
 
 See [`video-editing.md`](video-editing.md) for the document generation command,
 schema, quad basis, lighting defaults, playback visibility, SSH tunnel, and
@@ -363,8 +367,8 @@ Native media/timeline shell:
 
 ```sh
 cargo run -p trd-gui-video-editing -- \
-  --document web/gui-video-editing/data/fiba-shot1.arrow \
-  --video /path/to/shot_0001.mp4
+  --document output/fiba.dragon.arrow \
+  --video /path/to/shot_0001.mp4 --preview-width 1920
 ```
 
 The native adapter uses ffprobe for source validation and streams ffmpeg RGBA

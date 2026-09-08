@@ -1,6 +1,6 @@
 # GUI video editing web
 
-The native and browser editors use one current **params/GLB** workflow.
+The native and browser editors use one current **protocol 0.0.7 params/GLB** workflow.
 There is no annotation/catalog UI or implicit legacy demo on startup.
 Open Video and Load Arrow are independent. Without Arrow, the page is a plain
 video player; load params to show placement controls.
@@ -13,8 +13,9 @@ are rejected, never silently converted by the application.
 
 See [editable scene documents](../../docs/protocol/scene-documents.md) for the
 contract and [video editing](../../docs/video-editing.md) for media/diagnostics.
-The global protocol-version cutover is still tracked in #367; do not mistake
-the current-only editor UI for completion of every protocol migration.
+The [0.0.7 specification](../../docs/protocol/0.0.7.md) is authoritative.
+The [cutover status](../../docs/protocol/README.md#implementation-migration-status)
+tracks remaining old runtime/producer stamps separately from that contract.
 
 ## Prepare existing annotation data offline
 
