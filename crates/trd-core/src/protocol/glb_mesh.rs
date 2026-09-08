@@ -124,16 +124,7 @@ pub(super) fn mesh_schema() -> Schema {
 
 pub(super) fn decode_mesh_batch(batch: &RecordBatch) -> Result<Vec<GlbMesh>, ProtocolError> {
     let schema = batch.schema();
-    if schema.fields().len() != 2
-        || schema.field(0).name() != "mesh_id"
-        || schema.field(1).name() != "glb"
-        || schema.fields().iter().any(|field| field.is_nullable())
-    {
-        return Err(parse_error(
-            "mesh table must contain only non-null mesh_id and glb",
-        ));
-    }
-    schema.field(0).try_extension_type::<ArrowUuid>()?;
+    validate_mesh_schema(&schema)?;
     let ids = batch
         .column(0)
         .as_any()
@@ -155,6 +146,27 @@ pub(super) fn decode_mesh_batch(batch: &RecordBatch) -> Result<Vec<GlbMesh>, Pro
             GlbMesh::from_uuid(id, Arc::from(glbs.value(row)))
         })
         .collect()
+}
+
+pub(super) fn validate_mesh_schema(schema: &Schema) -> Result<(), ProtocolError> {
+    if schema.fields().len() != 2
+        || schema.field(0).name() != "mesh_id"
+        || schema.field(1).name() != "glb"
+        || schema.fields().iter().any(|field| field.is_nullable())
+    {
+        return Err(parse_error(
+            "mesh table must contain only non-null mesh_id and glb",
+        ));
+    }
+    schema.field(0).try_extension_type::<ArrowUuid>()?;
+    if schema.field(0).data_type() != &DataType::FixedSizeBinary(16)
+        || schema.field(1).data_type() != &DataType::LargeBinary
+    {
+        return Err(parse_error(
+            "mesh fields must be Arrow UUID and LargeBinary",
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn validate_mesh_ids(meshes: &[GlbMesh]) -> Result<(), ProtocolError> {

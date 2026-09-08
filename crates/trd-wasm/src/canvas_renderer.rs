@@ -243,13 +243,20 @@ impl CanvasRenderer {
     }
 
     /// The frame's external background reference, which the JS shell resolves to
-    /// RGBA and uploads before rendering. `None` when out of range or the frame
-    /// has no background.
+    /// RGBA and uploads before rendering. A document row without a background
+    /// returns `None`; an invalid document row returns an error.
     #[wasm_bindgen(js_name = frameRef)]
-    pub fn frame_ref(&self, index: u32) -> Option<String> {
-        self.frames
+    pub fn frame_ref(&self, index: u32) -> Result<Option<String>, JsValue> {
+        if let Some(document) = &self.document {
+            return document
+                .borrow()
+                .frame_ref(index as usize)
+                .map_err(js_error);
+        }
+        Ok(self
+            .frames
             .get(index as usize)
-            .and_then(|frame| frame.frame_ref.clone())
+            .and_then(|frame| frame.frame_ref.clone()))
     }
 
     /// Renders one buffered frame (by index) to the surface using the current

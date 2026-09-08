@@ -416,6 +416,7 @@ struct RenderedFrameDiagnostics {
     /// Pinned to the displayed frame (same reason as `media_time_seconds`).
     duration_seconds: f64,
     scene: crate::scene::SceneState,
+    inspected_object: usize,
     source_frame: Option<trd_core::DocumentFrame>,
     source_reference: bool,
     show_reference_cube: bool,
@@ -1578,6 +1579,22 @@ impl VideoEditingApp {
         let render_size = renderer.size();
         self.shared.needs_overlay.set(false);
         let mut state = self.controller.state.clone();
+        let inspected_object = if source_payload.is_some() {
+            if source_payload
+                .as_ref()
+                .is_some_and(|(document, _)| !document.meshes().is_empty())
+                && self.source_controller_row
+                    != self
+                        .arrow_scene
+                        .as_ref()
+                        .and_then(|scene| scene.source_row(video.frame_index))
+            {
+                state.objects.clear();
+            }
+            self.source_selected_instance
+        } else {
+            state.selected.unwrap_or(0) as usize
+        };
         let replay_tonemap = state.tone_mappings[0].operator;
         let rendered_playing = self.shared.video_playing.get();
         if rendered_playing {
@@ -1602,7 +1619,7 @@ impl VideoEditingApp {
         let selected_quad = self.selected_quad;
         let hovered_quad = self.hovered_quad;
         let move_direction = self.controller.move_direction;
-        let rendered_model = replay_frame
+        let mut rendered_model = replay_frame
             .as_ref()
             .and_then(|frame| frame.draws.as_ref())
             .and_then(|draws| draws.first())
@@ -1625,6 +1642,10 @@ impl VideoEditingApp {
         let source_reference = source_payload
             .as_ref()
             .is_some_and(|(document, _)| document.meshes().is_empty());
+        let source_document_active = self
+            .arrow_scene
+            .as_ref()
+            .is_some_and(|scene| scene.source.is_some());
         // GPU-path: `present_external_frame` frame has no RGBA bytes; always None natively (#302).
         let external_frame = shared.external_frame().filter(|_| video.rgba.is_empty());
         let render = async move {
@@ -1641,6 +1662,14 @@ impl VideoEditingApp {
                     source_overlays,
                     state.selected,
                 ) {
+                    Ok(()) if shared.skip_readback.get() => Ok(Vec::new()),
+                    Ok(()) => renderer.read_document_pixels().await,
+                    Err(error) => Err(error),
+                }
+            } else if source_document_active {
+                // A sparse tail has no object; the catalog draw path would
+                // overwrite mesh 0's material with the previous UI instance.
+                match renderer.draw_video_frame(source, video.width, video.height) {
                     Ok(()) if shared.skip_readback.get() => Ok(Vec::new()),
                     Ok(()) => renderer.read_document_pixels().await,
                     Err(error) => Err(error),
@@ -1700,7 +1729,18 @@ impl VideoEditingApp {
                     }
                 }
             };
-            let renderer_diagnostics = renderer.diagnostics();
+            let mut renderer_diagnostics = renderer.diagnostics();
+            let result = result.and_then(|rgba| {
+                if let Some((document, frame)) = source_payload.as_ref() {
+                    (renderer_diagnostics, rendered_model) = renderer.document_diagnostics(
+                        document,
+                        frame,
+                        inspected_object,
+                        &mut state,
+                    )?;
+                }
+                Ok(rgba)
+            });
             if shared.renderer_generation.get() != renderer_generation {
                 shared.render_in_flight.set(false);
                 shared.render_in_flight_frame.set(None);
@@ -1734,6 +1774,7 @@ impl VideoEditingApp {
                             media_time_seconds: background_media_time,
                             duration_seconds: background_duration,
                             scene: state,
+                            inspected_object,
                             source_frame: source_frame.clone(),
                             source_reference,
                             show_reference_cube: source_reference && source_overlays.cube,
@@ -1910,6 +1951,10 @@ impl VideoEditingApp {
 
     /// Derives the values the Details panel can't read directly: displayed-frame pin + domain math.
     pub(super) fn displayed_facts(&self) -> DisplayedFacts {
+        let inspected_object = self.displayed_diagnostics.as_ref().map_or(
+            self.controller.state.selected.unwrap_or(0) as usize,
+            |facts| facts.inspected_object,
+        );
         let displayed_frame_index = self
             .displayed_frame_ready
             .then_some(self.displayed_frame_index);
@@ -1945,7 +1990,7 @@ impl VideoEditingApp {
         let (quad, placement_error) = if let Some((points_px, k)) = source_frame.and_then(|frame| {
             frame
                 .objects
-                .get(self.source_selected_instance)?
+                .get(inspected_object)?
                 .quad
                 .zip(frame.params.k)
         }) {
@@ -2098,6 +2143,7 @@ impl VideoEditingApp {
             pose_delta,
             normal_sign_warning,
             scene: scene.clone(),
+            inspected_object,
             selected_asset,
             selected_quad,
             visibility_reason,
@@ -2135,6 +2181,7 @@ pub(super) struct DisplayedFacts {
     pub pose_delta: Option<PoseDeltaDiagnostics>,
     pub normal_sign_warning: bool,
     pub scene: crate::scene::SceneState,
+    pub inspected_object: usize,
     pub selected_asset: Option<CatalogAsset>,
     pub selected_quad: bool,
     pub visibility_reason: &'static str,
@@ -3009,6 +3056,41 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn details_describe_the_displayed_selected_object_not_object_zero() {
+        let shared = Rc::new(VideoEditingShared::default());
+        let mut app = VideoEditingApp::new(document(), shared);
+        let mut rendered = test_rendered_frame_diagnostics();
+        rendered.scene.add_object(
+            7,
+            trd_core::DisneyMaterial {
+                metallic: 0.72,
+                roughness: 0.31,
+                ..Default::default()
+            },
+            trd_core::RenderMode::Shaded,
+            trd_core::ToneMapping::default(),
+        );
+        rendered.scene.objects[0].translation[0] = 9.0;
+        rendered.scene.objects[1].translation[0] = -0.25;
+        rendered.inspected_object = 1;
+        app.displayed_frame_ready = true;
+        app.displayed_diagnostics = Some(rendered);
+        app.controller.state.selected = Some(0);
+
+        let facts = app.displayed_facts();
+        let text = details_ui::format_details(&app.video, &facts);
+        assert!(text.contains("selected object: 1"));
+        assert!(text.contains("object translation: [-0.250000, 0.000000, 0.000000]"));
+        assert!(text.contains("metallic: 0.7200"));
+        assert!(text.contains("roughness: 0.3100"));
+        assert!(text.contains(&format!(
+            "render mode: {}",
+            diagnostics::render_mode_label(trd_core::RenderMode::Shaded)
+        )));
+        assert!(!text.contains("object translation: [9."));
+    }
+
+    #[test]
     fn diagnostics_media_time_tracks_the_displayed_frame_not_a_newer_one() {
         let shared = Rc::new(VideoEditingShared::default());
         let mut app = VideoEditingApp::new(document(), shared.clone());
@@ -3052,6 +3134,7 @@ pub(super) mod tests {
             media_time_seconds: 0.25,
             duration_seconds: 272.0 / TIMESCALE,
             scene: crate::scene::SceneState::default(),
+            inspected_object: 0,
             source_frame: None,
             source_reference: false,
             show_reference_cube: false,

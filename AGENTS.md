@@ -159,7 +159,7 @@ have run.
 | Level | What it is | Adds over the level below |
 |---|---|---|
 | **L1** | **UT + IT** — everything needing no GPU and no display. | **Exactly `nix flake check`**: fmt, clippy native, clippy wasm32, `cargo test --workspace`, rustdoc (`-D rustdoc::broken_intra_doc_links`), `tsc --noEmit` + Biome. **The commands live in `flake.nix`, not here** — copying them is what let this file understate the wasm gate for weeks (#316/#181), so read the flake for exact arguments. |
-| **L2** | **normal** — L1 plus the pixel-level regression net. Needs a real GPU. | `cargo test -p trd-core -p trd-placement --test golden_render -- --ignored` (MSAA/PBR and the three params/GLB cases); `cargo test -p trd-core -- --ignored` (`render::gpu_tests`); `cargo test -p trd-placement --lib -- --ignored`; `cargo test -p trd-gui --test gui_render -- --ignored` |
+| **L2** | **normal** — L1 plus the pixel-level regression net. Needs a real GPU. | `cargo test -p trd-core -p trd-placement --test golden_render -- --ignored` (MSAA/PBR and the params/GLB cases); `cargo test -p trd-core -- --ignored` (`render::gpu_tests`); `cargo test -p trd-placement --lib -- --ignored`; `cargo test -p trd-gui -- --ignored` (GUI rendering plus document diagnostics/material retention) |
 | **L3** | **full** — L2 plus end-to-end on a real device. | The [§3 e2e list and the §4 Windows matrix](#the-tiers-in-full) (4.1 `trd-cli` · 4.2 `trd-app` window · 4.3 `trd-gui` window · 4.4 both web renderers · 4.5 native video editor · 4.6 browser video editor · 4.7 large-file seek) |
 
 **The floor table.** Run `git diff --name-only origin/main` and take the
@@ -177,7 +177,8 @@ have run.
 | `crates/trd-core/src/render/**`, `src/shader/*.wgsl`, PBR/tone-map, `math/` transforms feeding the GPU `Uniform`, or the golden fixtures | **L3** |
 | a delivery surface or shell — `native/**`, `crates/trd-wasm/**`, `crates/trd-gui/**`, `web/**` | **L3** |
 | `web/gui-video-editing/src/media/**`, or anything else that demuxes, decodes or seeks | **L3, and §4.7 is required** |
-| `scripts/golden_fixtures.py`, `scripts/{jsonl,obj,texture}_to_arrow.py`, `scripts/fiba_video_editing_bundle.py` — they regenerate goldens or stamp a version | **L3** |
+| `scripts/golden_fixtures.py`, `scripts/{jsonl,obj,texture,scene}_to_arrow.py`, `scripts/glb_assets.py`, `scripts/fiba_video_editing_bundle.py` — they generate render inputs, goldens or stamp a version | **L3** |
+| `examples/render.{sh,ps1}` — scene generation and delivery-surface launchers | **L3** |
 | `PROTOCOL_VERSION` / `VIDEO_EDIT_VERSION` bump, or regenerated fixtures | **L3** |
 | **no row matches** | **L3, and say so** — an unclassified path is an unknown blast radius, so it escalates rather than falling to L1. Add the row it should have matched in the same PR. |
 
@@ -348,7 +349,7 @@ The contents of the test levels: tiers 1–2 are **L2**, tiers 3–4 are **L3**.
 2. **GPU-gated tests (must — L2).** Every `#[ignore]` test, on a real GPU:
    `cargo test -p trd-core -- --ignored` (golden + `render::gpu_tests`),
    `cargo test -p trd-placement --lib -- --ignored`, and
-   `cargo test -p trd-gui --test gui_render -- --ignored`
+   `cargo test -p trd-gui -- --ignored`
 
 #### 3. End-to-end — Linux *and* Windows (L3)
 

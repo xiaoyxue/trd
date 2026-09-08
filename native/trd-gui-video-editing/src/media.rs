@@ -491,6 +491,15 @@ fn probe_unpresented_tail(
     let NativeVideoSource::Local(_) = source else {
         return None;
     };
+    probe_tail_packets(source, duration_seconds)
+}
+
+/// Remote tail evidence is fetched only when playback reaches an otherwise
+/// unexplained EOF, not as another index read on every HTTP open.
+pub(crate) fn probe_tail_packets(
+    source: &NativeVideoSource,
+    duration_seconds: f64,
+) -> Option<trd_core::UnpresentedTail> {
     // 1-second window: enough to catch trailing discarded packets.
     let from = (duration_seconds - 1.0).max(0.0);
     let output = Command::new("ffprobe")
@@ -520,15 +529,19 @@ fn probe_unpresented_tail(
     })
 }
 
-/// Counts discard-flagged packets from `ffprobe -show_entries packet=flags -of csv=p=0`.
+/// Counts trailing discard-flagged packets from `ffprobe -show_entries packet=flags -of csv=p=0`.
 /// Checks byte position 1 (the `D` in `_D_`), not a substring search (#331).
 /// Returns `None` for empty input ("not checked").
 fn count_discarded_packets(text: &str) -> Option<u32> {
-    let mut flags = text.lines().map(str::trim).filter(|line| !line.is_empty());
-    let first = flags.next()?;
-    std::iter::once(first)
+    let mut flags = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .rev();
+    let last = flags.next()?;
+    std::iter::once(last)
         .chain(flags)
-        .filter(|field| field.as_bytes().get(1) == Some(&b'D'))
+        .take_while(|field| field.as_bytes().get(1) == Some(&b'D'))
         .count()
         .try_into()
         .ok()
@@ -953,7 +966,13 @@ mod tests {
         // Only byte position 1 is the discard flag; other `D`s on the line must not match.
         assert_eq!(count_discarded_packets("K__,DTS\n___,DTS\n"), Some(0));
         assert_eq!(count_discarded_packets("K__,side_data\n"), Some(0));
-        assert_eq!(count_discarded_packets("_D_,DTS\n___,DTS\n"), Some(1));
+        assert_eq!(count_discarded_packets("_D_,DTS\n___,DTS\n"), Some(0));
+    }
+
+    #[test]
+    fn discarded_preroll_is_not_counted_as_a_missing_tail_picture() {
+        assert_eq!(count_discarded_packets("_D_\n___\n_D_\n_D_\n"), Some(2));
+        assert_eq!(count_discarded_packets("_D_\n___\n"), Some(0));
     }
 
     #[test]

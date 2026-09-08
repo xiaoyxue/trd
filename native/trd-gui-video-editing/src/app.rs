@@ -251,7 +251,7 @@ impl NativeVideoEditingApp {
         let Some(clock) = self.playback else {
             return;
         };
-        let last_frame = self.video_info.frame_count.saturating_sub(1);
+        let mut last_frame = last_presentable_frame(&self.video_info);
         let target = clock.target_frame(
             Instant::now(),
             self.video_info.fps_num,
@@ -282,14 +282,27 @@ impl NativeVideoEditingApp {
             self.submit_frame(frame);
         }
 
-        if self.frame_index >= last_frame {
-            self.stop_playback();
-        } else if self.pending_frame.is_none()
+        let exhausted = self.pending_frame.is_none()
             && self
                 .video
                 .as_ref()
-                .is_some_and(|video| !video.is_streaming())
+                .is_some_and(|video| !video.is_streaming());
+        if exhausted && self.frame_index < last_frame && self.video_info.unpresented_tail.is_none()
         {
+            if let Some(tail) = self.video_source.as_ref().and_then(|source| {
+                crate::media::probe_tail_packets(
+                    source,
+                    self.video_info.duration_us as f64 / 1_000_000.0,
+                )
+            }) {
+                self.video_info.unpresented_tail = Some(tail);
+                self.editor.set_video_info(self.video_info.clone());
+                last_frame = last_presentable_frame(&self.video_info);
+            }
+        }
+        if self.frame_index >= last_frame {
+            self.stop_playback();
+        } else if exhausted {
             self.shared.set_error(
                 ErrorScope::Media,
                 format!(
@@ -575,7 +588,7 @@ impl NativeVideoEditingApp {
             );
             return;
         }
-        let last_frame = self.video_info.frame_count.saturating_sub(1);
+        let last_frame = last_presentable_frame(&self.video_info);
         let start_frame = replay_start(self.frame_index, last_frame);
         if start_frame != self.frame_index {
             self.seek(start_frame);
@@ -682,7 +695,7 @@ impl NativeVideoEditingApp {
     fn sync_video_status(&self) {
         self.shared
             .set_video_status(self.video.is_some(), self.playback.is_some());
-        let last_frame = self.video_info.frame_count.saturating_sub(1);
+        let last_frame = last_presentable_frame(&self.video_info);
         self.shared.set_video_media_observation(
             if self.video.is_some() { 4 } else { 0 },
             self.video.is_some() && self.playback.is_none() && self.frame_index >= last_frame,
@@ -729,6 +742,12 @@ impl eframe::App for NativeVideoEditingApp {
             ui.ctx().request_repaint_after(self.frame_duration());
         }
     }
+}
+
+fn last_presentable_frame(info: &trd_core::VideoInfo) -> u32 {
+    info.frame_count
+        .saturating_sub(info.unpresented_tail.map_or(0, |tail| tail.samples))
+        .saturating_sub(1)
 }
 
 fn replay_start(current_frame: u32, last_frame: u32) -> u32 {
@@ -821,6 +840,31 @@ mod tests {
     fn replay_restarts_only_at_end() {
         assert_eq!(replay_start(100, 287), 100);
         assert_eq!(replay_start(287, 287), 0);
+    }
+
+    #[test]
+    fn eof_and_replay_use_the_last_presented_sample_without_changing_the_timeline() {
+        let mut info = empty_video_info();
+        info.frame_count = 694_840;
+        assert_eq!(
+            last_presentable_frame(&info),
+            694_839,
+            "unknown is not inferred"
+        );
+        info.unpresented_tail = Some(trd_core::UnpresentedTail {
+            samples: 1,
+            evidence: trd_core::UnpresentedTailEvidence::PacketFlags,
+        });
+        let last = last_presentable_frame(&info);
+        assert_eq!(last, 694_838);
+        assert_eq!(replay_start(last, last), 0);
+        assert_eq!(replay_start(last - 1, last), last - 1);
+        assert_eq!(
+            info.frame_count, 694_840,
+            "retain the container sample count"
+        );
+        info.unpresented_tail.as_mut().unwrap().samples = 0;
+        assert_eq!(last_presentable_frame(&info), 694_839);
     }
 
     #[test]

@@ -11,6 +11,9 @@ yet retired. The agreed target is the
 optional mesh resources. A mesh row contains exactly `mesh_id` (Arrow UUID) and
 `glb` (LargeBinary). The GLB bytes, including their material/texture payloads,
 are kept unchanged on export.
+Original mesh schema/field metadata and record-batch boundaries, including
+empty batches, are retained too. API-supplied resources with no source mesh
+stream are emitted in a canonical single batch.
 
 `SceneDocument::read` reads `[params][mesh?]`. A source table using the minimal
 FHC `bottom_quads`/`k` schema can be read without inventing trd metadata. When a
@@ -180,12 +183,25 @@ never accumulated into the exported matrix. `Renderer::with_assets` itself
 uses identity bases, so placement is not applied twice. No-quad CG/CV scenes
 retain their prior transforms. All placement math stays in `trd-placement`.
 
+`trd-app` uses this same document reader/placement adapter and wakes its window
+when input arrives. Both browser renderers expose document background references;
+the viewer preloads them and disables compositing on rows with no reference,
+rather than retaining the previous still. `examples/render.ps1` and `render.sh`
+use `scripts/scene_to_arrow.py` to convert their existing OBJ/albedo demo inputs
+offline into `[params][mesh]`. Camera/model arrays are retained; the OBJ preview
+normalization is baked into the converted GLB. Inline `-FramesTable` /
+`--frames-table` inputs are retired; use external `frame_path`/`frame_url` and
+`--frames-base` instead.
+
 The editable document path uses `document_scene_with_overlays` to assemble two
 back-to-front scenes for `Renderer::draw_layers`: video plus quad fill, outline,
 grid and coordinate axes first; meshes, reference cubes and their AABBs/gizmos
 second. Quad guides never tint or cover model content. Meshes still share depth
 within the foreground scene, and their AABBs remain on top. This avoids changing
 the global primitive order used by ordinary CG/OBJ scenes.
+Details is captured from that displayed frame's inspected instance and its
+resolved mesh slot, including the actual GPU material/IBL/tone-map settings.
+Selecting another instance does not reuse object 0's transform or material.
 
 Internal OBJ loading and the original CG camera path remain intact. The GLB
 importer's current capability limits still apply; this work does not silently
@@ -198,8 +214,8 @@ Run these on native and Chrome/wasm surfaces on both Windows and Linux:
 | Case | Input | Acceptance |
 |---|---|---|
 | 1 | Params only | Click the quad to show highlight, local axes, plane grid and a cube whose bottom center is at the local origin; click away to deselect. |
-| 2 | Params plus one mesh | Edit the active model matrix, export updated params, reload with the same GLB and compare the edited/reopened rendering at identical frames and camera/lighting settings. Unrelated columns and untouched models survive. |
-| 3 | Params plus multiple mesh rows | Verify asset IDs, independent transforms and each GLB's material/textures; no swapped or missing assets. |
+| 2 | Params plus one mesh | Edit, play/pause/resume and seek; export, close the process and freshly reopen with the same video. Repeat playback/seeks, including edited/untouched rows and the sparse tail; compare matched-frame rendering and retained data. |
+| 3 | Params plus multiple mesh rows | Verify one bound model per quad, independent transforms/materials and exact source/resource retention. Play/seek before export and after fresh reopen; no asset swaps or stale selected-instance Details. |
 
 Multiple meshes occupy rows of one `mesh_id`/`glb` table. These cases organize
 the feature acceptance; the remaining L3 gates, CG/OBJ regressions and video/

@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 use trd_core::{
-    DisneyMaterial, EnvMapData, ImageBasedLighting, Lighting, Mesh, MeshAsset, PbrConfig,
-    RenderMode, RenderOptions, ToneMapping,
+    DisneyMaterial, EnvMapData, ImageBasedLighting, Lighting, MeshAsset, PbrConfig, RenderMode,
+    RenderOptions, ToneMapping,
 };
 use winit::application::ApplicationHandler;
 #[cfg(not(target_os = "windows"))]
@@ -33,11 +33,8 @@ struct App {
     gpu: Option<WindowRenderer>,
     /// Meshes + rate + frames arriving from the stdin reader thread.
     rx: Receiver<StreamMsg>,
-    /// The stream's mesh table (or the legacy built-in fallback), held until the
-    /// GPU surface exists so the renderer can be built.
-    pending_meshes: Option<Vec<Mesh>>,
-    pending_mesh_assets: Option<Vec<MeshAsset>>,
-    mesh_assets_applied: bool,
+    /// Decoded assets and explicit reference-only mode, awaiting the GPU surface.
+    pending_mesh_assets: Option<(Vec<MeshAsset>, bool)>,
     /// Every frame received so far, retained so playback can loop.
     frames: Vec<FrameData>,
     /// The frame currently on screen (none until the first arrives).
@@ -84,9 +81,7 @@ impl App {
         Self {
             gpu: None,
             rx,
-            pending_meshes: None,
             pending_mesh_assets: None,
-            mesh_assets_applied: false,
             frames: Vec::new(),
             current: None,
             rate_override,
@@ -115,8 +110,12 @@ impl App {
     fn drain_stream(&mut self) {
         loop {
             match self.rx.try_recv() {
-                Ok(StreamMsg::Meshes(meshes)) => self.pending_meshes = Some(meshes),
-                Ok(StreamMsg::MeshAssets(assets)) => self.pending_mesh_assets = Some(assets),
+                Ok(StreamMsg::Meshes {
+                    assets,
+                    reference_only,
+                }) => {
+                    self.pending_mesh_assets = Some((assets, reference_only));
+                }
                 Ok(StreamMsg::Rate(rate)) => self.stream_rate = rate,
                 Ok(StreamMsg::Tonemap(operator)) => {
                     self.stream_tonemap = Some(operator);
@@ -254,27 +253,19 @@ impl ApplicationHandler for App {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.drain_stream();
 
-        // Build the scene renderer once both the GPU surface and the stream's
-        // mesh table (or built-in fallback) are available; then paint.
+        // Both the surface and decoded document assets must be ready.
         if let Some(gpu) = self.gpu.as_mut() {
             if gpu.renderer.is_none() {
-                if let Some(meshes) = self.pending_meshes.as_ref() {
-                    match gpu.set_meshes(meshes) {
+                if let Some((assets, reference_only)) = self.pending_mesh_assets.as_ref() {
+                    match gpu.set_mesh_assets(assets, *reference_only) {
                         Ok(()) => gpu.window.request_redraw(),
                         // An unusable mesh table is a bad stream, not a crash:
                         // report it and stop retrying it every wake (#235 R8).
                         Err(error) => {
                             log::error!("cannot render this stream's meshes: {error}");
-                            self.pending_meshes = None;
+                            self.pending_mesh_assets = None;
                         }
                     }
-                }
-            }
-            if !self.mesh_assets_applied && gpu.renderer.is_some() {
-                if let Some(assets) = self.pending_mesh_assets.as_ref() {
-                    gpu.set_mesh_assets(assets);
-                    self.mesh_assets_applied = true;
-                    gpu.window.request_redraw();
                 }
             }
             // Apply the Disney PBR material + env probe once the renderer exists.
@@ -383,9 +374,8 @@ pub fn run() -> Result<(), AppError> {
     };
 
     let (tx, rx) = mpsc::channel();
-    spawn_stdin_reader(tx, cli.frames_base.clone());
-
     let event_loop = EventLoop::new()?;
+    spawn_stdin_reader(tx, cli.frames_base.clone(), event_loop.create_proxy());
     // Playback is paced with `ControlFlow::WaitUntil` in `about_to_wait`; start
     // by waiting until the app schedules the first frame.
     event_loop.set_control_flow(ControlFlow::Wait);

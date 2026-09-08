@@ -99,7 +99,7 @@ pub struct VideoPlacementRenderer {
     default_mode: trd_core::RenderMode,
     default_material: trd_core::DisneyMaterial,
     identity: Rc<RendererIdentity>,
-    asset_diagnostics: Option<ImportedAssetDiagnostics>,
+    asset_diagnostics: Vec<ImportedAssetDiagnostics>,
     export_asset: Option<Rc<VideoExportAsset>>,
     replay_lighting: trd_core::Lighting,
     /// Transfer counts written at the transfer sites (#229).
@@ -133,7 +133,7 @@ impl VideoPlacementRenderer {
                 backend: facts.backend,
                 device_type: facts.device_type,
             }),
-            asset_diagnostics: None,
+            asset_diagnostics: Vec::new(),
             export_asset: None,
             replay_lighting: trd_core::Lighting::default(),
             transfers: TransferCounts::default(),
@@ -240,11 +240,15 @@ impl VideoPlacementRenderer {
             .map_or_else(trd_core::DisneyMaterial::default, |asset| {
                 asset.material.clone()
             });
-        let asset_diagnostics = assets.first().map(replay_asset_diagnostics);
+        let asset_diagnostics = assets.iter().map(replay_asset_diagnostics).collect();
         Ok(Self {
             renderer,
             target,
-            default_mode: trd_core::RenderMode::Filled,
+            default_mode: if preview {
+                trd_core::RenderMode::Filled
+            } else {
+                trd_core::RenderMode::Shaded
+            },
             default_material,
             identity: Rc::new(RendererIdentity {
                 adapter_name: facts.name,
@@ -340,7 +344,7 @@ impl VideoPlacementRenderer {
                 backend: facts.backend,
                 device_type: facts.device_type,
             }),
-            asset_diagnostics: Some(asset_diagnostics),
+            asset_diagnostics: vec![asset_diagnostics],
             export_asset: Some(export_asset),
             replay_lighting: trd_core::Lighting::default(),
             transfers: TransferCounts::default(),
@@ -364,14 +368,69 @@ impl VideoPlacementRenderer {
     }
 
     pub fn diagnostics(&self) -> VideoRendererDiagnostics {
+        self.mesh_diagnostics(0)
+    }
+
+    fn mesh_diagnostics(&self, mesh: usize) -> VideoRendererDiagnostics {
         VideoRendererDiagnostics {
             identity: self.identity.clone(),
             target_size: self.size(),
             pick_target_size: self.renderer.pick_target_size(),
             msaa_samples: 4,
-            asset: self.asset_diagnostics.clone(),
+            asset: self.asset_diagnostics.get(mesh).cloned(),
             transfers: self.transfers,
         }
+    }
+
+    pub(crate) fn document_diagnostics(
+        &self,
+        document: &trd_core::SceneDocument,
+        frame: &trd_core::DocumentFrame,
+        inspected_object: usize,
+        state: &mut crate::scene::SceneState,
+    ) -> Result<(VideoRendererDiagnostics, Option<trd_core::Matrix4>), String> {
+        if document.meshes().is_empty() {
+            return Ok((self.diagnostics(), None));
+        }
+        let (_, draws) = trd_placement::document_pick_draws(document, frame, self.viewport())
+            .map_err(|error| error.to_string())?;
+        state.objects.resize(draws.len(), Default::default());
+        state.selected = state
+            .selected
+            .filter(|index| (*index as usize) < draws.len());
+        state.mesh_ids.clear();
+        state.materials.clear();
+        state.modes.clear();
+        state.image_based_lighting.clear();
+        state.tone_mappings.clear();
+        state.pbr_debug_views.clear();
+        for draw in &draws {
+            let appearance = self
+                .renderer
+                .mesh_appearance(draw.mesh_id as usize)
+                .ok_or_else(|| format!("missing rendered mesh {}", draw.mesh_id))?;
+            state.mesh_ids.push(draw.mesh_id);
+            state.materials.push(appearance.material.clone());
+            state.modes.push(
+                draw.selection
+                    .mesh_mode(trd_core::RenderMode::Shaded)
+                    .unwrap_or(trd_core::RenderMode::Shaded),
+            );
+            state.image_based_lighting.push(appearance.ibl);
+            state.tone_mappings.push(appearance.tone_mapping);
+            state.pbr_debug_views.push(appearance.debug_view);
+        }
+        state.lighting = self.replay_lighting;
+        state.environment_available = true;
+        let Some(draw) = draws.get(inspected_object) else {
+            let mut diagnostics = self.diagnostics();
+            diagnostics.asset = None;
+            return Ok((diagnostics, None));
+        };
+        Ok((
+            self.mesh_diagnostics(draw.mesh_id as usize),
+            Some(draw.model),
+        ))
     }
 
     /// Resizes the render target (#203).
@@ -558,6 +617,24 @@ impl VideoPlacementRenderer {
                 trd_core::SceneLayer::new(camera, &background),
                 trd_core::SceneLayer::new(camera, &foreground),
             ],
+            &self.target,
+        );
+        Ok(())
+    }
+
+    pub(crate) fn draw_video_frame(
+        &mut self,
+        source: FrameSource<'_>,
+        frame_width: u32,
+        frame_height: u32,
+    ) -> Result<(), String> {
+        self.upload_frame(source, frame_width, frame_height);
+        let camera = trd_core::FrameParams::IDENTITY
+            .to_camera(self.viewport())
+            .map_err(|error| error.to_string())?;
+        let (background, _) = replay_scenes(&[], self.replay_lighting);
+        self.renderer.draw_layers(
+            &[trd_core::SceneLayer::new(camera, &background)],
             &self.target,
         );
         Ok(())
@@ -936,6 +1013,71 @@ fn replay_scenes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    fn document_diagnostics_follow_bindings_and_sparse_video_does_not_change_materials() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let document = trd_core::SceneDocument::read(
+            &std::fs::read(root.join("crates/trd-core/tests/golden/stage2.arrow")).unwrap(),
+        )
+        .unwrap();
+        let mut frame = document.frame(0).unwrap();
+        let object = frame.objects[0].clone();
+        frame.objects = [1, 0]
+            .map(|index| trd_core::DocumentObject {
+                mesh: Some(trd_core::DocumentMesh::Index(index)),
+                selection: trd_core::DrawSelection::INHERIT,
+                ..object.clone()
+            })
+            .to_vec();
+        let assets = document.decoded_assets().unwrap();
+        let gpu = pollster::block_on(VideoPlacementRenderer::own_gpu()).unwrap();
+        let env = std::fs::read(root.join("assets/envmap/uffizi-large.hdr")).unwrap();
+        let mut renderer =
+            VideoPlacementRenderer::new_assets_with_gpu(gpu, &assets, &env, 96, 96, false).unwrap();
+        for (index, metallic) in [0.1, 0.85].into_iter().enumerate() {
+            renderer.renderer.set_disney_material(
+                trd_core::MeshTarget::One(index),
+                trd_core::DisneyMaterial {
+                    metallic,
+                    ..Default::default()
+                },
+            );
+        }
+        let mut state = crate::scene::SceneState {
+            selected: Some(1),
+            ..Default::default()
+        };
+        let (facts, model) = renderer
+            .document_diagnostics(&document, &frame, 1, &mut state)
+            .unwrap();
+        assert_eq!(state.mesh_ids, [1, 0]);
+        assert_eq!(state.materials[0].metallic, 0.85);
+        assert_eq!(state.materials[1].metallic, 0.1);
+        assert_eq!(state.modes, [trd_core::RenderMode::Shaded; 2]);
+        assert_eq!(
+            facts.asset.unwrap().aabb_min,
+            document.meshes()[0].bounds().unwrap().min().to_array(),
+        );
+        assert!(model.is_some());
+
+        renderer
+            .draw_video_frame(FrameSource::Rgba(&vec![255; 96 * 96 * 4]), 96, 96)
+            .unwrap();
+        for (index, metallic) in [0.1, 0.85].into_iter().enumerate() {
+            assert_eq!(
+                renderer
+                    .renderer
+                    .mesh_appearance(index)
+                    .unwrap()
+                    .material
+                    .metallic,
+                metallic,
+                "a video-only tail must not overwrite a loaded GLB's appearance",
+            );
+        }
+    }
     use crate::scene::SceneState;
 
     fn is_axes(d: &trd_core::DrawableObject) -> bool {

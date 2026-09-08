@@ -16,11 +16,10 @@
 # By default (or with --cli, alias --headless) the frame stream is rendered to a
 # GIF/WebP via the headless trd-cli.
 # With --native (alias --app) it is played live in the interactive trd-app window
-# (trd-native); OUTPUT is then ignored and neither uv nor ffmpeg are needed.
-# The stream protocol is 0.0.6-only and mesh-first: every stream begins with a
-# mesh table (scripts/obj_to_arrow.py encodes the OBJ) concatenated with the
-# params stream, so trd renders the loaded mesh (centered + uniformly scaled to
-# fit) driven by INPUT.jsonl. When no --mesh (and no --placement-quad) is given,
+# (trd-native); OUTPUT is then ignored and no ffmpeg encoder is needed.
+# The input is params-first with self-contained GLB resources. Offline OBJ
+# conversion retains the preview fit and original camera/model params.
+# When no --mesh (and no --placement-quad) is given,
 # the bunny (assets/meshes/bunny.obj) is loaded as the default demo object. Try:
 # examples/render.sh --mesh assets/meshes/bunny.obj \
 # examples/frames.turntable.jsonl output/bunny.gif. --mesh is repeatable: pass it
@@ -76,7 +75,7 @@
 # renderer) draws to an offscreen ArrowRenderer texture read back to a 2D canvas
 # (the browser twin of the CLI output stream). All the content flags below
 # (--mesh/--texture/--wireframe/--aabb/--axes/--axes-local/--placement-quad/
-# --frames-base/--frames-table) and the positional WIDTH/HEIGHT apply to --web exactly as to
+# --frames-base) and the positional WIDTH/HEIGHT apply to --web exactly as to
 # --cli; only the playback rate is a live URL param:
 #   ?fps=N    playback frame rate (1..240; default = the FPS positional arg)
 # e.g. examples/render.sh --web --canvas-renderer --placement-quad --axes-local \
@@ -123,7 +122,7 @@ CONTENT FLAGS (--cli and --native):
                       Repeatable: pass several times to load several meshes (row 0,
                       1, …); a frame's `draws` list references them by index.
                       Defaults to assets/meshes/bunny.obj when no mesh is given.
-  --texture IMG       Bind IMG as a texture table and render textured — sampling it
+  --texture IMG       Embed IMG in the first GLB and render textured — sampling it
                       at each vertex UV (#20). Requires --mesh (with UVs); mutually
                       exclusive with --wireframe.
   --wireframe         Draw mesh edges as a line list instead of filled triangles (#38).
@@ -149,10 +148,7 @@ CONTENT FLAGS (--cli and --native):
                       Stills are decoded at full resolution; extract them with
                       scripts/extract_frames.py <video> --format jpg (add --height H to
                       extract smaller stills and save memory).
-  --frames-table FILE Splice a protocol 0.0.6 inline frames resource table between
-                      texture and params. Params rows select resources by `frame_id`;
-                      author FILE with scripts/frames_to_arrow.py or
-                      scripts/extract_frames.py --embed bytes|pixels.
+  --frames-table FILE Retired. Use external frame_path/frame_url and --frames-base.
 
   -h, --help          Show this guidance and exit.
 
@@ -188,14 +184,6 @@ Examples:
     --texture assets/meshes/bunny_with_texture/bunny_uv_map1.jpg \
     --frames-base output/cornellbox \
     examples/frames.cornellbox.stage2.jsonl output/cornellbox_stage2.gif 960 540 25  # stage 2: mesh placed
-  # Full self-contained tensor e2e: all 250 frames, correctly placed bunny only.
-  #   uv run --with pyarrow --with pillow --with numpy scripts/extract_frames.py \
-  #     assets/videos/cornellbox/CameraMovement.mp4 --format jpg --width 1920 --height 1080 \
-  #     --embed pixels -o output/cornellbox-inline
-  examples/render.sh --cli --frames-table output/cornellbox-inline/frames.arrow \
-    --mesh assets/meshes/bunny_with_texture/bunny.obj \
-    --texture assets/meshes/bunny_with_texture/bunny_uv_map1.jpg \
-    examples/frames.cornellbox.inline.jsonl output/cornellbox-inline-tensor-bunny.gif 1920 1080 25
   # --web replays any --cli scene in the browser (same flags + positional W H FPS):
   examples/render.sh --web --canvas-renderer --placement-quad --axes-local \
     --frames-base output/cornellbox \
@@ -220,7 +208,7 @@ fi
 
 # Extract the optional mode flags (--cli/--native/--web), the --web renderer
 # sub-flags (--canvas-renderer/--offscreen-renderer), and repeatable --mesh <obj>
-# flags that prepend a mesh Arrow stream (0.0.6 [mesh][...][params]); the rest are
+# flags that create GLB resource rows after params; the rest are
 # positional.
 cli=0
 native=0
@@ -321,10 +309,10 @@ if [ $((offscreen_renderer + canvas_renderer)) -ge 1 ] && [ "$web" -ne 1 ]; then
   exit 1
 fi
 
-# --texture provides a 0.0.4 texture table (bound as the sampled albedo) and
+# --texture embeds albedo in the first converted GLB and
 # renders textured. It needs a --mesh (UVs to sample the texture) and is
 # mutually exclusive with --wireframe. It applies to --web too (the browser
-# renderer replays the same generated [mesh][texture][params] stream).
+# renderer replays the same generated [params][mesh] document).
 if [ -n "$texture" ]; then
   if [ ${#meshes[@]} -eq 0 ]; then
     echo "error: --texture requires at least one --mesh (with UVs to sample)" >&2
@@ -391,11 +379,7 @@ QUAD
   meshes+=("$quad_obj")
 fi
 
-# The stream protocol is mesh-first (0.0.6 requires a leading [mesh] table; there
-# is no params-only fallback). When neither --mesh nor --placement-quad supplied a
-# mesh, load the bunny as the default demo object so the stream is a valid
-# [mesh][params] and the default INPUT (frames.bunny_dolly.cg.jsonl) has something
-# to place.
+# Keep the demo's default bunny, converted offline to a self-contained GLB.
 if [ ${#meshes[@]} -eq 0 ]; then
   meshes+=("$root/assets/meshes/bunny.obj")
 fi
@@ -440,78 +424,39 @@ for tool in $tools; do
 done
 
 # Choose a frame producer for the params stream: scripts/jsonl_to_arrow.py via
-# uv (or python3 with pyarrow). The stream protocol is 0.0.6-only and mesh-first,
-# so the params batch carries the `model`/camera/`draws`/frame-source columns the
-# pyarrow producer emits (the old DuckDB `arrow` path only understood the retired
-# 0.0.1/0.0.2 center/size/theta/model columns and is gone).
+# uv (or python3 with pyarrow/numpy/Pillow). The GLB bundler keeps the original
+# model/camera/draw arrays and external frame references.
 if command -v uv >/dev/null 2>&1; then
   producer=uv
-elif command -v python3 >/dev/null 2>&1 && python3 -c 'import pyarrow' >/dev/null 2>&1; then
+elif command -v python3 >/dev/null 2>&1 && python3 -c 'import pyarrow, numpy, PIL' >/dev/null 2>&1; then
   producer=python3
 else
-  echo "error: need uv or python3 with pyarrow to build the Arrow frame stream" >&2
+  echo "error: need uv or python3 with pyarrow, numpy and Pillow to build params/GLB input" >&2
   exit 1
 fi
 
 # Emit the Arrow IPC frame stream on stdout via the chosen producer.
 frames() {
   case "$producer" in
-    uv) uv run --with pyarrow "$root/scripts/jsonl_to_arrow.py" "$input" ;;
-    python3) python3 "$root/scripts/jsonl_to_arrow.py" "$input" ;;
+    uv) uv run --with pyarrow "$root/scripts/jsonl_to_arrow.py" "$input" --fps "$fps" ;;
+    python3) python3 "$root/scripts/jsonl_to_arrow.py" "$input" --fps "$fps" ;;
   esac
 }
 
-# When rendering loaded meshes (--mesh, repeatable), pick a pyarrow-capable
-# Python to encode the OBJ(s) into the leading mesh Arrow stream.
-# scripts/obj_to_arrow.py emits a mesh table with **one row per --mesh** (in the
-# order given); it is concatenated *before* the params stream so trd reads
-# [mesh][...][params]. A frame's `draws` list references these meshes by 0-based index
-# (mesh 0 = first --mesh).
-mesh_producer=""
-if [ ${#meshes[@]} -gt 0 ]; then
-  if command -v uv >/dev/null 2>&1; then
-    mesh_producer=uv
-  elif command -v python3 >/dev/null 2>&1 && python3 -c 'import pyarrow' >/dev/null 2>&1; then
-    mesh_producer=python3
-  else
-    echo "error: --mesh needs uv or python3 with pyarrow to encode ${meshes[*]}" >&2
-    exit 1
-  fi
+if [ -n "$frames_table" ]; then
+  echo "error: --frames-table is retired; use frame_path/frame_url and --frames-base" >&2
+  exit 1
 fi
 
-# The optional texture table (0.0.4): scripts/texture_to_arrow.py encodes the
-# image into a one-row `rgba` fixed_shape_tensor<u8>[H,W,4] Arrow stream,
-# concatenated *between* the mesh table and later frames/params so trd reads
-# [mesh][texture][frames?][params] and binds it as the sampled albedo. Downscaled to
-# --max-size 2048 to stay within the renderer's portable (downlevel/WebGL2)
-# 2048² texture limit. Needs pyarrow + pillow + numpy.
-texture_producer=""
-if [ -n "$texture" ]; then
-  if command -v uv >/dev/null 2>&1; then
-    texture_producer=uv
-  elif command -v python3 >/dev/null 2>&1 \
-    && python3 -c 'import pyarrow, PIL, numpy' >/dev/null 2>&1; then
-    texture_producer=python3
-  else
-    echo "error: --texture needs uv or python3 with pyarrow/pillow/numpy to encode $texture" >&2
-    exit 1
-  fi
-fi
-
-# The full trd input stream: mesh, optional texture, optional inline frames, params.
+# OBJ/albedo conversion is offline; applications receive only params and GLBs.
 stream() {
-  case "$mesh_producer" in
-    uv) uv run --with pyarrow "$root/scripts/obj_to_arrow.py" "${meshes[@]}" ;;
-    python3) python3 "$root/scripts/obj_to_arrow.py" "${meshes[@]}" ;;
+  local args=() mesh
+  for mesh in "${meshes[@]}"; do args+=(--mesh "$mesh"); done
+  [ -n "$texture" ] && args+=(--texture "$texture")
+  case "$producer" in
+    uv) frames | uv run --with pyarrow --with numpy --with pillow "$root/scripts/scene_to_arrow.py" "${args[@]}" ;;
+    python3) frames | python3 "$root/scripts/scene_to_arrow.py" "${args[@]}" ;;
   esac
-  case "$texture_producer" in
-    uv) uv run --with pyarrow --with pillow --with numpy "$root/scripts/texture_to_arrow.py" "$texture" --max-size 2048 ;;
-    python3) python3 "$root/scripts/texture_to_arrow.py" "$texture" --max-size 2048 ;;
-  esac
-  if [ -n "$frames_table" ]; then
-    cat "$frames_table"
-  fi
-  frames
 }
 
 # Appearance flags pass through to both trd-cli (--cli) and trd-app (--native);

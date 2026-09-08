@@ -420,10 +420,17 @@ impl OffscreenRenderer {
 
     /// External background reference for the buffered frame at `index`; `None` if absent.
     #[wasm_bindgen(js_name = frameRef)]
-    pub fn frame_ref(&self, index: u32) -> Option<String> {
-        self.frames
+    pub fn frame_ref(&self, index: u32) -> Result<Option<String>, JsValue> {
+        if let Some(document) = &self.document {
+            return document
+                .borrow()
+                .frame_ref(index as usize)
+                .map_err(crate::js_error);
+        }
+        Ok(self
+            .frames
             .get(index as usize)
-            .and_then(|frame| frame.frame_ref.clone())
+            .and_then(|frame| frame.frame_ref.clone()))
     }
 
     /// Renders a buffered frame by index; returns `width * height * 4` RGBA bytes.

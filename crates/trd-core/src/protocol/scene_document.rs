@@ -8,7 +8,9 @@ use arrow::datatypes::SchemaRef;
 use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::StreamWriter;
 
-use super::glb_mesh::{decode_mesh_batch, encode_mesh_batch, validate_mesh_ids};
+use super::glb_mesh::{
+    decode_mesh_batch, encode_mesh_batch, validate_mesh_ids, validate_mesh_schema,
+};
 use super::{check_version, parse_error, GlbMesh, ProtocolError, TABLE_KIND_KEY};
 
 /// The original params columns and immutable GLB payloads in `[params][mesh?]`.
@@ -17,6 +19,15 @@ pub struct SceneDocument {
     schema: SchemaRef,
     batches: Vec<RecordBatch>,
     meshes: Vec<GlbMesh>,
+    mesh_layout: Option<MeshTableLayout>,
+}
+
+/// The immutable GLB bytes already live in `meshes`; retain layout without a
+/// second copy of potentially large resource arrays.
+#[derive(Debug, Clone)]
+struct MeshTableLayout {
+    schema: SchemaRef,
+    batch_lengths: Vec<usize>,
 }
 
 impl SceneDocument {
@@ -55,18 +66,27 @@ impl SceneDocument {
         let mut source = Cursor::new(bytes);
         let (schema, batches) = read_table(&mut source, "params")?;
         let mut meshes = Vec::new();
-        if source.position() < bytes.len() as u64 {
-            let (_, mesh_batches) = read_table(&mut source, "mesh")?;
-            for batch in mesh_batches {
-                meshes.extend(decode_mesh_batch(&batch)?);
+        let mesh_layout = if source.position() < bytes.len() as u64 {
+            let (schema, mesh_batches) = read_table(&mut source, "mesh")?;
+            validate_mesh_schema(&schema)?;
+            for batch in &mesh_batches {
+                meshes.extend(decode_mesh_batch(batch)?);
             }
-        }
+            Some(MeshTableLayout {
+                schema,
+                batch_lengths: mesh_batches.iter().map(RecordBatch::num_rows).collect(),
+            })
+        } else {
+            None
+        };
         if source.position() != bytes.len() as u64 {
             return Err(parse_error(
                 "only [params] followed by one optional [mesh] stream is allowed",
             ));
         }
-        Self::from_batches(schema, batches, meshes)
+        let mut document = Self::from_batches(schema, batches, meshes)?;
+        document.mesh_layout = mesh_layout;
+        Ok(document)
     }
 
     pub fn from_batches(
@@ -98,6 +118,7 @@ impl SceneDocument {
             schema,
             batches,
             meshes,
+            mesh_layout: None,
         };
         document.validate_render_view()?;
         Ok(document)
@@ -184,6 +205,11 @@ impl SceneDocument {
         candidate.meshes = meshes;
         candidate.validate_render_view()?;
         self.meshes = candidate.meshes;
+        if !self.meshes.is_empty() {
+            if let Some(layout) = &mut self.mesh_layout {
+                layout.batch_lengths.push(self.meshes.len());
+            }
+        }
         Ok(())
     }
 
@@ -217,7 +243,21 @@ impl SceneDocument {
             }
             writer.finish()?;
         }
-        if !self.meshes.is_empty() {
+        if let Some(layout) = &self.mesh_layout {
+            let mut writer = StreamWriter::try_new(&mut bytes, &layout.schema)?;
+            let mut start = 0;
+            for &length in &layout.batch_lengths {
+                let batch = if length == 0 {
+                    RecordBatch::new_empty(Arc::clone(&layout.schema))
+                } else {
+                    let encoded = encode_mesh_batch(&self.meshes[start..start + length])?;
+                    RecordBatch::try_new(Arc::clone(&layout.schema), encoded.columns().to_vec())?
+                };
+                writer.write(&batch)?;
+                start += length;
+            }
+            writer.finish()?;
+        } else if !self.meshes.is_empty() {
             let batch = encode_mesh_batch(&self.meshes)?;
             let mut writer = StreamWriter::try_new(&mut bytes, &batch.schema())?;
             writer.write(&batch)?;
@@ -289,4 +329,119 @@ fn read_table(
     validate_table(&schema, kind)?;
     let batches = reader.by_ref().collect::<Result<Vec<_>, _>>()?;
     Ok((Arc::clone(&schema), batches))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Draw, DrawSelection, FrameParams, Matrix4, ModelEdit};
+
+    fn params() -> Vec<u8> {
+        super::super::scene_encode::encode_params_stream(
+            &[FrameParams::IDENTITY],
+            Some(&[vec![Draw {
+                mesh_id: 0,
+                model: Matrix4::IDENTITY,
+                selection: DrawSelection::INHERIT,
+            }]]),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn edits_preserve_resource_schema_metadata_and_all_batch_boundaries() {
+        let meshes = [1, 2].map(|id| {
+            GlbMesh::new(
+                &format!("00000000-0000-0000-0000-{id:012}"),
+                &super::super::triangle_glb(),
+            )
+            .unwrap()
+        });
+        let canonical = encode_mesh_batch(&meshes).unwrap();
+        let mut metadata = canonical.schema().metadata().clone();
+        metadata.insert("upstream.mesh".to_owned(), "retained".to_owned());
+        let mut fields = canonical.schema().fields().to_vec();
+        fields[1] = Arc::new(
+            fields[1].as_ref().clone().with_metadata(
+                [("upstream.glb".to_owned(), "original".to_owned())]
+                    .into_iter()
+                    .collect(),
+            ),
+        );
+        let schema = Arc::new(arrow::datatypes::Schema::new_with_metadata(
+            fields, metadata,
+        ));
+        let source = RecordBatch::try_new(schema.clone(), canonical.columns().to_vec()).unwrap();
+        let batches = [source.slice(0, 1), source.slice(1, 0), source.slice(1, 1)];
+        let mut bytes = params();
+        {
+            let mut writer = StreamWriter::try_new(&mut bytes, &schema).unwrap();
+            for batch in &batches {
+                writer.write(batch).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        let mut document = SceneDocument::read(&bytes).unwrap();
+        document
+            .apply_model_edits(&[ModelEdit {
+                row: 0,
+                object: 0,
+                model: Matrix4::from_translation(crate::Vector3::new(0.25, 0.0, 0.0)),
+            }])
+            .unwrap();
+        let exported = document.write().unwrap();
+        let mut cursor = Cursor::new(exported.as_slice());
+        read_table(&mut cursor, "params").unwrap();
+        let (actual_schema, actual_batches) = read_table(&mut cursor, "mesh").unwrap();
+        assert_eq!(actual_schema, schema);
+        assert_eq!(actual_batches, batches);
+        assert_eq!(SceneDocument::read(&exported).unwrap().meshes(), meshes);
+    }
+
+    #[test]
+    fn empty_resource_stream_keeps_its_schema_and_presence() {
+        let original = super::super::glb_mesh::mesh_schema();
+        let mut metadata = original.metadata().clone();
+        metadata.insert("source.empty".to_owned(), "retained".to_owned());
+        let schema = Arc::new(original.with_metadata(metadata));
+        let mut bytes = params();
+        StreamWriter::try_new(&mut bytes, &schema)
+            .unwrap()
+            .finish()
+            .unwrap();
+        let mut document = SceneDocument::read(&bytes).unwrap();
+        let exported = document.write().unwrap();
+        let mut cursor = Cursor::new(exported.as_slice());
+        read_table(&mut cursor, "params").unwrap();
+        let (actual, batches) = read_table(&mut cursor, "mesh").unwrap();
+        assert_eq!(actual, schema);
+        assert!(batches.is_empty());
+        assert_eq!(cursor.position(), exported.len() as u64);
+
+        document.bind_glb(&super::super::triangle_glb()).unwrap();
+        let bound = document.write().unwrap();
+        let mut cursor = Cursor::new(bound.as_slice());
+        read_table(&mut cursor, "params").unwrap();
+        let (actual, batches) = read_table(&mut cursor, "mesh").unwrap();
+        assert_eq!(actual, schema);
+        assert_eq!(
+            batches
+                .iter()
+                .map(RecordBatch::num_rows)
+                .collect::<Vec<_>>(),
+            [1]
+        );
+    }
+
+    #[test]
+    fn invalid_empty_mesh_schema_is_rejected() {
+        let schema = arrow::datatypes::Schema::empty()
+            .with_metadata(super::super::glb_mesh::mesh_schema().metadata().clone());
+        let mut bytes = params();
+        StreamWriter::try_new(&mut bytes, &schema)
+            .unwrap()
+            .finish()
+            .unwrap();
+        assert!(SceneDocument::read(&bytes).is_err());
+    }
 }

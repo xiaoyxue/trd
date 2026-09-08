@@ -8,8 +8,8 @@
 use std::sync::Arc;
 
 use trd_core::{
-    EnvMapData, FrameFit, ImageData, Lighting, Mesh, MeshAsset, RenderError, RenderOptions,
-    RenderTarget, Renderer, Scene, SurfaceTarget,
+    EnvMapData, FrameFit, ImageData, Lighting, MeshAsset, RenderError, RenderOptions, RenderTarget,
+    Renderer, SurfaceTarget,
 };
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
@@ -103,42 +103,20 @@ impl WindowRenderer {
         }
     }
 
-    /// Uploads the stream's meshes and builds the scene renderer (each mesh
-    /// centered + scaled to fit via its preview base model). Idempotent per
-    /// stream: called once when the mesh table first arrives.
-    ///
-    /// Reports an unusable mesh set (e.g. a stream whose mesh table decoded to
-    /// nothing) rather than aborting the window on it (#235 R8) — the mesh set
-    /// comes from the wire, so it is input, not a bug.
-    pub(crate) fn set_meshes(&mut self, meshes: &[Mesh]) -> Result<(), RenderError> {
-        self.renderer = Some(Renderer::auto_fit(
-            self.gpu.clone(),
-            self.target.view_format(),
-            meshes,
-        )?);
+    /// GLB geometry is authoritative; placement owns any derived grounding.
+    pub(crate) fn set_mesh_assets(
+        &mut self,
+        assets: &[MeshAsset],
+        reference_only: bool,
+    ) -> Result<(), RenderError> {
+        let mut renderer =
+            Renderer::with_assets(self.gpu.clone(), self.target.view_format(), assets)?;
+        if reference_only {
+            renderer.set_mesh_aabb_color(0, trd_core::Mesh::REFERENCE_CUBE_COLOR)?;
+        }
+        self.renderer = Some(renderer);
         self.uploaded_frame_image = None;
         Ok(())
-    }
-
-    pub(crate) fn set_mesh_assets(&mut self, assets: &[MeshAsset]) {
-        if let Some(renderer) = self.renderer.as_mut() {
-            for (index, asset) in assets.iter().enumerate() {
-                let mesh_id = asset.mesh_id_or(index as u32) as usize;
-                renderer.set_disney_material(
-                    trd_core::MeshTarget::One(mesh_id),
-                    asset.material.clone(),
-                );
-                if let Some(texture) = asset.base_color_texture.as_ref() {
-                    renderer.set_mesh_texture(mesh_id, texture);
-                }
-                if let Some(texture) = asset.metallic_roughness_texture.as_ref() {
-                    renderer.set_mesh_metallic_roughness_texture(mesh_id, texture);
-                }
-                if let Some(texture) = asset.normal_texture.as_ref() {
-                    renderer.set_mesh_normal_texture(mesh_id, texture);
-                }
-            }
-        }
     }
 
     /// Sets the appearance of every mesh. No-op until the renderer is built.
@@ -195,16 +173,20 @@ impl WindowRenderer {
                 None
             }
         };
-        let scene =
-            Scene::from_draws(&frame.draws, options, frame_fit).with_lighting(self.lighting);
-
-        let camera = match frame.params.to_camera(self.target.viewport()) {
-            Ok(camera) => camera,
+        let (camera, scene) = match trd_placement::document_scene(
+            &frame.document,
+            &frame.frame,
+            self.target.viewport(),
+            options,
+            frame_fit,
+        ) {
+            Ok(scene) => scene,
             Err(error) => {
-                log::warn!("skipping frame with a malformed camera: {error}");
+                log::error!("cannot assemble scene document frame: {error}");
                 return;
             }
         };
+        let scene = scene.with_lighting(self.lighting);
         // The recovery policy is the window's, not the harness's (#180): repair
         // the surface and defer to the next redraw. A frame that *was* presented
         // needs no redraw, only the repair.
