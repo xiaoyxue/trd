@@ -15,10 +15,9 @@ from pathlib import Path
 import pyarrow as pa
 from PIL import Image
 
-from glb_assets import glb_bytes, png_bytes
-from obj_to_arrow import parse_obj
-from protocol_schema import PROTOCOL_VERSION
-from texture_to_arrow import image_to_rgba
+from glb_assets import glb_bytes, image_to_rgba, png_bytes
+from obj_geometry import parse_obj
+from protocol_version import PROTOCOL_VERSION
 
 
 def bundle(params: bytes, paths: list[Path], texture_path: Path | None) -> bytes:

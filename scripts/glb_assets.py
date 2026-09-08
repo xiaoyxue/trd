@@ -8,6 +8,16 @@ import numpy as np
 from PIL import Image
 
 
+def image_to_rgba(path, max_size=None):
+    with Image.open(path) as image:
+        image = image.convert("RGBA")
+        if max_size is not None and max(image.size) > max_size:
+            image.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+        width, height = image.size
+        pixels = np.asarray(image, dtype=np.uint8)
+    return height, width, np.ascontiguousarray(pixels).reshape(-1)
+
+
 def png_bytes(image: Image.Image) -> bytes:
     output = io.BytesIO()
     image.save(output, format="PNG")

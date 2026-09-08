@@ -1,7 +1,7 @@
 //! trd-cli: native headless entry point.
 //!
 //! Reads an Arrow IPC scene stream on stdin and writes an Arrow
-//! IPC stream of rendered images on stdout (trd protocol 0.0.6).
+//! IPC stream of rendered images on stdout (trd protocol 0.0.7).
 
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -50,7 +50,7 @@ impl From<TonemapArg> for trd_core::Tonemap {
     }
 }
 
-/// Streaming Arrow renderer for trd (protocol 0.0.6).
+/// Streaming Arrow renderer for trd (protocol 0.0.7).
 #[derive(Parser)]
 #[command(name = "trd", version, about)]
 struct Cli {

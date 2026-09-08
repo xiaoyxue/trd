@@ -42,7 +42,7 @@ pub use scene_encode::{
     encode_scene_with_tonemap, encode_texture_assets, SceneEncodeError, SceneMesh, SceneTexture,
 };
 
-pub const PROTOCOL_VERSION: &str = "0.0.6";
+pub const PROTOCOL_VERSION: &str = "0.0.7";
 pub const PROTOCOL_VERSION_KEY: &str = "trd.protocol.version";
 pub const TABLE_KIND_KEY: &str = "trd.table.kind";
 
@@ -52,8 +52,8 @@ pub(crate) const FRAMES_TABLE_KIND: &str = "frames";
 pub(crate) const PARAMS_TABLE_KIND: &str = "params";
 
 /// Input schema versions this build accepts. The protocol is **not** backward
-/// compatible: only the current [`PROTOCOL_VERSION`] (`0.0.6`) is accepted. A
-/// stream is `[mesh][texture?][frames?][params]`; every sub-stream declares its
+/// compatible: only the current [`PROTOCOL_VERSION`] (`0.0.7`) is accepted.
+/// Scene documents are `[params][mesh?]`; versioned sub-streams declare their
 /// kind through [`TABLE_KIND_KEY`].
 pub const SUPPORTED_INPUT_VERSIONS: &[&str] = &[PROTOCOL_VERSION];
 
@@ -730,13 +730,14 @@ mod tests {
 
     #[test]
     fn accepts_only_current_version_and_rejects_others() {
-        // 0.0.6 is the only supported version: there is no backward compat for
-        // 0.0.1–0.0.5, and future versions are rejected too.
+        // Only the current version is accepted, not previous or future versions.
         let mut session = InputSession::new();
         session.push(&version_stream(PROTOCOL_VERSION)).unwrap();
         session.finish().unwrap();
 
-        for version in ["0.0.1", "0.0.2", "0.0.3", "0.0.4", "0.0.5", "0.0.7"] {
+        for version in [
+            "0.0.1", "0.0.2", "0.0.3", "0.0.4", "0.0.5", "0.0.6", "0.0.8",
+        ] {
             let mut session = InputSession::new();
             assert!(
                 matches!(

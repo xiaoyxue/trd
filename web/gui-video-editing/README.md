@@ -15,7 +15,7 @@ See [editable scene documents](../../docs/protocol/scene-documents.md) for the
 contract and [video editing](../../docs/video-editing.md) for media/diagnostics.
 The [0.0.7 specification](../../docs/protocol/0.0.7.md) is authoritative.
 The [cutover status](../../docs/protocol/README.md#implementation-migration-status)
-tracks remaining old runtime/producer stamps separately from that contract.
+documents the shared 0.0.7 runtime/producer stamps and fixture/schema checks.
 
 ## Prepare existing annotation data offline
 

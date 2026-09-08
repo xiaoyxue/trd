@@ -30,8 +30,7 @@ recorded playback metadata; it does not resample video or establish real
 packet-to-presentation identity.
 
 Useful options are `--format png|jpg`, `--width`, `--height`, `--url-base` and
-`--no-arrow` for JSON/stills only. `--embed` exists in legacy tooling but does
-not produce a valid 0.0.7 scene resource.
+`--no-arrow` for JSON/stills only. `--embed` is rejected explicitly.
 
 ## External-reference mode (default)
 
@@ -57,10 +56,9 @@ examples/render.sh --cli \
 ```
 
 The wrapper converts OBJ/albedo offline into GLB and emits `[params][mesh]`.
-Do not append `frames.arrow` or a texture stream. The manifest's old tool
-metadata is not a license to submit it as current input; remaining producer
-stamps are recorded in the
-[atomic migration status](protocol/README.md#implementation-migration-status).
+Do not append `frames.arrow` or a texture stream. A mapping manifest is not
+itself a scene input. Current producer stamps are checked by the
+[schema generator](protocol/README.md#implementation-migration-status).
 
 ## Inline mode
 
@@ -82,8 +80,8 @@ without changing their camera/draw values or expected images.
 ## Pack existing images
 
 For current input, reference existing PNG/JPEG files directly from params.
-`scripts/frames_to_arrow.py` remains legacy/offline tooling; its inline output
-must not be presented as a 0.0.7 renderer resource.
+The old inline-frame producer is removed; do not recreate a compatibility
+resource stream.
 
 ## Determinism
 

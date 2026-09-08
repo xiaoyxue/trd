@@ -508,5 +508,5 @@ scene authoring, and the image-display texture. All pixels come from trd-core.
 * Render values (`Scene`, `DrawableObject`, `Draw`, `FrameParams`,
   `build_scene`, `SceneRenderer::encode`, `Renderer::render_frame`,
   `run_stream`, `RenderOptions`, `OutputSession`) — `crates/trd-core/src/{render,stream,output}.rs`.
-* Protocol 0.0.6 `[mesh][texture?][frames?][params]`, model per `Draw.model` —
-  `docs/protocol/0.0.6.md`, AGENTS.md.
+* The original mesh-first protocol is retired; its specification is available
+  in Git history only. Current input is [0.0.7 params/GLB](protocol/0.0.7.md).

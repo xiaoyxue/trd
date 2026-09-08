@@ -453,4 +453,41 @@ mod tests {
             .unwrap();
         assert!(SceneDocument::read(&bytes).is_err());
     }
+
+    #[test]
+    fn previous_protocol_version_is_rejected_for_params_and_mesh_schemas() {
+        let bytes = params();
+        let original = SceneDocument::read(&bytes).unwrap();
+        let mut metadata = original.schema().metadata().clone();
+        metadata.insert(
+            super::super::PROTOCOL_VERSION_KEY.to_owned(),
+            "0.0.6".to_owned(),
+        );
+        let schema = Arc::new(original.schema().as_ref().clone().with_metadata(metadata));
+        let batch =
+            RecordBatch::try_new(schema.clone(), original.batches()[0].columns().to_vec()).unwrap();
+        let mut old_params = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut old_params, &schema).unwrap();
+            writer.write(&batch).unwrap();
+            writer.finish().unwrap();
+        }
+        assert!(
+            matches!(SceneDocument::read(&old_params), Err(ProtocolError::UnsupportedVersion(v)) if v=="0.0.6")
+        );
+        let mut metadata = super::super::glb_mesh::mesh_schema().metadata().clone();
+        metadata.insert(
+            super::super::PROTOCOL_VERSION_KEY.to_owned(),
+            "0.0.6".to_owned(),
+        );
+        let schema = super::super::glb_mesh::mesh_schema().with_metadata(metadata);
+        let mut old_mesh = bytes;
+        StreamWriter::try_new(&mut old_mesh, &schema)
+            .unwrap()
+            .finish()
+            .unwrap();
+        assert!(
+            matches!(SceneDocument::read(&old_mesh), Err(ProtocolError::UnsupportedVersion(v)) if v=="0.0.6")
+        );
+    }
 }

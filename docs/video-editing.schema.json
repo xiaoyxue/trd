@@ -3,7 +3,7 @@
   "status": "offline legacy annotation source, not native/browser editor input",
   "current_editor_protocol": "docs/protocol/0.0.7.schema.json",
   "conversion": "scripts/timeline_to_params.py",
-  "generated_by": "scripts/protocol_schema.py",
+  "maintenance": "Offline video-editing source schema; independent of the current scene protocol generator.",
   "prose_spec": "docs/video-editing.md",
   "independent_of": "trd.protocol.version — the two versions move separately on purpose; editor state never bumps the stream protocol and vice versa",
   "containers": [

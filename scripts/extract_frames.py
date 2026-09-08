@@ -26,8 +26,8 @@ Convention (issue #76)
   ``trd.frames.height`` / ``trd.frames.count``.
 * A sidecar ``<out>/frames.json`` mirrors the manifest for human inspection and
   for demos/tools that would rather not read Arrow.
-* With ``--embed bytes|pixels``, ``frames.arrow`` is instead a protocol ``0.0.6``
-  inline frames resource table. Params rows select it with ``frame_id``.
+* The manifest is offline data, not another renderer input table. Copy external
+  references into current params; inline resource tables are retired.
 
 Determinism
 -----------
@@ -49,14 +49,14 @@ the JSON sidecar without it.
 import argparse
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
 
 FRAME_STEM = "frame_"
 FRAME_DIGITS = 6
 PROTOCOL_VERSION_KEY = b"trd.protocol.version"
-PROTOCOL_VERSION = b"0.0.6"
+from protocol_version import PROTOCOL_VERSION as SCENE_PROTOCOL_VERSION
+PROTOCOL_VERSION = SCENE_PROTOCOL_VERSION.encode()
 FRAME_RATE_KEY = b"trd.stream.frame_rate"
 
 
@@ -76,8 +76,7 @@ def usage_guidance() -> str:
         "  --url-base      served-base prefix for frame_url (default: frames).\n"
         "  --fps           override the source fps recorded in the manifest\n"
         "                  metadata (does NOT resample; extraction is passthrough).\n"
-        "  --embed         emit a 0.0.6 inline frames table: compressed Binary\n"
-        "                  bytes (recommended) or raw fixed-shape RGBA pixels.\n"
+        "  --embed         retired; external still references are required.\n"
         "  --no-arrow      skip the frames.arrow manifest (emit frames.json only).\n\n"
         "Emits:\n"
         "  <out>/frames/frame_000000.png …   zero-padded stills (row N == frame N)\n"
@@ -257,13 +256,13 @@ def main() -> None:
         "--embed",
         choices=["bytes", "pixels"],
         default=None,
-        help="write frames.arrow as a 0.0.6 inline frames resource table",
+        help="retired; use external frame_path/frame_url references",
     )
     ap.add_argument("--no-arrow", action="store_true", help="skip frames.arrow (JSON only)")
     args = ap.parse_args()
 
-    if args.embed and args.no_arrow:
-        raise SystemExit("error: --embed cannot be combined with --no-arrow")
+    if args.embed:
+        raise SystemExit("error: inline frame tables are retired; use external image references")
 
     if not os.path.isfile(args.video):
         raise SystemExit(f"error: video not found: {args.video}")
@@ -294,17 +293,7 @@ def main() -> None:
     emitted = [json_path]
     if not args.no_arrow:
         arrow_path = os.path.join(out_dir, "frames.arrow")
-        if args.embed:
-            from frames_to_arrow import write_frames_stream
-
-            with open(arrow_path, "wb") as sink:
-                write_frames_stream(
-                    [Path(frames_dir) / name for name in names],
-                    sink,
-                    args.embed,
-                )
-        else:
-            write_arrow_manifest(arrow_path, rows, out_w, out_h, fps)
+        write_arrow_manifest(arrow_path, rows, out_w, out_h, fps)
         emitted.append(arrow_path)
 
     storage_note = f", inline {args.embed}" if args.embed else ""

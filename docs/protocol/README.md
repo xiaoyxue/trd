@@ -25,17 +25,22 @@ path/URL resource tables. Video remains an independent input.
 
 ## Implementation migration status
 
-**Documentation defines 0.0.7; this is not a claim that the atomic runtime
-cutover is complete.** At the `c284478` implementation checkpoint,
-`crates/trd-core/src/protocol/mod.rs`, `scripts/protocol_schema.py` and several
-legacy producers still stamp `0.0.6`, despite current applications reading the
-params/GLB shape. That mismatch remains a release blocker on #367/#370.
+The runtime constant and `scripts/protocol_version.py` both declare **0.0.7**.
+Current producers share that Python version; `protocol_schema.py` generates
+`0.0.7.schema.json` and checks the committed params/GLB fixtures.
+Older declared versions are rejected for both params and mesh tables.
 
-The runtime constant, all current producers, fixture metadata and generator must
-move together before publishing 0.0.7 acceptance. Do not re-enable old application
-paths or merely restamp old mesh/texture/frames payloads. The existing
-`protocol_schema.py` still describes the archived format; its `--check` is not
-a validator for the new `0.0.7.schema.json` contract yet.
+Old mesh/texture/inline-frame/reference producers are removed. OBJ parsing and
+image loading remain offline helpers for GLB bundling. The golden generator
+authors current params/GLB inputs with external stills; it never changes
+expected golden PNGs.
+
+```sh
+uv run --with pyarrow python scripts/protocol_schema.py --check
+```
+
+Protocol migration is not a compatibility branch. Do not restore an earlier
+version or restamp an old resource envelope as current input.
 
 ## Timing model
 
@@ -47,11 +52,10 @@ The video editor instead uses the external video's actual timeline and the
 source's explicit frame identity/PTS mapping. It must not derive a made-up
 timestamp or duplicate sparse rows to match the full video frame count.
 
-## Historical specification
+## Earlier versions
 
-[0.0.6](0.0.6.md) and [its schema](0.0.6.schema.json) are retained only as
-historical documentation of `[mesh][texture?][frames?][params]`. They are not
-the current contract or instructions for a compatibility mode.
+Earlier specifications and schemas are removed from the current tree. Their
+history is available in Git, not as another selectable protocol.
 
 Application APIs, placement, all-frame editing and the two-round workflow are
 documented in [scene documents](scene-documents.md).

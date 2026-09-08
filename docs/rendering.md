@@ -26,7 +26,7 @@ anything they do, you can run by hand with `cargo run`.
 
 | Wrapper | Direct `cargo run` equivalent |
 |---|---|
-| `render.sh --cli  IN.jsonl OUT.gif W H FPS` | `obj_to_arrow.py MESH` + `jsonl_to_arrow.py IN.jsonl` piped to `cargo run -p trd-cli -- --width W --height H` piped to `encode.py --fps FPS -o OUT.gif` |
+| `render.sh --cli  IN.jsonl OUT.gif W H FPS` | `jsonl_to_arrow.py IN.jsonl` piped through `scene_to_arrow.py --mesh MESH`, then `cargo run -p trd-cli -- --width W --height H`, then `encode.py --fps FPS -o OUT.gif` |
 | `render.sh --native` | same producers piped to `cargo run -p trd-app -- --fps FPS` |
 | `render.sh --web` | `nix build .#web` (or `cd web/viewer && bun run build`) then serve `dist/` |
 | *(interactive viewer)* | `cargo run -p trd-gui-app -- --mesh MESH [--texture IMG]` |
@@ -411,21 +411,37 @@ Two targets share the bundle: **`--canvas-renderer`** (on-screen WebGPU) and
 **`--offscreen-renderer`** (offscreen texture → 2D canvas).
 
 The wasm core is a standard, TypeScript-typed npm package. The generic viewer
-replays a prebuilt stream by index — decoding it **once** with `loadIpc`:
+replays a complete current document by index — decoding it **once**:
 
 ```ts
-import init, { CanvasRenderer } from "trd-wasm"; // fully typed
+import init, { ArrowSceneDocument, CanvasRenderer } from "trd-wasm"; // fully typed
 
 await init({ module_or_path: wasmUrl });
 const canvas = await CanvasRenderer.create(canvasEl);
-const total = canvas.loadIpc(streamBytes); // decode + buffer all frames
+const total = canvas.loadSceneDocument(ArrowSceneDocument.fromArrow(streamBytes));
 canvas.renderIndex(0);                     // draw buffered frame 0
 ```
 
 `OffscreenRenderer` is the offscreen counterpart: `renderIndex(i)` is **async**,
-returning that frame's RGBA `Uint8Array` to paint onto a 2D canvas. Both also keep
-the streaming `pushIpc` path (append input / emit output, `finish()` → EOS) for
-producer-driven pipelines.
+returning that frame's RGBA `Uint8Array` to paint onto a 2D canvas. Both support
+`loadIpc(bytes)` as a convenience for loading one **complete** current document;
+there is no incremental/mesh-first `pushIpc` or old resource-resolution API.
+
+For Arrow **image output**, call `await offscreen.renderIpc(i)` instead of
+`renderIndex(i)` and concatenate its returned chunks with `offscreen.finish()`.
+Each call appends one image in call order; RGBA playback does not accumulate
+output images. `finish()` closes either renderer and further loading/rendering
+is rejected. External backgrounds must be uploaded before each rendered frame.
+
+The browser renderer regression uses the existing Bun runner:
+`bun test tests/renderers.test.js` from `web/viewer`, after `build:wasm`.
+The fixture/API test runs without a GPU. For the real WebGPU case, start Chrome
+with a dedicated temporary profile and `--remote-debugging-port=19370`, then set
+`TRD_RENDERER_CDP=http://127.0.0.1:19370` before running the same command.
+It covers both targets, rejected old input, reference geometry, external
+backgrounds, material/sky state, seek/edit/reload and image IPC output.
+Golden comparisons read the existing Rust golden helper's thresholds; replay
+comparisons are exact. Close that Chrome instance after the case.
 
 For local iteration inside `nix develop`, all browser surfaces share the Bun
 workspace rooted at `web/`:

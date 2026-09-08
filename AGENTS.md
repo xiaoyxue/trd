@@ -41,9 +41,9 @@ violate without anything noticing:
   compatible.** Versioned input must match exactly; unversioned FHC source
   ingestion is an explicit adapter, not permission to upgrade old wire formats.
   **Move runtime constants, producers, schemas and fixtures atomically.**
-  Remaining old stamps are recorded in the
-  [migration status](docs/protocol/README.md#implementation-migration-status);
-  never claim a docs-only version change completes that release gate.
+  Python producers use `scripts/protocol_version.py`; the Rust constant,
+  generated schema and committed fixtures must agree. Earlier protocol specs/
+  schemas are removed from the tree, not retained as compatibility choices.
 - **Native and browser video-editing accept only current params/GLB documents.**
   No old annotation/catalog UI or runtime fallback is retained. The independent
   `trd.video_edit.version = 0.2.0` annotation remains offline source data:
@@ -177,7 +177,7 @@ have run.
 | `crates/trd-core/src/render/**`, `src/shader/*.wgsl`, PBR/tone-map, `math/` transforms feeding the GPU `Uniform`, or the golden fixtures | **L3** |
 | a delivery surface or shell — `native/**`, `crates/trd-wasm/**`, `crates/trd-gui/**`, `web/**` | **L3** |
 | `web/gui-video-editing/src/media/**`, or anything else that demuxes, decodes or seeks | **L3, and §4.7 is required** |
-| `scripts/golden_fixtures.py`, `scripts/{jsonl,obj,texture,scene}_to_arrow.py`, `scripts/glb_assets.py`, `scripts/fiba_video_editing_bundle.py` — they generate render inputs, goldens or stamp a version | **L3** |
+| `scripts/golden_fixtures.py`, `scripts/{jsonl,scene}_to_arrow.py`, `scripts/{glb_assets,obj_geometry,protocol_version,timeline_to_params}.py`, `scripts/fiba_video_editing_bundle.py` — they generate render inputs, goldens or stamp a version | **L3** |
 | `examples/render.{sh,ps1}` — scene generation and delivery-surface launchers | **L3** |
 | `PROTOCOL_VERSION` / `VIDEO_EDIT_VERSION` bump, or regenerated fixtures | **L3** |
 | **no row matches** | **L3, and say so** — an unclassified path is an unknown blast radius, so it escalates rather than falling to L1. Add the row it should have matched in the same PR. |

@@ -4,8 +4,8 @@ This page describes the **0.0.7** contract and current document APIs agreed in
 #367/#370, based on #368. See the [formal specification](0.0.7.md),
 [machine-readable contract](0.0.7.schema.json), and
 [atomic implementation migration status](README.md#implementation-migration-status).
-The latter tracks remaining old runtime/generator stamps; this is not an old
-mesh-first compatibility mode.
+The runtime, current producers and committed fixtures use 0.0.7; the generator
+checks their declared types. There is no old-version compatibility mode.
 
 Both native and browser video editors expose only this current workflow.
 The old annotation/catalog UI, implicit default annotation and runtime

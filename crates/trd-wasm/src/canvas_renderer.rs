@@ -1,7 +1,7 @@
 use trd_core::{
-    DecodedFrame, DisneyMaterial, EnvMapData, FrameFit, FrameParams, ImageBasedLighting, Lighting,
-    RenderError, RenderMode, RenderOptions, RenderTarget, Renderer, Scene, SurfaceRepair,
-    SurfaceTarget, ToneMapping, Tonemap,
+    DisneyMaterial, EnvMapData, FrameFit, ImageBasedLighting, Lighting, RenderError, RenderMode,
+    RenderOptions, RenderTarget, Renderer, Scene, SurfaceRepair, SurfaceTarget, ToneMapping,
+    Tonemap,
 };
 use wasm_bindgen::prelude::*;
 
@@ -11,13 +11,6 @@ use crate::{js_error, PbrState};
 enum CanvasState {
     Open,
     Finished,
-    Failed,
-}
-
-#[derive(Clone, Copy)]
-enum PresentationCamera {
-    Params(FrameParams),
-    Resolved(trd_core::Camera),
 }
 
 #[wasm_bindgen]
@@ -28,8 +21,7 @@ pub struct CanvasRenderer {
     /// The canvas surface, owned by the shell so it can be resized or recovered
     /// before the render harness exists.
     target: RenderTarget,
-    /// Built lazily from the stream's leading mesh table, so `None` until the
-    /// first frame arrives.
+    /// Built when a complete params/GLB document is loaded.
     renderer: Option<Renderer>,
     /// Draw mode + overlay toggles; [`Scene::from_draws`] turns it into a scene.
     options: RenderOptions,
@@ -43,13 +35,7 @@ pub struct CanvasRenderer {
     /// Sky blur; `None` ⇒ no sky. Re-derived into `options.env_background`
     /// together with the tone mapping, since the sky shares its exposure.
     env_background_blur: Option<f32>,
-    input: trd_core::InputSession,
     document: Option<std::rc::Rc<std::cell::RefCell<trd_core::SceneDocument>>>,
-    /// Loaded by [`load_ipc`](Self::load_ipc) and replayed on demand, so the JS
-    /// shell can upload each frame's background before rendering it.
-    frames: Vec<DecodedFrame>,
-    /// Last inline frames-table resource uploaded to the frame-plane texture.
-    inline_frames: trd_core::InlineFrameCache,
     /// An external/manual upload waiting to be consumed by the next render.
     external_frame_ready: bool,
     state: CanvasState,
@@ -100,80 +86,18 @@ impl CanvasRenderer {
             canvas,
             gpu,
             target,
-            input: trd_core::InputSession::new(),
             document: None,
-            frames: Vec::new(),
-            inline_frames: trd_core::InlineFrameCache::default(),
             external_frame_ready: false,
             state: CanvasState::Open,
         })
     }
 
-    #[wasm_bindgen(js_name = pushIpc)]
-    pub fn push_ipc(&mut self, chunk: &[u8]) -> Result<u32, JsValue> {
-        self.require_open()?;
-        if self.document.is_some() {
-            return Err(js_error(
-                "loadSceneDocument mode does not accept incremental IPC",
-            ));
-        }
-
-        let result = (|| {
-            let batches = measure("trd.ipc.decode", || {
-                self.input
-                    .push(chunk)
-                    .map_err(|error| js_error(format!("Arrow IPC input failed: {error}")))
-            })?;
-            let rendered = batches.iter().try_fold(0_u32, |total, batch| {
-                let rows = u32::try_from(batch.len())
-                    .map_err(|_| js_error("decoded batch row count does not fit u32"))?;
-                total
-                    .checked_add(rows)
-                    .ok_or_else(|| js_error("rendered row count would overflow u32"))
-            })?;
-
-            for batch in &batches {
-                for frame in batch {
-                    self.render_frame(frame)?;
-                }
-            }
-
-            Ok(rendered)
-        })();
-
-        if result.is_err() {
-            self.state = CanvasState::Failed;
-        }
-        result
-    }
-
-    /// Buffers frames from an Arrow IPC chunk without rendering, returning the
-    /// running total. Push the whole `[mesh?][texture?][params]` stream, then
-    /// pace playback with [`render_index`](Self::render_index).
+    /// Loads a complete current params/GLB document, never legacy incremental IPC.
     #[wasm_bindgen(js_name = loadIpc)]
     pub fn load_ipc(&mut self, chunk: &[u8]) -> Result<u32, JsValue> {
         self.require_open()?;
-        if self.document.is_some() {
-            return Err(js_error(
-                "loadSceneDocument mode does not accept incremental IPC",
-            ));
-        }
-        let result = (|| {
-            let batches = self
-                .input
-                .push(chunk)
-                .map_err(|error| js_error(format!("Arrow IPC input failed: {error}")))?;
-            for batch in batches {
-                self.frames.extend(batch);
-            }
-            u32::try_from(self.frames.len())
-                .map_err(|_| js_error("buffered frame count does not fit u32"))
-        })();
-
-        if result.is_err() {
-            self.state = CanvasState::Failed;
-        }
-        result
+        let document = crate::ArrowSceneDocument::from_arrow(chunk)?;
+        self.load_scene_document(&document)
     }
 
     /// The number of frames buffered by [`load_ipc`](Self::load_ipc).
@@ -182,7 +106,7 @@ impl CanvasRenderer {
         if let Some(document) = &self.document {
             return u32::try_from(document.borrow().row_count()).unwrap_or(u32::MAX);
         }
-        u32::try_from(self.frames.len()).unwrap_or(u32::MAX)
+        0
     }
 
     #[wasm_bindgen(js_name = loadSceneDocument)]
@@ -203,9 +127,9 @@ impl CanvasRenderer {
         )?;
         self.renderer = Some(renderer);
         self.document = Some(std::rc::Rc::clone(&document.inner));
-        self.frames.clear();
-        self.inline_frames.invalidate();
         self.external_frame_ready = false;
+        drop(source);
+        self.refresh_env_background();
         Ok(count)
     }
 
@@ -214,32 +138,7 @@ impl CanvasRenderer {
         if let Some(document) = &self.document {
             return u32::try_from(document.borrow().meshes().len()).unwrap_or(u32::MAX);
         }
-        u32::try_from(self.input.mesh_resource_count()).unwrap_or(u32::MAX)
-    }
-
-    #[wasm_bindgen(js_name = gltfPath)]
-    pub fn gltf_path(&self, index: u32) -> Option<String> {
-        self.input
-            .unresolved_mesh_references()
-            .into_iter()
-            .find(|(row, _)| *row == index)
-            .and_then(|(_, reference)| reference.path)
-    }
-
-    #[wasm_bindgen(js_name = gltfUrl)]
-    pub fn gltf_url(&self, index: u32) -> Option<String> {
-        self.input
-            .unresolved_mesh_references()
-            .into_iter()
-            .find(|(row, _)| *row == index)
-            .and_then(|(_, reference)| reference.url)
-    }
-
-    #[wasm_bindgen(js_name = resolveGltf)]
-    pub fn resolve_gltf(&mut self, index: u32, bytes: &[u8]) -> Result<(), JsValue> {
-        self.input
-            .resolve_gltf(index, bytes)
-            .map_err(|error| js_error(format!("glTF resolution failed: {error}")))
+        0
     }
 
     /// The frame's external background reference, which the JS shell resolves to
@@ -253,10 +152,7 @@ impl CanvasRenderer {
                 .frame_ref(index as usize)
                 .map_err(js_error);
         }
-        Ok(self
-            .frames
-            .get(index as usize)
-            .and_then(|frame| frame.frame_ref.clone()))
+        Err(js_error("load a params/GLB document first"))
     }
 
     /// Renders one buffered frame (by index) to the surface using the current
@@ -286,44 +182,17 @@ impl CanvasRenderer {
                     .map(PbrState::lighting)
                     .unwrap_or_default(),
             );
-            return self.present_camera(PresentationCamera::Resolved(camera), &scene);
+            return measure("trd.canvas.render-submit", || {
+                self.present_camera(camera, &scene)
+            });
         }
-        let frame = match self.frames.get(index as usize).cloned() {
-            Some(frame) => frame,
-            None => {
-                return Err(js_error(format!(
-                    "frame index {index} out of range ({} buffered)",
-                    self.frames.len()
-                )));
-            }
-        };
-        let result = self.render_frame(&frame);
-        if result.is_err() {
-            self.state = CanvasState::Failed;
-        }
-        result
+        Err(js_error("load a params/GLB document first"))
     }
 
     pub fn finish(&mut self) -> Result<(), JsValue> {
         self.require_open()?;
-        if self.document.is_some() {
-            self.state = CanvasState::Finished;
-            return Ok(());
-        }
-        match self
-            .input
-            .finish()
-            .map_err(|error| js_error(format!("Arrow IPC finish failed: {error}")))
-        {
-            Ok(()) => {
-                self.state = CanvasState::Finished;
-                Ok(())
-            }
-            Err(error) => {
-                self.state = CanvasState::Failed;
-                Err(error)
-            }
-        }
+        self.state = CanvasState::Finished;
+        Ok(())
     }
 
     /// Selects filled (`false`) or wireframe (`true`) rendering for later frames.
@@ -336,7 +205,7 @@ impl CanvasRenderer {
         };
     }
 
-    /// Textured (`true`) samples the stream's texture table at each vertex UV,
+    /// Textured (`true`) samples each GLB material's albedo at each vertex UV,
     /// falling back to a 1×1 white; `false` uses per-vertex color.
     #[wasm_bindgen(js_name = setTextured)]
     pub fn set_textured(&mut self, enabled: bool) {
@@ -423,7 +292,12 @@ impl CanvasRenderer {
     }
 
     fn apply_stream_tonemap(&mut self) {
-        let Some(operator) = self.input.tonemap_override() else {
+        let Some(operator) = self.document.as_ref().and_then(|document| {
+            document
+                .borrow()
+                .tonemap_override()
+                .expect("loaded document metadata is immutable and validated")
+        }) else {
             return;
         };
         if let Some(renderer) = self.renderer.as_mut() {
@@ -472,7 +346,7 @@ impl CanvasRenderer {
     /// The browser twin of the native
     /// `--frames-base` compositing: enable it, then push one background per frame
     /// via [`update_frame_texture_rgba`](Self::update_frame_texture_rgba) *before*
-    /// that frame's [`push_ipc`](Self::push_ipc). Has no visible effect until a
+    /// that frame's [`render_index`](Self::render_index). Has no visible effect until a
     /// background has been uploaded.
     #[wasm_bindgen(js_name = setCompositeFrame)]
     pub fn set_composite_frame(&mut self, enabled: bool) {
@@ -506,16 +380,8 @@ impl CanvasRenderer {
                 rgba.len()
             )));
         }
-        // Building the renderer needs the leading mesh table already decoded
-        // (the protocol is mesh-first; the mesh renderer requires ≥1 mesh).
-        if self.document.is_none() && !self.input.has_meshes() {
-            return Err(js_error(
-                "input is missing the required leading mesh table (protocol is mesh-first)",
-            ));
-        }
         self.ensure_renderer()?
             .update_frame_texture_rgba(rgba, width, height);
-        self.inline_frames.invalidate();
         self.external_frame_ready = true;
         Ok(())
     }
@@ -526,48 +392,7 @@ impl CanvasRenderer {
         match self.state {
             CanvasState::Open => Ok(()),
             CanvasState::Finished => Err(js_error("CanvasRenderer is finished")),
-            CanvasState::Failed => Err(js_error("CanvasRenderer is failed")),
         }
-    }
-
-    /// Renders a single decoded frame to the surface: resolves its draw list
-    /// (defaulting to one instance of mesh `0` for a legacy single-object frame),
-    /// validates the mesh ids, builds the scene with the current flags + optional
-    /// background compositing, then encodes/submits/presents. Shared by
-    /// [`push_ipc`](Self::push_ipc) (immediate) and
-    /// [`render_index`](Self::render_index) (buffered replay).
-    fn render_frame(&mut self, frame: &DecodedFrame) -> Result<(), JsValue> {
-        // The protocol is mesh-first: without a leading mesh table there is
-        // nothing to draw (and the mesh renderer requires ≥1 mesh).
-        if !self.input.has_meshes() {
-            return Err(js_error(
-                "input is missing the required leading mesh table (protocol is mesh-first)",
-            ));
-        }
-        let params = frame.params;
-        let has_inline_frame = self.upload_inline_frame(frame.frame_id)?;
-        let has_external_frame = std::mem::take(&mut self.external_frame_ready);
-        let mesh_count = self.ensure_renderer()?.mesh_count();
-        // Draw-list resolution + mesh-id validation are the protocol's rules, not
-        // this harness's, so they come from the shared assembly every front-end
-        // uses — same scene, same error text, as the CLI.
-        let scene = Scene::try_from_frame(
-            frame,
-            mesh_count,
-            &self.options,
-            (has_inline_frame || (self.composite_frame && has_external_frame))
-                .then_some(FrameFit::Stretch),
-        )
-        .map_err(|error| js_error(error.to_string()))?
-        // The staged light rig belongs to the frame, not to the harness (#182).
-        .with_lighting(
-            self.pbr
-                .as_ref()
-                .map(PbrState::lighting)
-                .unwrap_or_default(),
-        );
-
-        measure("trd.canvas.render-submit", || self.present(params, &scene))
     }
 
     /// Presents one frame, recovering from a stale or lost surface **in-call**.
@@ -577,11 +402,7 @@ impl CanvasRenderer {
     /// so a recoverable outcome is repaired here and the frame retried exactly
     /// once. That policy is the front-end's; the harness only reports what
     /// happened (#180).
-    fn present(&mut self, params: FrameParams, scene: &Scene) -> Result<(), JsValue> {
-        self.present_camera(PresentationCamera::Params(params), scene)
-    }
-
-    fn present_camera(&mut self, params: PresentationCamera, scene: &Scene) -> Result<(), JsValue> {
+    fn present_camera(&mut self, params: trd_core::Camera, scene: &Scene) -> Result<(), JsValue> {
         match self.present_once(params, scene) {
             // Presented. A repair (the surface no longer matches the canvas) is
             // applied now so the *next* frame is clean; this one is on screen.
@@ -620,7 +441,7 @@ impl CanvasRenderer {
 
     fn retry(
         &mut self,
-        params: PresentationCamera,
+        params: trd_core::Camera,
         scene: &Scene,
         recovery: &str,
     ) -> Result<(), JsValue> {
@@ -641,15 +462,9 @@ impl CanvasRenderer {
     /// no `async fn` may cross the `wasm_bindgen` boundary.
     fn present_once(
         &mut self,
-        params: PresentationCamera,
+        camera: trd_core::Camera,
         scene: &Scene,
     ) -> Result<Option<SurfaceRepair>, RenderError> {
-        // Wire-decoded params: resolve against the surface's own size, so the
-        // camera's viewport cannot disagree with the attachments (#203).
-        let camera = match params {
-            PresentationCamera::Params(params) => params.to_camera(self.target.viewport())?,
-            PresentationCamera::Resolved(camera) => camera,
-        };
         let renderer = self
             .renderer
             .as_mut()
@@ -664,71 +479,10 @@ impl CanvasRenderer {
         }
     }
 
-    fn upload_inline_frame(&mut self, frame_id: Option<u32>) -> Result<bool, JsValue> {
-        let resolved = self
-            .inline_frames
-            .resolve(frame_id, self.input.frames())
-            .map_err(|error| js_error(error.to_string()))?;
-        let Some((image, changed)) = resolved else {
-            return Ok(false);
-        };
-        self.external_frame_ready = false;
-        if changed {
-            self.ensure_renderer()?.update_frame_texture_rgba(
-                &image.rgba,
-                image.width,
-                image.height,
-            );
-        }
-        Ok(true)
-    }
-
-    /// Lazily builds the mesh renderer on first use. The protocol is mesh-first,
-    /// so the session always carries a leading mesh table by the time frames are
-    /// produced; builds a multi-mesh renderer with each mesh's
-    /// [`preview_transform`](trd_core::Mesh::preview_transform) base model,
-    /// targeting the surface's sRGB view format.
     fn ensure_renderer(&mut self) -> Result<&mut Renderer, JsValue> {
-        if self.renderer.is_none() {
-            let meshes = self.input.meshes();
-            let renderer = Renderer::auto_fit(self.gpu.clone(), self.target.view_format(), meshes)
-                .map_err(crate::js_error)?;
-            self.renderer = Some(renderer);
-
-            for (index, asset) in self.input.mesh_assets().iter().enumerate() {
-                let mesh_id = asset.mesh_id_or(index as u32) as usize;
-                let renderer = self.renderer.as_mut().expect("renderer just built");
-                renderer.set_disney_material(
-                    trd_core::MeshTarget::One(mesh_id),
-                    asset.material.clone(),
-                );
-                if let Some(texture) = asset.base_color_texture.as_ref() {
-                    renderer.set_mesh_texture(mesh_id, texture);
-                }
-                if let Some(texture) = asset.metallic_roughness_texture.as_ref() {
-                    renderer.set_mesh_metallic_roughness_texture(mesh_id, texture);
-                }
-                if let Some(texture) = asset.normal_texture.as_ref() {
-                    renderer.set_mesh_normal_texture(mesh_id, texture);
-                }
-            }
-
-            // Apply the Disney PBR material + HDR environment probe staged by the
-            // JS shell before the first frame (RenderMode::Shaded draws only).
-            if let Some(pbr) = &self.pbr {
-                pbr.apply(self.renderer.as_mut().expect("renderer just built"));
-            }
-            if let Some(env) = self.env_map.clone() {
-                self.renderer
-                    .as_mut()
-                    .expect("renderer just built")
-                    .set_env_map(env);
-            }
-        }
-        if self.document.is_none() {
-            self.apply_stream_tonemap();
-        }
-        Ok(self.renderer.as_mut().expect("renderer just built"))
+        self.renderer
+            .as_mut()
+            .ok_or_else(|| js_error("load a params/GLB document first"))
     }
 }
 

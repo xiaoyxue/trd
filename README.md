@@ -83,9 +83,9 @@ examples\render.ps1 -Native
 The wrappers are conveniences around `cargo run`; the same demo, by hand:
 
 ```sh
-uv run --with pyarrow scripts/obj_to_arrow.py assets/meshes/bunny.obj  > /tmp/stream.arrow
-uv run --with pyarrow scripts/jsonl_to_arrow.py examples/frames.bunny_dolly.cg.jsonl >> /tmp/stream.arrow
-cat /tmp/stream.arrow \
+uv run --with pyarrow scripts/jsonl_to_arrow.py examples/frames.bunny_dolly.cg.jsonl \
+  | uv run --with pyarrow --with numpy --with pillow scripts/scene_to_arrow.py \
+      --mesh assets/meshes/bunny.obj \
   | cargo run -q -p trd-cli -- --width 256 --height 256 \
   | uv run --with pyarrow --with numpy scripts/encode.py --fps 30 -o output/out.gif
 ```
@@ -185,9 +185,9 @@ OBJ conversion is offline; ordinary OBJ viewers remain supported.
 
 **[0.0.7 specification](docs/protocol/0.0.7.md)** and
 **[machine-readable contract](docs/protocol/0.0.7.schema.json)** define the new
-format. The [implementation migration status](docs/protocol/README.md#implementation-migration-status)
-tracks remaining old runtime/generator stamps; this documentation update alone
-does not complete that atomic cutover.
+format. Runtime, current producers and committed fixture metadata use the same
+version; [schema generation/checking](docs/protocol/README.md#implementation-migration-status)
+is part of the cutover. Earlier protocol specifications live only in Git history.
 
 ## [Material (PBR)](docs/pbr.md)
 

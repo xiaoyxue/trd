@@ -22,7 +22,7 @@ import uuid
 
 import pyarrow as pa
 
-from protocol_schema import PROTOCOL_VERSION
+from protocol_version import PROTOCOL_VERSION
 
 SOURCE_VERSION_KEY = b"trd.video_edit.version"
 SOURCE_KIND_KEY = b"trd.video_edit.table.kind"

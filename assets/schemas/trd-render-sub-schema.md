@@ -4,7 +4,7 @@
 schema. This is the **0.0.7** params/GLB contract agreed in #367 / #370.
 The [formal specification](../../docs/protocol/0.0.7.md) and
 [implementation cutover status](../../docs/protocol/README.md#implementation-migration-status)
-distinguish the contract from any remaining old producer/runtime stamps.
+define the contract and its runtime/producer/fixture consistency checks.
 
 Selected source fields follow the supplied `field_definition_design 2.md`.
 That complete upstream business document is not redistributed here. This document

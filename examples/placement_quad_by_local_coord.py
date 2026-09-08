@@ -245,7 +245,7 @@ def k_render_columns(K, width, height, src_w, src_h):
 
 
 def emit_placement_jsonl(K, quads, args):
-    """Emit a 0.0.6 JSONL that places the bunny **per frame via #77's single-view
+    """Emit 0.0.7 params JSONL that places the bunny **per frame via #77's single-view
     basis**, using only ``K`` + the quad — **no ``pose`` column**.
 
     Reads the recorded ``K.txt``/``QuadImagePoints.txt`` fixture directly: builds
@@ -314,7 +314,7 @@ def read_perception_records(path):
 
 
 def emit_records(records, args):
-    """Reconstruct + emit the 0.0.6 render stream for ``(K, quad, frame_path)`` records.
+    """Reconstruct + emit 0.0.7 params for ``(K, quad, frame_path)`` records.
 
     The placement-quad's local frame is reconstructed from ``K`` + the quad points.
     With ``--place-mesh`` (default) the model mesh is anchored on it (stage 2); with
@@ -618,6 +618,8 @@ def main():
     ap.add_argument("--frames-list", type=int, nargs="+", default=[0, 60, 125, 190, 249],
                     help="frames to report in --validate")
     args = ap.parse_args()
+    if args.inline_frames:
+        ap.error("--inline-frames is retired; emit external frame_path references")
 
     if args.from_perception:
         # Downstream stage: consume the upstream perception Arrow stream directly.

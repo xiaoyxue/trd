@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Convert a trd JSONL frame-params file to a protocol 0.0.6 Arrow IPC stream.
+"""Convert JSONL camera/frame params to a protocol 0.0.7 params stream.
 
 A dependency-light pyarrow producer for examples/render.sh and render.ps1. The
-stream protocol is **0.0.6-only** (mesh-first; older wire formats are
-retired and no longer produced or accepted). Each JSON line is one frame.
+Bundle it with original GLB resources using scene_to_arrow.py. Params come first;
+older wire formats and inline-frame resources are not accepted.
 
 Emitted params columns (all optional except `model`, which is always emitted):
 
@@ -50,7 +50,7 @@ import sys
 import pyarrow as pa
 from pyarrow import ipc
 
-PROTOCOL_VERSION = "0.0.6"
+from protocol_version import PROTOCOL_VERSION
 PROTOCOL_VERSION_KEY = b"trd.protocol.version"
 TABLE_KIND_KEY = b"trd.table.kind"
 FRAME_RATE_KEY = b"trd.stream.frame_rate"
@@ -82,6 +82,8 @@ def main() -> None:
 
     with open(args.input, encoding="utf-8") as f:
         rows = [json.loads(line) for line in f if line.strip()]
+    if any("frame_id" in row for row in rows):
+        raise SystemExit("error: frame_id is retired; use external frame_path/frame_url")
 
     f32 = pa.float32()
     fsl16 = pa.list_(f32, 16)  # FixedSizeList<f32>[16] = column-major Mat4

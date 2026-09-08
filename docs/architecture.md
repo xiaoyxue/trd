@@ -22,9 +22,9 @@ params/GLB document + external VideoFrame/RGBA
 ```
 
 The [protocol specification](protocol/0.0.7.md) defines the current contract.
-See [migration status](protocol/README.md#implementation-migration-status) for
-remaining old runtime/producer stamps rather than assuming a documentation
-change completes the atomic cutover.
+Runtime and current producers use the same version; the
+[schema generator](protocol/README.md#implementation-migration-status) checks
+the committed params/GLB fixture schemas.
 
 ## Contents
 

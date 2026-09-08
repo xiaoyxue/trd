@@ -9,8 +9,8 @@
 //! decoder divergence, GPU `Uniform` byte drift, and camera-math regressions.
 //!
 //! The fixtures are the two-stage cornellbox *placement* demo (#77), reduced to
-//! a few frames at a small resolution and migrated to `[params][mesh]` by
-//! `scripts/migrate_golden_inputs.py`. Geometry and materials are original GLB
+//! a few frames at a small resolution and generated as `[params][mesh]` by
+//! `scripts/golden_fixtures.py`. Geometry and materials are embedded GLB
 //! payloads; params reference committed background stills under `golden/frames`.
 //! The shell resolver supplies those images while the scene is composited over
 //! the cornellbox background:

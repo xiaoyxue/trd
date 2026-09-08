@@ -1,18 +1,28 @@
 {
   "protocol_version": "0.0.7",
-  "status": "current agreed contract; atomic implementation cutover tracked in #367/#370",
+  "generated_by": "scripts/protocol_schema.py",
   "prose_spec": "docs/protocol/0.0.7.md",
   "source_contract": "assets/schemas/trd-render-sub-schema.md",
   "schema_kind": "Descriptive Arrow contract, not a JSON instance-validation schema",
-  "maintenance": "Normative 0.0.7 contract. The legacy protocol_schema.py generator is not yet migrated to this file.",
   "container": "concatenated Apache Arrow IPC streams",
-  "input_order": ["params", "mesh?"],
+  "input_order": [
+    "params",
+    "mesh?"
+  ],
+  "compatibility": "none; declared versions other than 0.0.7 are rejected",
   "schema_metadata": {
     "trd.protocol.version": "0.0.7",
-    "trd.table.kind": ["params", "mesh"],
-    "trd.stream.frame_rate": {"required": false, "type": "positive float string", "default": 30}
+    "trd.table.kind": [
+      "params",
+      "mesh"
+    ],
+    "trd.stream.frame_rate": {
+      "required": false,
+      "type": "positive float string",
+      "default": 30
+    }
   },
-  "source_adapter_exception": "Unversioned upstream FHC params are accepted by an explicit adapter; declared older trd versions are not upgraded.",
+  "source_adapter_exception": "Unversioned FHC source tables use the explicit tracked adapter; declared old versions are never upgraded.",
   "tables": {
     "params": {
       "row_model": "one existing scene sample; sparse video rows are not padded",
@@ -20,70 +30,244 @@
       "adapters": {
         "tracked_fhc": {
           "matrix_order": "row-major model on wire; column-major internally",
-          "point": "struct<x: float32 not null, y: float32 not null, w: float32 not null, h: float32 not null>",
-          "intrinsics": "struct<fx: float32 not null, fy: float32 not null, cx: float32 not null, cy: float32 not null, skew: float32 not null, w: float32 not null, h: float32 not null>",
           "columns": [
-            {"name": "bottom_quads", "arrow_type": "list<fixed_size_list<point not null, 4> not null> not null", "required": true},
-            {"name": "k", "arrow_type": "intrinsics not null", "required": true},
-            {"name": "model", "arrow_type": "list<fixed_size_list<fixed_size_list<float32 not null, 4> not null, 4> not null> not null", "required": false, "absent": "identity per instance"},
-            {"name": "mesh_id", "arrow_type": "list<uuid not null> not null", "required": false, "constraint": "explicit bindings required when implicit correspondence is ambiguous"},
-            {"name": "present_index", "arrow_type": "int64", "required": false},
-            {"name": "pts", "arrow_type": "int64", "required": false},
-            {"name": "track_id", "arrow_type": "list<utf8>", "required": false}
+            {
+              "name": "bottom_quads",
+              "arrow_type": "list<item: fixed_size_list<item: struct<x: float not null, y: float not null, w: float not null, h: float not null> not null>[4] not null>",
+              "required": true
+            },
+            {
+              "name": "k",
+              "arrow_type": "struct<fx: float not null, fy: float not null, cx: float not null, cy: float not null, skew: float not null, w: float not null, h: float not null>",
+              "required": true
+            },
+            {
+              "name": "model",
+              "arrow_type": "list<item: fixed_size_list<item: fixed_size_list<item: float not null>[4] not null>[4] not null>",
+              "required": false
+            },
+            {
+              "name": "mesh_id",
+              "arrow_type": "list<item: extension<arrow.uuid> not null>",
+              "required": false
+            },
+            {
+              "name": "present_index",
+              "arrow_type": "int64",
+              "required": false
+            },
+            {
+              "name": "pts",
+              "arrow_type": "int64",
+              "required": false
+            },
+            {
+              "name": "track_id",
+              "arrow_type": "list<item: string>",
+              "required": false
+            }
           ],
           "constraints": [
-            "Preserve source corner order and winding; never clamp finite off-image quads.",
-            "Use each source point/intrinsics width and height for FHC conversion.",
-            "Per-placement lists align and consumed geometry/model values are finite."
+            "Preserve source corner order/winding and finite off-image coordinates.",
+            "Use the source image dimensions for FHC conversions.",
+            "Per-placement lists align; consumed values are finite and non-null.",
+            "An absent model column means identity per instance.",
+            "UUID bindings are required where implicit correspondence is ambiguous."
           ]
         },
         "cg_cv": {
           "matrix_order": "column-major",
           "columns": [
-            {"name": "model", "arrow_type": "fixed_size_list<float32, 16>", "required": false},
-            {"name": "k", "arrow_type": "fixed_size_list<float32, 9>", "required": false},
-            {"name": "pose", "arrow_type": "fixed_size_list<float32, 16>", "required": false},
-            {"name": "eye", "arrow_type": "fixed_size_list<float32, 3>", "required": false},
-            {"name": "target", "arrow_type": "fixed_size_list<float32, 3>", "required": false},
-            {"name": "direction", "arrow_type": "fixed_size_list<float32, 3>", "required": false},
-            {"name": "up", "arrow_type": "fixed_size_list<float32, 3>", "required": false},
-            {"name": "fovy", "arrow_type": "float32", "required": false, "unit": "radians"},
-            {"name": "aspect", "arrow_type": "float32", "required": false},
-            {"name": "znear", "arrow_type": "float32", "required": false},
-            {"name": "zfar", "arrow_type": "float32", "required": false},
-            {"name": "draw_mesh", "arrow_type": "list<uint32>", "required": false},
-            {"name": "draw_model", "arrow_type": "list<fixed_size_list<float32, 16>>", "required": false},
-            {"name": "draw_mode", "arrow_type": "list<uint8>", "required": false},
-            {"name": "video_frame_index", "arrow_type": "uint32", "required": false},
-            {"name": "frame_path", "arrow_type": "utf8", "required": false},
-            {"name": "frame_url", "arrow_type": "utf8", "required": false},
-            {"name": "tonemap", "arrow_type": "uint8", "required": false}
+            {
+              "name": "model",
+              "arrow_type": "fixed_size_list<item: float>[16]",
+              "required": false
+            },
+            {
+              "name": "k",
+              "arrow_type": "fixed_size_list<item: float>[9]",
+              "required": false
+            },
+            {
+              "name": "pose",
+              "arrow_type": "fixed_size_list<item: float>[16]",
+              "required": false
+            },
+            {
+              "name": "eye",
+              "arrow_type": "fixed_size_list<item: float>[3]",
+              "required": false
+            },
+            {
+              "name": "target",
+              "arrow_type": "fixed_size_list<item: float>[3]",
+              "required": false
+            },
+            {
+              "name": "direction",
+              "arrow_type": "fixed_size_list<item: float>[3]",
+              "required": false
+            },
+            {
+              "name": "up",
+              "arrow_type": "fixed_size_list<item: float>[3]",
+              "required": false
+            },
+            {
+              "name": "fovy",
+              "arrow_type": "float",
+              "required": false
+            },
+            {
+              "name": "aspect",
+              "arrow_type": "float",
+              "required": false
+            },
+            {
+              "name": "znear",
+              "arrow_type": "float",
+              "required": false
+            },
+            {
+              "name": "zfar",
+              "arrow_type": "float",
+              "required": false
+            },
+            {
+              "name": "draw_mesh",
+              "arrow_type": "list<item: uint32>",
+              "required": false
+            },
+            {
+              "name": "draw_model",
+              "arrow_type": "list<item: fixed_size_list<item: float>[16]>",
+              "required": false
+            },
+            {
+              "name": "draw_mode",
+              "arrow_type": "list<item: uint8>",
+              "required": false
+            },
+            {
+              "name": "video_frame_index",
+              "arrow_type": "uint32",
+              "required": false
+            },
+            {
+              "name": "present_index",
+              "arrow_type": "int64",
+              "required": false
+            },
+            {
+              "name": "pts",
+              "arrow_type": "int64",
+              "required": false
+            },
+            {
+              "name": "frame_path",
+              "arrow_type": "string",
+              "required": false
+            },
+            {
+              "name": "frame_url",
+              "arrow_type": "string",
+              "required": false
+            },
+            {
+              "name": "tonemap",
+              "arrow_type": "uint8",
+              "required": false
+            }
           ],
-          "draw_mode": {"0": "filled", "1": "wireframe", "2": "textured", "3": "blob shadow", "4": "shaded/PBR", "255": "inherit"},
-          "tonemap": {"0": "Reinhard", "1": "ACES"},
-          "constraints": ["Preserve existing CG/CV camera defaults and golden camera values.", "Do not mix CG and CV camera forms.", "Draw-list lengths align."]
+          "draw_mode": {
+            "0": "filled",
+            "1": "wireframe",
+            "2": "textured",
+            "3": "blob shadow",
+            "4": "shaded/PBR",
+            "255": "inherit"
+          },
+          "tonemap": {
+            "0": "Reinhard",
+            "1": "ACES"
+          },
+          "constraints": [
+            "Preserve existing CG/CV camera defaults and golden camera values.",
+            "Do not mix CG and CV camera forms.",
+            "Draw-list lengths align; indices belong only to this adapter."
+          ]
         }
       }
     },
     "mesh": {
       "required": false,
-      "row_model": "one immutable asset per unique UUID",
       "allow_extra_columns": false,
+      "row_model": "one original self-contained GLB per unique UUID",
       "columns": [
-        {"name": "mesh_id", "arrow_type": "fixed_size_binary[16]", "nullable": false, "extension": "arrow.uuid"},
-        {"name": "glb", "arrow_type": "large_binary", "nullable": false, "content": "original self-contained GLB 2.0 bytes"}
+        {
+          "name": "mesh_id",
+          "arrow_type": "extension<arrow.uuid>",
+          "storage_type": "fixed_size_binary[16]",
+          "nullable": false
+        },
+        {
+          "name": "glb",
+          "arrow_type": "large_binary",
+          "nullable": false
+        }
       ],
-      "constraints": ["Unique UUIDs.", "Valid self-contained GLB with no external buffers/images.", "Resource row reordering does not change UUID bindings.", "No re-encoding or stripping original GLB bytes on export."]
+      "constraints": [
+        "Unique UUIDs and valid self-contained GLB 2.0 payloads.",
+        "No external GLB buffers/images or resource path/URL.",
+        "Resource row order does not change UUID bindings.",
+        "Preserve original bytes, schema metadata and all batch boundaries."
+      ]
     }
   },
   "editing": {
     "scope": "selected object across all corresponding existing sparse rows",
     "stored_model": "adjustment * original_local_model",
-    "identity": "track_id across reorder/gaps, otherwise consistent ordered instance/binding list; reject ambiguity",
-    "replay": "read saved per-row models without reapplying authoring adjustments",
-    "retained": ["unknown columns", "types and nulls", "field/schema metadata", "row order", "params batch boundaries", "mesh batch boundaries", "unmodified models", "original UUID/GLB bytes"]
+    "identity": "track_id across reorder/gaps, otherwise consistent ordered bindings; reject ambiguity",
+    "replay": "read saved per-row models without applying authoring adjustments twice",
+    "retained": [
+      "unknown columns",
+      "types/nulls",
+      "field/schema metadata",
+      "row order",
+      "params/mesh batch boundaries",
+      "other objects",
+      "UUID/GLB bytes"
+    ]
   },
-  "media": {"video": "external", "missing_row": "video-only", "pts": "never fabricated from fps", "external_stills": ["frame_path", "frame_url"]},
-  "retired_inputs": ["mesh-first envelope", "Arrow OBJ geometry", "texture table", "inline frames table", "frame_id", "gltf_path resource", "gltf_url resource", "Parquet application input", "video-edit 0.2.0 application input"],
-  "output": {"row_model": "one image per params row", "batch_boundaries": "mirror params", "channels": ["r", "g", "b", "a"], "arrow_type": "fixed_shape_tensor<uint8>[height,width]"}
+  "media": {
+    "video": "external",
+    "missing_row": "video-only",
+    "pts": "never fabricated from fps",
+    "external_stills": [
+      "frame_path",
+      "frame_url"
+    ]
+  },
+  "retired_inputs": [
+    "mesh-first envelope",
+    "Arrow OBJ geometry",
+    "texture table",
+    "inline frames table",
+    "frame_id",
+    "gltf_path resource",
+    "gltf_url resource",
+    "Parquet application input",
+    "video-edit 0.2.0 application input"
+  ],
+  "output": {
+    "row_model": "one image per params row",
+    "batch_boundaries": "mirror params",
+    "channels": [
+      "r",
+      "g",
+      "b",
+      "a"
+    ],
+    "arrow_type": "fixed_shape_tensor<uint8>[height,width]"
+  }
 }
