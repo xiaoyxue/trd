@@ -47,7 +47,7 @@ impl VideoEditingApp {
             );
             mesh_ids.push(u32::try_from(slot).map_err(|_| "too many meshes".to_owned())?);
         }
-        self.source_model_baselines = frame.objects.iter().map(|object| object.model).collect();
+        self.source_model_baselines = vec![None; count];
         self.source_applied_adjustments = vec![trd_core::Matrix4::IDENTITY; count];
         let state = &mut self.controller.state;
         state.objects = vec![crate::scene::ObjectTransform::default(); count];
@@ -66,8 +66,8 @@ impl VideoEditingApp {
         Ok(())
     }
 
-    /// Keep an untouched source matrix intact, including shear. The familiar
-    /// controls author a TRS adjustment instead of decomposing/rebuilding it.
+    /// Apply the adjustment to each original local model, never to the previous
+    /// drag result. Every tracked frame keeps its own camera, quad and base.
     pub(super) fn apply_source_transforms(&mut self) -> Result<bool, String> {
         let Some(row) = self.source_controller_row else {
             return Ok(false);
@@ -90,15 +90,28 @@ impl VideoEditingApp {
                 return Err("source editor transform state is out of sync".to_owned());
             };
             if adjustment != *previous {
-                let base = self
+                let baseline = self
                     .source_model_baselines
-                    .get(index)
+                    .get_mut(index)
                     .ok_or_else(|| "source editor matrix baseline is missing".to_owned())?;
-                edits.push(trd_core::ModelEdit {
-                    row,
-                    object: index,
-                    model: adjustment * *base,
-                });
+                if baseline.is_none() {
+                    *baseline = Some(
+                        source
+                            .borrow()
+                            .model_track(row, index)
+                            .map_err(|error| error.to_string())?,
+                    );
+                }
+                edits.extend(
+                    baseline
+                        .as_ref()
+                        .expect("captured above")
+                        .iter()
+                        .map(|base| trd_core::ModelEdit {
+                            model: adjustment * base.model,
+                            ..*base
+                        }),
+                );
                 changes.push((index, adjustment));
             }
         }
@@ -126,6 +139,10 @@ mod tests {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../trd-core/tests/golden/stage1.arrow");
         let source = trd_core::SceneDocument::read(&std::fs::read(fixture).unwrap()).unwrap();
+        app_from_source(source)
+    }
+
+    fn app_from_source(source: trd_core::SceneDocument) -> VideoEditingApp {
         let mut app = VideoEditingApp::player(
             super::super::tests::document().video,
             Rc::new(super::super::VideoEditingShared::default()),
@@ -140,9 +157,116 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires the matching FIBA/Dragon params fixture"]
+    fn dragon_edit_replay_persists_the_model_in_all_222_sparse_frames() {
+        let path = std::env::var_os("TRD_DRAGON_PARAMS").expect("set TRD_DRAGON_PARAMS");
+        let original = trd_core::SceneDocument::read(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(original.row_count(), 222);
+        for omit_model in [false, true] {
+            let source = if omit_model {
+                let indices = original
+                    .schema()
+                    .fields()
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, field)| (field.name() != "model").then_some(index))
+                    .collect::<Vec<_>>();
+                let batches = original
+                    .batches()
+                    .iter()
+                    .map(|batch| batch.project(&indices).unwrap())
+                    .collect::<Vec<_>>();
+                trd_core::SceneDocument::from_batches(
+                    batches[0].schema(),
+                    batches,
+                    original.meshes().to_vec(),
+                )
+                .unwrap()
+            } else {
+                original.clone()
+            };
+            let before = source.clone();
+            let mut author = app_from_source(source);
+            author.controller.state.objects[0].translation = [0.2, 0.1, -0.15];
+            author.controller.state.objects[0].yaw = 0.4;
+            author.controller.state.objects[0].scale = [0.8; 3];
+            let adjustment = author.controller.state.objects[0].model_matrix();
+            assert!(author.apply_source_transforms().unwrap());
+            let document = author
+                .arrow_scene
+                .as_ref()
+                .unwrap()
+                .source
+                .as_ref()
+                .unwrap()
+                .borrow();
+            let exported = document.write().unwrap();
+            let reopened = trd_core::SceneDocument::read(&exported).unwrap();
+            assert_eq!(
+                reopened.row_count(),
+                222,
+                "no invented rows for the video-only tail"
+            );
+            assert_eq!(reopened.meshes(), original.meshes());
+            assert_eq!(reopened.schema().metadata(), before.schema().metadata());
+            for (expected_batch, actual_batch) in before.batches().iter().zip(reopened.batches()) {
+                assert_eq!(expected_batch.num_rows(), actual_batch.num_rows());
+                for field in before
+                    .schema()
+                    .fields()
+                    .iter()
+                    .filter(|field| field.name() != "model")
+                {
+                    assert_eq!(
+                        expected_batch.column_by_name(field.name()),
+                        actual_batch.column_by_name(field.name())
+                    );
+                }
+            }
+            for row in 0..222 {
+                let mut expected = before.frame(row).unwrap();
+                expected.objects[0].model = adjustment * expected.objects[0].model;
+                assert_eq!(
+                    reopened.frame(row).unwrap(),
+                    expected,
+                    "row {row}, absent={omit_model}"
+                );
+            }
+            let mut replay = app_from_source(reopened);
+            for index in [110, 221, 222, 287, 0] {
+                replay.displayed_frame_index = index;
+                replay.sync_source_controller().unwrap();
+                assert!(!replay.apply_source_transforms().unwrap());
+            }
+            assert_eq!(
+                replay
+                    .arrow_scene
+                    .as_ref()
+                    .unwrap()
+                    .source
+                    .as_ref()
+                    .unwrap()
+                    .borrow()
+                    .write()
+                    .unwrap(),
+                exported,
+                "play/seek in a fresh replay must leave every saved matrix unchanged",
+            );
+        }
+    }
+
+    #[test]
     fn existing_move_scale_rotate_controls_write_source_model_without_accumulating_base() {
         let mut app = app();
-        let original = app.source_model_baselines[0];
+        let original = app
+            .arrow_scene
+            .as_ref()
+            .unwrap()
+            .source
+            .as_ref()
+            .unwrap()
+            .borrow()
+            .clone();
         app.controller.mode = TransformMode::Move;
         app.controller.move_direction = MoveDirection::Reference1;
         assert!(app
@@ -165,15 +289,99 @@ mod tests {
             .as_ref()
             .unwrap()
             .borrow();
-        assert_eq!(
-            source.frame(0).unwrap().objects[0].model,
-            adjustment * original
-        );
         let reopened = trd_core::SceneDocument::read(&source.write().unwrap()).unwrap();
+        assert_eq!(reopened.row_count(), original.row_count());
+        assert_eq!(reopened.meshes(), original.meshes());
+        assert_eq!(reopened.schema(), original.schema());
         assert_eq!(
-            reopened.frame(0).unwrap().objects[0].model,
-            adjustment * original
+            reopened
+                .batches()
+                .iter()
+                .map(|batch| batch.num_rows())
+                .collect::<Vec<_>>(),
+            original
+                .batches()
+                .iter()
+                .map(|batch| batch.num_rows())
+                .collect::<Vec<_>>(),
         );
+        for row in 0..original.row_count() {
+            let mut expected = original.frame(row).unwrap();
+            expected.objects[0].model = adjustment * expected.objects[0].model;
+            assert_eq!(source.frame(row).unwrap(), expected, "edited row {row}");
+            assert_eq!(reopened.frame(row).unwrap(), expected, "reopened row {row}");
+        }
+        drop(source);
+
+        app.displayed_frame_index = 1;
+        app.sync_source_controller().unwrap();
+        assert!(
+            !app.apply_source_transforms().unwrap(),
+            "seeking must not apply the adjustment twice"
+        );
+        let mut replay = VideoEditingApp::player(
+            super::super::tests::document().video,
+            Rc::new(super::super::VideoEditingShared::default()),
+        );
+        let exported = reopened.write().unwrap();
+        replay.set_arrow_scene(Some(Rc::new(
+            super::super::ArrowScene::from_source(reopened).unwrap(),
+        )));
+        for row in [0, 1, 2, 0] {
+            replay.displayed_frame_index = row;
+            replay.sync_source_controller().unwrap();
+            assert!(!replay.apply_source_transforms().unwrap());
+        }
+        assert_eq!(
+            replay
+                .arrow_scene
+                .as_ref()
+                .unwrap()
+                .source
+                .as_ref()
+                .unwrap()
+                .borrow()
+                .write()
+                .unwrap(),
+            exported,
+            "fresh replay/playhead changes do not rewrite saved matrices",
+        );
+    }
+
+    #[test]
+    fn consecutive_drag_updates_replace_the_track_adjustment_instead_of_accumulating_it() {
+        let mut app = app();
+        let original = app
+            .arrow_scene
+            .as_ref()
+            .unwrap()
+            .source
+            .as_ref()
+            .unwrap()
+            .borrow()
+            .frames()
+            .unwrap();
+        for translation in [0.1, 0.2, -0.15, 0.0] {
+            app.controller.state.objects[0].translation[0] = translation;
+            let adjustment = app.controller.state.objects[0].model_matrix();
+            assert!(app.apply_source_transforms().unwrap());
+            let source = app
+                .arrow_scene
+                .as_ref()
+                .unwrap()
+                .source
+                .as_ref()
+                .unwrap()
+                .borrow();
+            for (row, original) in original.iter().enumerate() {
+                let actual = source.frame(row).unwrap();
+                assert_eq!(
+                    actual.objects[0].model,
+                    adjustment * original.objects[0].model
+                );
+                assert_eq!(&actual.objects[1..], &original.objects[1..]);
+            }
+        }
     }
 
     #[test]
@@ -184,7 +392,18 @@ mod tests {
             (MoveDirection::Reference3, [0.0, 1.0, 0.0]),
         ] {
             let mut app = app();
-            let original = app.source_model_baselines[0];
+            let original = app
+                .arrow_scene
+                .as_ref()
+                .unwrap()
+                .source
+                .as_ref()
+                .unwrap()
+                .borrow()
+                .frame(0)
+                .unwrap()
+                .objects[0]
+                .model;
             app.controller.mode = TransformMode::Move;
             app.controller.move_direction = direction;
             assert!(app

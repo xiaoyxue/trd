@@ -22,6 +22,34 @@ pub struct ModelEdit {
 }
 
 impl SceneDocument {
+    /// Captures original local models for one object across the existing rows.
+    /// Track IDs survive reordered/missing instances. Without IDs, only a
+    /// consistent ordered binding list can establish cross-frame identity.
+    pub fn model_track(&self, row: usize, object: usize) -> Result<Vec<ModelEdit>, ProtocolError> {
+        let frames = self.frames()?;
+        let reference = frames
+            .get(row)
+            .ok_or_else(|| parse_error(format!("params row {row} is out of range")))?;
+        if object >= reference.objects.len() {
+            return Err(parse_error("model track instance is out of range"));
+        }
+        frames
+            .iter()
+            .enumerate()
+            .filter_map(
+                |(row, frame)| match Self::track_instance(reference, object, frame) {
+                    Ok(Some(object)) => Some(Ok(ModelEdit {
+                        row,
+                        object,
+                        model: frame.objects[object].model,
+                    })),
+                    Ok(None) => None,
+                    Err(error) => Some(Err(error)),
+                },
+            )
+            .collect()
+    }
+
     /// Updates only matrix columns and missing source bindings. Failures are atomic.
     pub fn apply_model_edits(&mut self, edits: &[ModelEdit]) -> Result<(), ProtocolError> {
         if edits.is_empty() {
@@ -123,6 +151,50 @@ impl SceneDocument {
             first_row = end;
         }
         self.replace_batches(schema, batches)
+    }
+
+    fn track_instance(
+        reference: &DocumentFrame,
+        object: usize,
+        frame: &DocumentFrame,
+    ) -> Result<Option<usize>, ProtocolError> {
+        let selected = &reference.objects[object];
+        if let Some(id) = selected.track_id.as_deref() {
+            if id.is_empty() {
+                return Err(parse_error(
+                    "an empty track_id cannot identify an edited object",
+                ));
+            }
+            let mut matches = frame
+                .objects
+                .iter()
+                .enumerate()
+                .filter(|(_, instance)| instance.track_id.as_deref() == Some(id));
+            let found = matches.next().map(|(index, _)| index);
+            if matches.next().is_some() {
+                return Err(parse_error(format!("ambiguous duplicate track_id {id}")));
+            }
+            return Ok(found);
+        }
+        if frame.objects.is_empty() {
+            return Ok(None);
+        }
+        if frame.objects.len() != reference.objects.len()
+            || frame
+                .objects
+                .iter()
+                .any(|instance| instance.track_id.is_some())
+            || !frame
+                .objects
+                .iter()
+                .map(|instance| instance.mesh)
+                .eq(reference.objects.iter().map(|instance| instance.mesh))
+        {
+            return Err(parse_error(
+                "cross-frame editing needs track_id when object counts or ordered mesh bindings change",
+            ));
+        }
+        Ok(Some(object))
     }
 
     pub fn object_mesh_slot(
@@ -243,6 +315,66 @@ mod tests {
     use super::*;
     use crate::{FrameParams, PROTOCOL_VERSION, PROTOCOL_VERSION_KEY, TABLE_KIND_KEY};
     use arrow::array::{Int64Array, StringArray};
+
+    fn track_frame(ids: &[Option<&str>]) -> DocumentFrame {
+        DocumentFrame {
+            params: FrameParams::IDENTITY,
+            source_size: None,
+            present_index: None,
+            pts: None,
+            objects: ids
+                .iter()
+                .map(|id| super::super::DocumentObject {
+                    mesh: Some(DocumentMesh::Index(0)),
+                    model: Matrix4::IDENTITY,
+                    quad: None,
+                    track_id: id.map(str::to_owned),
+                    selection: crate::DrawSelection::INHERIT,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn track_identity_follows_reordered_instances_and_skips_absent_rows() {
+        let original = track_frame(&[Some("dragon"), Some("can")]);
+        let reordered = track_frame(&[Some("can"), Some("dragon")]);
+        assert_eq!(
+            SceneDocument::track_instance(&original, 0, &reordered).unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            SceneDocument::track_instance(&original, 0, &track_frame(&[Some("can")])).unwrap(),
+            None
+        );
+        assert_eq!(
+            SceneDocument::track_instance(&original, 0, &track_frame(&[])).unwrap(),
+            None
+        );
+        assert!(SceneDocument::track_instance(
+            &original,
+            0,
+            &track_frame(&[Some("dragon"), Some("dragon")])
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn unkeyed_tracks_require_consistent_slots_and_never_edit_by_shared_mesh_alone() {
+        let original = track_frame(&[None, None]);
+        assert_eq!(
+            SceneDocument::track_instance(&original, 1, &original).unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            SceneDocument::track_instance(&original, 1, &track_frame(&[])).unwrap(),
+            None
+        );
+        assert!(SceneDocument::track_instance(&original, 1, &track_frame(&[None])).is_err());
+        let mut reordered = original.clone();
+        reordered.objects[0].mesh = Some(DocumentMesh::Index(1));
+        assert!(SceneDocument::track_instance(&original, 1, &reordered).is_err());
+    }
 
     fn cg_document() -> SceneDocument {
         let matrix = build_models(&[vec![Matrix4::IDENTITY]], &matrix_type(false), false).unwrap();

@@ -250,7 +250,7 @@ impl VideoEditingApp {
                 changed = true;
             }
             ui.weak(format!(
-                "Params row {row}; edits affect this row and object only."
+                "Params row {row}; edits affect this object across all its tracked frames."
             ));
             ui.weak("Pick the mesh to edit it. Controls adjust its existing local model.");
             changed |= crate::ui::interaction_section(

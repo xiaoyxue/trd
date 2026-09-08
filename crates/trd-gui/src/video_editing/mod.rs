@@ -938,7 +938,7 @@ pub struct VideoEditingApp {
     selected_asset: Option<CatalogAsset>,
     source_selected_instance: usize,
     source_controller_row: Option<usize>,
-    source_model_baselines: Vec<trd_core::Matrix4>,
+    source_model_baselines: Vec<Option<Vec<trd_core::ModelEdit>>>,
     source_applied_adjustments: Vec<trd_core::Matrix4>,
     source_hovered_instance: Option<usize>,
     show_reference_cube: bool,

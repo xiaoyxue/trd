@@ -71,8 +71,18 @@ relabeling model XYZ as e1/e2/e3; there is no object-local basis selector.
 The reference wireframe cube uses the same
 default extent-1 size as an imported model, with its bottom center on the plane.
 The read-only **Model matrix** section is an advanced view.
-**Export Arrow** writes the retained document. Edits remain row-local, not
-automatically propagated over a whole track; the UI states that scope.
+**Export Arrow** writes the retained document. Editor transforms apply to the
+selected object across all its existing sparse rows, not only the displayed
+row. Each row stores `adjustment * original_local_model`; its K, quad, timing
+and other objects remain unchanged. `track_id` identifies instances across
+reordering or gaps. Without it, cross-frame editing requires a consistent
+ordered object/binding list; ambiguous correspondence is rejected.
+Dragging replaces the current adjustment against captured original matrices,
+so it does not accumulate numerical drift on every pointer update.
+Fresh replay reads those saved per-row models directly, with identity UI
+adjustments: seeking or loading must not apply the authoring adjustment twice.
+The explicit API `setModel(row, object, ...)` remains a single-cell operation;
+`SceneDocument::model_track` supplies the complete target set used by the editor.
 
 The editor has separate **Open Video** and **Load Arrow** buttons, each with
 local-file and HTTP(S) URL selection. Loading/replacing Arrow does not reopen
@@ -214,7 +224,7 @@ Run these on native and Chrome/wasm surfaces on both Windows and Linux:
 | Case | Input | Acceptance |
 |---|---|---|
 | 1 | Params only | Click the quad to show highlight, local axes, plane grid and a cube whose bottom center is at the local origin; click away to deselect. |
-| 2 | Params plus one mesh | Edit, play/pause/resume and seek; export, close the process and freshly reopen with the same video. Repeat playback/seeks, including edited/untouched rows and the sparse tail; compare matched-frame rendering and retained data. |
+| 2 | Params plus one mesh | Edit all corresponding sparse-frame models, play/pause/resume and seek across them; export, close the process and freshly reopen with the same video. Repeat playback/seeks and compare every saved model plus matched-frame rendering. No model appears in the untracked tail. |
 | 3 | Params plus multiple mesh rows | Verify one bound model per quad, independent transforms/materials and exact source/resource retention. Play/seek before export and after fresh reopen; no asset swaps or stale selected-instance Details. |
 
 Multiple meshes occupy rows of one `mesh_id`/`glb` table. These cases organize
