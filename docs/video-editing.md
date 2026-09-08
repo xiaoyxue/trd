@@ -6,10 +6,15 @@ or implicit FIBA document on startup. Open Video and Load Arrow are independent.
 The browser always uses [mediabunny]; native uses ffmpeg/ffprobe.
 
 The rendering/editing contract is [protocol 0.0.7](protocol/0.0.7.md), with
-[editable document APIs](protocol/scene-documents.md). Remaining runtime/
-generator stamps are listed in the
-[atomic migration status](protocol/README.md#implementation-migration-status);
+[editable document APIs](protocol/scene-documents.md). Runtime, producers and
+fixtures use the same current version, as described in the
+[cutover status](protocol/README.md#implementation-migration-status);
 the old annotation schema is not the current editor protocol.
+
+External TS/JS callers can use `loadArrow`, `resetState`, `exportArrow` and
+`seekToSeconds` through the [typed browser controller](../web/gui-video-editing/README.md#external-tsjs-api).
+Loading atomically replaces the scene; reset removes its Arrow and GPU assets
+without replacing or seeking the video. Export returns retained 0.0.7 bytes.
 
 ## Data set
 

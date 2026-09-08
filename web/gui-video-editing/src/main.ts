@@ -1,6 +1,7 @@
 import uffiziEnvUrl from "../../../assets/envmap/uffizi-large.hdr" with { type: "file" };
 import init, { startVideoEditing } from "../pkg/trd_wasm.js";
 import wasmUrl from "../pkg/trd_wasm_bg.wasm" with { type: "file" };
+import { createVideoEditorApi, type VideoEditorApi } from "./api.ts";
 import { MediabunnyReader, type MediaInput } from "./media/mediabunny-reader.ts";
 import { VideoPlayer } from "./media/player.ts";
 
@@ -13,7 +14,7 @@ const errorScopes: Record<ErrorScope, number> = {
   export: 6,
 };
 
-async function main(): Promise<void> {
+async function main(): Promise<VideoEditorApi> {
   await init({ module_or_path: wasmUrl });
   const canvas = document.getElementById("video-editing-canvas");
   if (!(canvas instanceof HTMLCanvasElement)) {
@@ -40,7 +41,7 @@ async function main(): Promise<void> {
   const editor = await startVideoEditing(canvas, documentBytes, [], defaultEnvBytes);
 
   async function loadArrowInput(bytes: Uint8Array): Promise<void> {
-    await editor.loadDocumentWithGltf(bytes, [], defaultEnvBytes);
+    await api.loadArrow(bytes);
   }
 
   /// Surfaces a failure. The editor's UI is a canvas, so an error drawn there
@@ -80,6 +81,15 @@ async function main(): Promise<void> {
   let pendingVideoFile: File | undefined;
   let pendingDocumentFile: File | undefined;
   let player: VideoPlayer | undefined;
+  const api = createVideoEditorApi({
+    loadArrow: (bytes) => editor.loadArrow(bytes),
+    async resetState() {
+      await editor.resetState();
+      pendingDocumentFile = undefined;
+    },
+    exportArrow: () => editor.exportArrow(),
+    seekToSeconds: (seconds) => editor.seekToSeconds(seconds),
+  });
 
   /// Applies the dialog's document selection: a picked file, a fetched URL, or
   /// nothing — which means "play unannotated", since Load commits the whole
@@ -108,7 +118,7 @@ async function main(): Promise<void> {
       await loadArrowInput(new Uint8Array(await pendingDocumentFile.arrayBuffer()));
       return;
     }
-    editor.clearDocument();
+    await api.resetState();
   }
   let sourceReady = false;
   let sourceGeneration = 0;
@@ -323,18 +333,19 @@ async function main(): Promise<void> {
   // the only way a scripted browser run can reach the playback path.
   const requestedVideo = query.get("video");
   if (requestedVideo) {
-    void loadVideoSource({ kind: "url", url: requestedVideo }).then(() => {
-      // `&play=1` starts playback too, so a scripted run can exercise the
-      // decode/pace loop without driving the egui transport bar.
-      if (query.get("play") === "1" && sourceReady) {
-        player?.play();
-        editor.setVideoStatus(sourceReady, player?.playing ?? false);
-      }
-    });
+    await loadVideoSource({ kind: "url", url: requestedVideo });
+    // `&play=1` starts playback too, so a scripted run can exercise the
+    // decode/pace loop without driving the egui transport bar.
+    if (query.get("play") === "1" && sourceReady) {
+      player?.play();
+      editor.setVideoStatus(sourceReady, player?.playing ?? false);
+    }
   }
+  return api;
 }
 
-main().catch((error: unknown) => {
+window.trdVideoEditorReady = main();
+void window.trdVideoEditorReady.catch((error: unknown) => {
   console.error("video editing failed:", error);
   const message = document.createElement("pre");
   message.style.cssText = "color:#f88;padding:1rem";

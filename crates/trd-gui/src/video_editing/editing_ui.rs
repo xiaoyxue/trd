@@ -7,7 +7,6 @@ use super::{point_in_quad, VideoEditingApp, VideoSourceKind, COMMAND_PAUSE, COMM
 impl eframe::App for VideoEditingApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.shared.context.replace(Some(ui.ctx().clone()));
-        self.sync_native_texture(_frame);
         if let Some(video) = self.shared.take_pending_video_info() {
             // A timeline probed from the container after start-up (#264).
             self.set_video_info(video);
@@ -22,6 +21,8 @@ impl eframe::App for VideoEditingApp {
         self.consume_rendered_frame();
         self.consume_asset_defaults();
         self.consume_pick_result();
+        self.process_scene_operations();
+        self.sync_native_texture(_frame);
         if !self.shared.video_loaded.get() {
             self.displayed_frame_ready = false;
             self.last_rendered_frame_index = None;
@@ -499,12 +500,7 @@ impl VideoEditingApp {
         if frame_index == self.current_frame_index {
             return;
         }
-        self.current_frame_index = frame_index;
-        // Seek id retires the request when it arrives back (#322).
-        self.pending_seek = Some(super::PendingSeek {
-            frame_index,
-            id: self.shared.request_seek(frame_index),
-        });
+        self.begin_seek(frame_index);
     }
 
     /// Labels basis arms `e1`/`e2`/`e3` at their tips using projected egui text.

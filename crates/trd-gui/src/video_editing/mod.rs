@@ -5,6 +5,7 @@ mod details_ui;
 mod diagnostics;
 mod editing_ui;
 mod export;
+mod scene_api;
 mod source_editing;
 
 pub use diagnostics::{PoseDeltaDiagnostics, QuadFrameDiagnostics, TrackingPlacementError};
@@ -471,6 +472,8 @@ pub struct VideoEditingShared {
     /// Distinct from `pending_document` (the dialog's selection — this is the loaded result).
     incoming_document: RefCell<Option<Option<trd_core::VideoEditingDocument>>>,
     incoming_scene: RefCell<Option<Option<Rc<ArrowScene>>>>,
+    scene_operations: RefCell<std::collections::VecDeque<scene_api::SceneOperation>>,
+    scene_seeks: RefCell<Vec<scene_api::SeekCompletion>>,
     command: Cell<u8>,
     asset_request: Cell<u8>,
 
@@ -527,6 +530,8 @@ impl Default for VideoEditingShared {
             pending_video_info: RefCell::new(None),
             incoming_document: RefCell::new(None),
             incoming_scene: RefCell::new(None),
+            scene_operations: RefCell::new(std::collections::VecDeque::new()),
+            scene_seeks: RefCell::new(Vec::new()),
             command: Cell::new(COMMAND_NONE),
             asset_request: Cell::new(0),
 
@@ -675,6 +680,7 @@ impl VideoEditingShared {
 
     pub fn set_video_status(&self, loaded: bool, playing: bool) {
         if !loaded {
+            self.fail_scene_seeks("video source changed during seek");
             self.source_generation
                 .set(self.source_generation.get().wrapping_add(1));
             self.frame.replace(None);
@@ -728,7 +734,11 @@ impl VideoEditingShared {
     }
 
     pub fn set_error(&self, scope: ErrorScope, message: impl Into<String>) {
-        self.error.replace(Some((scope, message.into())));
+        let message = message.into();
+        if matches!(scope, ErrorScope::Media | ErrorScope::Render) {
+            self.fail_scene_seeks(&message);
+        }
+        self.error.replace(Some((scope, message)));
         self.request_repaint();
     }
 
@@ -1425,6 +1435,7 @@ impl VideoEditingApp {
                 self.pending_seek = None;
             }
         }
+        self.shared.finish_scene_seeks(frame.answers_seek);
         // Shared-device path: no readback, so no pixels to upload. Skipping is a panic.
         if frame.rgba.is_empty() {
             return;

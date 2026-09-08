@@ -43,6 +43,14 @@ Internal renderer slots never overwrite those UUIDs.
 
 ## Browser API
 
+For an already-running video editor, external TS uses
+`await window.trdVideoEditorReady`, then `loadArrow`, `resetState`, `exportArrow`
+and `seekToSeconds`. These delegate to the actual `VideoEditingHandle` WASM
+exports; the GUI's Load Arrow action follows the same route. Reset removes
+the current Arrow and mesh resources, not the video. Successful load replaces
+the scene atomically; rejected input leaves it intact. See the
+[typed controller and E2E recipe](../../web/gui-video-editing/README.md#external-tsjs-api).
+
 All operations below are implemented in Rust; the browser supplies bytes.
 
 ```typescript

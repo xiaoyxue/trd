@@ -3,6 +3,29 @@
 
 use std::rc::Rc;
 
+type SceneCompletion<T> = Box<dyn FnOnce(Result<T, String>)>;
+
+fn scene_completion<T: 'static>(
+    into_js: fn(T) -> wasm_bindgen::JsValue,
+) -> (js_sys::Promise, SceneCompletion<T>) {
+    let mut complete: Option<SceneCompletion<T>> = None;
+    let promise = js_sys::Promise::new(&mut |resolve, reject| {
+        complete = Some(Box::new(move |result| {
+            let (callback, value) = match result {
+                Ok(value) => (resolve, into_js(value)),
+                Err(error) => (reject, crate::js_error(error)),
+            };
+            if let Err(error) = callback.call1(&wasm_bindgen::JsValue::UNDEFINED, &value) {
+                wasm_bindgen::throw_val(error);
+            }
+        }));
+    });
+    (
+        promise,
+        complete.expect("Promise executes its initializer synchronously"),
+    )
+}
+
 #[wasm_bindgen::prelude::wasm_bindgen(js_name = videoEditingGltfReferences)]
 pub fn video_editing_gltf_references(
     bytes: Vec<u8>,
@@ -118,7 +141,8 @@ pub async fn start(
             None => None,
         };
         let shared = Rc::new(trd_gui::video_editing::VideoEditingShared::default());
-        let handle = VideoEditingHandle::player(shared.clone());
+        let env_bytes = Rc::new(env_bytes);
+        let handle = VideoEditingHandle::player(shared.clone(), env_bytes.clone());
         // A placeholder until a video is opened: the real size arrives with the
         // container probe, and the target is resized to the fitted panel anyway.
         let (width, height) = (1920, 1080);
@@ -375,6 +399,7 @@ struct TimelineFacts {
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub struct VideoEditingHandle {
     shared: Rc<trd_gui::video_editing::VideoEditingShared>,
+    env_bytes: Rc<Vec<u8>>,
     /// File identity from the document; `None` when document-less (no check).
     expected: Option<(String, u64)>,
     timeline: std::cell::Cell<TimelineFacts>,
@@ -382,9 +407,13 @@ pub struct VideoEditingHandle {
 
 impl VideoEditingHandle {
     /// Plain-player handle: no document, placeholder timeline until container is probed.
-    pub(crate) fn player(shared: Rc<trd_gui::video_editing::VideoEditingShared>) -> Self {
+    pub(crate) fn player(
+        shared: Rc<trd_gui::video_editing::VideoEditingShared>,
+        env_bytes: Rc<Vec<u8>>,
+    ) -> Self {
         Self {
             shared,
+            env_bytes,
             expected: None,
             timeline: std::cell::Cell::new(TimelineFacts {
                 fps_num: 25,
@@ -616,10 +645,25 @@ impl VideoEditingHandle {
         self.shared.cancel_arrow_export();
     }
 
-    /// Loads a current params/GLB scene document from bytes.
+    /// Loads a current params/GLB document using the editor's initial environment probe.
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = loadArrow)]
+    pub async fn load_arrow(&self, bytes: Vec<u8>) -> Result<(), wasm_bindgen::JsValue> {
+        self.load_document(bytes).await
+    }
+
+    /// Requests the same media seek as the GUI and waits for its displayed frame.
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = seekToSeconds)]
+    pub async fn seek_to_seconds(&self, seconds: f64) -> Result<(), wasm_bindgen::JsValue> {
+        let (promise, complete) = scene_completion(|()| wasm_bindgen::JsValue::UNDEFINED);
+        self.shared.seek_scene_to_seconds(seconds, complete);
+        wasm_bindgen_futures::JsFuture::from(promise).await?;
+        Ok(())
+    }
+
+    /// Alias retained for callers loading one complete current document.
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = loadDocument)]
     pub async fn load_document(&self, bytes: Vec<u8>) -> Result<(), wasm_bindgen::JsValue> {
-        self.load_document_with_gltf(bytes, js_sys::Array::new(), Vec::new())
+        self.load_document_with_gltf(bytes, js_sys::Array::new(), self.env_bytes.as_ref().clone())
             .await
     }
 
@@ -657,11 +701,47 @@ impl VideoEditingHandle {
                     }
                 }
                 .map_err(|error| wasm_bindgen::JsValue::from_str(&error))?;
-                self.shared.set_renderer(renderer);
-                self.shared.queue_arrow_scene(Rc::new(scene));
+                let (promise, complete) = scene_completion(|()| wasm_bindgen::JsValue::UNDEFINED);
+                self.shared
+                    .replace_arrow_scene(Rc::new(scene), renderer, complete);
+                wasm_bindgen_futures::JsFuture::from(promise).await?;
             }
         }
         Ok(())
+    }
+
+    /// Clears the Arrow scene and its GPU assets while preserving the video.
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = resetState)]
+    pub async fn reset_state(&self) -> Result<(), wasm_bindgen::JsValue> {
+        let gpu = self
+            .shared
+            .shared_gpu()
+            .ok_or_else(|| crate::js_error("video editor GPU is not initialized"))?;
+        let timeline = self.timeline.get();
+        let renderer = trd_gui::video_editing_renderer::VideoPlacementRenderer::new_empty_with_gpu(
+            gpu,
+            timeline.width,
+            timeline.height,
+        )
+        .map_err(crate::js_error)?;
+        let (promise, complete) = scene_completion(|()| wasm_bindgen::JsValue::UNDEFINED);
+        self.shared.reset_arrow_scene(renderer, complete);
+        wasm_bindgen_futures::JsFuture::from(promise).await?;
+        Ok(())
+    }
+
+    /// Returns the current 0.0.7 source snapshot without opening a save dialog.
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = exportArrow)]
+    pub async fn export_arrow(&self) -> Result<js_sys::Uint8Array, wasm_bindgen::JsValue> {
+        use wasm_bindgen::JsCast;
+
+        let (promise, complete) =
+            scene_completion(|bytes: Vec<u8>| js_sys::Uint8Array::from(bytes.as_slice()).into());
+        self.shared.export_arrow_scene(complete);
+        let bytes = wasm_bindgen_futures::JsFuture::from(promise).await?;
+        bytes
+            .dyn_into::<js_sys::Uint8Array>()
+            .map_err(|_| crate::js_error("Arrow export did not return bytes"))
     }
 
     /// Drops the current annotation document; video keeps playing.
