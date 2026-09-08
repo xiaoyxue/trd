@@ -20,10 +20,12 @@ mod canvas_renderer;
 pub mod gui;
 mod gui_web_app;
 mod offscreen_renderer;
+mod scene_document;
 
 pub use browser_frame::BrowserVideoFrame;
 pub use canvas_renderer::CanvasRenderer;
 pub use offscreen_renderer::OffscreenRenderer;
+pub use scene_document::ArrowSceneDocument;
 
 #[derive(Debug, Clone)]
 pub(crate) struct PbrState {

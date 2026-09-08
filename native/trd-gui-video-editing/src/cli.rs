@@ -5,18 +5,34 @@ use clap::Parser;
 #[derive(Debug, Parser)]
 #[command(name = "trd-gui-video-editing", version, about)]
 pub struct Cli {
-    /// Versioned `trd.video_edit.version = 0.2.0` Arrow IPC or Parquet timeline.
+    /// Arrow annotation input or a params scene. Videos remain separate.
     ///
-    /// The version is matched exactly, not as a minimum: `trd-core`'s
-    /// `VIDEO_EDIT_VERSION` is the only accepted value and any other is
-    /// rejected, so this text and that constant must not drift apart. The
-    /// container is sniffed from the bytes rather than the file name, so either
-    /// format may be passed here.
+    /// The bytes are sniffed against the exact current video-editing version
+    /// first, then the exact current render-protocol version. Other versions are
+    /// rejected rather than upgraded.
     ///
-    /// **Optional**: without one the editor is a plain player — the timeline
-    /// comes from the video container and the placement UI stays inert (#264).
-    #[arg(long, value_name = "TIMELINE")]
+    /// **Optional**: without one the editor is a plain player. Annotation input
+    /// enables editing; a protocol scene replays over the selected video.
+    #[arg(long, value_name = "ARROW_INPUT")]
     pub document: Option<PathBuf>,
+
+    /// One GLB resource for the params input; reuse its UUID or create a new binding.
+    #[arg(
+        long,
+        value_name = "GLB",
+        requires = "document",
+        conflicts_with = "glb_mesh"
+    )]
+    pub glb: Option<PathBuf>,
+
+    /// UUID-keyed GLB resources. Repeat as --glb-mesh UUID=PATH.
+    #[arg(
+        long,
+        value_name = "UUID=GLB",
+        requires = "document",
+        conflicts_with = "glb"
+    )]
+    pub glb_mesh: Vec<String>,
 
     /// Local MP4 matching the timeline metadata. Without a source, the editor
     /// starts with an empty canvas until Open video is used.

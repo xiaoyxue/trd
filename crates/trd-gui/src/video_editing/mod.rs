@@ -4,8 +4,12 @@
 mod details_ui;
 mod diagnostics;
 mod editing_ui;
+mod export;
+mod scene_api;
+mod source_editing;
 
 pub use diagnostics::{PoseDeltaDiagnostics, QuadFrameDiagnostics, TrackingPlacementError};
+pub use export::{decode_video_editing_input, ArrowExport, ArrowScene, VideoEditingInput};
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -13,6 +17,10 @@ use std::rc::Rc;
 use web_time::Instant;
 
 use diagnostics::{dot3, pose_delta};
+
+// Placement maps model (X, Y, Z) to (e1, e3, -e2).
+const QUAD_MOVE_AXES: [[f32; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]];
+const QUAD_MOVE_LABELS: [&str; 3] = ["e1 (quad X)", "e2 (-quad Z)", "e3 (normal)"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -57,6 +65,7 @@ pub enum ErrorScope {
     Document,
     Render,
     Pick,
+    Export,
 }
 
 impl ErrorScope {
@@ -67,6 +76,7 @@ impl ErrorScope {
             Self::Document => "document",
             Self::Render => "render",
             Self::Pick => "pick",
+            Self::Export => "export",
         }
     }
 
@@ -77,6 +87,7 @@ impl ErrorScope {
             3 => Some(Self::Document),
             4 => Some(Self::Render),
             5 => Some(Self::Pick),
+            6 => Some(Self::Export),
             _ => None,
         }
     }
@@ -98,6 +109,31 @@ const COMMAND_PLAY: u8 = 2;
 const COMMAND_PAUSE: u8 = 3;
 const COMMAND_PICK_DOCUMENT: u8 = 4;
 const COMMAND_LOAD_SELECTION: u8 = 5;
+const COMMAND_EXPORT_ARROW: u8 = 6;
+const COMMAND_LOAD_VIDEO: u8 = 7;
+const COMMAND_LOAD_ARROW: u8 = 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceDialog {
+    Video,
+    Arrow,
+}
+
+impl SourceDialog {
+    fn can_load(self, video_selected: bool, arrow_selected: bool, arrow_loaded: bool) -> bool {
+        match self {
+            Self::Video => video_selected,
+            Self::Arrow => arrow_selected || arrow_loaded,
+        }
+    }
+
+    fn command(self) -> u8 {
+        match self {
+            Self::Video => COMMAND_LOAD_VIDEO,
+            Self::Arrow => COMMAND_LOAD_ARROW,
+        }
+    }
+}
 
 /// A source the dialog has selected but not loaded: picking and loading are separate steps (#264).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,18 +147,16 @@ pub struct PendingSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DocumentFormat {
     ArrowIpc,
-    Parquet,
 }
 
 impl DocumentFormat {
-    pub const EXTENSIONS: [&'static str; 2] = ["arrow", "parquet"];
+    pub const EXTENSIONS: [&'static str; 1] = ["arrow"];
 
     /// The format an extension suggests, or `None` for anything else.
     pub fn from_name(name: &str) -> Option<Self> {
         let extension = name.rsplit_once('.')?.1.to_ascii_lowercase();
         match extension.as_str() {
             "arrow" => Some(Self::ArrowIpc),
-            "parquet" => Some(Self::Parquet),
             _ => None,
         }
     }
@@ -130,7 +164,6 @@ impl DocumentFormat {
     pub const fn label(self) -> &'static str {
         match self {
             Self::ArrowIpc => "Arrow IPC",
-            Self::Parquet => "Parquet",
         }
     }
 }
@@ -306,23 +339,26 @@ pub fn document_url_selection(url: &str) -> Result<DocumentFormat, String> {
         .next()
         .unwrap_or(url);
     DocumentFormat::from_name(path).ok_or_else(|| {
-        format!(
-            "document URL should name a .{} or .{} file",
-            DocumentFormat::EXTENSIONS[0],
-            DocumentFormat::EXTENSIONS[1]
-        )
+        "document URL should name an .arrow file; Parquet is not supported".to_owned()
     })
+}
+
+pub(crate) fn protocol_k_from_row_major(k: [f32; 9]) -> [f32; 9] {
+    [k[0], k[3], k[6], k[1], k[4], k[7], k[2], k[5], k[8]]
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoEditingCommand {
     OpenLocalVideo,
-    /// Pick a local annotation document (`.arrow` / `.parquet`); optional (#264).
+    /// Pick a local Arrow annotation document; optional (#264).
     OpenLocalDocument,
     /// Load the dialog's selection (video + optional document). Picking alone never loads.
     LoadSelection,
+    LoadVideo,
+    LoadArrow,
     Play,
     Pause,
+    ExportArrow,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -381,6 +417,11 @@ struct RenderedFrameDiagnostics {
     /// Pinned to the displayed frame (same reason as `media_time_seconds`).
     duration_seconds: f64,
     scene: crate::scene::SceneState,
+    inspected_object: usize,
+    source_frame: Option<trd_core::DocumentFrame>,
+    source_reference: bool,
+    show_reference_cube: bool,
+    show_plane_grid: bool,
     selected_asset: Option<CatalogAsset>,
     selected_quad: bool,
     move_direction: crate::interaction::MoveDirection,
@@ -398,6 +439,11 @@ struct PickRequest {
     point: (u32, u32),
     source_generation: u64,
     render_revision: u64,
+}
+
+enum PickFrame {
+    Annotation(trd_core::VideoEditingFrame, trd_core::Matrix4),
+    Source(trd_core::SceneDocument, Box<trd_core::DocumentFrame>),
 }
 
 struct PickResult {
@@ -425,6 +471,9 @@ pub struct VideoEditingShared {
     /// Decoded document from the shell, or `Some(None)` to clear. Consumed next frame.
     /// Distinct from `pending_document` (the dialog's selection — this is the loaded result).
     incoming_document: RefCell<Option<Option<trd_core::VideoEditingDocument>>>,
+    incoming_scene: RefCell<Option<Option<Rc<ArrowScene>>>>,
+    scene_operations: RefCell<std::collections::VecDeque<scene_api::SceneOperation>>,
+    scene_seeks: RefCell<Vec<scene_api::SeekCompletion>>,
     command: Cell<u8>,
     asset_request: Cell<u8>,
 
@@ -462,6 +511,9 @@ pub struct VideoEditingShared {
     renderer: RefCell<Option<crate::video_editing_renderer::VideoPlacementRenderer>>,
     renderer_diagnostics: RefCell<Option<crate::video_editing_renderer::VideoRendererDiagnostics>>,
     asset_defaults: RefCell<Option<(CatalogAsset, trd_core::RenderMode, trd_core::DisneyMaterial)>>,
+    export_asset: RefCell<Option<Rc<crate::video_editing_renderer::VideoExportAsset>>>,
+    pending_export: RefCell<Option<ArrowExport>>,
+    export_status: RefCell<Option<Result<String, String>>>,
     error: RefCell<Option<(ErrorScope, String)>>,
 }
 
@@ -477,6 +529,9 @@ impl Default for VideoEditingShared {
             external_frame: RefCell::new(None),
             pending_video_info: RefCell::new(None),
             incoming_document: RefCell::new(None),
+            incoming_scene: RefCell::new(None),
+            scene_operations: RefCell::new(std::collections::VecDeque::new()),
+            scene_seeks: RefCell::new(Vec::new()),
             command: Cell::new(COMMAND_NONE),
             asset_request: Cell::new(0),
 
@@ -508,6 +563,9 @@ impl Default for VideoEditingShared {
             renderer: RefCell::new(None),
             renderer_diagnostics: RefCell::new(None),
             asset_defaults: RefCell::new(None),
+            export_asset: RefCell::new(None),
+            pending_export: RefCell::new(None),
+            export_status: RefCell::new(None),
             error: RefCell::new(None),
         }
     }
@@ -622,6 +680,7 @@ impl VideoEditingShared {
 
     pub fn set_video_status(&self, loaded: bool, playing: bool) {
         if !loaded {
+            self.fail_scene_seeks("video source changed during seek");
             self.source_generation
                 .set(self.source_generation.get().wrapping_add(1));
             self.frame.replace(None);
@@ -675,7 +734,11 @@ impl VideoEditingShared {
     }
 
     pub fn set_error(&self, scope: ErrorScope, message: impl Into<String>) {
-        self.error.replace(Some((scope, message.into())));
+        let message = message.into();
+        if matches!(scope, ErrorScope::Media | ErrorScope::Render) {
+            self.fail_scene_seeks(&message);
+        }
+        self.error.replace(Some((scope, message)));
         self.request_repaint();
     }
 
@@ -704,8 +767,11 @@ impl VideoEditingShared {
             COMMAND_PICK_VIDEO => Some(VideoEditingCommand::OpenLocalVideo),
             COMMAND_PICK_DOCUMENT => Some(VideoEditingCommand::OpenLocalDocument),
             COMMAND_LOAD_SELECTION => Some(VideoEditingCommand::LoadSelection),
+            COMMAND_LOAD_VIDEO => Some(VideoEditingCommand::LoadVideo),
+            COMMAND_LOAD_ARROW => Some(VideoEditingCommand::LoadArrow),
             COMMAND_PLAY => Some(VideoEditingCommand::Play),
             COMMAND_PAUSE => Some(VideoEditingCommand::Pause),
+            COMMAND_EXPORT_ARROW => Some(VideoEditingCommand::ExportArrow),
             _ => None,
         }
     }
@@ -725,23 +791,29 @@ impl VideoEditingShared {
         self.pending_video_info.borrow_mut().take()
     }
 
-    /// Decodes `bytes` as an annotation document. On failure the current document is unchanged (#264).
-    pub fn load_document_bytes(&self, bytes: &[u8]) -> Result<(), String> {
-        let document =
-            trd_core::decode_video_editing_document(bytes).map_err(|error| error.to_string())?;
+    pub fn queue_annotation_document(&self, document: trd_core::VideoEditingDocument) {
         self.incoming_document.replace(Some(Some(document)));
         self.request_repaint();
-        Ok(())
     }
 
-    /// Drops the current annotation document; the video keeps playing.
+    pub fn queue_arrow_scene(&self, scene: Rc<ArrowScene>) {
+        self.incoming_scene.replace(Some(Some(scene)));
+        self.request_repaint();
+    }
+
+    /// Drops the current annotation document or replay scene; the video keeps playing.
     pub fn clear_document(&self) {
         self.incoming_document.replace(Some(None));
+        self.incoming_scene.replace(Some(None));
         self.request_repaint();
     }
 
     fn take_incoming_document(&self) -> Option<Option<trd_core::VideoEditingDocument>> {
         self.incoming_document.borrow_mut().take()
+    }
+
+    fn take_incoming_scene(&self) -> Option<Option<Rc<ArrowScene>>> {
+        self.incoming_scene.borrow_mut().take()
     }
 
     /// Records a file-picker result without loading; displayed by the dialog until Load is pressed.
@@ -781,6 +853,7 @@ impl VideoEditingShared {
     }
 
     pub fn set_renderer(&self, renderer: crate::video_editing_renderer::VideoPlacementRenderer) {
+        self.export_asset.replace(renderer.export_asset());
         self.renderer_generation
             .set(self.renderer_generation.get().wrapping_add(1));
         self.renderer_diagnostics
@@ -851,6 +924,8 @@ pub struct VideoEditingApp {
     /// editor is a plain player: the placement UI is inert and every frame is
     /// just video.
     document: Option<trd_core::VideoEditingDocument>,
+    /// A finished protocol scene replayed over the same source video.
+    arrow_scene: Option<Rc<ArrowScene>>,
     display_image: egui::ColorImage,
     display_texture: Option<egui::TextureHandle>,
     current_frame_index: u32,
@@ -871,9 +946,17 @@ pub struct VideoEditingApp {
     show_placement_quads: bool,
     was_playing: bool,
     selected_asset: Option<CatalogAsset>,
-    image_sizing: crate::ui::ImageSizing,
+    source_selected_instance: usize,
+    source_controller_row: Option<usize>,
+    source_model_baselines: Vec<Option<Vec<trd_core::ModelEdit>>>,
+    source_applied_adjustments: Vec<trd_core::Matrix4>,
+    source_hovered_instance: Option<usize>,
+    show_reference_cube: bool,
+    show_plane_grid: bool,
+    /// GPU target sizing; the displayed image always fits its available region.
+    render_sizing: crate::ui::ImageSizing,
     fitted_render_size: (u32, u32),
-    show_video_source_dialog: bool,
+    source_dialog: Option<SourceDialog>,
     video_url: String,
     /// URL input and last validation result (`Ok` = selected, `Err` = rejected).
     video_status: Option<Result<String, String>>,
@@ -912,11 +995,12 @@ impl VideoEditingApp {
         let mut controller = crate::interaction::InteractionController::new(scene);
         controller.target = crate::interaction::InteractionTarget::Object;
         controller.move_direction = crate::interaction::MoveDirection::Reference1;
-        controller.move_reference_axes = [[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]];
+        controller.move_reference_axes = QUAD_MOVE_AXES;
         controller.state.camera.distance = 1.0;
         Self {
             video,
             document,
+            arrow_scene: None,
             display_image: egui::ColorImage::from_rgba_unmultiplied([1, 1], &[0, 0, 0, 0]),
             display_texture: None,
             current_frame_index: 0,
@@ -933,9 +1017,16 @@ impl VideoEditingApp {
             show_placement_quads: true,
             was_playing: false,
             selected_asset: None,
-            image_sizing: crate::ui::ImageSizing::FitCanvas,
+            source_selected_instance: 0,
+            source_controller_row: None,
+            source_model_baselines: Vec::new(),
+            source_applied_adjustments: Vec::new(),
+            source_hovered_instance: None,
+            show_reference_cube: false,
+            show_plane_grid: false,
+            render_sizing: crate::ui::ImageSizing::FitCanvas,
             fitted_render_size: source_size,
-            show_video_source_dialog: false,
+            source_dialog: None,
             video_url: String::new(),
             video_status: None,
             document_url: String::new(),
@@ -971,12 +1062,93 @@ impl VideoEditingApp {
     /// Selection/object/pick are cleared (they refer to the old document's quads, #264).
     pub fn set_document(&mut self, document: Option<trd_core::VideoEditingDocument>) {
         self.document = document;
+        self.arrow_scene = None;
         self.selected_quad = false;
         self.hovered_quad = false;
         self.selected_asset = None;
         self.last_pick_result = None;
         self.controller.state.selected = None;
         self.controller.state.objects[0] = crate::scene::ObjectTransform::default();
+        self.shared.clear_export_asset();
+        self.shared.cancel_arrow_export();
+        self.shared.request_overlay();
+    }
+
+    pub fn set_arrow_scene(&mut self, scene: Option<Rc<ArrowScene>>) {
+        self.source_selected_instance = 0;
+        self.source_controller_row = None;
+        self.source_model_baselines.clear();
+        self.source_applied_adjustments.clear();
+        self.source_hovered_instance = None;
+        self.show_reference_cube = false;
+        self.show_plane_grid = false;
+        self.show_gizmos = false;
+        if self.shared.video_loaded.get() {
+            if let Some(error) = scene
+                .as_deref()
+                .and_then(|scene| self.arrow_scene_validation_error(scene))
+            {
+                self.shared.set_error(ErrorScope::Document, error);
+                return;
+            }
+        }
+        self.document = None;
+        if let Some(scene) = scene.as_ref() {
+            if scene.source.is_some() {
+                self.render_sizing = crate::ui::ImageSizing::OriginalResolution;
+            }
+            if let Some(operator) = scene.tonemap {
+                self.controller.state.tone_mappings[0].operator = operator;
+                self.controller
+                    .state
+                    .environment_background_tone_mapping
+                    .operator = operator;
+            }
+            if let Some(mode) = scene
+                .frames
+                .iter()
+                .filter_map(|frame| frame.draws.as_ref())
+                .flatten()
+                .find_map(|draw| match draw.selection {
+                    trd_core::DrawSelection::Mesh(Some(mode)) => Some(mode),
+                    _ => None,
+                })
+            {
+                self.controller.state.modes[0] = mode;
+            }
+            if let Some(renderer) = self.shared.renderer.borrow().as_ref() {
+                let (material, lighting) = renderer.replay_defaults();
+                self.controller.state.materials[0] = material;
+                self.controller.state.lighting = lighting;
+                self.controller.state.environment_available = true;
+            }
+        }
+        self.arrow_scene = scene;
+        self.selected_quad = false;
+        self.hovered_quad = false;
+        self.selected_asset = None;
+        self.last_pick_result = None;
+        self.controller.state.selected = None;
+        self.controller.state.objects[0] = crate::scene::ObjectTransform::default();
+        let initial = self
+            .arrow_scene
+            .as_ref()
+            .and_then(|scene| scene.source.as_ref())
+            .and_then(|source| {
+                let source = source.borrow();
+                source.frame(0).ok().and_then(|frame| {
+                    source_editing::initial_bound_instance(&frame, source.meshes().len())
+                })
+            });
+        if let Some(index) = initial {
+            self.selected_quad = true;
+            self.show_gizmos = true;
+            self.show_plane_grid = true;
+            self.controller.state.selected = Some(index);
+        }
+        self.shared.clear_export_asset();
+        self.shared.cancel_arrow_export();
+        self.shared.clear_error(ErrorScope::Document);
         self.shared.request_overlay();
     }
 
@@ -988,11 +1160,32 @@ impl VideoEditingApp {
         self.last_pick_result = None;
         self.show_placement_quads = true;
         self.show_gizmos = false;
+        self.show_reference_cube = false;
+        self.show_plane_grid = false;
+        self.source_hovered_instance = None;
         self.controller.state = crate::scene::SceneState::default();
         self.controller.target = crate::interaction::InteractionTarget::Camera;
         self.controller.mode = crate::interaction::TransformMode::default();
         self.controller.move_direction = crate::interaction::MoveDirection::default();
         self.controller.rebase_reset();
+        self.shared.clear_export_asset();
+        self.shared.cancel_arrow_export();
+        if self
+            .arrow_scene
+            .as_ref()
+            .is_some_and(|scene| scene.source.is_some())
+        {
+            // Reset controls/selection, not the saved document or its GPU assets.
+            self.source_controller_row = None;
+            self.source_model_baselines.clear();
+            self.source_applied_adjustments.clear();
+            self.source_selected_instance = 0;
+            if let Err(error) = self.sync_source_controller() {
+                self.shared.set_error(ErrorScope::Document, error);
+            }
+            self.shared.request_overlay();
+            return;
+        }
         // Drop the renderer to clear the GPU-side asset too.
         self.shared.renderer.borrow_mut().take();
         self.shared.asset_request.set(0);
@@ -1006,6 +1199,47 @@ impl VideoEditingApp {
         self.current_frame_index = self.current_frame_index.min(last);
         self.displayed_frame_index = self.displayed_frame_index.min(last);
         self.pending_seek = None;
+        if let Some(error) = self
+            .arrow_scene
+            .as_deref()
+            .and_then(|scene| self.arrow_scene_validation_error(scene))
+        {
+            self.arrow_scene = None;
+            self.shared.set_error(ErrorScope::Document, error);
+        }
+    }
+
+    fn arrow_scene_validation_error(&self, scene: &ArrowScene) -> Option<String> {
+        let stored = self.video.frame_count as usize;
+        if scene.source.is_some() && scene.frames.is_empty() {
+            return None;
+        }
+        if scene.is_frame_indexed() {
+            return scene
+                .frames
+                .iter()
+                .filter_map(|frame| frame.video_frame_index)
+                .find(|index| *index as usize >= stored)
+                .map(|index| {
+                    format!(
+                        "protocol scene references video frame {index}, but the video stores \
+                         {stored} frames"
+                    )
+                });
+        }
+        let allowed_tail = self
+            .video
+            .unpresented_tail
+            .map_or(1, |tail| tail.samples.max(1)) as usize;
+        let missing_tail = stored.saturating_sub(scene.frames.len());
+        (scene.frames.is_empty() || scene.frames.len() > stored || missing_tail > allowed_tail)
+            .then(|| {
+                format!(
+                    "protocol scene has {} params rows, but the video stores {stored} frames \
+                     (at most {allowed_tail} trailing unpresented frame(s) may be omitted)",
+                    scene.frames.len(),
+                )
+            })
     }
 
     /// Registers the render texture directly in egui (no readback) when sharing a device.
@@ -1045,31 +1279,35 @@ impl VideoEditingApp {
     }
 
     fn video_source_dialog(&mut self, context: &egui::Context) {
-        if !self.show_video_source_dialog {
+        let Some(kind) = self.source_dialog else {
             return;
-        }
+        };
         let mut open = true;
         let mut close = false;
-        egui::Window::new("Open source")
-            .collapsible(false)
-            .resizable(false)
-            .open(&mut open)
-            .show(context, |ui| {
-                ui.set_min_width(460.0);
-                // The rows scroll; the Load button does not. A dialog whose
-                // commit point can be pushed off-screen by its own explanatory
-                // text is a dialog with no commit point.
-                egui::ScrollArea::vertical()
-                    .max_height(360.0)
-                    .show(ui, |ui| {
-                        self.video_source_row(ui);
-                        ui.separator();
-                        self.document_source_row(ui);
-                    });
-                ui.separator();
-                close = self.load_row(ui);
-            });
-        self.show_video_source_dialog = open && !close;
+        egui::Window::new(match kind {
+            SourceDialog::Video => "Open Video",
+            SourceDialog::Arrow => "Load Arrow",
+        })
+        .collapsible(false)
+        .resizable(false)
+        .open(&mut open)
+        .show(context, |ui| {
+            ui.set_min_width(460.0);
+            // The rows scroll; the Load button does not. A dialog whose
+            // commit point can be pushed off-screen by its own explanatory
+            // text is a dialog with no commit point.
+            egui::ScrollArea::vertical()
+                .max_height(360.0)
+                .show(ui, |ui| match kind {
+                    SourceDialog::Video => self.video_source_row(ui),
+                    SourceDialog::Arrow => self.document_source_row(ui),
+                });
+            ui.separator();
+            close = self.load_row(ui, kind);
+        });
+        if !open || close {
+            self.source_dialog = None;
+        }
     }
 
     /// The video row. Selecting a file or URL waits for the Load button (#264).
@@ -1115,11 +1353,11 @@ impl VideoEditingApp {
         ui.weak("A URL must allow cross-origin video frame access.");
     }
 
-    /// The optional annotation-document row (`.arrow`/`.parquet`, local or HTTP, plus Clear).
+    /// Optional annotation document or exported protocol scene.
     fn document_source_row(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Annotation document (optional)");
-        ui.label("Arrow IPC or Parquet rows naming the frames that carry placement data.");
-        ui.weak("Without one the video simply plays; with one, those frames become editable.");
+        ui.heading("Arrow input");
+        ui.label("An Arrow annotation document or params scene. Parquet is not supported.");
+        ui.weak("Load or replace Arrow data without reopening the video.");
 
         ui.horizontal(|ui| {
             if ui.button("Select local file...").clicked() {
@@ -1131,12 +1369,12 @@ impl VideoEditingApp {
                 self.shared.set_pending_document(None);
             }
         });
-        ui.weak("Load applies the whole selection: with no document the video plays unannotated.");
+        ui.weak("Clear the selection and choose Unload Arrow to keep only the video.");
 
-        ui.label("Document URL");
+        ui.label("Arrow input URL");
         let response = ui.add(
             egui::TextEdit::singleline(&mut self.document_url)
-                .hint_text("https://example.com/shot.parquet")
+                .hint_text("https://example.com/shot.arrow")
                 .desired_width(f32::INFINITY),
         );
         let submit = response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
@@ -1156,7 +1394,7 @@ impl VideoEditingApp {
         selection_label(ui, self.document_status.as_ref(), || {
             match self.shared.pending_document() {
                 Some(source) => format!("Selected: {}", source.name),
-                None => "No document — the video plays as-is".to_owned(),
+                None => "No Arrow input — the video plays as-is".to_owned(),
             }
         });
         ui.weak("Format is decided by the file's contents, not its name.");
@@ -1164,20 +1402,23 @@ impl VideoEditingApp {
 
     /// The single commit point. Returns whether it was pressed, so the dialog
     /// closes only on an actual load.
-    fn load_row(&mut self, ui: &mut egui::Ui) -> bool {
-        let ready = load_is_available(
+    fn load_row(&mut self, ui: &mut egui::Ui, kind: SourceDialog) -> bool {
+        let ready = kind.can_load(
             self.shared.pending_video().is_some(),
-            self.shared.video_loaded.get(),
+            self.shared.pending_document().is_some(),
+            self.document.is_some() || self.arrow_scene.is_some(),
         );
+        let label = match kind {
+            SourceDialog::Video => "Open Video",
+            SourceDialog::Arrow if self.shared.pending_document().is_none() => "Unload Arrow",
+            SourceDialog::Arrow => "Load Arrow",
+        };
         let clicked = ui
-            .add_enabled(ready, egui::Button::new("Load"))
-            .on_disabled_hover_text("Select a video first — the document is optional")
+            .add_enabled(ready, egui::Button::new(label))
+            .on_disabled_hover_text("Select a local file or an HTTP(S) URL")
             .clicked();
         if clicked {
-            self.shared.command.set(COMMAND_LOAD_SELECTION);
-        }
-        if !ready {
-            ui.weak("Load becomes available once a video is selected.");
+            self.shared.command.set(kind.command());
         }
         clicked
     }
@@ -1194,6 +1435,7 @@ impl VideoEditingApp {
                 self.pending_seek = None;
             }
         }
+        self.shared.finish_scene_seeks(frame.answers_seek);
         // Shared-device path: no readback, so no pixels to upload. Skipping is a panic.
         if frame.rgba.is_empty() {
             return;
@@ -1258,8 +1500,25 @@ impl VideoEditingApp {
         }
         let hit = result.hit;
         self.last_pick_result = Some(hit);
-        if hit != self.controller.state.selected {
-            self.controller.state.selected = hit;
+        let mut selection_changed = hit != self.controller.state.selected;
+        if self
+            .arrow_scene
+            .as_ref()
+            .is_some_and(|scene| scene.source.is_some())
+        {
+            if let Some(index) = hit {
+                selection_changed |= !self.selected_quad
+                    || !self.show_gizmos
+                    || !self.show_plane_grid
+                    || self.source_selected_instance != index as usize;
+                self.source_selected_instance = index as usize;
+                self.selected_quad = true;
+                self.show_gizmos = true;
+                self.show_plane_grid = true;
+            }
+        }
+        self.controller.state.selected = hit;
+        if selection_changed {
             self.shared.request_overlay();
         }
     }
@@ -1276,6 +1535,32 @@ impl VideoEditingApp {
             return;
         };
         let background_frame = self.frame_row(video.frame_index).cloned();
+        let replay_frame = self
+            .arrow_scene
+            .as_ref()
+            .and_then(|scene| scene.frame(video.frame_index))
+            .cloned();
+        let source_payload = self
+            .arrow_scene
+            .as_ref()
+            .and_then(|scene| {
+                scene
+                    .source
+                    .as_ref()
+                    .zip(scene.source_row(video.frame_index))
+            })
+            .map(|(source, row)| {
+                let source = source.borrow();
+                source.frame(row).map(|frame| (source.clone(), frame))
+            })
+            .transpose();
+        let source_payload = match source_payload {
+            Ok(payload) => payload,
+            Err(error) => {
+                self.shared.set_error(ErrorScope::Render, error.to_string());
+                return;
+            }
+        };
         let quad_frame = self.quad_frame_at(video.frame_index);
         // Overlay follows the toggles, not play state (#264).
         let tracked = background_frame.as_ref().is_some_and(|frame| frame.tracked);
@@ -1303,7 +1588,7 @@ impl VideoEditingApp {
         // Size from the decoded frame (not the document): `--preview-width` may decode below
         // source res. Calibration K stays at document size; `frame_camera` rescales it (#168/#170).
         let decoded_size = (video.width.max(1), video.height.max(1));
-        let requested_size = match self.image_sizing {
+        let requested_size = match self.render_sizing {
             crate::ui::ImageSizing::FitCanvas => (
                 self.fitted_render_size.0.min(decoded_size.0).max(1),
                 self.fitted_render_size.1.min(decoded_size.1).max(1),
@@ -1321,6 +1606,23 @@ impl VideoEditingApp {
         let render_size = renderer.size();
         self.shared.needs_overlay.set(false);
         let mut state = self.controller.state.clone();
+        let inspected_object = if source_payload.is_some() {
+            if source_payload
+                .as_ref()
+                .is_some_and(|(document, _)| !document.meshes().is_empty())
+                && self.source_controller_row
+                    != self
+                        .arrow_scene
+                        .as_ref()
+                        .and_then(|scene| scene.source_row(video.frame_index))
+            {
+                state.objects.clear();
+            }
+            self.source_selected_instance
+        } else {
+            state.selected.unwrap_or(0) as usize
+        };
+        let replay_tonemap = state.tone_mappings[0].operator;
         let rendered_playing = self.shared.video_playing.get();
         if rendered_playing {
             state.selected = None;
@@ -1344,12 +1646,33 @@ impl VideoEditingApp {
         let selected_quad = self.selected_quad;
         let hovered_quad = self.hovered_quad;
         let move_direction = self.controller.move_direction;
-        let rendered_model = model;
+        let mut rendered_model = replay_frame
+            .as_ref()
+            .and_then(|frame| frame.draws.as_ref())
+            .and_then(|draws| draws.first())
+            .map(|draw| draw.model)
+            .or(model);
         let background_frame_index = video.frame_index;
         let background_media_time = video.media_time_seconds;
         let background_duration = video.duration_seconds;
         let answers_seek = video.answers_seek;
         let render_started = Instant::now();
+        let source_overlays = trd_placement::PlacementOverlays {
+            quad: self.show_placement_quads,
+            axes: self.show_gizmos,
+            cube: self.show_reference_cube,
+            grid: self.show_plane_grid,
+            selected: self.selected_quad.then_some(self.source_selected_instance),
+            hovered: self.source_hovered_instance,
+        };
+        let source_frame = source_payload.as_ref().map(|(_, frame)| frame.clone());
+        let source_reference = source_payload
+            .as_ref()
+            .is_some_and(|(document, _)| document.meshes().is_empty());
+        let source_document_active = self
+            .arrow_scene
+            .as_ref()
+            .is_some_and(|scene| scene.source.is_some());
         // GPU-path: `present_external_frame` frame has no RGBA bytes; always None natively (#302).
         let external_frame = shared.external_frame().filter(|_| video.rgba.is_empty());
         let render = async move {
@@ -1357,10 +1680,39 @@ impl VideoEditingApp {
                 Some(frame) => crate::video_editing_renderer::FrameSource::External(frame),
                 None => crate::video_editing_renderer::FrameSource::Rgba(&video.rgba),
             };
-            let result = if shared.skip_readback.get() {
+            let result = if let Some((document, frame)) = source_payload.as_ref() {
+                match renderer.draw_document_frame(
+                    source,
+                    (video.width, video.height),
+                    document,
+                    frame,
+                    source_overlays,
+                    state.selected,
+                ) {
+                    Ok(()) if shared.skip_readback.get() => Ok(Vec::new()),
+                    Ok(()) => renderer.read_document_pixels().await,
+                    Err(error) => Err(error),
+                }
+            } else if source_document_active {
+                // A sparse tail has no object; the catalog draw path would
+                // overwrite mesh 0's material with the previous UI instance.
+                match renderer.draw_video_frame(source, video.width, video.height) {
+                    Ok(()) if shared.skip_readback.get() => Ok(Vec::new()),
+                    Ok(()) => renderer.read_document_pixels().await,
+                    Err(error) => Err(error),
+                }
+            } else if shared.skip_readback.get() {
                 // Shared-device: no readback; empty Vec signals `set_display_frame` to skip upload.
-                renderer
-                    .draw(
+                match replay_frame.as_ref() {
+                    Some(frame) => renderer.draw_scene_frame(
+                        source,
+                        video.width,
+                        video.height,
+                        (width, height),
+                        frame,
+                        replay_tonemap,
+                    ),
+                    None => renderer.draw(
                         source,
                         video.width,
                         video.height,
@@ -1370,24 +1722,52 @@ impl VideoEditingApp {
                         placement_frame.as_ref(),
                         model,
                         &state,
-                    )
-                    .map(|()| Vec::new())
+                    ),
+                }
+                .map(|()| Vec::new())
             } else {
-                renderer
-                    .render(
-                        &video.rgba,
-                        video.width,
-                        video.height,
-                        (width, height),
-                        background_frame.as_ref(),
-                        quad_overlay,
-                        placement_frame.as_ref(),
-                        model,
-                        &state,
-                    )
-                    .await
+                match replay_frame.as_ref() {
+                    Some(frame) => {
+                        renderer
+                            .render_scene_frame(
+                                &video.rgba,
+                                video.width,
+                                video.height,
+                                (width, height),
+                                frame,
+                                replay_tonemap,
+                            )
+                            .await
+                    }
+                    None => {
+                        renderer
+                            .render(
+                                &video.rgba,
+                                video.width,
+                                video.height,
+                                (width, height),
+                                background_frame.as_ref(),
+                                quad_overlay,
+                                placement_frame.as_ref(),
+                                model,
+                                &state,
+                            )
+                            .await
+                    }
+                }
             };
-            let renderer_diagnostics = renderer.diagnostics();
+            let mut renderer_diagnostics = renderer.diagnostics();
+            let result = result.and_then(|rgba| {
+                if let Some((document, frame)) = source_payload.as_ref() {
+                    (renderer_diagnostics, rendered_model) = renderer.document_diagnostics(
+                        document,
+                        frame,
+                        inspected_object,
+                        &mut state,
+                    )?;
+                }
+                Ok(rgba)
+            });
             if shared.renderer_generation.get() != renderer_generation {
                 shared.render_in_flight.set(false);
                 shared.render_in_flight_frame.set(None);
@@ -1421,12 +1801,23 @@ impl VideoEditingApp {
                             media_time_seconds: background_media_time,
                             duration_seconds: background_duration,
                             scene: state,
+                            inspected_object,
+                            source_frame: source_frame.clone(),
+                            source_reference,
+                            show_reference_cube: source_reference && source_overlays.cube,
+                            show_plane_grid: if source_frame.is_some() {
+                                source_overlays.grid
+                            } else {
+                                show_gizmos
+                            },
                             selected_asset,
                             selected_quad,
                             move_direction,
                             playing: rendered_playing,
-                            show_quad,
-                            show_gizmos,
+                            show_quad: show_quad
+                                || (source_frame.is_some() && source_overlays.quad),
+                            show_gizmos: show_gizmos
+                                || (source_frame.is_some() && source_overlays.axes),
                             hovered_quad,
                             draw_model: rendered_model,
                             renderer: renderer_diagnostics,
@@ -1459,11 +1850,28 @@ impl VideoEditingApp {
         let Some(request) = self.shared.pending_pick.take() else {
             return;
         };
-        let Some(frame) = self.frame_row(self.displayed_frame_index).cloned() else {
-            return;
-        };
-        let Some(model) = self.placement_model_at(self.displayed_frame_index) else {
-            return;
+        let pick_frame = if let Some((source, row)) = self.arrow_scene.as_ref().and_then(|scene| {
+            scene
+                .source
+                .as_ref()
+                .zip(scene.source_row(self.displayed_frame_index))
+        }) {
+            let source = source.borrow();
+            match source.frame(row) {
+                Ok(frame) => PickFrame::Source(source.clone(), Box::new(frame)),
+                Err(error) => {
+                    self.shared.set_error(ErrorScope::Pick, error.to_string());
+                    return;
+                }
+            }
+        } else {
+            let Some(frame) = self.frame_row(self.displayed_frame_index).cloned() else {
+                return;
+            };
+            let Some(model) = self.placement_model_at(self.displayed_frame_index) else {
+                return;
+            };
+            PickFrame::Annotation(frame, model)
         };
         let Some(mut renderer) = self.shared.renderer.borrow_mut().take() else {
             self.shared.pending_pick.set(Some(request));
@@ -1479,9 +1887,16 @@ impl VideoEditingApp {
         let shared = self.shared.clone();
         let renderer_generation = shared.renderer_generation.get();
         let pick = async move {
-            let result = renderer
-                .pick(&frame, source_size, model, target_point)
-                .await;
+            let result = match &pick_frame {
+                PickFrame::Annotation(frame, model) => {
+                    renderer
+                        .pick(frame, source_size, *model, target_point)
+                        .await
+                }
+                PickFrame::Source(document, frame) => {
+                    renderer.pick_document(document, frame, target_point).await
+                }
+            };
             let renderer_diagnostics = renderer.diagnostics();
             if shared.renderer_generation.get() != renderer_generation {
                 shared.pick_in_flight.set(false);
@@ -1563,10 +1978,18 @@ impl VideoEditingApp {
 
     /// Derives the values the Details panel can't read directly: displayed-frame pin + domain math.
     pub(super) fn displayed_facts(&self) -> DisplayedFacts {
+        let inspected_object = self.displayed_diagnostics.as_ref().map_or(
+            self.controller.state.selected.unwrap_or(0) as usize,
+            |facts| facts.inspected_object,
+        );
         let displayed_frame_index = self
             .displayed_frame_ready
             .then_some(self.displayed_frame_index);
         let timeline_frame = displayed_frame_index.and_then(|index| self.frame_row(index));
+        let source_frame = self
+            .displayed_diagnostics
+            .as_ref()
+            .and_then(|facts| facts.source_frame.as_ref());
         let media_time_seconds = self
             .displayed_frame_ready
             .then(|| {
@@ -1591,14 +2014,32 @@ impl VideoEditingApp {
             presented_frame_index.filter(|presented| *presented != in_flight)
         });
 
-        let (quad, placement_error) = match displayed_frame_index {
-            Some(index) if timeline_frame.is_some_and(|frame| frame.tracked) => {
-                match self.quad_frame_result_at(index) {
-                    Ok(frame) => (Some(frame), None),
-                    Err(error) => (None, Some(error)),
-                }
+        let (quad, placement_error) = if let Some((points_px, k)) = source_frame.and_then(|frame| {
+            frame
+                .objects
+                .get(inspected_object)?
+                .quad
+                .zip(frame.params.k)
+        }) {
+            match trd_placement::quad_frame(
+                trd_placement::CameraIntrinsics {
+                    row_major: protocol_k_from_row_major(k),
+                },
+                trd_placement::PlacementQuad { points_px },
+            ) {
+                Ok(quad) => (Some(quad), None),
+                Err(error) => (None, Some(error.into())),
             }
-            _ => (None, None),
+        } else {
+            match displayed_frame_index {
+                Some(index) if timeline_frame.is_some_and(|frame| frame.tracked) => {
+                    match self.quad_frame_result_at(index) {
+                        Ok(frame) => (Some(frame), None),
+                        Err(error) => (None, Some(error)),
+                    }
+                }
+                _ => (None, None),
+            }
         };
         let previous_quad = displayed_frame_index.and_then(|index| {
             (0..index).rev().find_map(|previous_index| {
@@ -1628,9 +2069,17 @@ impl VideoEditingApp {
             .map(|d| d.renderer.clone())
             .or_else(|| self.shared.renderer_diagnostics.borrow().clone());
 
-        let tracked = timeline_frame.is_some_and(|frame| frame.tracked);
+        let tracked = timeline_frame.is_some_and(|frame| frame.tracked)
+            || source_frame
+                .is_some_and(|frame| frame.objects.iter().any(|object| object.quad.is_some()));
         let visibility_reason = if playing {
             "playing"
+        } else if source_frame.is_some() {
+            if displayed.is_some_and(|facts| facts.source_reference) {
+                "placement reference"
+            } else {
+                "source model"
+            }
         } else if selected_asset.is_none() {
             "no asset"
         } else if !tracked {
@@ -1668,9 +2117,9 @@ impl VideoEditingApp {
         let show_quad = displayed.is_some_and(|d| d.show_quad);
         let show_gizmos = displayed.is_some_and(|d| d.show_gizmos);
         let quad_washed = show_quad && displayed.is_some_and(|d| d.hovered_quad || d.selected_quad);
-        let background_drawables =
+        let mut background_drawables =
             1 + u32::from(show_quad) + u32::from(quad_washed) + if show_gizmos { 2 } else { 0 };
-        let foreground_drawables = if object_visible {
+        let mut foreground_drawables = if object_visible {
             1 + u32::from(scene.show_local_axes)
                 + u32::from(scene.show_axes)
                 + u32::from(scene.show_local_grid)
@@ -1678,6 +2127,28 @@ impl VideoEditingApp {
         } else {
             0
         };
+        if let Some(frame) = source_frame {
+            let count = frame.objects.len() as u32;
+            background_drawables = 1
+                + u32::from(show_quad)
+                    * frame
+                        .objects
+                        .iter()
+                        .filter(|object| object.quad.is_some())
+                        .count() as u32
+                + u32::from(show_gizmos) * count
+                + u32::from(displayed.is_some_and(|facts| facts.show_plane_grid)) * count
+                + u32::from(
+                    show_quad
+                        && (selected_quad || displayed.is_some_and(|facts| facts.hovered_quad)),
+                )
+                + u32::from(displayed.is_some_and(|facts| facts.show_reference_cube)) * count;
+            foreground_drawables = if displayed.is_some_and(|facts| facts.source_reference) {
+                0
+            } else {
+                count
+            };
+        }
         let selection_drawables =
             u32::from(object_visible && (scene.show_aabb || scene.selected == Some(0)));
         let render_target_size = renderer
@@ -1690,6 +2161,7 @@ impl VideoEditingApp {
             media_time_seconds,
             frame_duration_seconds,
             timeline_frame: timeline_frame.cloned(),
+            source_frame: source_frame.cloned(),
             presented_frame_index,
             in_flight_frame_index,
             coalesced_frame_index,
@@ -1698,6 +2170,7 @@ impl VideoEditingApp {
             pose_delta,
             normal_sign_warning,
             scene: scene.clone(),
+            inspected_object,
             selected_asset,
             selected_quad,
             visibility_reason,
@@ -1726,6 +2199,7 @@ pub(super) struct DisplayedFacts {
     /// could not say.
     pub frame_duration_seconds: Option<f64>,
     pub timeline_frame: Option<trd_core::VideoEditingFrame>,
+    pub source_frame: Option<trd_core::DocumentFrame>,
     pub presented_frame_index: Option<u32>,
     pub in_flight_frame_index: Option<u32>,
     pub coalesced_frame_index: Option<u32>,
@@ -1734,6 +2208,7 @@ pub(super) struct DisplayedFacts {
     pub pose_delta: Option<PoseDeltaDiagnostics>,
     pub normal_sign_warning: bool,
     pub scene: crate::scene::SceneState,
+    pub inspected_object: usize,
     pub selected_asset: Option<CatalogAsset>,
     pub selected_quad: bool,
     pub visibility_reason: &'static str,
@@ -1876,6 +2351,7 @@ pub(super) mod tests {
             ErrorScope::Document,
             ErrorScope::Render,
             ErrorScope::Pick,
+            ErrorScope::Export,
         ] {
             assert_eq!(ErrorScope::from_code(scope.code()), Some(scope));
         }
@@ -2073,10 +2549,7 @@ pub(super) mod tests {
 
     #[test]
     fn document_url_selection_names_the_format_or_says_why_not() {
-        assert_eq!(
-            document_url_selection("https://example.com/shot.parquet"),
-            Ok(DocumentFormat::Parquet)
-        );
+        assert!(document_url_selection("https://example.com/shot.parquet").is_err());
         assert_eq!(
             document_url_selection("  http://example.com/a/b/shot.ARROW  "),
             Ok(DocumentFormat::ArrowIpc),
@@ -2099,10 +2572,7 @@ pub(super) mod tests {
             DocumentFormat::from_name("fiba-shot1.arrow"),
             Some(DocumentFormat::ArrowIpc)
         );
-        assert_eq!(
-            DocumentFormat::from_name("tracks.Parquet"),
-            Some(DocumentFormat::Parquet)
-        );
+        assert_eq!(DocumentFormat::from_name("tracks.Parquet"), None);
         assert_eq!(DocumentFormat::from_name("tracks"), None);
         assert_eq!(DocumentFormat::from_name("tracks.csv"), None);
     }
@@ -2123,6 +2593,79 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn video_and_arrow_dialogs_load_independently() {
+        assert!(SourceDialog::Arrow.can_load(false, true, false));
+        assert!(SourceDialog::Arrow.can_load(false, false, true));
+        assert!(!SourceDialog::Arrow.can_load(true, false, false));
+        assert!(SourceDialog::Video.can_load(true, false, false));
+        assert!(!SourceDialog::Video.can_load(false, true, true));
+        let shared = VideoEditingShared::default();
+        shared.command.set(SourceDialog::Video.command());
+        assert_eq!(shared.take_command(), Some(VideoEditingCommand::LoadVideo));
+        shared.command.set(SourceDialog::Arrow.command());
+        assert_eq!(shared.take_command(), Some(VideoEditingCommand::LoadArrow));
+    }
+
+    #[test]
+    fn source_quad_click_selects_reference_and_empty_click_hides_it() {
+        let shared = Rc::new(VideoEditingShared::default());
+        let mut app = VideoEditingApp::player(document().video, shared);
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../trd-core/tests/golden/stage1.arrow");
+        let source = trd_core::SceneDocument::read(&std::fs::read(fixture).unwrap()).unwrap();
+        let source = trd_core::SceneDocument::from_batches(
+            source.schema().clone(),
+            source.batches().to_vec(),
+            Vec::new(),
+        )
+        .unwrap();
+        app.arrow_scene = Some(Rc::new(ArrowScene::from_source(source).unwrap()));
+        let mut displayed = test_rendered_frame_diagnostics();
+        displayed.source_frame = Some(trd_core::DocumentFrame {
+            params: trd_core::FrameParams::IDENTITY,
+            source_size: Some(trd_core::Viewport {
+                width: 1920,
+                height: 1080,
+            }),
+            present_index: Some(0),
+            pts: None,
+            objects: vec![trd_core::DocumentObject {
+                mesh: None,
+                model: trd_core::Matrix4::IDENTITY,
+                quad: Some([
+                    [200.0, 200.0],
+                    [400.0, 200.0],
+                    [400.0, 400.0],
+                    [200.0, 400.0],
+                ]),
+                track_id: None,
+                selection: trd_core::DrawSelection::INHERIT,
+            }],
+        });
+        app.displayed_diagnostics = Some(displayed);
+        app.display_size = (960, 540);
+        let context = egui::Context::default();
+        app.settle_frame(&context, false, None, Some((150, 150)), None);
+        assert_eq!(app.source_hovered_instance, Some(0));
+        assert!(app.hovered_quad);
+        assert!(!app.selected_quad);
+        app.handle_pick((150, 150), None);
+        assert!(app.selected_quad);
+        assert!(app.show_gizmos);
+        assert!(app.show_plane_grid);
+        assert!(app.show_reference_cube);
+        app.settle_frame(&context, false, None, None, None);
+        assert_eq!(app.source_hovered_instance, None);
+        assert!(!app.hovered_quad);
+        assert!(app.selected_quad);
+        app.handle_pick((20, 20), None);
+        assert!(!app.selected_quad);
+        assert!(!app.show_gizmos);
+        assert!(!app.show_plane_grid);
+        assert!(!app.show_reference_cube);
+    }
+
+    #[test]
     fn pending_sources_are_selected_independently() {
         let shared = VideoEditingShared::default();
         assert_eq!(shared.pending_video(), None);
@@ -2133,7 +2676,7 @@ pub(super) mod tests {
         }));
         shared.set_pending_document(Some(PendingSource {
             kind: VideoSourceKind::HttpUrl,
-            name: "https://example.com/shot.parquet".to_owned(),
+            name: "https://example.com/shot.arrow".to_owned(),
         }));
 
         shared.set_pending_document(None);
@@ -2540,6 +3083,41 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn details_describe_the_displayed_selected_object_not_object_zero() {
+        let shared = Rc::new(VideoEditingShared::default());
+        let mut app = VideoEditingApp::new(document(), shared);
+        let mut rendered = test_rendered_frame_diagnostics();
+        rendered.scene.add_object(
+            7,
+            trd_core::DisneyMaterial {
+                metallic: 0.72,
+                roughness: 0.31,
+                ..Default::default()
+            },
+            trd_core::RenderMode::Shaded,
+            trd_core::ToneMapping::default(),
+        );
+        rendered.scene.objects[0].translation[0] = 9.0;
+        rendered.scene.objects[1].translation[0] = -0.25;
+        rendered.inspected_object = 1;
+        app.displayed_frame_ready = true;
+        app.displayed_diagnostics = Some(rendered);
+        app.controller.state.selected = Some(0);
+
+        let facts = app.displayed_facts();
+        let text = details_ui::format_details(&app.video, &facts);
+        assert!(text.contains("selected object: 1"));
+        assert!(text.contains("object translation: [-0.250000, 0.000000, 0.000000]"));
+        assert!(text.contains("metallic: 0.7200"));
+        assert!(text.contains("roughness: 0.3100"));
+        assert!(text.contains(&format!(
+            "render mode: {}",
+            diagnostics::render_mode_label(trd_core::RenderMode::Shaded)
+        )));
+        assert!(!text.contains("object translation: [9."));
+    }
+
+    #[test]
     fn diagnostics_media_time_tracks_the_displayed_frame_not_a_newer_one() {
         let shared = Rc::new(VideoEditingShared::default());
         let mut app = VideoEditingApp::new(document(), shared.clone());
@@ -2583,6 +3161,11 @@ pub(super) mod tests {
             media_time_seconds: 0.25,
             duration_seconds: 272.0 / TIMESCALE,
             scene: crate::scene::SceneState::default(),
+            inspected_object: 0,
+            source_frame: None,
+            source_reference: false,
+            show_reference_cube: false,
+            show_plane_grid: false,
             selected_asset: None,
             selected_quad: false,
             move_direction: crate::interaction::MoveDirection::Reference1,

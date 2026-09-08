@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-"""Convert a trd JSONL frame-params file to a protocol 0.0.6 Arrow IPC stream.
+"""Convert JSONL camera/frame params to a protocol 0.0.7 params stream.
 
 A dependency-light pyarrow producer for examples/render.sh and render.ps1. The
-stream protocol is **0.0.6-only** (mesh-first; older wire formats are
-retired and no longer produced or accepted). Each JSON line is one frame.
+Bundle it with original GLB resources using scene_to_arrow.py. Params come first;
+older wire formats and inline-frame resources are not accepted.
 
 Emitted params columns (all optional except `model`, which is always emitted):
 
+  * `video_frame_index` (`UInt32`, all-or-nothing): sidecar-video frame key for
+    sparse scene rows. Values must be strictly increasing.
+  * `tonemap` (`UInt8`, all-or-nothing): output curve (`"reinhard"` / `0` or
+    `"aces"` / `1`). When omitted, renderers default to Reinhard.
   * `model` (`FixedSizeList<f32>[16]`, column-major, matching glam
     `Mat4::from_cols_array`): the per-frame object transform. A row's explicit
     `"model"` is used verbatim; a row without one gets the identity.
@@ -46,7 +50,7 @@ import sys
 import pyarrow as pa
 from pyarrow import ipc
 
-PROTOCOL_VERSION = "0.0.6"
+from protocol_version import PROTOCOL_VERSION
 PROTOCOL_VERSION_KEY = b"trd.protocol.version"
 TABLE_KIND_KEY = b"trd.table.kind"
 FRAME_RATE_KEY = b"trd.stream.frame_rate"
@@ -78,6 +82,8 @@ def main() -> None:
 
     with open(args.input, encoding="utf-8") as f:
         rows = [json.loads(line) for line in f if line.strip()]
+    if any("frame_id" in row for row in rows):
+        raise SystemExit("error: frame_id is retired; use external frame_path/frame_url")
 
     f32 = pa.float32()
     fsl16 = pa.list_(f32, 16)  # FixedSizeList<f32>[16] = column-major Mat4
@@ -89,10 +95,46 @@ def main() -> None:
     if args.fps and args.fps > 0:
         metadata[FRAME_RATE_KEY] = str(args.fps).encode()
 
-    # `model` is the one always-present column: a row's explicit matrix, else identity.
+    # Start with sparse timeline/output state, then the always-present model.
+    columns = []
+    fields = []
+
+    if all("video_frame_index" in row for row in rows):
+        indices = [int(row["video_frame_index"]) for row in rows]
+        if any(current <= previous for previous, current in zip(indices, indices[1:])):
+            raise SystemExit("error: video_frame_index must be strictly increasing")
+        columns.append(pa.array(indices, type=pa.uint32()))
+        fields.append(("video_frame_index", pa.uint32()))
+
+    if any("tonemap" in row for row in rows):
+        if not all("tonemap" in row for row in rows):
+            raise SystemExit("error: tonemap must be present on every row or omitted entirely")
+        tonemap_wire = {"reinhard": 0, "aces": 1}
+
+        def to_tonemap_byte(value):
+            if isinstance(value, str):
+                key = value.lower()
+                if key not in tonemap_wire:
+                    raise SystemExit("error: tonemap must be 'reinhard', 'aces', 0, or 1")
+                return tonemap_wire[key]
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or value not in (0, 1)
+            ):
+                raise SystemExit("error: tonemap must be 'reinhard', 'aces', 0, or 1")
+            return int(value)
+
+        tonemaps = [to_tonemap_byte(row["tonemap"]) for row in rows]
+        if len(set(tonemaps)) > 1:
+            raise SystemExit("error: tonemap must be constant across the params stream")
+        columns.append(pa.array(tonemaps, type=pa.uint8()))
+        fields.append(pa.field("tonemap", pa.uint8(), nullable=False))
+
+    # `model` is always present: a row's explicit matrix, else identity.
     model_rows = [r.get("model", IDENTITY_MODEL) for r in rows]
-    columns = [pa.array(model_rows, type=fsl16)]
-    fields = [("model", fsl16)]
+    columns.append(pa.array(model_rows, type=fsl16))
+    fields.append(("model", fsl16))
 
     # Camera columns are all-or-nothing (every row must provide them).
     for name, length in CAMERA_VEC:

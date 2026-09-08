@@ -162,7 +162,7 @@ pub(super) fn value_bool(
 
 /// Says what a table that is *not* a video-editing document appears to be.
 ///
-/// Every trd table is a `.arrow` or `.parquet`, and most of them are **not**
+/// Every trd input table is Arrow IPC, and most of them are **not**
 /// documents: render-protocol streams, golden fixtures, raw perception dumps. A
 /// file picker can only filter by extension, so reaching for the wrong one is
 /// ordinary — and "metadata is missing" named the key the file lacks rather than
@@ -185,7 +185,7 @@ pub(super) fn describe_foreign_table(schema: &Schema) -> String {
         );
     }
     format!(
-        "it has no trd metadata at all — an unrelated Arrow/Parquet table: {}",
+        "it has no trd metadata at all — an unrelated Arrow table: {}",
         summarise_columns(schema)
     )
 }

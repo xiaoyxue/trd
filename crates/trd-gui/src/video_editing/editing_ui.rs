@@ -1,15 +1,12 @@
 //! The editor's egui surface (#163/#167): left-pane editing controls,
-//! quad/catalog interaction, and player footer.
+//! source-model interaction, and player footer.
 
 use super::details_ui::details_ui;
-use super::{
-    point_in_quad, CatalogAsset, VideoEditingApp, VideoSourceKind, COMMAND_PAUSE, COMMAND_PLAY,
-};
+use super::{point_in_quad, VideoEditingApp, VideoSourceKind, COMMAND_PAUSE, COMMAND_PLAY};
 
 impl eframe::App for VideoEditingApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.shared.context.replace(Some(ui.ctx().clone()));
-        self.sync_native_texture(_frame);
         if let Some(video) = self.shared.take_pending_video_info() {
             // A timeline probed from the container after start-up (#264).
             self.set_video_info(video);
@@ -17,10 +14,15 @@ impl eframe::App for VideoEditingApp {
         if let Some(document) = self.shared.take_incoming_document() {
             self.set_document(document);
         }
+        if let Some(scene) = self.shared.take_incoming_scene() {
+            self.set_arrow_scene(scene);
+        }
         self.consume_video_frame();
         self.consume_rendered_frame();
         self.consume_asset_defaults();
         self.consume_pick_result();
+        self.process_scene_operations();
+        self.sync_native_texture(_frame);
         if !self.shared.video_loaded.get() {
             self.displayed_frame_ready = false;
             self.last_rendered_frame_index = None;
@@ -39,10 +41,30 @@ impl eframe::App for VideoEditingApp {
         self.video_source_dialog(ui.ctx());
 
         let overlay_frame_index = self.displayed_frame_index;
-        let quad = self
-            .frame_row(overlay_frame_index)
-            .and_then(|frame| frame.placement_quad);
-        let quad_frame = self.quad_frame_at(overlay_frame_index);
+        let source_mode = self
+            .arrow_scene
+            .as_ref()
+            .is_some_and(|scene| scene.source.is_some());
+        if source_mode {
+            if let Err(error) = self.sync_source_controller() {
+                self.shared.set_error(super::ErrorScope::Document, error);
+            }
+        }
+        let quad = if source_mode {
+            self.displayed_diagnostics
+                .as_ref()
+                .and_then(|facts| facts.source_frame.as_ref())
+                .and_then(|frame| frame.objects.get(self.source_selected_instance))
+                .and_then(|object| object.quad)
+        } else {
+            self.frame_row(overlay_frame_index)
+                .and_then(|frame| frame.placement_quad)
+        };
+        let quad_frame = if source_mode {
+            self.displayed_facts().quad
+        } else {
+            self.quad_frame_at(overlay_frame_index)
+        };
         let mut needs_render = false;
         let mut pick = None;
         let mut hover = None;
@@ -57,18 +79,9 @@ impl eframe::App for VideoEditingApp {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     self.source_controls(ui);
                     ui.separator();
-                    needs_render |= crate::ui::controls_sections(
-                        ui,
-                        &mut self.controller,
-                        crate::ui::Controls {
-                            camera_locked: true,
-                            move_reference_labels: Some(["e1", "e2", "e3"]),
-                        },
-                    );
+                    needs_render |= self.source_model_controls(ui);
                     ui.separator();
-                    self.shot_controls(ui);
-                    self.quad_controls(ui, overlay_frame_index, quad_frame);
-                    self.catalog_controls(ui);
+                    self.export_controls(ui);
                     self.details_controls(ui);
                     needs_render |= crate::ui::reset_button(ui, &mut self.controller);
                     if ui
@@ -114,7 +127,7 @@ impl eframe::App for VideoEditingApp {
                     controller: &mut self.controller,
                     texture,
                     render_size: self.display_size,
-                    sizing: self.image_sizing,
+                    sizing: crate::ui::ImageSizing::FitCanvas,
                     camera_locked: true,
                     hide_when_empty: true,
                 },
@@ -135,6 +148,119 @@ impl eframe::App for VideoEditingApp {
 }
 
 impl VideoEditingApp {
+    fn source_model_controls(&mut self, ui: &mut egui::Ui) -> bool {
+        ui.heading("Placement / source models");
+        let Some(scene) = self.arrow_scene.as_ref() else {
+            ui.weak("Load params Arrow with optional GLB mesh resources. Video playback is independent.");
+            return false;
+        };
+        let Some(source) = scene.source.clone() else {
+            ui.colored_label(
+                egui::Color32::LIGHT_RED,
+                "This scene is not a current params/GLB document.",
+            );
+            return false;
+        };
+        let mut overlay_changed = ui
+            .checkbox(&mut self.show_placement_quads, "Show quad")
+            .changed();
+        overlay_changed |= ui
+            .add_enabled(
+                self.selected_quad,
+                egui::Checkbox::new(&mut self.show_gizmos, "Show Coordinate"),
+            )
+            .changed();
+        overlay_changed |= ui
+            .add_enabled(
+                self.selected_quad,
+                egui::Checkbox::new(&mut self.show_plane_grid, "Show Plane"),
+            )
+            .changed();
+        let reference_only = source.borrow().meshes().is_empty();
+        if reference_only {
+            overlay_changed |= ui
+                .add_enabled(
+                    self.selected_quad,
+                    egui::Checkbox::new(&mut self.show_reference_cube, "Show reference cube"),
+                )
+                .changed();
+        }
+        let Some(row) = scene.source_row(self.displayed_frame_index) else {
+            ui.weak("No params row for this video frame.");
+            return overlay_changed;
+        };
+        if reference_only {
+            ui.weak(if self.selected_quad {
+                "Selected quad: the cube's bottom center is at the local origin."
+            } else {
+                "Click a quad to show its local coordinates, plane grid and cube."
+            });
+            return overlay_changed;
+        }
+        let frame = match source.borrow().frame(row) {
+            Ok(frame) => frame,
+            Err(error) => {
+                self.shared
+                    .set_error(super::ErrorScope::Document, error.to_string());
+                return false;
+            }
+        };
+        if frame.objects.is_empty() {
+            ui.weak("This params row has no objects.");
+            return false;
+        }
+        self.source_selected_instance = self.source_selected_instance.min(frame.objects.len() - 1);
+        let mut changed = false;
+        ui.add_enabled_ui(!self.shared.video_playing.get(), |ui| {
+            let label = |index: usize| {
+                frame.objects[index]
+                    .track_id
+                    .clone()
+                    .unwrap_or_else(|| format!("Object {}", index + 1))
+            };
+            let previous = self.source_selected_instance;
+            egui::ComboBox::from_id_salt("source-instance")
+                .selected_text(label(self.source_selected_instance))
+                .show_ui(ui, |ui| {
+                    for index in 0..frame.objects.len() {
+                        ui.selectable_value(
+                            &mut self.source_selected_instance,
+                            index,
+                            label(index),
+                        );
+                    }
+                });
+            if previous != self.source_selected_instance {
+                self.controller.state.selected = Some(self.source_selected_instance as u32);
+                self.selected_quad = true;
+                self.show_gizmos = true;
+                self.show_plane_grid = true;
+                changed = true;
+            }
+            ui.weak(format!(
+                "Params row {row}; edits affect this object across all its tracked frames."
+            ));
+            ui.weak("Pick the mesh to edit it. Controls adjust its existing local model.");
+            changed |= crate::ui::interaction_section(
+                ui,
+                &mut self.controller,
+                crate::ui::Controls {
+                    camera_locked: true,
+                    move_reference_labels: Some(super::QUAD_MOVE_LABELS),
+                },
+            );
+            changed |= crate::ui::transform_section(ui, &mut self.controller);
+            ui.collapsing("Model matrix (advanced)", |ui| {
+                ui.monospace(super::diagnostics::format_matrix(
+                    frame.objects[self.source_selected_instance]
+                        .model
+                        .to_cols_array(),
+                ));
+            });
+        });
+        changed || overlay_changed
+    }
+
     /// Scene revision settles before the pick captures it (#205).
     pub(super) fn settle_frame(
         &mut self,
@@ -145,6 +271,10 @@ impl VideoEditingApp {
         quad: Option<[[f32; 2]; 4]>,
     ) {
         if needs_render {
+            if let Err(error) = self.apply_source_transforms() {
+                self.shared.set_error(super::ErrorScope::Document, error);
+                return;
+            }
             self.shared.request_overlay();
             ctx.request_repaint();
         }
@@ -156,6 +286,33 @@ impl VideoEditingApp {
 
     /// Updates hover state; only re-renders on a change.
     fn update_quad_hover(&mut self, hover: Option<(u32, u32)>, quad: Option<[[f32; 2]; 4]>) {
+        if self
+            .arrow_scene
+            .as_ref()
+            .is_some_and(|scene| scene.source.is_some())
+        {
+            let hovered = hover.and_then(|point| {
+                self.displayed_diagnostics
+                    .as_ref()
+                    .and_then(|facts| facts.source_frame.as_ref())
+                    .and_then(|frame| {
+                        frame
+                            .objects
+                            .iter()
+                            .enumerate()
+                            .rev()
+                            .find(|(_, object)| self.point_hits_quad(point, object.quad))
+                            .map(|(index, _)| index)
+                    })
+            });
+            if hovered != self.source_hovered_instance {
+                self.source_hovered_instance = hovered;
+                self.hovered_quad = hovered.is_some();
+                self.shared.request_overlay();
+                self.shared.request_repaint();
+            }
+            return;
+        }
         let hovered = hover.is_some_and(|point| self.point_hits_quad(point, quad));
         if hovered != self.hovered_quad {
             self.hovered_quad = hovered;
@@ -168,9 +325,18 @@ impl VideoEditingApp {
     /// back to source-video coordinates first.
     fn point_hits_quad(&self, (x, y): (u32, u32), quad: Option<[[f32; 2]; 4]>) -> bool {
         quad.is_some_and(|points| {
+            let source_size = self
+                .displayed_diagnostics
+                .as_ref()
+                .and_then(|facts| facts.source_frame.as_ref())
+                .and_then(|frame| frame.source_size)
+                .unwrap_or(trd_core::Viewport {
+                    width: self.video.width,
+                    height: self.video.height,
+                });
             let source = [
-                x as f32 * self.video.width as f32 / self.display_size.0 as f32,
-                y as f32 * self.video.height as f32 / self.display_size.1 as f32,
+                x as f32 * source_size.width as f32 / self.display_size.0 as f32,
+                y as f32 * source_size.height as f32 / self.display_size.1 as f32,
             ];
             point_in_quad(source, points)
         })
@@ -179,23 +345,33 @@ impl VideoEditingApp {
     /// Source heading, the Open button, and the loaded-source readout.
     fn source_controls(&mut self, ui: &mut egui::Ui) {
         ui.heading("Video");
-        if ui.button("Open source...").clicked() {
-            self.show_video_source_dialog = true;
-            ui.ctx().request_repaint();
-        }
+        ui.horizontal(|ui| {
+            if ui.button("Open Video").clicked() {
+                self.source_dialog = Some(super::SourceDialog::Video);
+                ui.ctx().request_repaint();
+            }
+            if ui.button("Load Arrow").clicked() {
+                self.source_dialog = Some(super::SourceDialog::Arrow);
+                ui.ctx().request_repaint();
+            }
+        });
         ui.weak("Display: fit right pane (16:9)");
         ui.collapsing("Source", |ui| {
             let video = &self.video;
             ui.label(format!("Source: {}", video.source_name));
             ui.label(match self.shared.pending_document() {
                 Some(source) => match source.kind {
-                    VideoSourceKind::LocalFile => format!("Document: {} (local)", source.name),
-                    VideoSourceKind::HttpUrl => format!("Document: {}", source.name),
+                    VideoSourceKind::LocalFile => format!("Arrow input: {} (local)", source.name),
+                    VideoSourceKind::HttpUrl => format!("Arrow input: {}", source.name),
                 },
-                None => "Document: none — the video plays as-is".to_owned(),
+                None if self.arrow_scene.is_some() => {
+                    "Arrow input: source params loaded".to_owned()
+                }
+                None if self.document.is_some() => "Arrow input: annotation loaded".to_owned(),
+                None => "Arrow input: none — the video plays as-is".to_owned(),
             });
-            match self.document.as_ref() {
-                Some(document) => {
+            match (self.document.as_ref(), self.arrow_scene.as_ref()) {
+                (Some(document), _) => {
                     let summary = super::document_summary(document, &self.video);
                     ui.label(summary.describes);
                     ui.label(summary.annotated);
@@ -203,7 +379,20 @@ impl VideoEditingApp {
                         ui.colored_label(egui::Color32::from_rgb(240, 180, 80), mismatch);
                     }
                 }
-                None => {
+                (None, Some(scene)) => {
+                    ui.label(format!(
+                        "Protocol {} scene · {} params rows · {:.6} fps",
+                        trd_core::PROTOCOL_VERSION,
+                        scene.frames.len(),
+                        scene.frame_rate
+                    ));
+                    ui.weak(if scene.source.is_some() {
+                        "Source editing: model changes preserve the other Arrow columns."
+                    } else {
+                        "Replay mode: the exported models are rendered over this video."
+                    });
+                }
+                (None, None) => {
                     ui.weak("No document loaded: every frame is plain video");
                 }
             }
@@ -227,76 +416,31 @@ impl VideoEditingApp {
         });
     }
 
-    /// The standalone placement-quad readout.
-    fn quad_controls(
-        &mut self,
-        ui: &mut egui::Ui,
-        frame_index: u32,
-        quad_frame: Option<trd_placement::QuadFrame>,
-    ) {
-        ui.collapsing("Placement quad (standalone)", |ui| {
-            let Some(frame) = self.frame_row(frame_index) else {
-                ui.label(format!("Frame {frame_index}"));
-                ui.label(if self.has_document() {
-                    "Not annotated: this frame is plain video"
-                } else {
-                    "No annotation document: the video plays as-is"
-                });
-                return;
-            };
-            ui.label(format!("Frame {}", frame.video_frame_index));
-            ui.label(if frame.tracked {
-                if self.shared.video_playing.get() && !self.show_placement_quads {
-                    "Placement quad hidden during playback"
-                } else if !self.selected_quad {
-                    "Click the green quad to select it"
-                } else {
-                    "Placement quad selected"
-                }
-            } else {
-                "Background-only row: quad and object hidden"
-            });
-            ui.weak(format!(
-                "Pointer: {} · quad: {}",
-                if self.hovered_quad {
-                    "over the quad"
-                } else {
-                    "off the quad"
-                },
-                if self.selected_quad {
-                    "selected"
-                } else {
-                    "not selected"
-                }
-            ));
-            if let Some(local) = quad_frame {
-                ui.label(format!("Local axis length: {:.4}", local.axis_length));
-                ui.weak("RGB axes: e1 / e2 / e3");
-                ui.weak("Quad overlay follows the displayed tracking row.");
-                ui.weak("Object edit state persists; quad basis updates per frame.");
-                ui.weak("Local X/Y/Z rotate with the placed object.");
-                ui.weak("Initial can placement matches the Olympic upper-can preset.");
+    fn export_controls(&self, ui: &mut egui::Ui) {
+        ui.group(|ui| {
+            ui.strong("Scene export");
+            let disabled = self.arrow_export_disabled_reason();
+            if ui
+                .add_enabled(disabled.is_none(), egui::Button::new("Export Arrow..."))
+                .on_disabled_hover_text(disabled.as_deref().unwrap_or_default())
+                .clicked()
+            {
+                self.request_arrow_export();
             }
-        });
-    }
-
-    /// The fixed catalog. Selecting an asset loads it immediately.
-    fn catalog_controls(&mut self, ui: &mut egui::Ui) {
-        ui.add_enabled_ui(self.selected_quad, |ui| {
-            ui.collapsing("Object catalog", |ui| {
-                for asset in CatalogAsset::ALL {
-                    if ui
-                        .selectable_label(self.selected_asset == Some(asset), asset.label())
-                        .clicked()
-                    {
-                        self.select_catalog_asset(asset);
-                        ui.ctx().request_repaint();
-                    }
+            match self.arrow_export_status() {
+                Some(Ok(message)) => {
+                    ui.colored_label(egui::Color32::LIGHT_GREEN, message);
                 }
-            });
-        })
-        .response
-        .on_disabled_hover_text("Select a placement quad first");
+                Some(Err(error)) => {
+                    ui.colored_label(egui::Color32::LIGHT_RED, error);
+                }
+                None => {
+                    ui.weak("Params and original GLB resources; video remains external.");
+                }
+            }
+            ui.weak("Edits persist in all corresponding sparse-frame model matrices.");
+            ui.weak("Replay uses uffizi-large.hdr as the default IBL probe.");
+        });
     }
 
     /// The Details inspector.
@@ -352,82 +496,11 @@ impl VideoEditingApp {
         }
     }
 
-    /// Shots section: click a shot to seek to its first frame (#264).
-    fn shot_controls(&mut self, ui: &mut egui::Ui) {
-        let shots = self.shots();
-        ui.collapsing(format!("Shots ({})", shots.len()), |ui| {
-            let mut changed = ui
-                .checkbox(&mut self.show_placement_quads, "Show placement quads")
-                .on_hover_text(
-                    "Draw the placement quad on annotated frames, including while playing",
-                )
-                .changed();
-            changed |= ui
-                .checkbox(&mut self.show_gizmos, "Show gizmos")
-                .on_hover_text("Draw the quad's local floor grid and basis axes (e1 / e2 / e3)")
-                .changed();
-            if changed {
-                self.shared.request_overlay();
-            }
-            let state = super::overlay_state(
-                self.show_placement_quads || self.show_gizmos,
-                self.has_document(),
-                self.current_frame_index,
-                self.frame_row(self.current_frame_index)
-                    .map(|frame| frame.tracked),
-            );
-            ui.weak(state.label());
-            if shots.is_empty() {
-                ui.weak(if self.has_document() {
-                    "The document annotates no frames"
-                } else {
-                    "No annotation document: the whole video is plain playback"
-                });
-                return;
-            }
-            let current = self.current_frame_index;
-            for (index, shot) in shots.iter().enumerate() {
-                let label = format!(
-                    "Shot {} · frames {}-{} ({})",
-                    index + 1,
-                    shot.start_frame,
-                    shot.end_frame,
-                    shot.frame_count()
-                );
-                if ui
-                    .selectable_label(shot.contains(current), label)
-                    .on_hover_text("Jump to the first frame of this shot")
-                    .clicked()
-                {
-                    self.seek_to(shot.start_frame);
-                    ui.ctx().request_repaint();
-                }
-            }
-        });
-    }
-
     fn seek_to(&mut self, frame_index: u32) {
         if frame_index == self.current_frame_index {
             return;
         }
-        self.current_frame_index = frame_index;
-        // Seek id retires the request when it arrives back (#322).
-        self.pending_seek = Some(super::PendingSeek {
-            frame_index,
-            id: self.shared.request_seek(frame_index),
-        });
-    }
-
-    fn select_catalog_asset(&mut self, asset: CatalogAsset) {
-        self.selected_asset = Some(asset);
-        self.selected_quad = true;
-        self.show_gizmos = true;
-        self.controller.state.objects[0] = crate::scene::ObjectTransform::default();
-        self.controller.state.selected = Some(0);
-        self.controller.target = crate::interaction::InteractionTarget::Object;
-        self.shared.renderer.borrow_mut().take();
-        self.shared.asset_request.set(asset.code());
-        self.shared.request_overlay();
+        self.begin_seek(frame_index);
     }
 
     /// Labels basis arms `e1`/`e2`/`e3` at their tips using projected egui text.
@@ -444,7 +517,14 @@ impl VideoEditingApp {
         let Some(frame) = quad_frame else {
             return;
         };
-        let Some(k) = self.frame_row(frame_index).and_then(|row| row.k) else {
+        let Some(k) = self
+            .displayed_diagnostics
+            .as_ref()
+            .and_then(|facts| facts.source_frame.as_ref())
+            .and_then(|frame| frame.params.k)
+            .map(super::protocol_k_from_row_major)
+            .or_else(|| self.frame_row(frame_index).and_then(|row| row.k))
+        else {
             return;
         };
         let intrinsics = trd_placement::CameraIntrinsics { row_major: k };
@@ -493,7 +573,7 @@ impl VideoEditingApp {
     /// Re-imposes the source aspect so the render target stays the video's shape (#282).
     fn resize_render_target(&mut self, ctx: &egui::Context, fitted: (u32, u32)) {
         let fitted = fit_to_source_aspect(fitted, (self.video.width, self.video.height));
-        if self.image_sizing != crate::ui::ImageSizing::FitCanvas
+        if self.render_sizing != crate::ui::ImageSizing::FitCanvas
             || fitted == self.fitted_render_size
         {
             return;
@@ -510,6 +590,52 @@ impl VideoEditingApp {
     /// Resolves a click into a quad selection or GPU pick. Selection bumps before
     /// pick so the pick captures the updated revision (#205).
     pub(super) fn handle_pick(&mut self, (x, y): (u32, u32), quad: Option<[[f32; 2]; 4]>) {
+        if self
+            .arrow_scene
+            .as_ref()
+            .and_then(|scene| scene.source.as_ref())
+            .is_some_and(|source| !source.borrow().meshes().is_empty())
+        {
+            if !self.shared.video_playing.get() {
+                self.shared.request_pick((x, y));
+            }
+            return;
+        }
+        if self
+            .arrow_scene
+            .as_ref()
+            .is_some_and(|scene| scene.source.is_some())
+        {
+            if self.shared.video_playing.get() {
+                return;
+            }
+            let selected = self
+                .displayed_diagnostics
+                .as_ref()
+                .and_then(|facts| facts.source_frame.as_ref())
+                .and_then(|frame| {
+                    frame
+                        .objects
+                        .iter()
+                        .enumerate()
+                        .rev()
+                        .find(|(_, object)| self.point_hits_quad((x, y), object.quad))
+                        .map(|(index, _)| index)
+                });
+            if self.selected_quad != selected.is_some()
+                || selected.is_some_and(|index| index != self.source_selected_instance)
+            {
+                self.selected_quad = selected.is_some();
+                if let Some(index) = selected {
+                    self.source_selected_instance = index;
+                }
+                self.show_gizmos = self.selected_quad;
+                self.show_plane_grid = self.selected_quad;
+                self.show_reference_cube = self.selected_quad;
+                self.shared.request_overlay();
+            }
+            return;
+        }
         if self.selected_asset.is_some() {
             self.shared.request_pick((x, y));
             return;

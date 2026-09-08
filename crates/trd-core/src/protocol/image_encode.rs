@@ -1,5 +1,5 @@
 //! The **output** wire format: rendered RGBA frames -> the `r`/`g`/`b`/`a`
-//! planar `fixed_shape_tensor<u8>[H, W]` schema of protocol `0.0.6`.
+//! planar `fixed_shape_tensor<u8>[H, W]` schema of protocol `0.0.7`.
 //!
 //! Pure encoding maths — the schema, the interleaved-to-planar channel split,
 //! the readback row-stride unpad — plus the reader that turns the result back

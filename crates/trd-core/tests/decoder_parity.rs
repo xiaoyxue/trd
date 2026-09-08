@@ -1,46 +1,30 @@
-//! Decoder parity test (issue #88, guards #84).
+//! Parity of the current `[params][mesh]` document entry points.
 //!
-//! The column decode is **no longer duplicated**: since #104/#108 unified the
-//! per-batch decoders and #296 split transport from format, both paths run the
-//! same [`trd_core::InputSession`] over the one decoder in
-//! `protocol/arrow_decode.rs`. The native side ([`trd_core::InputStream`],
-//! `io/input_stream.rs`) is a *byte transport* that owns a `Read` and feeds that
-//! session; the browser pushes bytes into it directly.
-//!
-//! So what this test guards is no longer decoder-versus-decoder divergence — it
-//! is **API-surface** divergence. Framing, sub-stream boundary recovery and
-//! external-reference decode all live *inside* `InputSession`, so they cannot
-//! differ; what can are the two public surfaces a caller actually assembles a
-//! frame through:
-//!
-//! * the drivers — `InputStream::{prologue, next_batch, finish}` versus a bare
-//!   `InputSession::push`, which the browser calls without a prologue or a
-//!   `finish` at all;
-//! * the inline-background APIs — [`trd_core::InlineFrameCache`], which decodes
-//!   once per `frame_id` change, versus `InlineFrame::decode` called per frame;
-//! * the chunking — 64 KiB reads versus one push, though
-//!   `protocol`'s own `*_across_every_split` tests already cover boundary
-//!   independence far more thoroughly than this test's single split does.
-//!
-//! A bug in any of those appears on one path only. The original motivating
-//! defect — the `input field `center` must be non-nullable` bug (`08c113a`),
-//! where the wasm decoder rejected a stream the native decoder accepted — is the
-//! shape of failure still worth catching, even though its specific cause is now
-//! shared code.
-//!
-//! This test decodes the **same committed Arrow bytes** (the golden fixtures,
-//! `[mesh][texture?][frames][params]`) through both surfaces and asserts they
-//! yield identical per-frame params, draws, external references, and decoded
-//! inline background pixels — agreement at the *assembled frame*, not merely at
-//! the `RecordBatch`. It needs no GPU, so — unlike the golden render test — it
-//! runs in `nix flake check` (`cargo test`) and guards both surfaces on every
-//! change.
+//! Native `run_stream` uses [`trd_core::SceneDocument::read_from`]; browser
+//! `ArrowSceneDocument.fromArrow` uses [`trd_core::SceneDocument::read`].
+//! Exercise fragmented native reads against the browser's complete buffer,
+//! then compare per-row rendering views, resolved bindings, external frame
+//! references and all retained source data. The legacy mesh-first
+//! `InputSession` is not the entry point for these migrated fixtures.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use trd_core::{Draw, FrameParams, ImageData, InlineFrameCache, InputSession, InputStream};
+use trd_core::SceneDocument;
 
-type Frame = (FrameParams, Vec<Draw>, Option<String>, Option<ImageData>);
+struct ChunkedReader<'a> {
+    bytes: &'a [u8],
+    chunk_size: usize,
+}
+
+impl Read for ChunkedReader<'_> {
+    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+        let count = self.bytes.len().min(self.chunk_size).min(output.len());
+        output[..count].copy_from_slice(&self.bytes[..count]);
+        self.bytes = &self.bytes[count..];
+        Ok(count)
+    }
+}
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -48,79 +32,51 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// Drive the whole stream (leading mesh/texture tables + params) through the
-/// native decoder, collecting the resolved scene and inline image per frame.
-fn native_frames(bytes: &[u8]) -> Vec<Frame> {
-    let mut input = InputStream::new(bytes);
-    input.prologue().expect("native prologue");
-    let mut cache = InlineFrameCache::default();
-    let mut frames = Vec::new();
-    while let Some(batch) = input.next_batch() {
-        for frame in batch.expect("native batch") {
-            let inline = cache
-                .resolve(frame.frame_id, input.frames())
-                .expect("native inline frame")
-                .map(|(image, _changed)| (*image).clone());
-            frames.push((
-                frame.params,
-                frame.resolved_draws(),
-                frame.frame_ref,
-                inline,
-            ));
-        }
-    }
-    input.finish().expect("native decode");
-    frames
-}
-
-/// Feed the same bytes to the wasm push decoder, flattening its decoded frames.
-/// Resolves each frame's draws (via [`trd_core::DecodedFrame::resolved_draws`])
-/// so it compares against the native path's already-resolved draw list.
-fn wasm_frames(bytes: &[u8]) -> Vec<Frame> {
-    let mut session = InputSession::new();
-    let mut frames = Vec::new();
-    for batch in session.push(bytes).expect("wasm push") {
-        for frame in batch {
-            let inline = frame.frame_id.map(|id| {
-                session.frames()[id as usize]
-                    .decode()
-                    .expect("inline frame decode")
-            });
-            frames.push((
-                frame.params,
-                frame.resolved_draws(),
-                frame.frame_ref,
-                inline,
-            ));
-        }
-    }
-    session.finish().expect("wasm finish");
-    frames
-}
-
 fn assert_parity(fixture_name: &str) {
     let bytes =
         std::fs::read(fixture(fixture_name)).unwrap_or_else(|e| panic!("read {fixture_name}: {e}"));
-    let native = native_frames(&bytes);
-    let wasm = wasm_frames(&bytes);
+    let browser = SceneDocument::read(&bytes).expect("browser document");
+    let frames = browser.frames().expect("browser rendering views");
+    assert!(!frames.is_empty(), "{fixture_name}: no frames");
+    assert!(!browser.meshes().is_empty(), "{fixture_name}: no GLBs");
 
-    assert!(
-        !native.is_empty(),
-        "{fixture_name}: native decoded no frames"
-    );
-    assert_eq!(
-        native.len(),
-        wasm.len(),
-        "{fixture_name}: native decoded {} frames, wasm decoded {}",
-        native.len(),
-        wasm.len()
-    );
-    for (i, (n, w)) in native.iter().zip(wasm.iter()).enumerate() {
+    for chunk_size in [1, 7, 64 * 1024] {
+        let native = SceneDocument::read_from(ChunkedReader {
+            bytes: &bytes,
+            chunk_size,
+        })
+        .unwrap_or_else(|error| panic!("{fixture_name}, chunk {chunk_size}: {error}"));
+        assert_eq!(native.schema(), browser.schema());
+        assert_eq!(native.batches(), browser.batches());
+        assert_eq!(native.meshes(), browser.meshes());
         assert_eq!(
-            n, w,
-            "{fixture_name} frame {i}: native and wasm decoders disagree \
-             on (FrameParams, draws, frame_ref, inline pixels)"
+            native.row_count(),
+            frames.len(),
+            "{fixture_name}: frame count"
         );
+        for (row, expected) in frames.iter().enumerate() {
+            let actual = native.frame(row).expect("native rendering view");
+            assert_eq!(
+                &actual, expected,
+                "{fixture_name} row {row}, chunk {chunk_size}: rendering view"
+            );
+            assert_eq!(
+                native.frame_ref(row).unwrap(),
+                browser.frame_ref(row).unwrap(),
+                "{fixture_name} row {row}: external background reference"
+            );
+            assert!(
+                !actual.objects.is_empty(),
+                "{fixture_name} row {row}: no draws"
+            );
+            for object in 0..actual.objects.len() {
+                assert_eq!(
+                    native.object_mesh_slot(&actual, object).unwrap(),
+                    browser.object_mesh_slot(expected, object).unwrap(),
+                    "{fixture_name} row {row}, object {object}: resolved mesh"
+                );
+            }
+        }
     }
 }
 

@@ -24,13 +24,13 @@ from JS.
 
 ## [How it fits together](docs/architecture.md)
 
-Everything shares **one render function** and one mesh-first render format. The
-video editor additionally reads a separate `0.2.0` authoring timeline and
-derives normal render scenes from it in Rust:
+Everything shares **one render core** and the **0.0.7 params/GLB contract**.
+The video editor uses the same retained scene document plus an independent
+video timeline; legacy annotation is converted offline:
 
 ```
 input-stream ─┬─ trd-cli  → trd-core → offscreen readback → image-stream   (headless)
-(mesh-first)  ├─ trd-app  → trd-core → window surface                      (native playback)
+(params/GLB)  ├─ trd-app  → trd-core → window surface                      (native playback)
               ├─ trd-wasm → trd-core → canvas surface                      (browser)
               └─ trd-gui  → trd-core → offscreen → egui image      (interactive, native + browser)
 
@@ -41,9 +41,9 @@ input-stream ─┬─ trd-cli  → trd-core → offscreen readback → image-st
 |---|---|---|---|
 | **`trd-cli`** | Arrow stream (stdin) | offscreen texture → read-back | Arrow image stream (stdout) |
 | **`trd-app`** | Arrow stream (stdin) | live window swapchain | frames on screen |
-| **`trd-wasm`** | Arrow stream (via `loadIpc`) | live canvas (or offscreen texture) | frames in the browser |
+| **`trd-wasm`** | `ArrowSceneDocument` via `loadSceneDocument` | live canvas (or offscreen texture) | frames in the browser |
 | **`trd-gui`** | a mesh + live gestures | offscreen → egui image | an interactive orbit/zoom viewer |
-| **video editor** | `0.2.0` timeline + external video | offscreen → egui image | quad-local 3D editing over video |
+| **video editor** | 0.0.7 params/GLB + external video | offscreen → egui image | sparse-frame editing/export/replay |
 
 Each front-end is a *thin shell* that only supplies a render target and calls the
 core — no per-front-end rendering logic. Primitive dispatch and draw-kind
@@ -83,9 +83,9 @@ examples\render.ps1 -Native
 The wrappers are conveniences around `cargo run`; the same demo, by hand:
 
 ```sh
-uv run --with pyarrow scripts/obj_to_arrow.py assets/meshes/bunny.obj  > /tmp/stream.arrow
-uv run --with pyarrow scripts/jsonl_to_arrow.py examples/frames.bunny_dolly.cg.jsonl >> /tmp/stream.arrow
-cat /tmp/stream.arrow \
+uv run --with pyarrow scripts/jsonl_to_arrow.py examples/frames.bunny_dolly.cg.jsonl \
+  | uv run --with pyarrow --with numpy --with pillow scripts/scene_to_arrow.py \
+      --mesh assets/meshes/bunny.obj \
   | cargo run -q -p trd-cli -- --width 256 --height 256 \
   | uv run --with pyarrow --with numpy scripts/encode.py --fps 30 -o output/out.gif
 ```
@@ -139,8 +139,8 @@ Linux, the vendor driver on Windows).
 cargo build --workspace                                # shared crates + native delivery apps
 cargo run -p trd-cli -- --width 256 --height 256       # headless Arrow filter (stdin → stdout)
 cargo run -p trd-gui-app -- --mesh assets/meshes/bunny.obj # interactive viewer window
-cargo run -p trd-gui-video-editing -- --document web/gui-video-editing/data/fiba-shot1.arrow \
-  --video /path/to/shot_0001.mp4                    # native video timeline/player
+cargo run -p trd-gui-video-editing -- --document output/fiba.dragon.arrow \
+  --video /path/to/shot_0001.mp4 --preview-width 1920 # current params/GLB editor
 examples/render.sh --cli                               # end-to-end demo → output/out.gif
 ( cd web && bun run --cwd viewer dev )                 # stream viewer on :8080
 ( cd web && bun run --cwd gui-viewer dev )             # GUI viewer on :8082
@@ -154,8 +154,8 @@ examples/render.sh --cli                               # end-to-end demo → out
 cargo build --workspace
 cargo run -p trd-cli -- --width 256 --height 256       # headless Arrow filter (stdin → stdout)
 cargo run -p trd-gui-app -- --mesh assets\meshes\bunny.obj # interactive viewer window
-cargo run -p trd-gui-video-editing -- --document web\gui-video-editing\data\fiba-shot1.arrow `
-  --video C:\path\to\shot_0001.mp4                   # native video timeline/player
+cargo run -p trd-gui-video-editing -- --document output\fiba.dragon.arrow `
+  --video C:\path\to\shot_0001.mp4 --preview-width 1920 # current params/GLB editor
 examples\render.ps1 -CLI                               # end-to-end demo → output\out.gif
 cd web; bun run --cwd viewer dev                       # stream viewer on :8080
 # use `bun run --cwd gui-viewer dev` for :8082
@@ -166,35 +166,28 @@ Full setup — Windows `dev-env.ps1`, GPU-driver notes (nixGL / `WGPU_BACKEND=gl
 and the `wrappers ⇄ cargo run` mapping — is in
 [`docs/rendering.md`](docs/rendering.md).
 
-## [Stream protocol](docs/protocol/0.0.6.md)
+## [Scene protocol](docs/protocol/0.0.7.md)
 
 Frame parameters are plain columnar data, so **any** tool that emits the input
-columns as an Arrow IPC stream can drive the renderer. The current — and **only
-supported** — version is **0.0.6**:
-`[mesh][texture?][frames?][params]`, with every table explicitly tagged by
-`trd.table.kind`. It is not backward-compatible; every other or missing version
-is hard-rejected.
+columns as Arrow IPC can drive the renderer. The current agreed protocol is
+**0.0.7**: `[params][mesh?]`.
 
-- a leading **mesh** table (`position`/`color`/`uv`/`index`) — one row per mesh;
-- an optional **texture** table (`rgba` tensor) for textured/PBR albedo;
-- an optional indexed **frames** resource table (`frame_bytes` Binary or
-  `frame_pixels` tensor) for self-contained backgrounds;
-- the per-frame **params** table — an optional **camera** (**CV** `k`+`pose`, or
-  **CG** `eye`/`target`/`up`+`fovy`…), an optional **draw list** (`draw_mesh` +
-  `draw_model`) instancing several meshes, and an optional **background frame**
-  (`frame_id` for inline data, or external `frame_path`/`frame_url`) composited
-  beneath the scene.
+Params contain the rendering subset plus retained upstream columns. Mesh
+resources contain only unique UUID `mesh_id` and original self-contained `glb`
+bytes; geometry, materials and textures stay inside GLB. Params-only input
+renders reference geometry. Video is external, and a missing sparse row remains
+video-only.
 
-The standard inline e2e packs all 250 native 1920×1080 frames of the Cornell-box
-clip as a raw RGBA tensor table and renders only the correctly placed textured bunny; see
-[`docs/frame-extraction.md`](docs/frame-extraction.md).
+Tracked FHC `model` is row-major on the wire; the separate CG/CV adapter retains
+column-major matrices and existing camera behavior. Editor transforms persist
+in all corresponding sparse rows and survive a fresh play/seek roundtrip.
+OBJ conversion is offline; ordinary OBJ viewers remain supported.
 
-All params columns are optional/additive and drive `clip = P · V · M · (pos, 1)`.
-Rendering appearance (filled / wireframe / textured / **PBR**) is a render-time
-choice, **not** a wire column, so the same stream renders any way.
-
-**Full column-by-column specification:
-[`docs/protocol/0.0.6.md`](docs/protocol/0.0.6.md).**
+**[0.0.7 specification](docs/protocol/0.0.7.md)** and
+**[machine-readable contract](docs/protocol/0.0.7.schema.json)** define the new
+format. Runtime, current producers and committed fixture metadata use the same
+version; [schema generation/checking](docs/protocol/README.md#implementation-migration-status)
+is part of the cutover. Earlier protocol specifications live only in Git history.
 
 ## [Material (PBR)](docs/pbr.md)
 
@@ -239,11 +232,11 @@ params: **[`docs/rendering.md`](docs/rendering.md#interactive-viewer--trd-gui)**
 
 ## [Video editing](docs/video-editing.md)
 
-`web/gui-video-editing` is a Rust-owned WebGPU editor for placing catalog objects on
+`web/gui-video-editing` is a Rust-owned WebGPU editor for placing GLB objects on
 the tracked FIBA court quad while an external MP4 plays. The browser owns media
 decode and hands each presented `VideoFrame` to Rust untouched — the pixels stay
 on the GPU (`frame upload: 0 B`); Rust owns the separate
-`trd.video_edit.version = 0.2.0` Arrow timeline, quad reconstruction,
+params/GLB Arrow document, quad reconstruction,
 quad/object-local transforms, GPU picking, PBR/IBL, final composition, and a
 collapsed **Details** inspector. Its typed snapshot follows the displayed render
 and exposes source/synchronization, raw tracking pose deltas, placement,
@@ -255,7 +248,7 @@ material/lighting, and renderer facts.
 `displayed` / `rendered`) are reported separately, and how to read the
 `expected … / observed …` `[MATCH]` comparisons.
 
-Generate the ignored local timeline first using
+Convert the matching source annotation to current params/GLB Arrow first using
 [`docs/video-editing.md`](docs/video-editing.md#generate-the-document), then:
 
 ```sh
@@ -266,8 +259,9 @@ bun install --frozen-lockfile
 bun run --cwd gui-video-editing dev  # http://localhost:8085
 ```
 
-The MP4 remains local and uncommitted. The initial fixed catalog contains the
-Coca-Cola can, beer can, and Dragon; every PBR object uses
+The MP4 remains local and uncommitted. The old annotation/catalog UI is removed:
+both surfaces reject old annotation and mesh-first inputs rather than silently
+falling back. The empty browser page loads no legacy demo. Every PBR object uses
 `assets/envmap/uffizi-large.hdr` by default. Current behavior, document schema,
 placement conventions, generation command, and known limitations are in
 **[`docs/video-editing.md`](docs/video-editing.md)**.
@@ -278,8 +272,8 @@ by the browser, without temporary frame files:
 
 ```sh
 cargo run -p trd-gui-video-editing -- \
-  --document web/gui-video-editing/data/fiba-shot1.arrow \
-  --video /path/to/shot_0001.mp4
+  --document output/fiba.dragon.arrow \
+  --video /path/to/shot_0001.mp4 --preview-width 1920
 ```
 
 `--video-url https://example.com/shot_0001.mp4` launches the same native editor
@@ -292,7 +286,7 @@ source width when comparing the two surfaces. See
 [`docs/video-editing.md`](docs/video-editing.md).
 
 The native and browser surfaces share the same panels, timeline, quad selection,
-catalog, object transforms, GPU picking, PBR/IBL controls, and three-layer
+source-model transforms, GPU picking, PBR/IBL, and depth-separated
 composition. Only the media adapter differs: [mediabunny] demux/decode behind the
 `FrameReader` seam in the
 browser, ffmpeg/ffprobe in the native shell. Native **Open video** supports both
@@ -308,19 +302,29 @@ MP4 opens and seeks in megabytes.
 - [`docs/rendering.md`](docs/rendering.md) — running every front-end
   (wrappers ⇄ `cargo run`), all CLI flags, PBR / tone-map / MSAA, camera forms,
   AR demos, the native window, the interactive viewer, web, and Windows setup.
+- [`docs/trd-wasm.md`](docs/trd-wasm.md) — public WASM/TS/JS APIs, initialization,
+  external editor control, scene editing, canvas/offscreen rendering, image IPC,
+  media-shell integration and lifecycle/error handling.
 - [`docs/pbr.md`](docs/pbr.md) — the Disney principled-BRDF material model, all PBR
   parameters + defaults, tone mapping, and the HDR environment probe.
-- [`docs/protocol/0.0.6.md`](docs/protocol/0.0.6.md) — the full stream-protocol spec,
-  with [`0.0.6.schema.json`](docs/protocol/0.0.6.schema.json) beside it as the
-  machine-readable form producers can generate against.
+- [`docs/protocol/0.0.7.md`](docs/protocol/0.0.7.md) — the current params/GLB contract,
+  with [`0.0.7.schema.json`](docs/protocol/0.0.7.schema.json). The
+  [protocol index](docs/protocol/README.md) distinguishes the agreed contract,
+  implementation cutover and archived specifications.
+- [`assets/schemas/trd-render-sub-schema.md`](assets/schemas/trd-render-sub-schema.md)
+  — the approved params/GLB simplification being implemented in #367; selected
+  source fields, CG camera compatibility, and source-preserving editing.
+- [`docs/protocol/scene-documents.md`](docs/protocol/scene-documents.md) — current
+  Rust/wasm document APIs, native GLB inputs and implementation limitations.
 - [`docs/frame-extraction.md`](docs/frame-extraction.md) — background-frame
-  extraction, external references, and inline frames-table authoring.
+  extraction and external references; retired inline resources are identified as historical.
 - [`docs/gui-design.md`](docs/gui-design.md) — the `trd-gui` interactive-viewer design.
 - [`docs/video-editing.md`](docs/video-editing.md) — FIBA timeline document,
   the browser media boundary (mediabunny + ranged reads), quad-local placement,
-  catalog, playback, and known limits. Its schema is also machine-readable as
-  [`video-editing.schema.json`](docs/video-editing.schema.json) — the **sparse**
-  table: one row per *annotated* frame, not per video frame.
+  current params/GLB editing, playback, and known limits. The offline annotation
+  source schema remains documented as
+  [`video-editing.schema.json`](docs/video-editing.schema.json); convert it
+  explicitly before loading the editor.
 - [`docs/comments.md`](docs/comments.md) — what comments are for, what to cut and
   what to keep, and `scripts/comment_audit.py` for when you want a number.
 - [`AGENTS.md`](AGENTS.md) — contributor/agent guide: which gates a change owes

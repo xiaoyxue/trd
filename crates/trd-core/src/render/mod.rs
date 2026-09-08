@@ -114,7 +114,6 @@ pub(crate) use gpu_types::{
 // The light rig is universal domain vocabulary and lives at the crate root
 // (#223); re-exported here so `render/`'s `use super::*` globs keep resolving.
 pub(crate) use crate::light::{Lighting, DEFAULT_LIGHTS, DEFAULT_POINT_LIGHTS};
-#[cfg(test)]
 pub(crate) use draw::DRAW_MODE_INHERIT;
 pub(crate) use draw_config::frame_fit_uv_scale;
 pub(crate) use pbr::{

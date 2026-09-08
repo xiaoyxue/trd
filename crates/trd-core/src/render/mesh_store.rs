@@ -40,6 +40,7 @@ pub(super) struct MeshGeometry {
     pub(super) triangles: IndexBuffer,
     pub(super) edges: IndexBuffer,
     pub(super) aabb: VertexBuffer<GizmoLineVertex>,
+    pub(super) aabb_bounds: crate::Aabb3,
     /// The preview transform pre-multiplied beneath every per-frame instance
     /// model (`effective = model · base`).
     pub(super) base_model: Matrix4,
@@ -160,6 +161,7 @@ pub(super) fn upload_mesh(
             triangles,
             edges,
             aabb: VertexBuffer::new(&gpu.device, "trd mesh aabb line buffer", &aabb_vertices),
+            aabb_bounds: mesh.aabb(),
             base_model,
         },
         textures: MeshTextures {

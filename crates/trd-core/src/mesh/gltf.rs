@@ -33,6 +33,12 @@ pub enum GltfImportError {
     PrimitiveMode(gltf_rs::mesh::Mode),
     #[error("glTF primitive has no POSITION attribute")]
     MissingPositions,
+    #[error("glTF attribute {attribute} has {actual} values for {expected} positions")]
+    AttributeLength {
+        attribute: &'static str,
+        expected: usize,
+        actual: usize,
+    },
     #[error("glTF buffer {0} is external; GLB BIN data is required")]
     ExternalBuffer(usize),
     #[error("GLB has no BIN chunk")]
@@ -81,11 +87,29 @@ pub fn import_glb(bytes: &[u8]) -> Result<GltfAsset, GltfImportError> {
         .read_tex_coords(0)
         .map(|coords| coords.into_f32().collect())
         .unwrap_or_else(|| vec![[0.0; 2]; positions.len()]);
+    let colors: Vec<[f32; 3]> = reader
+        .read_colors(0)
+        .map(|colors| colors.into_rgb_f32().collect())
+        .unwrap_or_else(|| vec![[1.0; 3]; positions.len()]);
     let normals: Option<Vec<[f32; 3]>> = reader.read_normals().map(Iterator::collect);
     let tangents: Vec<[f32; 4]> = reader
         .read_tangents()
         .map(Iterator::collect)
         .unwrap_or_default();
+    for (attribute, count) in [
+        ("TEXCOORD_0", Some(tex_coords.len())),
+        ("COLOR_0", Some(colors.len())),
+        ("NORMAL", normals.as_ref().map(Vec::len)),
+        ("TANGENT", (!tangents.is_empty()).then_some(tangents.len())),
+    ] {
+        if let Some(actual) = count.filter(|count| *count != positions.len()) {
+            return Err(GltfImportError::AttributeLength {
+                attribute,
+                expected: positions.len(),
+                actual,
+            });
+        }
+    }
     let indices: Vec<u32> = reader
         .read_indices()
         .map(|indices| indices.into_u32().collect())
@@ -93,9 +117,10 @@ pub fn import_glb(bytes: &[u8]) -> Result<GltfAsset, GltfImportError> {
     let vertices: Vec<Vertex> = positions
         .into_iter()
         .zip(tex_coords)
-        .map(|(position, uv)| Vertex {
+        .zip(colors)
+        .map(|((position, uv), color)| Vertex {
             position,
-            color: [1.0; 3],
+            color,
             uv,
         })
         .collect();

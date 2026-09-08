@@ -40,6 +40,7 @@ export class VideoPlayer {
   #positionSeconds = 0;
   #filling = false;
   #exhausted = false;
+  #ended = false;
   /// Bumped by every seek and by close, so an in-flight fill for an older
   /// position discards its frames instead of showing them.
   #generation = 0;
@@ -84,8 +85,17 @@ export class VideoPlayer {
     return this.#positionSeconds;
   }
 
+  get ended(): boolean {
+    return this.#ended;
+  }
+
   play(): void {
-    if (this.#playing || this.#exhausted) {
+    if (this.#playing || this.#ended) {
+      return;
+    }
+    // Reader EOF can leave up to a lookahead of frames still to present.
+    if (this.#exhausted && this.#queue.length === 0) {
+      this.#end();
       return;
     }
     this.#playing = true;
@@ -108,6 +118,7 @@ export class VideoPlayer {
     const generation = ++this.#generation;
     this.#drain();
     this.#exhausted = false;
+    this.#ended = false;
     const target = await this.#video.seekTo(seconds);
     if (generation !== this.#generation) {
       return;
@@ -126,7 +137,7 @@ export class VideoPlayer {
       this.#show(frame);
     } else {
       this.#exhausted = true;
-      this.#sink.ended();
+      this.#end();
     }
     void this.#fill();
   }
@@ -150,6 +161,14 @@ export class VideoPlayer {
       frame.close();
     }
     this.#queue.length = 0;
+  }
+
+  #end(): void {
+    this.pause();
+    if (!this.#ended) {
+      this.#ended = true;
+      this.#sink.ended();
+    }
   }
 
   /// Keeps the lookahead topped up. Guarded rather than queued: one fill at a
@@ -214,8 +233,7 @@ export class VideoPlayer {
     }
     void this.#fill();
     if (this.#exhausted && this.#queue.length === 0) {
-      this.#playing = false;
-      this.#sink.ended();
+      this.#end();
     }
   }
 }

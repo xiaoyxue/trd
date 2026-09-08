@@ -6,8 +6,7 @@ use std::time::{Duration, Instant};
 use crate::error::NativeVideoEditingError;
 use crate::media::{preview_size, DecodedFrame, NativeVideo, NativeVideoSource};
 use trd_gui::video_editing::{
-    CatalogAsset, ErrorScope, VideoEditingApp, VideoEditingCommand, VideoEditingShared,
-    VideoSourceKind,
+    ErrorScope, VideoEditingApp, VideoEditingCommand, VideoEditingShared, VideoSourceKind,
 };
 use trd_gui::video_editing_renderer::VideoPlacementRenderer;
 
@@ -33,10 +32,8 @@ impl PlaybackClock {
 }
 
 pub struct NativeVideoEditingApp {
-    /// The timeline in force: the document's when there is one, otherwise what
-    /// ffprobe read from the container (#264).
+    /// Playback uses the container timeline independently of sparse scene rows.
     video_info: trd_core::VideoInfo,
-    document: Option<trd_core::VideoEditingDocument>,
     shared: Rc<VideoEditingShared>,
     editor: VideoEditingApp,
     video_source: Option<NativeVideoSource>,
@@ -95,25 +92,26 @@ fn empty_video_info() -> trd_core::VideoInfo {
 
 impl NativeVideoEditingApp {
     pub fn new(
-        document: Option<trd_core::VideoEditingDocument>,
+        input: Option<trd_gui::video_editing::VideoEditingInput>,
         video_source: Option<NativeVideoSource>,
         preview_width: u32,
         gpu: Option<std::sync::Arc<trd_core::GpuContext>>,
     ) -> Result<Self, NativeVideoEditingError> {
-        // With a document the video is validated against it; without one the
-        // container *is* the timeline, so the probe supplies it (#264).
-        let (mut video, video_info) = match (video_source.clone(), document.as_ref()) {
-            (Some(source), Some(document)) => (
-                Some(NativeVideo::open(source, &document.video, preview_width)?),
-                document.video.clone(),
-            ),
-            (Some(source), None) => {
+        let arrow_scene = match input {
+            Some(trd_gui::video_editing::VideoEditingInput::Scene(scene)) => {
+                let mut scene = scene;
+                resolve_arrow_scene(&mut scene).map_err(NativeVideoEditingError::Input)?;
+                Some(Rc::new(scene))
+            }
+            None => None,
+        };
+        let (mut video, video_info) = match video_source.clone() {
+            Some(source) => {
                 let (video, info) = NativeVideo::probe(source, preview_width)?;
                 (Some(video), info)
             }
-            (None, Some(document)) => (None, document.video.clone()),
             // Neither yet: an empty timeline the Open dialog will replace.
-            (None, None) => (None, empty_video_info()),
+            None => (None, empty_video_info()),
         };
         let initial_frame = video
             .as_ref()
@@ -126,15 +124,38 @@ impl NativeVideoEditingApp {
         if let Some(video) = &mut video {
             video.stop();
         }
+        let assets_root =
+            std::env::current_dir().map_err(|source| NativeVideoEditingError::Read {
+                path: "current working directory".to_owned(),
+                source,
+            })?;
+        let replay_env = arrow_scene
+            .as_ref()
+            .map(|_| read_asset(&assets_root, Path::new("assets/envmap/uffizi-large.hdr")))
+            .transpose()
+            .map_err(NativeVideoEditingError::Renderer)?;
 
         let shared = Rc::new(VideoEditingShared::default());
         // With eframe's device the rendered texture is bound straight into egui;
         // without one (no wgpu render state) the portable readback path stands.
-        let renderer = match gpu.clone() {
-            Some(gpu) => {
+        let renderer = match (gpu.clone(), arrow_scene.as_ref()) {
+            (Some(gpu), Some(scene)) => VideoPlacementRenderer::new_arrow_scene_with_gpu(
+                gpu,
+                scene,
+                replay_env.as_deref().expect("scene env loaded above"),
+                render_size.0,
+                render_size.1,
+            ),
+            (None, Some(scene)) => pollster::block_on(VideoPlacementRenderer::new_arrow_scene(
+                scene,
+                replay_env.as_deref().expect("scene env loaded above"),
+                render_size.0,
+                render_size.1,
+            )),
+            (Some(gpu), None) => {
                 VideoPlacementRenderer::new_empty_with_gpu(gpu, render_size.0, render_size.1)
             }
-            None => pollster::block_on(VideoPlacementRenderer::new_empty(
+            (None, None) => pollster::block_on(VideoPlacementRenderer::new_empty(
                 render_size.0,
                 render_size.1,
             )),
@@ -144,13 +165,12 @@ impl NativeVideoEditingApp {
         if let Some(gpu) = gpu {
             shared.set_shared_gpu(gpu);
         }
-        let editor = match document.clone() {
-            Some(document) => VideoEditingApp::new(document, shared.clone()),
-            None => VideoEditingApp::player(video_info.clone(), shared.clone()),
-        };
+        let mut editor = VideoEditingApp::player(video_info.clone(), shared.clone());
+        if let Some(scene) = arrow_scene {
+            editor.set_arrow_scene(Some(scene));
+        }
         let mut app = Self {
             video_info,
-            document,
             shared,
             editor,
             video_source,
@@ -159,12 +179,7 @@ impl NativeVideoEditingApp {
             frame_index: 0,
             playback: None,
             pending_frame: None,
-            assets_root: std::env::current_dir().map_err(|source| {
-                NativeVideoEditingError::Read {
-                    path: "current working directory".to_owned(),
-                    source,
-                }
-            })?,
+            assets_root,
             env_bytes: None,
             picked_video: None,
             picked_document: None,
@@ -216,7 +231,7 @@ impl NativeVideoEditingApp {
         let Some(clock) = self.playback else {
             return;
         };
-        let last_frame = self.video_info.frame_count.saturating_sub(1);
+        let mut last_frame = last_presentable_frame(&self.video_info);
         let target = clock.target_frame(
             Instant::now(),
             self.video_info.fps_num,
@@ -247,14 +262,27 @@ impl NativeVideoEditingApp {
             self.submit_frame(frame);
         }
 
-        if self.frame_index >= last_frame {
-            self.stop_playback();
-        } else if self.pending_frame.is_none()
+        let exhausted = self.pending_frame.is_none()
             && self
                 .video
                 .as_ref()
-                .is_some_and(|video| !video.is_streaming())
+                .is_some_and(|video| !video.is_streaming());
+        if exhausted && self.frame_index < last_frame && self.video_info.unpresented_tail.is_none()
         {
+            if let Some(tail) = self.video_source.as_ref().and_then(|source| {
+                crate::media::probe_tail_packets(
+                    source,
+                    self.video_info.duration_us as f64 / 1_000_000.0,
+                )
+            }) {
+                self.video_info.unpresented_tail = Some(tail);
+                self.editor.set_video_info(self.video_info.clone());
+                last_frame = last_presentable_frame(&self.video_info);
+            }
+        }
+        if self.frame_index >= last_frame {
+            self.stop_playback();
+        } else if exhausted {
             self.shared.set_error(
                 ErrorScope::Media,
                 format!(
@@ -272,30 +300,18 @@ impl NativeVideoEditingApp {
                 VideoEditingCommand::OpenLocalVideo => self.pick_local_video(),
                 VideoEditingCommand::OpenLocalDocument => self.pick_local_document(),
                 VideoEditingCommand::LoadSelection => self.load_selection(),
+                VideoEditingCommand::LoadVideo => {
+                    self.load_selected_video();
+                }
+                VideoEditingCommand::LoadArrow => self.load_selected_document(),
                 VideoEditingCommand::Play => self.play(),
                 VideoEditingCommand::Pause => self.pause(),
+                VideoEditingCommand::ExportArrow => self.save_arrow_export(),
             }
         }
 
         if let Some(index) = self.shared.take_seek_frame() {
             self.seek(index);
-        }
-        if let Some(asset) = self.shared.take_asset_request() {
-            // Logged, not merely surfaced in the UI. A catalog load reads and
-            // decodes up to tens of megabytes and rebuilds the renderer, so it
-            // is worth being able to see that it was asked for and that it
-            // finished.
-            log::info!("loading catalog asset {asset:?}");
-            match self.load_catalog_asset(asset) {
-                Ok(()) => {
-                    log::info!("catalog asset {asset:?} loaded");
-                    self.shared.clear_error(ErrorScope::Catalog);
-                }
-                Err(error) => {
-                    log::error!("catalog asset {asset:?} failed to load: {error}");
-                    self.shared.set_error(ErrorScope::Catalog, error);
-                }
-            }
         }
     }
 
@@ -304,7 +320,7 @@ impl NativeVideoEditingApp {
     /// this one stays reviewable as pure UI (#264).
     fn pick_local_document(&mut self) {
         let dialog = rfd::FileDialog::new().add_filter(
-            "Annotation document",
+            "Arrow input",
             &trd_gui::video_editing::DocumentFormat::EXTENSIONS,
         );
         if let Some(path) = dialog.pick_file() {
@@ -340,24 +356,70 @@ impl NativeVideoEditingApp {
         }
     }
 
+    fn save_arrow_export(&self) {
+        let Some(export) = self.shared.take_arrow_export() else {
+            self.shared.complete_arrow_export(Err(
+                "the editor requested an export without queued Arrow bytes".to_owned(),
+            ));
+            return;
+        };
+        let path = rfd::FileDialog::new()
+            .add_filter("Arrow scene", &["arrow"])
+            .set_file_name(&export.filename)
+            .save_file();
+        let Some(path) = path else {
+            self.shared.cancel_arrow_export();
+            return;
+        };
+        match write_arrow_export(&path, &export.bytes) {
+            Ok(()) => {
+                log::info!(
+                    "saved Arrow scene to {} ({} bytes)",
+                    path.display(),
+                    export.bytes.len()
+                );
+                self.shared.complete_arrow_export(Ok(format!(
+                    "Saved {} bytes to {}",
+                    export.bytes.len(),
+                    path.display()
+                )));
+            }
+            Err(error) => {
+                log::error!("{error}");
+                self.shared.complete_arrow_export(Err(error));
+            }
+        }
+    }
+
     /// Loads whatever the dialog selected: the picked local video or the typed
     /// URL, plus the optional annotation document.
     ///
     /// Both are applied in one act, so "open this video *with* this document" is
     /// expressible — which is why picking never loads on its own (#264).
     fn load_selection(&mut self) {
+        if self.load_selected_video() {
+            self.load_selected_document();
+        }
+    }
+
+    fn load_selected_video(&mut self) -> bool {
         let Some(pending) = self.shared.pending_video() else {
-            return;
+            self.shared
+                .set_error(ErrorScope::Media, "Select a video file or URL first");
+            return false;
         };
         let source = match pending.kind {
             VideoSourceKind::LocalFile => match self.picked_video.clone() {
                 Some(path) => NativeVideoSource::Local(path),
-                None => return,
+                None => {
+                    self.shared
+                        .set_error(ErrorScope::Media, "The selected video file is unavailable");
+                    return false;
+                }
             },
             VideoSourceKind::HttpUrl => NativeVideoSource::Url(pending.name),
         };
-        self.open_video_source(source);
-        self.load_selected_document();
+        self.open_video_source(source)
     }
 
     /// Reads the selected annotation document — a local file or an HTTP(S) URL —
@@ -384,39 +446,63 @@ impl NativeVideoEditingApp {
             }
             VideoSourceKind::HttpUrl => fetch_document(&pending.name),
         };
-        let result = bytes.and_then(|bytes| self.shared.load_document_bytes(&bytes));
+        let result = bytes.and_then(|bytes| self.load_input_bytes(&bytes));
         match result {
-            Ok(()) => {
-                log::info!("annotation document loaded from {}", pending.name);
+            Ok(kind) => {
+                log::info!("{kind} loaded from {}", pending.name);
                 self.shared.clear_error(ErrorScope::Document);
             }
             Err(error) => self.shared.set_error(ErrorScope::Document, error),
         }
     }
 
-    fn open_video_source(&mut self, source: NativeVideoSource) {
-        self.stop_playback();
-        // With a document the source must match it; without one the container is
-        // the timeline, so probe and adopt what it says (#264).
-        let opened = match self.document.as_ref() {
-            Some(document) => {
-                NativeVideo::open(source.clone(), &document.video, self.preview_width)
-                    .map(|video| (video, document.video.clone()))
+    fn load_input_bytes(&mut self, bytes: &[u8]) -> Result<&'static str, String> {
+        match trd_gui::video_editing::decode_video_editing_input(bytes)? {
+            trd_gui::video_editing::VideoEditingInput::Scene(scene) => {
+                let mut scene = scene;
+                resolve_arrow_scene(&mut scene)?;
+                if self.env_bytes.is_none() {
+                    self.env_bytes = Some(read_asset(
+                        &self.assets_root,
+                        Path::new("assets/envmap/uffizi-large.hdr"),
+                    )?);
+                }
+                let env = self.env_bytes.as_deref().expect("loaded above");
+                let (width, height) = self
+                    .video
+                    .as_ref()
+                    .map(|video| (video.width, video.height))
+                    .unwrap_or_else(|| preview_size(&self.video_info, self.preview_width));
+                let renderer = match self.shared.shared_gpu() {
+                    Some(gpu) => VideoPlacementRenderer::new_arrow_scene_with_gpu(
+                        gpu, &scene, env, width, height,
+                    ),
+                    None => pollster::block_on(VideoPlacementRenderer::new_arrow_scene(
+                        &scene, env, width, height,
+                    )),
+                }?;
+                self.shared.set_renderer(renderer);
+                self.shared.queue_arrow_scene(Rc::new(scene));
+                Ok("protocol scene")
             }
-            None => NativeVideo::probe(source.clone(), self.preview_width),
-        };
+        }
+    }
+
+    fn open_video_source(&mut self, source: NativeVideoSource) -> bool {
+        self.stop_playback();
+        let opened = NativeVideo::probe(source.clone(), self.preview_width);
         let (video, info) = match opened {
             Ok(opened) => opened,
             Err(error) => {
                 self.shared.set_error(ErrorScope::Media, error.to_string());
-                return;
+                return false;
             }
         };
         let frame = match video.decode_one(0) {
             Ok(frame) => frame,
             Err(error) => {
                 self.shared.set_error(ErrorScope::Media, error.to_string());
-                return;
+                return false;
             }
         };
         self.shared.set_video_status(false, false);
@@ -434,6 +520,7 @@ impl NativeVideoEditingApp {
         self.pending_frame = None;
         self.submit_frame(frame);
         self.sync_video_status();
+        true
     }
 
     fn play(&mut self) {
@@ -444,7 +531,7 @@ impl NativeVideoEditingApp {
             );
             return;
         }
-        let last_frame = self.video_info.frame_count.saturating_sub(1);
+        let last_frame = last_presentable_frame(&self.video_info);
         let start_frame = replay_start(self.frame_index, last_frame);
         if start_frame != self.frame_index {
             self.seek(start_frame);
@@ -497,54 +584,10 @@ impl NativeVideoEditingApp {
         self.sync_video_status();
     }
 
-    fn load_catalog_asset(&mut self, asset: CatalogAsset) -> Result<(), String> {
-        let (model_path, texture_path) = catalog_paths(asset);
-        let model_bytes = read_asset(&self.assets_root, model_path)?;
-        let texture_bytes = texture_path
-            .map(|path| read_asset(&self.assets_root, path))
-            .transpose()?
-            .unwrap_or_default();
-        if self.env_bytes.is_none() {
-            self.env_bytes = Some(read_asset(
-                &self.assets_root,
-                Path::new("assets/envmap/uffizi-large.hdr"),
-            )?);
-        }
-        let (width, height) = self
-            .video
-            .as_ref()
-            .map(|video| (video.width, video.height))
-            .unwrap_or_else(|| preview_size(&self.video_info, self.preview_width));
-        // A catalog swap rebuilds the renderer, so it has to land on the *same*
-        // device egui samples — otherwise the re-registered texture belongs to a
-        // device the toolkit knows nothing about.
-        let renderer = match self.shared.shared_gpu() {
-            Some(gpu) => VideoPlacementRenderer::new_with_gpu(
-                gpu,
-                asset,
-                &model_bytes,
-                &texture_bytes,
-                self.env_bytes.as_deref().expect("loaded above"),
-                width,
-                height,
-            ),
-            None => pollster::block_on(VideoPlacementRenderer::new(
-                asset,
-                &model_bytes,
-                &texture_bytes,
-                self.env_bytes.as_deref().expect("loaded above"),
-                width,
-                height,
-            )),
-        }?;
-        self.shared.set_catalog_renderer(asset, renderer);
-        Ok(())
-    }
-
     fn sync_video_status(&self) {
         self.shared
             .set_video_status(self.video.is_some(), self.playback.is_some());
-        let last_frame = self.video_info.frame_count.saturating_sub(1);
+        let last_frame = last_presentable_frame(&self.video_info);
         self.shared.set_video_media_observation(
             if self.video.is_some() { 4 } else { 0 },
             self.video.is_some() && self.playback.is_none() && self.frame_index >= last_frame,
@@ -593,6 +636,12 @@ impl eframe::App for NativeVideoEditingApp {
     }
 }
 
+fn last_presentable_frame(info: &trd_core::VideoInfo) -> u32 {
+    info.frame_count
+        .saturating_sub(info.unpresented_tail.map_or(0, |tail| tail.samples))
+        .saturating_sub(1)
+}
+
 fn replay_start(current_frame: u32, last_frame: u32) -> u32 {
     if current_frame >= last_frame {
         0
@@ -601,28 +650,41 @@ fn replay_start(current_frame: u32, last_frame: u32) -> u32 {
     }
 }
 
-fn catalog_paths(asset: CatalogAsset) -> (&'static Path, Option<&'static Path>) {
-    match asset {
-        CatalogAsset::CocaColaCan => (
-            Path::new("assets/meshes/can/coke.obj"),
-            Some(Path::new("assets/meshes/can/can_around.jpg")),
-        ),
-        CatalogAsset::BeerCan => (
-            Path::new("assets/meshes/qd_beer/source/3d66.com_JDH5455878326.obj"),
-            Some(Path::new(
-                "assets/meshes/qd_beer/textures/3d66-export-JDH5455878326-001.jpg",
-            )),
-        ),
-        CatalogAsset::Dragon => (
-            Path::new("assets/meshes/glb/Meshy_AI_Dragon_0804104424_texture.glb"),
-            None,
-        ),
+pub(crate) fn resolve_arrow_scene(
+    scene: &mut trd_gui::video_editing::ArrowScene,
+) -> Result<(), String> {
+    for (index, reference) in scene.unresolved_mesh_references() {
+        let bytes = load_mesh_reference(&reference)?;
+        scene.resolve_gltf(index, &bytes)?;
     }
+    Ok(())
+}
+
+fn load_mesh_reference(reference: &trd_core::MeshReference) -> Result<Vec<u8>, String> {
+    if let Some(path) = reference.path.as_ref() {
+        match std::fs::read(path) {
+            Ok(bytes) => return Ok(bytes),
+            Err(error) if reference.url.is_none() => {
+                return Err(format!("failed to read {path}: {error}"));
+            }
+            Err(_) => {}
+        }
+    }
+    let url = reference
+        .url
+        .as_deref()
+        .ok_or_else(|| "glTF reference has neither a readable path nor a URL".to_owned())?;
+    fetch_document(url)
 }
 
 fn read_asset(root: &Path, relative: &Path) -> Result<Vec<u8>, String> {
     let path = root.join(relative);
     std::fs::read(&path).map_err(|error| format!("failed to read {}: {error}", path.display()))
+}
+
+fn write_arrow_export(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    std::fs::write(path, bytes)
+        .map_err(|error| format!("failed to write Arrow scene {}: {error}", path.display()))
 }
 
 #[cfg(test)]
@@ -651,5 +713,47 @@ mod tests {
     fn replay_restarts_only_at_end() {
         assert_eq!(replay_start(100, 287), 100);
         assert_eq!(replay_start(287, 287), 0);
+    }
+
+    #[test]
+    fn eof_and_replay_use_the_last_presented_sample_without_changing_the_timeline() {
+        let mut info = empty_video_info();
+        info.frame_count = 694_840;
+        assert_eq!(
+            last_presentable_frame(&info),
+            694_839,
+            "unknown is not inferred"
+        );
+        info.unpresented_tail = Some(trd_core::UnpresentedTail {
+            samples: 1,
+            evidence: trd_core::UnpresentedTailEvidence::PacketFlags,
+        });
+        let last = last_presentable_frame(&info);
+        assert_eq!(last, 694_838);
+        assert_eq!(replay_start(last, last), 0);
+        assert_eq!(replay_start(last - 1, last), last - 1);
+        assert_eq!(
+            info.frame_count, 694_840,
+            "retain the container sample count"
+        );
+        info.unpresented_tail.as_mut().unwrap().samples = 0;
+        assert_eq!(last_presentable_frame(&info), 694_839);
+    }
+
+    #[test]
+    fn arrow_export_writer_persists_the_exact_bytes() {
+        let path = std::env::temp_dir().join(format!(
+            "trd-arrow-export-{}-{}.arrow",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let bytes = b"arrow scene bytes";
+
+        write_arrow_export(&path, bytes).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        std::fs::remove_file(path).unwrap();
     }
 }

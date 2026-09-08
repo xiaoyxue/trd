@@ -1,134 +1,168 @@
-//! The stdin Arrow-stream reader thread and the messages it forwards: the
-//! decoded mesh table, optional bound texture, playback rate, and each frame.
+//! Reads one retained `[params][mesh?]` document off the window thread.
 
-use std::path::PathBuf;
-use std::sync::mpsc;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::sync::{mpsc, Arc};
 
-use trd_core::{
-    Draw, FrameParams, ImageData, ImageTexture, InlineFrameCache, InputStream, Mesh, SceneError,
-};
+use trd_core::{DocumentFrame, ImageData, MeshAsset, SceneDocument, StreamError, Tonemap};
 
-/// A message from the stdin reader thread: the decoded mesh table (sent once,
-/// first), then the optional bound texture (once, only for a `0.0.4` stream
-/// carrying a texture table), then the stream's declared playback rate (once),
-/// then each decoded frame.
 pub(crate) enum StreamMsg {
-    Meshes(Vec<Mesh>),
-    // Only sent when the stream carries a texture table; small (width/height +
-    // an RGBA byte buffer), so it needs no boxing.
-    Texture(ImageTexture),
+    Meshes {
+        assets: Vec<MeshAsset>,
+        reference_only: bool,
+    },
     Rate(f64),
-    // Boxed: `FrameData` embeds the large `FrameParams` (camera columns), so an
-    // unboxed variant would dwarf `Rate` (clippy::large_enum_variant).
+    Tonemap(Tonemap),
     Frame(Box<FrameData>),
 }
 
-/// One decoded frame: its camera/transform params and resolved instanced draw
-/// list, built into a [`trd_core::Scene`] at render time. `frame_image` holds a
-/// per-frame background image (#63) decoded to RGBA at full source
-/// resolution off the render thread (from `frame_path` + `--frames-base`),
-/// uploaded + composited beneath the scene at render time (the GPU samples it
-/// down to the surface via the frame plane's `Stretch` fit); `None` when the
-/// frame has no background. It is an `Arc` so cloning a frame for playback never
-/// re-copies the pixel buffer.
 #[derive(Clone)]
 pub(crate) struct FrameData {
-    pub(crate) params: FrameParams,
-    pub(crate) draws: Vec<Draw>,
+    pub(crate) document: Arc<SceneDocument>,
+    pub(crate) frame: DocumentFrame,
     pub(crate) frame_image: Option<Arc<ImageData>>,
 }
 
-/// Reads the Arrow IPC frame-params stream from stdin on a background thread,
-/// forwarding the stream's declared playback rate then each decoded frame over
-/// `tx` until the stream ends. When `frames_base` is set, a frame's `frame_path`
-/// is loaded and decoded to RGBA at full source resolution off the
-/// render thread, then shipped with the frame for compositing (the GPU samples it
-/// down to the surface via the frame plane's `Stretch` fit). Decoded stills are
-/// held in an `Arc` so cloning a frame for loop playback never re-copies the
-/// pixel buffer; per-frame decode is cheap because deps build with `opt-level=3`
-/// even in dev (see the root `Cargo.toml`).
-pub(crate) fn spawn_stdin_reader(tx: mpsc::Sender<StreamMsg>, frames_base: Option<PathBuf>) {
-    let spawned = std::thread::Builder::new()
-        .name("trd-stdin-reader".to_string())
-        .spawn(move || {
-            // A send error just means the window closed; stop reading in that case.
-            if let Err(err) = read_stdin(&tx, frames_base) {
-                log::error!("input stream error: {err}");
-            }
-        });
-    if let Err(err) = spawned {
-        log::error!("failed to spawn stdin reader thread: {err}");
-    }
-}
-
-/// Drives the stream: the prologue once, then a frame per timeline row.
-///
-/// The loop lives here rather than behind a callback API in `trd-core` because
-/// it is three lines and this shell is the only thing that knows what to do with
-/// each frame — forward it to the window thread, which paces playback itself.
-fn read_stdin(
-    tx: &mpsc::Sender<StreamMsg>,
+pub(crate) fn spawn_stdin_reader(
+    tx: mpsc::Sender<StreamMsg>,
     frames_base: Option<PathBuf>,
-) -> Result<(), trd_core::StreamError> {
-    let mut input = InputStream::new(std::io::stdin().lock());
-    let prologue = input.prologue()?;
-    let mesh_count = prologue.meshes.len();
-    let _ = tx.send(StreamMsg::Meshes(prologue.meshes.to_vec()));
-    if let Some(texture) = prologue.texture {
-        let _ = tx.send(StreamMsg::Texture(texture.clone()));
-    }
-    let _ = tx.send(StreamMsg::Rate(prologue.frame_rate));
-
-    let mut inline_cache = InlineFrameCache::default();
-    while let Some(batch) = input.next_batch() {
-        for frame in batch? {
-            let draws = frame.resolved_draws();
-            if let Some(bad) = draws.iter().find(|d| d.mesh_id as usize >= mesh_count) {
-                return Err(SceneError::MeshIndexOutOfRange {
-                    mesh_id: bad.mesh_id,
-                    mesh_count,
-                }
-                .into());
+    wake: winit::event_loop::EventLoopProxy<()>,
+) {
+    let spawned = std::thread::Builder::new()
+        .name("trd-stdin-reader".to_owned())
+        .spawn(move || {
+            let notify = || {
+                let _ = wake.send_event(());
+            };
+            if let Err(error) = read_stream(
+                std::io::stdin().lock(),
+                &tx,
+                frames_base.as_deref(),
+                &notify,
+            ) {
+                log::error!("input stream error: {error}");
             }
-            let frame_image = inline_cache
-                .resolve(frame.frame_id, input.frames())?
-                .map(|(image, _changed)| image)
-                .or_else(|| {
-                    frame
-                        .frame_ref
-                        .as_deref()
-                        .zip(frames_base.as_ref())
-                        .and_then(|(rel, base)| load_frame_image(&base.join(rel)))
-                        .map(Arc::new)
-                });
-            let _ = tx.send(StreamMsg::Frame(Box::new(FrameData {
-                params: frame.params,
-                draws,
-                frame_image,
-            })));
-        }
+            // Wake after disconnect too, so non-looping playback can become idle.
+            drop(tx);
+            notify();
+        });
+    if let Err(error) = spawned {
+        log::error!("failed to spawn stdin reader thread: {error}");
     }
-    input.finish()
 }
 
-/// Decodes a background frame image file (PNG/JPEG) to RGBA at its full source
-/// resolution (#63). Kept in the shell so trd-core does no image I/O; a load
-/// failure logs and yields `None` (that frame renders without a background).
-fn load_frame_image(path: &std::path::Path) -> Option<ImageData> {
-    match image::open(path) {
-        Ok(img) => {
-            let rgba = img.to_rgba8();
-            let (width, height) = rgba.dimensions();
-            Some(ImageData {
-                width,
-                height,
-                rgba: rgba.into_raw(),
-            })
+fn read_stream(
+    input: impl Read,
+    tx: &mpsc::Sender<StreamMsg>,
+    frames_base: Option<&Path>,
+    notify: &dyn Fn(),
+) -> Result<(), StreamError> {
+    let document = Arc::new(SceneDocument::read_from(input)?);
+    let send = |message| {
+        let sent = tx.send(message).is_ok();
+        notify();
+        sent
+    };
+    if !send(StreamMsg::Meshes {
+        assets: document.decoded_assets()?,
+        reference_only: document.meshes().is_empty(),
+    }) || !send(StreamMsg::Rate(trd_core::frame_rate_from_metadata(
+        document.schema().metadata(),
+    ))) {
+        return Ok(()); // The window closed.
+    }
+    if let Some(operator) = document.tonemap_override()? {
+        if !send(StreamMsg::Tonemap(operator)) {
+            return Ok(());
         }
-        Err(err) => {
-            log::warn!("skipping frame background {}: {err}", path.display());
+    }
+    let mut images = HashMap::<String, Arc<ImageData>>::new();
+    for row in 0..document.row_count() {
+        let frame_image = if let Some(reference) = document.frame_ref(row)? {
+            if let Some(image) = images.get(&reference) {
+                Some(Arc::clone(image))
+            } else {
+                let base =
+                    frames_base.ok_or_else(|| StreamError::FrameResolve(reference.clone()))?;
+                let image = Arc::new(load_frame_image(&base.join(&reference))?);
+                images.insert(reference, Arc::clone(&image));
+                Some(image)
+            }
+        } else {
             None
+        };
+        if !send(StreamMsg::Frame(Box::new(FrameData {
+            frame: document.frame(row)?,
+            document: Arc::clone(&document),
+            frame_image,
+        }))) {
+            break;
         }
+    }
+    Ok(())
+}
+
+fn load_frame_image(path: &Path) -> Result<ImageData, StreamError> {
+    let rgba = image::open(path)
+        .map_err(|error| {
+            std::io::Error::other(format!("read background {}: {error}", path.display()))
+        })?
+        .to_rgba8();
+    Ok(ImageData {
+        width: rgba.width(),
+        height: rgba.height(),
+        rgba: rgba.into_raw(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn current_document_reaches_the_window_without_changing_camera_or_glb_bindings() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/trd-core/tests/golden");
+        let bytes = std::fs::read(root.join("stage2.arrow")).unwrap();
+        let expected = SceneDocument::read(&bytes).unwrap();
+        let (tx, rx) = mpsc::channel();
+        let wakes = Cell::new(0);
+        read_stream(&bytes[..], &tx, Some(&root), &|| wakes.set(wakes.get() + 1)).unwrap();
+        drop(tx);
+        let mut frames = Vec::new();
+        let mut assets = None;
+        for message in rx {
+            match message {
+                StreamMsg::Meshes {
+                    assets: value,
+                    reference_only,
+                } => {
+                    assert!(!reference_only);
+                    assets = Some(value);
+                }
+                StreamMsg::Frame(frame) => frames.push(frame),
+                StreamMsg::Rate(rate) => assert!(rate > 0.0),
+                StreamMsg::Tonemap(_) => {}
+            }
+        }
+        assert_eq!(assets.unwrap().len(), expected.meshes().len());
+        assert_eq!(frames.len(), expected.row_count());
+        assert!(wakes.get() >= frames.len() + 2);
+        for (row, frame) in frames.iter().enumerate() {
+            assert_eq!(frame.frame, expected.frame(row).unwrap());
+            assert_eq!(frame.document.meshes(), expected.meshes());
+            assert!(frame.frame_image.is_some());
+        }
+    }
+
+    #[test]
+    fn missing_background_is_an_error_not_an_incomplete_scene() {
+        let bytes = include_bytes!("../../../crates/trd-core/tests/golden/stage1.arrow");
+        let (tx, _rx) = mpsc::channel();
+        assert!(matches!(
+            read_stream(&bytes[..], &tx, None, &|| {}),
+            Err(StreamError::FrameResolve(_))
+        ));
     }
 }

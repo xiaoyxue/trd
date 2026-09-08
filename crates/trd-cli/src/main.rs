@@ -1,7 +1,7 @@
 //! trd-cli: native headless entry point.
 //!
 //! Reads an Arrow IPC scene stream on stdin and writes an Arrow
-//! IPC stream of rendered images on stdout (trd protocol 0.0.6).
+//! IPC stream of rendered images on stdout (trd protocol 0.0.7).
 
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -50,7 +50,7 @@ impl From<TonemapArg> for trd_core::Tonemap {
     }
 }
 
-/// Streaming Arrow renderer for trd (protocol 0.0.6).
+/// Streaming Arrow renderer for trd (protocol 0.0.7).
 #[derive(Parser)]
 #[command(name = "trd", version, about)]
 struct Cli {
@@ -180,7 +180,7 @@ fn main() -> Result<(), trd_core::StreamError> {
     // `--env-background` also needs it: the probe drawn as the sky is the same
     // bound environment map the shaded surfaces reflect (#235 R2), so a filled or
     // wireframe scene asking for a sky gets the config too.
-    let pbr = if cli.pbr || cli.env_background {
+    let pbr = if cli.pbr || cli.env_background || cli.env.is_some() {
         let material = trd_core::DisneyMaterial {
             metallic: cli.metallic,
             roughness: cli.roughness,
@@ -244,7 +244,7 @@ fn main() -> Result<(), trd_core::StreamError> {
         .as_ref()
         .map(|r| r as &dyn Fn(&str) -> Option<trd_core::ImageData>);
 
-    trd_core::run_stream(
+    trd_core::run_stream_with_scene_builder(
         stdin,
         stdout,
         cli.width,
@@ -277,6 +277,10 @@ fn main() -> Result<(), trd_core::StreamError> {
             },
         },
         frame_resolver,
+        |document, frame, viewport, options, fit| {
+            trd_placement::document_scene(document, frame, viewport, options, fit)
+                .map_err(|error| error.to_string())
+        },
     )?;
     io::stdout().flush()?;
     Ok(())

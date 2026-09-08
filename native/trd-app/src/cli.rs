@@ -44,9 +44,9 @@ impl From<TonemapArg> for trd_core::Tonemap {
     }
 }
 
-/// Interactive desktop viewer for a trd scene stream (protocol 0.0.6).
+/// Interactive desktop viewer for a trd scene document (protocol 0.0.7).
 ///
-/// Reads the Arrow IPC `[mesh][texture?][frames?][params]` stream on stdin and
+/// Reads the Arrow IPC `[params][mesh?]` document on stdin and
 /// plays it live in a window. `examples/render.sh --native` builds a stream and
 /// runs this for you.
 #[derive(Parser)]

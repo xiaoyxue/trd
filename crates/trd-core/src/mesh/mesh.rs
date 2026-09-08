@@ -26,6 +26,15 @@ pub struct Mesh {
 }
 
 impl Mesh {
+    pub const REFERENCE_CUBE_OBJ: &'static str =
+        include_str!("../../../../assets/meshes/cube/cube.obj");
+    pub const REFERENCE_CUBE_COLOR: [f32; 3] = [0.10, 0.40, 0.85];
+
+    /// The internal OBJ reference, not an Arrow mesh resource.
+    pub fn reference_cube() -> Result<Self, super::MeshError> {
+        Self::from_obj(Self::REFERENCE_CUBE_OBJ)
+    }
+
     /// The legacy hello-triangle expressed as a 3-vertex indexed mesh.
     pub fn hello_triangle() -> Self {
         Self {

@@ -1,6 +1,6 @@
 // The single, config-driven browser viewer. It is the in-browser twin of
-// `render.sh --cli`: `render.sh --web` runs the SAME Arrow producers (mesh +
-// texture + params) at the SAME scene flags, writes the resulting stream plus a
+// `render.sh --cli`: `render.sh --web` bundles the SAME params + GLB assets
+// at the SAME scene flags, writes the resulting stream plus a
 // small `config.json` into the served directory, and this module fetches both
 // and replays them — to an on-screen `<canvas>` (`--canvas-renderer`, the
 // `CanvasRenderer`) or to an offscreen texture painted back to the canvas
@@ -10,7 +10,7 @@
 // axes-local, background compositing) is fixed by render.sh at generation time,
 // exactly like the CLI. Only playback `?fps=N` is a live URL param (the render
 // resolution is baked into the stream, so it is a render.sh argument).
-import init, { CanvasRenderer, OffscreenRenderer } from "trd-wasm";
+import init, { ArrowSceneDocument, CanvasRenderer, OffscreenRenderer } from "trd-wasm";
 import wasmUrl from "trd-wasm/trd_wasm_bg.wasm" with { type: "file" };
 
 /// The flags render.sh bakes alongside the generated `stream.arrow`. Mirrors the
@@ -47,8 +47,7 @@ interface RenderConfig {
   showAabb: boolean;
   showAxes: boolean;
   showLocalAxes: boolean;
-  /// Composite external `frame_ref` stills; inline `frame_id` resources are
-  /// composited directly by the Rust renderer.
+  /// Composite the external still referenced by each params row.
   background: boolean;
   /// Baked render resolution (matches the stream's CV `k`, so it is fixed).
   width: number;
@@ -178,7 +177,9 @@ async function preloadBackgrounds(
   for (let start = 0; start < refs.length; start += batch) {
     const slice = refs.slice(start, start + batch);
     await Promise.all(
-      slice.map((ref) => decodeBackground(`./${ref}`, config.width, config.height)),
+      slice.map((ref) =>
+        decodeBackground(new URL(ref, location.href).href, config.width, config.height),
+      ),
     );
     setStatus(`decoding backgrounds… ${Math.min(start + batch, refs.length)}/${refs.length}`);
   }
@@ -192,7 +193,7 @@ async function runCanvas(
 ): Promise<void> {
   const renderer = await CanvasRenderer.create(canvas);
   await applyMode(renderer, config);
-  const total = renderer.loadIpc(stream);
+  const total = renderer.loadSceneDocument(ArrowSceneDocument.fromArrow(stream));
   if (total === 0) {
     fail("stream carried no frames");
   }
@@ -234,7 +235,7 @@ async function runOffscreen(
   }
   const renderer = await OffscreenRenderer.create(config.width, config.height);
   await applyMode(renderer, config);
-  const total = renderer.loadIpc(stream);
+  const total = renderer.loadSceneDocument(ArrowSceneDocument.fromArrow(stream));
   if (total === 0) {
     fail("stream carried no frames");
   }
@@ -300,10 +301,10 @@ async function applyMode(
       pbr.ambient,
       pbr.tonemap,
     );
-    if (config.env) {
-      setStatus("loading environment map…");
-      renderer.setEnvMapHdr(await fetchBytes(config.env));
-    }
+  }
+  if (config.env) {
+    setStatus("loading environment map…");
+    renderer.setEnvMapHdr(await fetchBytes(config.env));
   }
   // The HDR sky is a scene background, not a material, so it is applied after
   // the material (whose tone mapping it follows) and independently of it.
@@ -318,22 +319,22 @@ async function applyMode(
   }
 }
 
-/// Uploads a frame's background from the preloaded cache as the reused
-/// frame-plane texture. Synchronous (no decode) so it can run inside the rAF
-/// callback; `preloadBackgrounds` guarantees the cache hit. A frame with no
-/// reference — or one not yet cached — keeps the previous background.
+/// Preloading guarantees the still is ready; an absent reference must not
+/// accidentally display the previous frame's background.
 function uploadCachedBackground(
   renderer: CanvasRenderer | OffscreenRenderer,
   ref: string | undefined,
   config: RenderConfig,
 ): void {
+  renderer.setCompositeFrame(ref !== undefined);
   if (!ref) {
     return;
   }
-  const rgba = backgroundCache.get(`./${ref}`);
-  if (rgba) {
-    renderer.updateFrameTextureRgba(rgba, config.width, config.height);
+  const rgba = backgroundCache.get(new URL(ref, location.href).href);
+  if (!rgba) {
+    fail(`background was not preloaded: ${ref}`);
   }
+  renderer.updateFrameTextureRgba(rgba, config.width, config.height);
 }
 
 await main();

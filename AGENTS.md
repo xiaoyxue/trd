@@ -37,14 +37,29 @@ violate without anything noticing:
   (#290). The boundary and its one exception (the raw `moov` walk, because Rust
   needs a **rational** frame rate) are in
   [`docs/video-editing.md`](docs/video-editing.md#reader-boundary).
-- **The input protocol is NOT backward compatible.** Only the current
-  `trd_core::protocol::PROTOCOL_VERSION` (`0.0.6`) is accepted; anything else is
-  hard-rejected, never silently upgraded. To evolve it, **bump the version and
-  migrate all producers + fixtures in one change** (`scripts/*_to_arrow.py` stamp
-  it; regenerate `stage{1,2}.arrow`). Never re-add retired versions (#82/#90).
-- **The video-editing document (`trd.video_edit.version = 0.2.0`) is deliberately
-  independent of `PROTOCOL_VERSION`** — no editor columns in `0.0.6`, no protocol
-  bump for editor state.
+- **The current scene contract is [0.0.7](docs/protocol/0.0.7.md), not backward
+  compatible.** Versioned input must match exactly; unversioned FHC source
+  ingestion is an explicit adapter, not permission to upgrade old wire formats.
+  **Move runtime constants, producers, schemas and fixtures atomically.**
+  Python producers use `scripts/protocol_version.py`; the Rust constant,
+  generated schema and committed fixtures must agree. Earlier protocol specs/
+  schemas are removed from the tree, not retained as compatibility choices.
+- **Native and browser video-editing accept only current params/GLB documents.**
+  No old annotation/catalog UI or runtime fallback is retained. The independent
+  `trd.video_edit.version = 0.2.0` annotation remains offline source data:
+  explicitly convert it with `scripts/timeline_to_params.py` before loading.
+- **Protocol `0.0.7` asset rule:** `[params][mesh?]`; a mesh row has only UUID
+  `mesh_id` and original `glb: LargeBinary`. No Arrow OBJ geometry, texture
+  table, inline-frame table or GLB path/URL reference resources. Preserve
+  original GLB bytes and UUID bindings; renderer-local slots are not source IDs.
+  Invalid or unresolved assets are errors, never placeholders. Internal OBJ
+  loading/viewers remain supported. Use `assets/envmap/uffizi-large.hdr` for IBL.
+- **Video scene export stays sparse.** Export only tracked placement rows and
+  retain their source `present_index`/PTS or CG/CV `video_frame_index` helpers;
+  do not pad the params stream. Missing rows mean video-only playback. Keep
+  camera and model separate, never serialize MVP. Tracked `model` stays
+  row-major; CG/CV `draw_model` stays column-major. Apply editor transforms
+  across all matching sparse rows; fresh replay must not apply them twice.
 - **Comments say *why*, not *what*, and stay short enough to see what they attach
   to.** Guidance rather than a gate, with the reasoning and a measuring script in
   [`docs/comments.md`](docs/comments.md) — run
@@ -91,6 +106,49 @@ command that covers the change while iterating, but a task is not complete until
 every gate its **test level** requires has passed on **both** platforms — and
 **the results are recorded on the PR**.
 
+For GPT-driven work, run long builds and test suites through test subagents so
+the main session stays responsive. The parent agent still selects the test level,
+supplies the exact commands, reviews every result, and ensures no required gate
+is omitted. Use GPT-6 Astra with `high` reasoning for test subagents unless the
+user explicitly selects another model; do not use Terra.
+
+Optimize execution overhead, not acceptance coverage. Reuse audited helpers and
+incremental build outputs after checking source freshness, batch independent
+setup checks and predictable UI actions, and wait for observable readiness with
+bounded timeouts instead of fixed sleeps. Never reuse a previous run's evidence
+as a new result. A targeted rerun names its cases and revision explicitly; it
+does not claim a fresh full-level pass or silently remove outstanding gates.
+
+For GPT-driven UI e2e, capture screenshots only at named acceptance milestones,
+not after every click, hover, scroll, readiness check, or coordinate adjustment.
+Derive the minimum useful screenshot set from that specific case before the run;
+do not impose a fixed count or reuse one universal capture list across different
+workflows. For canvas-rendered UI such as egui, use direct screenshot-based
+visual recognition as the primary way to locate controls: inspect a scaled or
+focused crop from the same screenshot, then act on the visually identified
+control. Do not substitute DOM/accessibility lookup or generated pixel-scanning
+scripts for visual recognition. Use the UI's **Copy details** action, the
+clipboard, logs, and exported-file audits for intermediate diagnostics. Record
+measured wall-clock time for setup, UI readiness, the case's major phases,
+cleanup, and the complete run. If the UI is still blocked after two informed
+attempts, stop and report the exact blocker instead of accumulating debug
+screenshots.
+
+Treat every UI e2e case as a process-isolation boundary. Record the exact
+Chrome, native-app, server, and helper PIDs started for the case; on pass, fail,
+or cancellation, stop those process trees and verify their ports and PIDs are
+gone. Do not leave a process alive for reuse, and do not start the next case
+until the previous case's cleanup gate is complete.
+
+For Windows browser e2e, use 1920x1080 as the default source-video/render
+resolution. Run normal headed Chrome maximized/full-screen using the current
+desktop and native Windows display scaling; do not set its window or CSS viewport
+to 1920x1080, force a device scale factor, or use CDP device metrics to emulate
+another viewport or DPI.
+For native video-editor e2e, pass `--preview-width 1920` for both authoring and
+replay, and confirm the actual render size in **Details**; a 1080p source or
+window alone does not prove a 1080p render target.
+
 ### Test levels — L1 / L2 / L3
 
 Each PR declares a level, and **the level is derived from the diff, not from how
@@ -101,7 +159,7 @@ have run.
 | Level | What it is | Adds over the level below |
 |---|---|---|
 | **L1** | **UT + IT** — everything needing no GPU and no display. | **Exactly `nix flake check`**: fmt, clippy native, clippy wasm32, `cargo test --workspace`, rustdoc (`-D rustdoc::broken_intra_doc_links`), `tsc --noEmit` + Biome. **The commands live in `flake.nix`, not here** — copying them is what let this file understate the wasm gate for weeks (#316/#181), so read the flake for exact arguments. |
-| **L2** | **normal** — L1 plus the pixel-level regression net. Needs a real GPU. | `cargo test -p trd-core --test golden_render -- --ignored` (MSAA on **and** off, plus the PBR tone-map variants); `cargo test -p trd-core -- --ignored` (`render::gpu_tests`); `cargo test -p trd-gui --test gui_render -- --ignored` |
+| **L2** | **normal** — L1 plus the pixel-level regression net. Needs a real GPU. | `cargo test -p trd-core -p trd-placement --test golden_render -- --ignored` (MSAA/PBR and the params/GLB cases); `cargo test -p trd-core -- --ignored` (`render::gpu_tests`); `cargo test -p trd-placement --lib -- --ignored`; `cargo test -p trd-gui -- --ignored` (GUI rendering plus document diagnostics/material retention) |
 | **L3** | **full** — L2 plus end-to-end on a real device. | The [§3 e2e list and the §4 Windows matrix](#the-tiers-in-full) (4.1 `trd-cli` · 4.2 `trd-app` window · 4.3 `trd-gui` window · 4.4 both web renderers · 4.5 native video editor · 4.6 browser video editor · 4.7 large-file seek) |
 
 **The floor table.** Run `git diff --name-only origin/main` and take the
@@ -119,7 +177,8 @@ have run.
 | `crates/trd-core/src/render/**`, `src/shader/*.wgsl`, PBR/tone-map, `math/` transforms feeding the GPU `Uniform`, or the golden fixtures | **L3** |
 | a delivery surface or shell — `native/**`, `crates/trd-wasm/**`, `crates/trd-gui/**`, `web/**` | **L3** |
 | `web/gui-video-editing/src/media/**`, or anything else that demuxes, decodes or seeks | **L3, and §4.7 is required** |
-| `scripts/golden_fixtures.py`, `scripts/{jsonl,obj,texture}_to_arrow.py`, `scripts/fiba_video_editing_bundle.py` — they regenerate goldens or stamp a version | **L3** |
+| `scripts/golden_fixtures.py`, `scripts/{jsonl,scene}_to_arrow.py`, `scripts/{glb_assets,obj_geometry,protocol_version,timeline_to_params}.py`, `scripts/fiba_video_editing_bundle.py` — they generate render inputs, goldens or stamp a version | **L3** |
+| `examples/render.{sh,ps1}` — scene generation and delivery-surface launchers | **L3** |
 | `PROTOCOL_VERSION` / `VIDEO_EDIT_VERSION` bump, or regenerated fixtures | **L3** |
 | **no row matches** | **L3, and say so** — an unclassified path is an unknown blast radius, so it escalates rather than falling to L1. Add the row it should have matched in the same PR. |
 
@@ -191,8 +250,10 @@ shell auto-configures this on WSL.
 ### The golden render test (#88)
 
 **The primary pixel-level regression net.** `crates/trd-core/tests/golden_render.rs`
-feeds committed Arrow fixtures through the real `run_stream` pipeline and
-pixel-diffs the frames against committed golden PNGs.
+keeps the existing camera/MSAA/PBR regressions, while
+`crates/trd-placement/tests/golden_render.rs` covers the three params/GLB input
+forms through the actual placement adapter. Both use one shared image comparator
+with unchanged channel/pixel tolerances. Placement stays in `trd-placement`.
 
 It is GPU-gated (`#[ignore]`); run it via the nixGL wrapper (Linux) or directly
 on a Windows box with a discrete GPU.
@@ -200,9 +261,12 @@ on a Windows box with a discrete GPU.
 #### What it covers
 
 Fixtures are `crates/trd-core/tests/golden/stage{1,2}.arrow` (the reduced
-two-stage cornellbox placement demo), with goldens in the same dir. Each params
-row selects an inline `0.0.6` frames-table resource by `frame_id` (stage 1
-encoded Binary, stage 2 raw tensor), composited **under** the scene.
+two-stage cornellbox placement demo), with goldens in the same dir. Migrated
+fixtures contain params followed by GLB mesh resources and reference the
+committed stills under `frames/`; no inline frames table is required. Their
+camera and draw arrays and pre-existing expected PNGs are preserved. The old
+preview normalization is baked into these fixture GLBs, not into draw matrices
+that would also change local gizmos.
 
 | Variant | Why it exists |
 |---|---|
@@ -210,6 +274,13 @@ encoded Binary, stage 2 raw tensor), composited **under** the scene.
 | `stageN_noaa_*` — MSAA off (`Msaa::Off`, single-sample) | the raw single-sample path |
 | `golden_stage2_pbr_{aces,reinhard}` | PBR tone-map variants |
 | `golden_environment_light_syncs_sky_and_reflection` | a hand-built scene (no fixture can draw a sky) pinning that the scene's one `EnvironmentLight.rotation` drives the visible sky **and** the reflections on a near-mirror ball in front of it (#182) |
+| `golden_params_reference_quad_axes_cube` | params only: the quad outline, local axes and centered wireframe cube |
+| `golden_params_single_glb_edit_roundtrip` | absent/identity model → edit → export → reload, with exact same-device pixels and retained source data |
+| `golden_params_multiple_glb_bindings` | two distinguishable GLBs with independent transforms; reversing mesh rows cannot change UUID bindings |
+
+The three new baselines live under `crates/trd-placement/tests/golden/` and use
+Uffizi for model shading. They are headless pixel regressions, **not** the
+native/Chrome UI end-to-end cases. L3 still owes those windows and interactions.
 
 #### Regenerating
 
@@ -219,22 +290,27 @@ Only after an *intended* visual change or a fixture change:
 # 1. rebuild the .arrow fixtures + stills (needs uv + ffmpeg on PATH)
 python3 scripts/golden_fixtures.py
 # 2. refresh the golden PNGs from the current renderer (GPU box)
-TRD_UPDATE_GOLDENS=1 cargo test -p trd-core --test golden_render -- --ignored
+TRD_UPDATE_GOLDENS=1 cargo test -p trd-core -p trd-placement --test golden_render -- --ignored
 ```
+
+When adding a new baseline, select only that new test while setting
+`TRD_UPDATE_GOLDENS`; then unset it and compare the complete suite. Do not
+refresh existing expected images or weaken tolerances to conceal a migration
+regression.
 
 #### The companion non-GPU gate — `tests/decoder_parity.rs`
 
-It decodes the same fixtures through both **public API surfaces** — the native
-`InputStream` (`io/input_stream.rs`, a byte transport owning a `Read`) and the
-browser's push `InputSession` — and asserts identical *assembled frames*. It runs
-in `nix flake check`.
+It decodes the same `[params][mesh]` fixtures through the current **public
+document entry points**: native `SceneDocument::read_from(Read)`, used by
+`run_stream`, and `SceneDocument::read(&[u8])`, used by browser
+`ArrowSceneDocument.fromArrow`. It runs in `nix flake check`.
 
-Neither the column decode nor the framing is duplicated: both run the one decoder
-in `protocol/arrow_decode.rs` through the one `InputSession`. What this guards is
-that the two surfaces a caller assembles a frame through agree —
-`prologue`/`next_batch`/`finish` versus a bare `push`, and `InlineFrameCache`
-versus `InlineFrame::decode` — the shape of failure the `center` non-nullable bug
-had.
+Fragmented native reads (including one-byte chunks) must agree with the complete
+browser buffer on retained schemas/batches, original UUID/GLB resources,
+per-row camera/object views, resolved mesh bindings and external background
+references. Both paths share the document decoder; this pins transport and
+frame-assembly parity, not a second copy of the parser. The legacy mesh-first
+`InputSession` is not the entry point for these migrated fixtures.
 
 ### Where a test lives — by kind, not by size (#305)
 
@@ -266,13 +342,14 @@ file.
 The contents of the test levels: tiers 1–2 are **L2**, tiers 3–4 are **L3**.
 
 1. **Golden test — MSAA enabled *and* disabled (must — L2).**
-   `cargo test -p trd-core --test golden_render -- --ignored` runs both the 4×
-   MSAA (`stageN_*`) and single-sample (`stageN_noaa_*`) goldens plus the PBR
-   tone-map variants. Mandatory for any render-path change, on every platform
+   `cargo test -p trd-core -p trd-placement --test golden_render -- --ignored`
+   runs the 4× MSAA, single-sample and PBR variants plus the three params/GLB
+   placement cases. Mandatory for any render-path change, on every platform
    with a GPU — see [the golden render test](#the-golden-render-test-88).
 2. **GPU-gated tests (must — L2).** Every `#[ignore]` test, on a real GPU:
-   `cargo test -p trd-core -- --ignored` (golden + `render::gpu_tests`) and
-   `cargo test -p trd-gui --test gui_render -- --ignored`
+   `cargo test -p trd-core -- --ignored` (golden + `render::gpu_tests`),
+   `cargo test -p trd-placement --lib -- --ignored`, and
+   `cargo test -p trd-gui -- --ignored`
 
 #### 3. End-to-end — Linux *and* Windows (L3)
 
@@ -286,7 +363,7 @@ The contents of the test levels: tiers 1–2 are **L2**, tiers 3–4 are **L3**.
 - **trd-gui (wasm + web):** build the gui wasm, serve, and load a mesh
   (`?mesh=…&texture=…`) in the browser.
 - **video editor:** serve `web/gui-video-editing`, open the FIBA MP4, and exercise
-  quad selection, all three catalog assets, object picking/editing,
+  quad selection, params-only and single/multiple-GLB inputs, object picking/editing,
   play/pause/seek, and the video-only 222–287 tail. Confirm PBR/IBL and colors
   match the other front-ends. Open **Details** and confirm its displayed frame
   identity does not jump ahead during rapid seek/render, and that the Dragon
@@ -339,7 +416,7 @@ Use the [coca-cola can recipe](#cross-mode-e2e-recipe--coca-cola-can-pbr--aabb--
 for 4.1-4.4 so all four are driven by one scene and their colours can be compared
 directly. For 4.2 also confirm playback runs at the stream's declared rate and
 loops; for 4.5/4.6 run the editor checks listed under §3 — quad selection, all
-three catalog assets, picking/editing, play/pause/seek, the video-only 222-287
+current params-only/single/multiple-GLB cases, picking/editing, play/pause/seek, the video-only 222-287
 tail, and Details' frame identity under rapid seek.
 
 ##### 4.7 — large-file seek (Windows, required for any media-layer change)
@@ -398,6 +475,29 @@ Expect, on **both** surfaces:
 
 The big MP4 stays **external and uncommitted**; name the file and its size in the
 PR so a reviewer knows which one was used.
+
+###### Accepted EOF tail-sample difference
+
+**A single terminal container sample may be emitted by the browser and discarded
+by the native reader. This is an accepted EOF difference: report that item as
+✅ (accepted EOF tail sample), not as a failure requiring a playback fix.**
+This policy applies to small and large video files; file size is not the cause.
+
+Record the actual final frame IDs, sample PTS/duration and container tail
+evidence. The accepted case is limited to a terminal sample starting at or beyond
+the declared presentation end, after the valid frames have been presented,
+with playback ending normally and no pending/in-flight work. For the reference
+recording, native ends at `694838` / `27793.520s`; the browser emits the terminal
+sample at `27793.600s` and reports the clamped container index `694839`.
+Preserve those observations rather than claiming the two readers output the
+same last frame.
+
+Do not unconditionally subtract one from frame counts or drop the last decoded
+frame: ordinary files may have a valid final frame. Earlier frame/seek identity,
+premature EOF, ordering, source retention and reader reuse remain strict.
+This exception does **not** waive the opening-read budget, render-resolution
+requirements or another matrix item; the combined §4.7 row is green only when
+its other requirements are satisfied.
 
 ### Cross-mode e2e recipe — coca-cola can (PBR + AABB + axes)
 
@@ -527,7 +627,7 @@ excludes those gates.
 | 🔀 `decoder_parity` (2)        | ✅ | 🤝 |
 | 📚 rustdoc (0 broken links)    | ✅ | 🤝 |
 | 🌐 `tsc --noEmit` + Biome      | ✅ | 🤝 |
-| 🖼️ `golden_render` (6/6, GPU)  | ✅ | 🤝 |
+| 🖼️ `golden_render` (10/10, GPU) | ✅ | 🤝 |
 | 🎮 `gpu_tests` + `gui_render`  | ✅ | 🤝 |
 | 🖥️ window e2e (§4.2/4.3)       | n/a (L2) | n/a (L2) |
 | 🎬 video-editor e2e (§4.5/4.6) | n/a (L2) | n/a (L2) |
@@ -535,7 +635,7 @@ excludes those gates.
 
 ## 🤝 Handoff — 🐧 Linux/Nix
 - [ ] `nix flake check -L`
-- [ ] nixGL-wrapped `cargo test -p trd-core --test golden_render -- --ignored`
+- [ ] nixGL-wrapped `cargo test -p trd-core -p trd-placement --test golden_render -- --ignored`
 
 > Expected: all green — behaviour-preserving change.
 ```

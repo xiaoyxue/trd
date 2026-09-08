@@ -3,9 +3,15 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/api.d.ts",
+      "import": "./dist/api.js"
+    }
+  },
   "scripts": {
     "build:wasm": "wasm-pack build ../../crates/trd-wasm --mode no-install --target web --out-dir ../../web/gui-video-editing/pkg",
-    "build:web": "bun build ./index.html --outdir dist",
+    "build:web": "bun build ./index.html --outdir dist && bun build ./src/api.ts --outdir dist && tsc src/api.ts --declaration --emitDeclarationOnly --outDir dist --target ES2022 --module ESNext --moduleResolution bundler --strict --skipLibCheck",
     "build": "bun run build:wasm && bun run build:web",
     "dev": "bun run build:wasm && BUN_PORT=8085 bun ./index.html",
     "typecheck": "tsc --noEmit",

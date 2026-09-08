@@ -1158,6 +1158,7 @@ mod tests {
     #[test]
     fn try_from_frame_rejects_a_draw_naming_a_mesh_the_stream_never_sent() {
         let frame = crate::DecodedFrame {
+            video_frame_index: None,
             params: crate::FrameParams::IDENTITY,
             draws: Some(vec![Draw {
                 mesh_id: 3,
@@ -1181,6 +1182,7 @@ mod tests {
         // An absent wire draw list is the legacy single-object stream: one
         // instance of mesh 0 placed by the frame's own model.
         let frame = crate::DecodedFrame {
+            video_frame_index: None,
             params: crate::FrameParams::IDENTITY,
             draws: None,
             frame_ref: None,

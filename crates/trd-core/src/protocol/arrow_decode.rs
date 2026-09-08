@@ -14,17 +14,19 @@
 //! the native drivers (`io/input_stream.rs`, `stream_filter/`) map them onto
 //! their `StreamError` at the framing boundary.
 
+use std::sync::Arc;
+
 use arrow::array::{
-    Array, FixedSizeListArray, Float32Array, ListArray, RecordBatch, StringArray, UInt32Array,
-    UInt8Array,
+    Array, ArrayRef, FixedSizeListArray, FixedSizeListBuilder, Float32Array, Float32Builder,
+    ListArray, ListBuilder, RecordBatch, StringArray, UInt32Array, UInt32Builder, UInt8Array,
 };
 use arrow::datatypes::{DataType, Field, Schema};
 
 use crate::math::Matrix4;
 use crate::render::{Draw, DrawSelection};
-use crate::{CameraFormError, FrameParams};
+use crate::{CameraFormError, FrameParams, Tonemap};
 
-use super::{ProtocolError, PROTOCOL_VERSION_KEY, SUPPORTED_INPUT_VERSIONS};
+use super::{parse_error, ProtocolError, PROTOCOL_VERSION_KEY, SUPPORTED_INPUT_VERSIONS};
 
 /// Validates a schema's declared protocol version against
 /// [`SUPPORTED_INPUT_VERSIONS`]. The current protocol is deliberately not
@@ -139,6 +141,105 @@ pub(crate) fn decode_frame_ids(
 /// [`DrawSelection::from_wire`] (`255` = inherit); an absent column leaves every
 /// [`Draw::mode`] `None`. Mirrors the native `stream::decode_draws`.
 pub(crate) fn decode_draws(batch: &RecordBatch) -> Result<Option<Vec<Vec<Draw>>>, ProtocolError> {
+    decode_explicit_draws(batch)
+}
+
+pub(crate) fn decode_draws_for_meshes(
+    batch: &RecordBatch,
+    mesh_ids: &[u32],
+) -> Result<Option<Vec<Vec<Draw>>>, ProtocolError> {
+    let has_meshes = batch.column_by_name("draw_mesh").is_some();
+    let has_models = batch.column_by_name("draw_model").is_some();
+    if has_meshes && has_models {
+        return decode_explicit_draws(batch);
+    }
+    if !has_meshes
+        && !has_models
+        && mesh_ids.is_empty()
+        && batch.column_by_name("draw_mode").is_none()
+    {
+        return Ok(None);
+    }
+
+    let mut ordered_ids = mesh_ids.to_vec();
+    ordered_ids.sort_unstable();
+    if ordered_ids.windows(2).any(|ids| ids[0] == ids[1]) {
+        return Err(parse_error("external mesh IDs must be unique"));
+    }
+    let count_column = ["draw_mesh", "draw_model", "draw_mode"]
+        .into_iter()
+        .find_map(|name| batch.column_by_name(name).map(|column| (name, column)))
+        .map(|(name, column)| {
+            column
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .ok_or_else(|| ProtocolError::ColumnType {
+                    column: name,
+                    expected: "List",
+                    actual: column.data_type().clone(),
+                })
+        })
+        .transpose()?;
+    let fallback = optional_fixed_list(batch, "model", 16)?;
+    let mut ids = ListBuilder::new(UInt32Builder::new());
+    let mut models = ListBuilder::new(FixedSizeListBuilder::new(Float32Builder::new(), 16));
+
+    for row in 0..batch.num_rows() {
+        let count = count_column.map_or(ordered_ids.len().max(1), |list| {
+            list.value_length(row) as usize
+        });
+        if !has_meshes {
+            if count == 0 {
+                ids.append(true);
+            } else {
+                if ordered_ids.is_empty() {
+                    for index in 0..count {
+                        ids.values().append_value(
+                            u32::try_from(index)
+                                .map_err(|_| parse_error("too many implicit mesh IDs"))?,
+                        );
+                    }
+                } else {
+                    ids.values().append_slice(&ordered_ids);
+                }
+                ids.append(true);
+            }
+        }
+        if !has_models {
+            let model = fallback.map_or(Matrix4::IDENTITY.to_cols_array(), |(list, values)| {
+                read_fixed::<16>(list, values, row)
+            });
+            for _ in 0..count {
+                models.values().values().append_slice(&model);
+                models.values().append(true);
+            }
+            models.append(true);
+        }
+    }
+
+    // Supply decoding defaults without changing the retained source columns.
+    let mut fields = batch.schema().fields().to_vec();
+    let mut columns = batch.columns().to_vec();
+    let mut append = |name, column: ArrayRef| {
+        fields.push(Arc::new(Field::new(
+            name,
+            column.data_type().clone(),
+            false,
+        )));
+        columns.push(column);
+    };
+    if !has_meshes {
+        append("draw_mesh", Arc::new(ids.finish()));
+    }
+    if !has_models {
+        append("draw_model", Arc::new(models.finish()));
+    }
+    let schema = Schema::new_with_metadata(fields, batch.schema().metadata().clone());
+    let normalized = RecordBatch::try_new(Arc::new(schema), columns)?;
+    decode_explicit_draws(&normalized)
+}
+
+fn decode_explicit_draws(batch: &RecordBatch) -> Result<Option<Vec<Vec<Draw>>>, ProtocolError> {
     let (mesh_col, model_col) = match (
         batch.column_by_name("draw_mesh"),
         batch.column_by_name("draw_model"),
@@ -309,6 +410,24 @@ pub(crate) fn validate_schema(schema: &Schema) -> Result<(), ProtocolError> {
             validate_f32_field(field, static_name(name))?;
         }
     }
+    if let Ok(field) = schema.field_with_name("tonemap") {
+        if field.data_type() != &DataType::UInt8 || field.is_nullable() {
+            return Err(ProtocolError::ColumnType {
+                column: "tonemap",
+                expected: "non-null UInt8",
+                actual: field.data_type().clone(),
+            });
+        }
+    }
+    if let Ok(field) = schema.field_with_name("video_frame_index") {
+        if field.data_type() != &DataType::UInt32 || field.is_nullable() {
+            return Err(ProtocolError::ColumnType {
+                column: "video_frame_index",
+                expected: "non-null UInt32",
+                actual: field.data_type().clone(),
+            });
+        }
+    }
     if let Ok(field) = schema.field_with_name("frame_id") {
         if field.data_type() != &DataType::UInt32 {
             return Err(ProtocolError::ColumnType {
@@ -334,6 +453,38 @@ pub(crate) fn validate_schema(schema: &Schema) -> Result<(), ProtocolError> {
         }
     }
     Ok(())
+}
+
+/// Decodes the optional scene-wide tone-map operator from a params batch.
+///
+/// The video editor exports one operator for the whole scene, repeated on every
+/// sparse row. Requiring one value across the stream keeps it outside the public
+/// camera/model [`FrameParams`] API.
+pub(crate) fn decode_tonemap(batch: &RecordBatch) -> Result<Option<Tonemap>, ProtocolError> {
+    let Some(values) = optional_u8(batch, "tonemap")? else {
+        return Ok(None);
+    };
+    let Some(&first) = values.values().first() else {
+        return Err(parse_error("tonemap column must contain at least one row"));
+    };
+    let operator = Tonemap::from_wire(first).ok_or_else(|| {
+        parse_error(format!(
+            "tonemap byte {first} is not valid (0 = Reinhard, 1 = ACES)"
+        ))
+    })?;
+    for &value in values.values().iter().skip(1) {
+        let current = Tonemap::from_wire(value).ok_or_else(|| {
+            parse_error(format!(
+                "tonemap byte {value} is not valid (0 = Reinhard, 1 = ACES)"
+            ))
+        })?;
+        if current != operator {
+            return Err(parse_error(format!(
+                "tonemap must be constant across the params stream (expected {first}, got {value})"
+            )));
+        }
+    }
+    Ok(Some(operator))
 }
 
 /// Interns a known camera-column name to a `'static str` for error messages
@@ -466,6 +617,27 @@ fn optional_f32<'a>(
         .ok_or_else(|| ProtocolError::ColumnType {
             column: name,
             expected: "Float32",
+            actual: column.data_type().clone(),
+        })?;
+    if array.null_count() > 0 {
+        return Err(ProtocolError::NullValues(name));
+    }
+    Ok(Some(array))
+}
+
+fn optional_u8<'a>(
+    batch: &'a RecordBatch,
+    name: &'static str,
+) -> Result<Option<&'a UInt8Array>, ProtocolError> {
+    let Some(column) = batch.column_by_name(name) else {
+        return Ok(None);
+    };
+    let array = column
+        .as_any()
+        .downcast_ref::<UInt8Array>()
+        .ok_or_else(|| ProtocolError::ColumnType {
+            column: name,
+            expected: "UInt8",
             actual: column.data_type().clone(),
         })?;
     if array.null_count() > 0 {

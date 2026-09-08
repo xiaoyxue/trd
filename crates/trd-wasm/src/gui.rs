@@ -3,6 +3,85 @@
 
 use std::rc::Rc;
 
+type SceneCompletion<T> = Box<dyn FnOnce(Result<T, String>)>;
+
+fn scene_completion<T: 'static>(
+    into_js: fn(T) -> wasm_bindgen::JsValue,
+) -> (js_sys::Promise, SceneCompletion<T>) {
+    let mut complete: Option<SceneCompletion<T>> = None;
+    let promise = js_sys::Promise::new(&mut |resolve, reject| {
+        complete = Some(Box::new(move |result| {
+            let (callback, value) = match result {
+                Ok(value) => (resolve, into_js(value)),
+                Err(error) => (reject, crate::js_error(error)),
+            };
+            if let Err(error) = callback.call1(&wasm_bindgen::JsValue::UNDEFINED, &value) {
+                wasm_bindgen::throw_val(error);
+            }
+        }));
+    });
+    (
+        promise,
+        complete.expect("Promise executes its initializer synchronously"),
+    )
+}
+
+#[wasm_bindgen::prelude::wasm_bindgen(js_name = videoEditingGltfReferences)]
+pub fn video_editing_gltf_references(
+    bytes: Vec<u8>,
+) -> Result<js_sys::Array, wasm_bindgen::JsValue> {
+    let input = trd_gui::video_editing::decode_video_editing_input(&bytes)
+        .map_err(|error| wasm_bindgen::JsValue::from_str(&error))?;
+    let result = js_sys::Array::new();
+    let trd_gui::video_editing::VideoEditingInput::Scene(scene) = input;
+    {
+        for (index, reference) in scene.unresolved_mesh_references() {
+            let value = js_sys::Object::new();
+            js_sys::Reflect::set(
+                &value,
+                &wasm_bindgen::JsValue::from_str("index"),
+                &wasm_bindgen::JsValue::from_f64(f64::from(index)),
+            )?;
+            if let Some(path) = reference.path {
+                js_sys::Reflect::set(
+                    &value,
+                    &wasm_bindgen::JsValue::from_str("path"),
+                    &wasm_bindgen::JsValue::from_str(&path),
+                )?;
+            }
+            if let Some(url) = reference.url {
+                js_sys::Reflect::set(
+                    &value,
+                    &wasm_bindgen::JsValue::from_str("url"),
+                    &wasm_bindgen::JsValue::from_str(&url),
+                )?;
+            }
+            result.push(&value);
+        }
+    }
+    Ok(result)
+}
+
+fn resolve_video_editing_scene(
+    scene: &mut trd_gui::video_editing::ArrowScene,
+    gltf_bytes: &js_sys::Array,
+) -> Result<(), wasm_bindgen::JsValue> {
+    let references = scene.unresolved_mesh_references();
+    if references.len() != gltf_bytes.length() as usize {
+        return Err(wasm_bindgen::JsValue::from_str(&format!(
+            "expected {} resolved glTF resource(s), got {}",
+            references.len(),
+            gltf_bytes.length()
+        )));
+    }
+    for ((index, _), bytes) in references.into_iter().zip(gltf_bytes.iter()) {
+        scene
+            .resolve_gltf(index, &js_sys::Uint8Array::new(&bytes).to_vec())
+            .map_err(|error| wasm_bindgen::JsValue::from_str(&error))?;
+    }
+    Ok(())
+}
+
 /// Runs the GUI viewer on `canvas`. OBJ/GLB bytes from `?mesh=`, texture from `?texture=`,
 /// HDR probe from `?env=` (enables PBR mode); absent parameters fall back to built-in defaults.
 ///
@@ -43,26 +122,32 @@ pub async fn start(
     pub async fn start_video_editing(
         canvas: web_sys::HtmlCanvasElement,
         document_bytes: Option<Vec<u8>>,
+        gltf_bytes: js_sys::Array,
+        env_bytes: Vec<u8>,
     ) -> Result<VideoEditingHandle, wasm_bindgen::JsValue> {
         use std::rc::Rc;
 
         console_error_panic_hook::set_once();
         let _ = eframe::WebLogger::init(log::LevelFilter::Warn);
-        let document = document_bytes
-            .map(|bytes| trd_core::decode_video_editing_document(&bytes))
+        let input = document_bytes
+            .map(|bytes| trd_gui::video_editing::decode_video_editing_input(&bytes))
             .transpose()
-            .map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()))?;
-        let shared = Rc::new(trd_gui::video_editing::VideoEditingShared::default());
-        let handle = match document.as_ref() {
-            Some(document) => VideoEditingHandle::new(document, shared.clone()),
-            None => VideoEditingHandle::player(shared.clone()),
+            .map_err(|error| wasm_bindgen::JsValue::from_str(&error))?;
+        let scene = match input {
+            Some(trd_gui::video_editing::VideoEditingInput::Scene(mut scene)) => {
+                resolve_video_editing_scene(&mut scene, &gltf_bytes)?;
+                Some(Rc::new(scene))
+            }
+            None => None,
         };
+        let shared = Rc::new(trd_gui::video_editing::VideoEditingShared::default());
+        let env_bytes = Rc::new(env_bytes);
+        let handle = VideoEditingHandle::player(shared.clone(), env_bytes.clone());
         // A placeholder until a video is opened: the real size arrives with the
         // container probe, and the target is resized to the fitted panel anyway.
-        let (width, height) = document.as_ref().map_or((1280, 720), |document| {
-            (document.video.width, document.video.height)
-        });
+        let (width, height) = (1920, 1080);
         let creator_shared = shared.clone();
+        let creator_scene = scene.clone();
         eframe::WebRunner::new()
             .start(
                 canvas,
@@ -78,22 +163,28 @@ pub async fn start(
                         state.device.clone(),
                         state.queue.clone(),
                     );
-                    let renderer =
-                        trd_gui::video_editing_renderer::VideoPlacementRenderer::new_empty_with_gpu(
-                            gpu.clone(), width, height,
-                        )?;
+                    let renderer = match creator_scene.as_ref() {
+                        Some(scene) => {
+                            trd_gui::video_editing_renderer::VideoPlacementRenderer::
+                                new_arrow_scene_with_gpu(
+                                    gpu.clone(),
+                                    scene,
+                                    &env_bytes,
+                                    width,
+                                    height,
+                                )?
+                        }
+                        None => trd_gui::video_editing_renderer::VideoPlacementRenderer::
+                            new_empty_with_gpu(gpu.clone(), width, height)?,
+                    };
                     creator_shared.set_renderer(renderer);
                     creator_shared.set_shared_gpu(gpu);
-                    Ok(match document {
-                        Some(document) => Box::new(trd_gui::video_editing::VideoEditingApp::new(
-                            document,
-                            creator_shared,
-                        )),
-                        None => Box::new(trd_gui::video_editing::VideoEditingApp::player(
-                            player_timeline(width, height),
-                            creator_shared,
-                        )),
-                    })
+                    let mut app = trd_gui::video_editing::VideoEditingApp::player(
+                        player_timeline(width, height),
+                        creator_shared,
+                    );
+                    app.set_arrow_scene(creator_scene);
+                    Ok(Box::new(app))
                 }),
             )
             .await?;
@@ -308,36 +399,21 @@ struct TimelineFacts {
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub struct VideoEditingHandle {
     shared: Rc<trd_gui::video_editing::VideoEditingShared>,
+    env_bytes: Rc<Vec<u8>>,
     /// File identity from the document; `None` when document-less (no check).
     expected: Option<(String, u64)>,
     timeline: std::cell::Cell<TimelineFacts>,
 }
 
 impl VideoEditingHandle {
-    pub(crate) fn new(
-        document: &trd_core::VideoEditingDocument,
+    /// Plain-player handle: no document, placeholder timeline until container is probed.
+    pub(crate) fn player(
         shared: Rc<trd_gui::video_editing::VideoEditingShared>,
+        env_bytes: Rc<Vec<u8>>,
     ) -> Self {
         Self {
             shared,
-            expected: Some((
-                document.video.source_name.clone(),
-                document.video.byte_length,
-            )),
-            timeline: std::cell::Cell::new(TimelineFacts {
-                fps_num: document.video.fps_num,
-                fps_den: document.video.fps_den,
-                frame_count: document.video.frame_count,
-                width: document.video.width,
-                height: document.video.height,
-            }),
-        }
-    }
-
-    /// Plain-player handle: no document, placeholder timeline until container is probed.
-    pub(crate) fn player(shared: Rc<trd_gui::video_editing::VideoEditingShared>) -> Self {
-        Self {
-            shared,
+            env_bytes,
             expected: None,
             timeline: std::cell::Cell::new(TimelineFacts {
                 fps_num: 25,
@@ -545,17 +621,127 @@ impl VideoEditingHandle {
         self.shared.take_command_code()
     }
 
-    #[wasm_bindgen::prelude::wasm_bindgen(js_name = takeAssetRequest)]
-    pub fn take_asset_request(&self) -> u8 {
-        self.shared.take_asset_request_code()
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = pendingArrowExportFilename)]
+    pub fn pending_arrow_export_filename(&self) -> Option<String> {
+        self.shared.pending_arrow_export_filename()
     }
 
-    /// Loads an annotation document from bytes; a failure leaves the current document in place.
-    #[wasm_bindgen::prelude::wasm_bindgen(js_name = loadDocument)]
-    pub fn load_document(&self, bytes: Vec<u8>) -> Result<(), wasm_bindgen::JsValue> {
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = takeExportArrow)]
+    pub fn take_export_arrow(&self) -> Result<Vec<u8>, wasm_bindgen::JsValue> {
         self.shared
-            .load_document_bytes(&bytes)
-            .map_err(|error| wasm_bindgen::JsValue::from_str(&error))
+            .take_arrow_export()
+            .map(|export| export.bytes)
+            .ok_or_else(|| wasm_bindgen::JsValue::from_str("no Arrow export is queued"))
+    }
+
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = finishArrowExport)]
+    pub fn finish_arrow_export(&self, success: bool, message: String) {
+        self.shared
+            .complete_arrow_export(if success { Ok(message) } else { Err(message) });
+    }
+
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = cancelArrowExport)]
+    pub fn cancel_arrow_export(&self) {
+        self.shared.cancel_arrow_export();
+    }
+
+    /// Loads a current params/GLB document using the editor's initial environment probe.
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = loadArrow)]
+    pub async fn load_arrow(&self, bytes: Vec<u8>) -> Result<(), wasm_bindgen::JsValue> {
+        self.load_document(bytes).await
+    }
+
+    /// Requests the same media seek as the GUI and waits for its displayed frame.
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = seekToSeconds)]
+    pub async fn seek_to_seconds(&self, seconds: f64) -> Result<(), wasm_bindgen::JsValue> {
+        let (promise, complete) = scene_completion(|()| wasm_bindgen::JsValue::UNDEFINED);
+        self.shared.seek_scene_to_seconds(seconds, complete);
+        wasm_bindgen_futures::JsFuture::from(promise).await?;
+        Ok(())
+    }
+
+    /// Alias retained for callers loading one complete current document.
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = loadDocument)]
+    pub async fn load_document(&self, bytes: Vec<u8>) -> Result<(), wasm_bindgen::JsValue> {
+        self.load_document_with_gltf(bytes, js_sys::Array::new(), self.env_bytes.as_ref().clone())
+            .await
+    }
+
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = loadDocumentWithGltf)]
+    pub async fn load_document_with_gltf(
+        &self,
+        bytes: Vec<u8>,
+        gltf_bytes: js_sys::Array,
+        env_bytes: Vec<u8>,
+    ) -> Result<(), wasm_bindgen::JsValue> {
+        match trd_gui::video_editing::decode_video_editing_input(&bytes)
+            .map_err(|error| wasm_bindgen::JsValue::from_str(&error))?
+        {
+            trd_gui::video_editing::VideoEditingInput::Scene(mut scene) => {
+                resolve_video_editing_scene(&mut scene, &gltf_bytes)?;
+                let timeline = self.timeline.get();
+                let renderer = match self.shared.shared_gpu() {
+                    Some(gpu) => {
+                        trd_gui::video_editing_renderer::VideoPlacementRenderer::new_arrow_scene_with_gpu(
+                            gpu,
+                            &scene,
+                            &env_bytes,
+                            timeline.width,
+                            timeline.height,
+                        )
+                    }
+                    None => {
+                        trd_gui::video_editing_renderer::VideoPlacementRenderer::new_arrow_scene(
+                            &scene,
+                            &env_bytes,
+                            timeline.width,
+                            timeline.height,
+                        )
+                        .await
+                    }
+                }
+                .map_err(|error| wasm_bindgen::JsValue::from_str(&error))?;
+                let (promise, complete) = scene_completion(|()| wasm_bindgen::JsValue::UNDEFINED);
+                self.shared
+                    .replace_arrow_scene(Rc::new(scene), renderer, complete);
+                wasm_bindgen_futures::JsFuture::from(promise).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Clears the Arrow scene and its GPU assets while preserving the video.
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = resetState)]
+    pub async fn reset_state(&self) -> Result<(), wasm_bindgen::JsValue> {
+        let gpu = self
+            .shared
+            .shared_gpu()
+            .ok_or_else(|| crate::js_error("video editor GPU is not initialized"))?;
+        let timeline = self.timeline.get();
+        let renderer = trd_gui::video_editing_renderer::VideoPlacementRenderer::new_empty_with_gpu(
+            gpu,
+            timeline.width,
+            timeline.height,
+        )
+        .map_err(crate::js_error)?;
+        let (promise, complete) = scene_completion(|()| wasm_bindgen::JsValue::UNDEFINED);
+        self.shared.reset_arrow_scene(renderer, complete);
+        wasm_bindgen_futures::JsFuture::from(promise).await?;
+        Ok(())
+    }
+
+    /// Returns the current 0.0.7 source snapshot without opening a save dialog.
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = exportArrow)]
+    pub async fn export_arrow(&self) -> Result<js_sys::Uint8Array, wasm_bindgen::JsValue> {
+        use wasm_bindgen::JsCast;
+
+        let (promise, complete) =
+            scene_completion(|bytes: Vec<u8>| js_sys::Uint8Array::from(bytes.as_slice()).into());
+        self.shared.export_arrow_scene(complete);
+        let bytes = wasm_bindgen_futures::JsFuture::from(promise).await?;
+        bytes
+            .dyn_into::<js_sys::Uint8Array>()
+            .map_err(|_| crate::js_error("Arrow export did not return bytes"))
     }
 
     /// Drops the current annotation document; video keeps playing.
@@ -617,45 +803,5 @@ impl VideoEditingHandle {
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = takeSeekFrame)]
     pub fn take_seek_frame(&self) -> i32 {
         self.shared.take_seek_frame_code()
-    }
-
-    #[wasm_bindgen::prelude::wasm_bindgen(js_name = loadCatalogAsset)]
-    pub async fn load_catalog_asset(
-        &self,
-        asset_code: u8,
-        model_bytes: Vec<u8>,
-        texture_bytes: Vec<u8>,
-        env_bytes: Vec<u8>,
-    ) -> Result<(), wasm_bindgen::JsValue> {
-        let asset = trd_gui::video_editing::CatalogAsset::from_code(asset_code)
-            .ok_or_else(|| wasm_bindgen::JsValue::from_str("unknown catalog asset"))?;
-        // Must use the same device egui samples — a different device yields an unusable texture.
-        let renderer = match self.shared.shared_gpu() {
-            Some(gpu) => trd_gui::video_editing_renderer::VideoPlacementRenderer::new_with_gpu(
-                gpu,
-                asset,
-                &model_bytes,
-                &texture_bytes,
-                &env_bytes,
-                self.timeline.get().width,
-                self.timeline.get().height,
-            ),
-            None => {
-                trd_gui::video_editing_renderer::VideoPlacementRenderer::new(
-                    asset,
-                    &model_bytes,
-                    &texture_bytes,
-                    &env_bytes,
-                    self.timeline.get().width,
-                    self.timeline.get().height,
-                )
-                .await
-            }
-        }
-        .map_err(|error| wasm_bindgen::JsValue::from_str(&error))?;
-        self.shared.set_catalog_renderer(asset, renderer);
-        self.shared
-            .clear_error(trd_gui::video_editing::ErrorScope::Catalog);
-        Ok(())
     }
 }

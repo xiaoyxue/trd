@@ -20,6 +20,8 @@ pub enum TrackingPlacementError {
     BehindCamera,
     #[error("placement scale must be positive")]
     InvalidScale,
+    #[error("placement geometry must be finite")]
+    NonFiniteGeometry,
 }
 
 impl From<trd_placement::PlacementError> for TrackingPlacementError {
@@ -29,6 +31,7 @@ impl From<trd_placement::PlacementError> for TrackingPlacementError {
             trd_placement::PlacementError::SingularIntrinsics => Self::SingularIntrinsics,
             trd_placement::PlacementError::BehindCamera => Self::BehindCamera,
             trd_placement::PlacementError::InvalidScale => Self::InvalidScale,
+            trd_placement::PlacementError::NonFiniteGeometry => Self::NonFiniteGeometry,
         }
     }
 }

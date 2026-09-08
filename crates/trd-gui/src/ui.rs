@@ -25,7 +25,7 @@ pub enum ImageSizing {
 pub struct Controls {
     /// Hide the "Orbit camera" drag target (the video editor pins the camera).
     pub camera_locked: bool,
-    /// Override axis labels (e.g. `["e1","e2","e3"]`); `None` keeps parent basis.
+    /// Use only these reference axes; `None` keeps free, parent and local movement.
     pub move_reference_labels: Option<[&'static str; 3]>,
 }
 
@@ -220,7 +220,7 @@ pub fn status(ui: &mut egui::Ui, render_size: (u32, u32), last_render_ms: Option
     ui.add_space(8.0);
     ui.label(
         egui::RichText::new(
-            "Left-drag: orbit / rotate / move / scale\nAxis lock: drag rotates/moves on one axis\nRight-drag: move object\nScroll: zoom (or scale)",
+            "Left-drag: orbit / rotate / translate / scale\nAxis lock: drag rotates/translates on one axis\nRight-drag: translate object\nScroll: zoom (or scale)",
         )
         .small()
         .color(Color32::GRAY),
@@ -235,6 +235,15 @@ pub fn interaction_section(
 ) -> bool {
     section(ui, "Interaction", |ui| {
         let mut c = false;
+        if controls.move_reference_labels.is_some()
+            && !matches!(
+                controller.move_direction,
+                MoveDirection::Reference1 | MoveDirection::Reference2 | MoveDirection::Reference3
+            )
+        {
+            controller.move_direction = MoveDirection::Reference1;
+            c = true;
+        }
         ui.label("Primary drag");
         let target = &mut controller.target;
         ui.horizontal_wrapped(|ui| {
@@ -255,7 +264,7 @@ pub fn interaction_section(
             let mode = &mut controller.mode;
             ui.horizontal_wrapped(|ui| {
                 ui.selectable_value(mode, TransformMode::Rotate, "Rotate");
-                ui.selectable_value(mode, TransformMode::Move, "Move");
+                ui.selectable_value(mode, TransformMode::Move, "Translate");
                 ui.selectable_value(mode, TransformMode::Scale, "Scale");
             });
             if controller.mode == TransformMode::Move {
@@ -293,12 +302,26 @@ pub fn interaction_section(
                         reference_labels[2],
                     );
                 });
-                ui.label("Object local basis");
-                ui.horizontal_wrapped(|ui| {
-                    ui.selectable_value(&mut controller.move_direction, MoveDirection::LocalX, "X");
-                    ui.selectable_value(&mut controller.move_direction, MoveDirection::LocalY, "Y");
-                    ui.selectable_value(&mut controller.move_direction, MoveDirection::LocalZ, "Z");
-                });
+                if controls.move_reference_labels.is_none() {
+                    ui.label("Object local basis");
+                    ui.horizontal_wrapped(|ui| {
+                        ui.selectable_value(
+                            &mut controller.move_direction,
+                            MoveDirection::LocalX,
+                            "X",
+                        );
+                        ui.selectable_value(
+                            &mut controller.move_direction,
+                            MoveDirection::LocalY,
+                            "Y",
+                        );
+                        ui.selectable_value(
+                            &mut controller.move_direction,
+                            MoveDirection::LocalZ,
+                            "Z",
+                        );
+                    });
+                }
             }
             if controller.mode == TransformMode::Rotate {
                 ui.add_space(4.0);
@@ -630,11 +653,14 @@ pub fn image_panel(ui: &mut egui::Ui, image: Image<'_>) -> ImageOutcome {
         }
     };
     let add_image = |ui: &mut egui::Ui, size| {
-        ui.add(
-            egui::Image::new(texture.sized())
-                .fit_to_exact_size(size)
-                .sense(Sense::click_and_drag()),
-        )
+        // Justified layout can enlarge an Image widget's Response beyond its
+        // painted bounds. Register picking/hover on the actual image only.
+        let rect = ui
+            .layout()
+            .align_size_within_rect(size, ui.available_rect_before_wrap());
+        let response = ui.allocate_rect(rect, Sense::click_and_drag());
+        egui::Image::new(texture.sized()).paint_at(ui, response.rect);
+        response
     };
     let response = match sizing {
         ImageSizing::FitCanvas => {
@@ -725,7 +751,7 @@ pub fn image_panel(ui: &mut egui::Ui, image: Image<'_>) -> ImageOutcome {
 
 #[cfg(test)]
 mod tests {
-    use super::section;
+    use super::*;
 
     /// Runs `body` inside one headless egui frame; used to test panel helpers.
     fn in_frame<R>(body: impl FnOnce(&mut egui::Ui) -> R) -> R {
@@ -749,5 +775,83 @@ mod tests {
             !in_frame(|ui| section(ui, "unchanged", |_| false)),
             "a section whose body reports no change must return false"
         );
+    }
+
+    #[test]
+    fn quad_translate_controls_keep_only_reference_directions() {
+        for direction in [
+            MoveDirection::Free,
+            MoveDirection::LocalX,
+            MoveDirection::LocalY,
+            MoveDirection::LocalZ,
+            MoveDirection::Reference1,
+            MoveDirection::Reference2,
+            MoveDirection::Reference3,
+        ] {
+            let mut controller = InteractionController::new(crate::scene::SceneState::default());
+            controller.target = InteractionTarget::Object;
+            controller.mode = TransformMode::Move;
+            controller.move_direction = direction;
+            in_frame(|ui| {
+                interaction_section(
+                    ui,
+                    &mut controller,
+                    Controls {
+                        camera_locked: true,
+                        move_reference_labels: Some(["e1", "e2", "e3"]),
+                    },
+                )
+            });
+            let expected = match direction {
+                MoveDirection::Reference1
+                | MoveDirection::Reference2
+                | MoveDirection::Reference3 => direction,
+                _ => MoveDirection::Reference1,
+            };
+            assert_eq!(controller.move_direction, expected);
+
+            controller.move_direction = direction;
+            in_frame(|ui| interaction_section(ui, &mut controller, Controls::default()));
+            assert_eq!(controller.move_direction, direction);
+        }
+    }
+
+    #[test]
+    fn fitted_1080p_image_has_exact_painted_aspect_and_stays_in_the_region() {
+        for size in [
+            Vec2::new(640.0, 480.0),
+            Vec2::new(1200.0, 400.0),
+            Vec2::new(240.0, 700.0),
+        ] {
+            in_frame(|ui| {
+                ui.set_min_size(size);
+                ui.set_max_size(size);
+                let region = ui.available_rect_before_wrap();
+                let mut controller =
+                    InteractionController::new(crate::scene::SceneState::default());
+                let output = image_panel(
+                    ui,
+                    Image {
+                        controller: &mut controller,
+                        texture: Some(DisplayTexture::Native {
+                            id: egui::TextureId::User(1),
+                            size: (1920, 1080),
+                        }),
+                        render_size: (1920, 1080),
+                        sizing: ImageSizing::FitCanvas,
+                        camera_locked: true,
+                        hide_when_empty: false,
+                    },
+                );
+                let image = output.image_rect.unwrap();
+                assert!((image.width() / image.height() - 16.0 / 9.0).abs() < 0.001);
+                assert!(
+                    region.expand(0.1).contains_rect(image),
+                    "{image:?} exceeds {region:?}"
+                );
+                assert!(image.width() <= region.width() + 0.1);
+                assert!(image.height() <= region.height() + 0.1);
+            });
+        }
     }
 }

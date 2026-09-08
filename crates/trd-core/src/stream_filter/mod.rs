@@ -1,21 +1,13 @@
-//! Native-only Arrow streaming protocol (trd protocol 0.0.6).
+//! Native Arrow scene-document rendering.
 //!
-//! The protocol is **not backward compatible**: only `0.0.6` is accepted (see
-//! `AGENTS.md`). Input is a `[mesh][texture?][frames?][params]` byte stream of
-//! concatenated Arrow IPC streams on stdin:
-//! a **required** leading **mesh** table (one row = one mesh, all rows decoded
-//! by [`Mesh::from_arrow_all`]), an optional **texture** table (one row = one
-//! `fixed_shape_tensor<u8>[H,W,4]` image, decoded by [`ImageTexture::from_arrow`]
-//! and bound as the sampled albedo), then the **params** stream (one row per
-//! frame: optional camera columns `model`/`k`/`pose`/`eye`/`target`/`direction`/
-//! `up`/`fovy`/`aspect`/`znear`/`zfar`, an optional per-frame instanced draw list
-//! `draw_mesh` (`List<UInt32>`) / `draw_model`
-//! (`List<FixedSizeList<Float32>[16]>`) placing instances of the loaded meshes,
-//! and an optional per-frame background `frame_path` reference). When the draw
-//! list is absent, one instance of mesh 0 is placed by the frame's own `model`
-//! (identity when absent). A params stream with no leading mesh table is an error
-//! ([`StreamError::MissingMeshStream`]). Output: one row per frame, four
-//! `fixed_shape_tensor<u8>` channels `r,g,b,a` of shape `[H, W]`.
+//! Input is `[params][mesh?]`: complete Arrow IPC streams decoded through
+//! [`crate::SceneDocument`], with optional UUID-keyed original GLB resources.
+//! External background references are resolved by the shell. Explicit object
+//! transforms render directly; quad placement requires a caller-supplied
+//! [`SceneBuilder`] so placement policy stays outside the core.
+//!
+//! Output is one row per frame, four `fixed_shape_tensor<u8>` channels
+//! `r,g,b,a` of shape `[H, W]`, preserving the params batch boundaries.
 
 use arrow::array::RecordBatch;
 use std::io::{Read, Write};
@@ -32,11 +24,14 @@ use crate::OutputStream;
 ///
 /// Each layer keeps its own error and is wrapped **transparently**, so a message
 /// is identical whether it surfaces here, in `trd-wasm` (which reports
-/// [`ProtocolError`] directly) or from the renderer. Only the two genuinely
-/// stream-level conditions — a draw naming a mesh the stream never sent, and a
-/// stream that is not mesh-first — are declared here.
+/// [`ProtocolError`] directly) or from the renderer. The legacy mesh-first
+/// transport helpers still use their existing error variants during migration.
 #[derive(Debug, thiserror::Error)]
 pub enum StreamError {
+    #[error("scene assembly failed: {0}")]
+    SceneBuild(String),
+    #[error("background frame `{0}` could not be resolved")]
+    FrameResolve(String),
     /// Decoding or validating the input protocol failed.
     #[error(transparent)]
     Protocol(#[from] ProtocolError),
@@ -55,11 +50,18 @@ pub enum StreamError {
     /// stream never sent.
     #[error(transparent)]
     Scene(#[from] crate::SceneError),
-    /// The input is not mesh-first: the protocol requires a leading mesh table
-    /// before the params stream (`[mesh][texture?][frames?][params]`). Params-only
-    /// streams are no longer accepted.
+    /// Legacy `InputStream` diagnostic. The document-based renderer accepts
+    /// params-only input and does not emit this mesh-first transport error.
     #[error("input is missing the required leading mesh table (protocol is mesh-first)")]
     MissingMeshStream,
+    #[error("mesh row {index} reference `{reference}` has no resolver")]
+    UnresolvedMeshReference { index: u32, reference: String },
+    #[error("mesh row {index} reference `{reference}` failed to load: {message}")]
+    MeshResolve {
+        index: u32,
+        reference: String,
+        message: String,
+    },
 }
 
 /// [`TargetError`] reaches [`StreamError`] through
@@ -92,21 +94,29 @@ pub fn decode_frames(batch: &RecordBatch) -> Result<Vec<FrameParams>, StreamErro
 /// out of `trd-core` so the core performs no file/network I/O: the native CLI
 /// supplies one backed by the `image` crate + a `--frames-base` dir; a stream
 /// without background frames (or a shell that doesn't load them) passes `None`.
-/// Returning `None` for a given reference renders that frame without a
-/// background plane (the shell decides how to report the miss).
+/// Returning `None` for a referenced image is a [`StreamError::FrameResolve`],
+/// not a silent omission of the background.
 pub type FrameResolver<'a> = &'a dyn Fn(&str) -> Option<crate::texture::ImageData>;
+pub type MeshResolver<'a> = &'a dyn Fn(&crate::MeshReference) -> Result<Vec<u8>, String>;
+
+/// The caller owns placement policy; core renders the resulting domain values.
+pub type SceneBuilder = fn(
+    &crate::SceneDocument,
+    &crate::DocumentFrame,
+    crate::Viewport,
+    &RenderOptions,
+    Option<FrameFit>,
+) -> Result<(crate::Camera, crate::Scene), String>;
 
 /// The **external** background reference currently uploaded, so consecutive
 /// frames naming the same `frame_path`/`frame_url` skip the resolver + upload.
-/// Its inline-`frame_id` counterpart is the shared
-/// [`InlineFrameCache`](crate::InlineFrameCache).
 #[derive(Default)]
 struct FrameBackgroundState {
     last_ref: Option<String>,
 }
 
-/// Renders one decoded [`FrameBatch`](crate::FrameBatch) and writes its output
-/// batch, mirroring one Arrow output batch per input record batch. When
+/// Renders a retained params row range and writes its output batch, mirroring
+/// one Arrow output batch per input record batch. When
 /// `frame_resolver` is `Some`, a frame carrying a `frame_path`/`frame_url`
 /// reference has its background image resolved + uploaded and composited
 /// beneath the scene via the scene's [`Background::frame`](crate::Background::frame).
@@ -118,48 +128,39 @@ fn render_and_write_batch<W: Write>(
     target: &TextureTarget,
     options: &RenderOptions,
     output: &mut OutputStream<W>,
-    batch: &crate::FrameBatch,
-    inline_frames: &[crate::InlineFrame],
+    document: &crate::SceneDocument,
+    rows: std::ops::Range<usize>,
     frame_resolver: Option<FrameResolver>,
     background_state: &mut FrameBackgroundState,
-    inline_cache: &mut crate::InlineFrameCache,
+    build_scene: SceneBuilder,
 ) -> Result<(), StreamError> {
-    let mesh_count = renderer.mesh_count();
-    let mut planes: Vec<Vec<u8>> = Vec::with_capacity(batch.len());
-    for frame in batch {
+    let mut planes: Vec<Vec<u8>> = Vec::with_capacity(rows.len());
+    for row in rows {
+        let frame = document.frame(row)?;
         let mut frame_fit = None;
-        if let Some((image, changed)) = inline_cache.resolve(frame.frame_id, inline_frames)? {
-            if changed {
+        if let Some(path) = document.frame_ref(row)? {
+            if background_state.last_ref.as_deref() != Some(&path) {
+                let image = frame_resolver
+                    .and_then(|resolve| resolve(&path))
+                    .ok_or_else(|| StreamError::FrameResolve(path.clone()))?;
                 renderer.update_frame_texture(&image);
+                background_state.last_ref = Some(path);
             }
-            background_state.last_ref = None;
             frame_fit = Some(FrameFit::Stretch);
-        } else if let (Some(path), Some(resolve)) = (frame.frame_ref.as_deref(), frame_resolver) {
-            if background_state.last_ref.as_deref() != Some(path) {
-                if let Some(image) = resolve(path) {
-                    renderer.update_frame_texture(&image);
-                    background_state.last_ref = Some(path.to_owned());
-                    frame_fit = Some(FrameFit::Stretch);
-                }
-            } else {
-                frame_fit = Some(FrameFit::Stretch);
-            }
         } else {
             background_state.last_ref = None;
         }
         // The scene is assembled here, from the wire draw list plus the CLI's
         // appearance options — the same `scene_with_overlays` every other
         // front-end uses, so they cannot drift apart (#180).
-        let scene = crate::render::Scene::try_from_frame(frame, mesh_count, options, frame_fit)?;
+        let (camera, scene) = build_scene(document, &frame, target.viewport(), options, frame_fit)
+            .map_err(StreamError::SceneBuild)?;
         // `run_stream` is a synchronous `Read`/`Write` filter, while the renderer
         // is async because GPU read-back is (the browser must not block its event
         // loop). Natively blocking here is free: the future is already complete
         // when `poll_for_map` returns. This is the only bridge between the two.
-        planes.push(pollster::block_on(renderer.render_params(
-            frame.params,
-            &scene,
-            target,
-        ))?);
+        renderer.draw_layers(&[crate::SceneLayer::new(camera, &scene)], target);
+        planes.push(pollster::block_on(renderer.read_pixels(target))?);
     }
     // `OutputStream` owns the sink, so encoding *is* writing — no drain + hand
     // -off pair at the call site.
@@ -169,19 +170,12 @@ fn render_and_write_batch<W: Write>(
 
 /// Reads a trd input stream, renders each frame, and writes an Arrow IPC stream
 /// of `fixed_shape_tensor` images to `output`. Output batch boundaries mirror
-/// input batches (one batch in flight).
+/// input batches (one output batch in flight).
 ///
-/// The protocol is `[mesh][texture?][frames?][params]`: the **required**
-/// leading mesh table is decoded once (via [`Mesh::from_arrow_all`](crate::Mesh::from_arrow_all)) and
-/// uploaded, then an optional texture table is uploaded as the bound albedo,
-/// then the following params stream drives per-frame rendering. A params-only
-/// stream with no leading mesh table is a [`StreamError::MissingMeshStream`].
-///
-/// Framing is driven by the single shared [`InputSession`](crate::InputSession)
-/// (also used by the wasm renderers): input bytes are read in chunks and pushed
-/// through it, so all the mesh-first sub-stream sniffing + boundary handling
-/// lives in exactly one place. The only native-specific bit is the blocking
-/// [`Read`] byte source.
+/// [`crate::SceneDocument::read_from`] reads `[params][mesh?]` through the same
+/// document decoder as the browser's complete-buffer API. Original GLBs are
+/// decoded once before rendering. Params-only input produces reference
+/// geometry; quad-bound input uses [`run_stream_with_scene_builder`].
 pub fn run_stream<R: Read, W: Write>(
     input: R,
     output: W,
@@ -190,66 +184,155 @@ pub fn run_stream<R: Read, W: Write>(
     options: RenderOptions,
     frame_resolver: Option<FrameResolver>,
 ) -> Result<(), StreamError> {
+    run_stream_with_mesh_resolver(input, output, width, height, options, frame_resolver, None)
+}
+
+pub fn run_stream_with_mesh_resolver<R: Read, W: Write>(
+    input: R,
+    output: W,
+    width: u32,
+    height: u32,
+    options: RenderOptions,
+    frame_resolver: Option<FrameResolver>,
+    _mesh_resolver: Option<MeshResolver>,
+) -> Result<(), StreamError> {
+    run_stream_with_scene_builder(
+        input,
+        output,
+        width,
+        height,
+        options,
+        frame_resolver,
+        explicit_scene,
+    )
+}
+
+pub fn run_stream_with_scene_builder<R: Read, W: Write>(
+    input: R,
+    output: W,
+    width: u32,
+    height: u32,
+    mut options: RenderOptions,
+    frame_resolver: Option<FrameResolver>,
+    build_scene: SceneBuilder,
+) -> Result<(), StreamError> {
     // Validate dimensions up front so schema construction (which multiplies
     // width*height) can't overflow before Renderer's guard runs.
     check_dimensions(width, height)?;
 
-    let mut input = crate::InputStream::new(input);
-    // The mesh-first prologue is complete here, so the renderer can be built
-    // from it eagerly rather than lazily inside the frame loop. The renderer and
+    let document = crate::SceneDocument::read_from(input)?;
+    // The document's trailing resources are complete here. The renderer and
     // its texture target are a matched pair (#203): the target is a call
     // argument, not a field, so both are held here.
-    let prologue = input.prologue()?;
-    let frame_rate = prologue.frame_rate;
-    let (mut renderer, target) = pollster::block_on(Renderer::with_meshes_sample_count(
-        width,
-        height,
-        prologue.meshes,
+    let assets = document.decoded_assets()?;
+    let frame_rate = crate::frame_rate_from_metadata(document.schema().metadata());
+    let instance = crate::create_instance();
+    let gpu = pollster::block_on(crate::GpuContext::request(
+        &instance,
+        &crate::GpuRequest {
+            limits: crate::render::LimitsPreset::Downlevel,
+            memory_hints: wgpu::MemoryHints::MemoryUsage,
+            ..Default::default()
+        },
+    ))
+    .map_err(|error| crate::RenderError::Gpu(error.to_string()))?;
+    let mut renderer = Renderer::with_assets_sample_count(
+        gpu,
+        crate::TEXTURE_TARGET_FORMAT,
+        &assets,
         options.msaa.sample_count(),
-    ))?;
+    )?;
+    let target = renderer.create_texture_target(width, height)?;
+    if document.meshes().is_empty() {
+        renderer.set_mesh_aabb_color(0, crate::Mesh::REFERENCE_CUBE_COLOR)?;
+    }
     if let Some(pbr) = &options.pbr {
-        renderer.set_appearance(
-            crate::MeshTarget::All,
-            crate::MeshAppearance {
-                material: pbr.material.clone(),
-                ibl: pbr.ibl,
-                tone_mapping: pbr.tone_mapping,
-                ..Default::default()
-            },
-        );
+        if options.mode == crate::RenderMode::Shaded {
+            renderer.set_appearance(
+                crate::MeshTarget::All,
+                crate::MeshAppearance {
+                    material: pbr.material.clone(),
+                    ibl: pbr.ibl,
+                    tone_mapping: pbr.tone_mapping,
+                    ..Default::default()
+                },
+            );
+        }
         if let Some(env) = &pbr.env_map {
             renderer.set_env_map(env.clone());
         }
     }
-    if let Some(texture) = prologue.texture {
-        renderer.set_texture(texture);
+    if let Some(operator) = document.tonemap_override()? {
+        renderer.set_tonemap_operator(crate::MeshTarget::All, operator);
+        if let Some(background) = options.env_background.as_mut() {
+            background.tonemap = operator;
+        }
     }
-
     // Opening the stream writes its IPC header straight into `output`.
     let mut output = OutputStream::new(output, width, height, Some(frame_rate))?;
     // The background currently uploaded, so consecutive frames sharing it skip
     // the decode + re-upload.
     let mut background_state = FrameBackgroundState::default();
-    let mut inline_cache = crate::InlineFrameCache::default();
 
-    // `next_batch` rather than `for batch in &mut input`: the loop body needs
-    // `input.frames()` too, which a `for` loop's borrow would forbid.
-    while let Some(batch) = input.next_batch() {
+    let mut row = 0;
+    for batch in document.batches() {
+        let end = row + batch.num_rows();
         render_and_write_batch(
             &mut renderer,
             &target,
             &options,
             &mut output,
-            &batch?,
-            input.frames(),
+            &document,
+            row..end,
             frame_resolver,
             &mut background_state,
-            &mut inline_cache,
+            build_scene,
         )?;
+        row = end;
     }
-    input.finish()?;
     output.finish()?;
     Ok(())
+}
+
+fn explicit_scene(
+    document: &crate::SceneDocument,
+    frame: &crate::DocumentFrame,
+    viewport: crate::Viewport,
+    options: &RenderOptions,
+    fit: Option<FrameFit>,
+) -> Result<(crate::Camera, crate::Scene), String> {
+    if frame.objects.iter().any(|object| object.quad.is_some()) {
+        return Err(
+            "quad placement requires a caller-provided scene builder from trd-placement".to_owned(),
+        );
+    }
+    let camera = frame
+        .params
+        .to_camera(viewport)
+        .map_err(|error| error.to_string())?;
+    let mut draws = Vec::new();
+    if !document.meshes().is_empty() {
+        for (index, object) in frame.objects.iter().enumerate() {
+            draws.push(crate::Draw {
+                mesh_id: u32::try_from(
+                    document
+                        .object_mesh_slot(frame, index)
+                        .map_err(|error| error.to_string())?,
+                )
+                .map_err(|_| "too many meshes".to_owned())?,
+                model: object.model,
+                selection: object.selection,
+            });
+        }
+    }
+    let mut scene = crate::Scene::from_draws(&draws, options, fit);
+    if document.meshes().is_empty() && !frame.objects.is_empty() {
+        scene.push(crate::DrawableObject::aabb_box(0, crate::Matrix4::IDENTITY));
+        scene.push(crate::DrawableObject::coordinate_axes(
+            crate::Matrix4::IDENTITY,
+        ));
+    }
+    Ok((camera, scene))
 }
 
 #[cfg(test)]
@@ -884,12 +967,30 @@ mod tests {
     }
 
     #[test]
+    fn run_stream_rejects_mesh_first_documents() {
+        let mut input_bytes = Vec::new();
+        write_mesh_stream(&mut input_bytes, &Mesh::hello_triangle());
+        write_params_stream(&mut input_bytes, &[FrameParams::IDENTITY]);
+        let error = run_stream(
+            &input_bytes[..],
+            &mut Vec::new(),
+            32,
+            32,
+            RenderOptions::default(),
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            StreamError::Protocol(ProtocolError::Arrow(arrow::error::ArrowError::ParseError(message)))
+                if message == "expected a params table"
+        ));
+    }
+
+    #[test]
     #[ignore = "requires a GPU adapter"]
-    fn run_stream_renders_mesh_first_stream() {
+    fn run_stream_renders_params_first_glb_document() {
         let (w, h) = (32u32, 32u32);
-        // A full-screen quad as the leading mesh; two params frames follow.
-        let mesh =
-            Mesh::from_obj("v -1 -1 0\nv 1 -1 0\nv 1 1 0\nv -1 1 0\nf 1 2 3\nf 1 3 4\n").unwrap();
         let frames = vec![
             FrameParams::IDENTITY,
             FrameParams {
@@ -899,9 +1000,19 @@ mod tests {
                 ..FrameParams::IDENTITY
             },
         ];
-        let mut input_bytes = Vec::new();
-        write_mesh_stream(&mut input_bytes, &mesh);
-        write_params_stream(&mut input_bytes, &frames);
+        let batch = build_input_batch(&frames);
+        let document = crate::SceneDocument::from_batches(
+            batch.schema(),
+            vec![batch],
+            vec![crate::GlbMesh::new(
+                "00000000-0000-0000-0000-000000000001",
+                &crate::protocol::triangle_glb(),
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        let input_bytes = document.write().unwrap();
+        assert!(crate::SceneDocument::starts_with_params(&input_bytes).unwrap());
 
         let mut output_bytes = Vec::new();
         run_stream(
@@ -917,9 +1028,9 @@ mod tests {
         let reader = StreamReader::try_new(&output_bytes[..], None).unwrap();
         let batches = reader.collect::<Result<Vec<_>, _>>().unwrap();
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(batches.len(), 1, "preserve the params batch boundary");
         assert_eq!(total_rows, frames.len());
 
-        // The white quad covers the frame, so the center pixel must be lit.
         let get = |batch: &RecordBatch, name: &str| -> U8List {
             batch
                 .column_by_name(name)
@@ -937,7 +1048,12 @@ mod tests {
             .downcast_ref::<UInt8Array>()
             .unwrap()
             .value(center);
-        assert!(value > 0, "mesh quad should cover the center pixel");
+        assert!(value > 0, "the GLB triangle should cover the center pixel");
+        assert_ne!(
+            r.value(0).to_data(),
+            r.value(1).to_data(),
+            "the second params row must visibly translate the GLB"
+        );
     }
 
     /// A reader that hands out at most `chunk` bytes per `read`, so a test can force
@@ -984,7 +1100,7 @@ mod tests {
             });
             let prologue = stream.prologue().expect("prologue");
             assert_eq!(prologue.meshes, std::slice::from_ref(&mesh));
-            assert!(prologue.texture.is_none());
+            assert!(prologue.mesh_assets[0].base_color_texture.is_none());
 
             let decoded: Vec<FrameParams> = stream
                 .by_ref()

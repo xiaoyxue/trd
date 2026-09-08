@@ -9,11 +9,11 @@
 //! decoder divergence, GPU `Uniform` byte drift, and camera-math regressions.
 //!
 //! The fixtures are the two-stage cornellbox *placement* demo (#77), reduced to
-//! a few frames at a small resolution by `scripts/golden_fixtures.py`. The mesh,
-//! texture, inline background frames, and params are embedded in one Arrow byte
-//! stream. Params `frame_id` values select the background resource, so the
-//! fixture is self-contained while still compositing the scene over the
-//! cornellbox background:
+//! a few frames at a small resolution and generated as `[params][mesh]` by
+//! `scripts/golden_fixtures.py`. Geometry and materials are embedded GLB
+//! payloads; params reference committed background stills under `golden/frames`.
+//! The shell resolver supplies those images while the scene is composited over
+//! the cornellbox background:
 //!
 //! * `stage1.arrow` — the reconstructed placement quad (wireframe) + local axes;
 //! * `stage2.arrow` — a textured bunny anchored on that quad, with AABB + local
@@ -54,7 +54,10 @@
 //! ```
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, Once};
+
+#[path = "support/golden_image.rs"]
+mod golden_image;
 
 use arrow::array::{Array, FixedSizeListArray, UInt8Array};
 use arrow::ipc::reader::StreamReader;
@@ -68,12 +71,6 @@ use trd_core::{
 /// Golden render resolution (16:9; the fixtures' CV `k` is rescaled to match).
 const WIDTH: u32 = 320;
 const HEIGHT: u32 = 180;
-
-/// A channel absolute difference `<= CHANNEL_EPS` is treated as equal, absorbing
-/// minor cross-driver rasterization variance.
-const CHANNEL_EPS: u8 = 16;
-/// At most this fraction of pixels may differ beyond `CHANNEL_EPS`.
-const MAX_DIFF_FRACTION: f64 = 0.02;
 
 fn golden_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden")
@@ -217,7 +214,31 @@ fn pbr_options(tonemap: Tonemap) -> RenderOptions {
 /// `#[test]` threads (see [`render_fixture`]).
 static GPU_SERIAL: Mutex<()> = Mutex::new(());
 
+struct AdapterLog;
+impl log::Log for AdapterLog {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level() <= log::Level::Info && metadata.target().starts_with("trd_core")
+    }
+    fn log(&self, record: &log::Record<'_>) {
+        if self.enabled(record.metadata()) {
+            eprintln!("{}", record.args());
+        }
+    }
+    fn flush(&self) {}
+}
+
+fn init_adapter_log() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        if let Err(error) = log::set_logger(&AdapterLog) {
+            eprintln!("golden tests reuse the existing logger: {error}");
+        }
+        log::set_max_level(log::LevelFilter::Info);
+    });
+}
+
 fn render_fixture(fixture: &str, options: RenderOptions) -> Vec<Vec<u8>> {
+    init_adapter_log();
     let bytes = std::fs::read(golden_dir().join(fixture))
         .unwrap_or_else(|e| panic!("read fixture {fixture}: {e}"));
 
@@ -234,7 +255,17 @@ fn render_fixture(fixture: &str, options: RenderOptions) -> Vec<Vec<u8>> {
         let _serial = GPU_SERIAL
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        run_stream(&bytes[..], &mut out, WIDTH, HEIGHT, options, None)
+        let resolve = |relative: &str| {
+            let image = image::open(golden_dir().join(relative))
+                .unwrap_or_else(|error| panic!("golden background {relative}: {error}"))
+                .to_rgba8();
+            Some(trd_core::ImageData {
+                width: image.width(),
+                height: image.height(),
+                rgba: image.into_raw(),
+            })
+        };
+        run_stream(&bytes[..], &mut out, WIDTH, HEIGHT, options, Some(&resolve))
             .unwrap_or_else(|e| panic!("run_stream on {fixture}: {e:?}"));
     }
 
@@ -281,66 +312,7 @@ fn render_fixture(fixture: &str, options: RenderOptions) -> Vec<Vec<u8>> {
 /// Compare `actual` RGBA against the golden PNG, or (re)write it under
 /// `TRD_UPDATE_GOLDENS`. Returns `Err(reason)` on mismatch.
 fn compare_or_update(actual: &[u8], golden: &Path) -> Result<(), String> {
-    assert_eq!(
-        actual.len(),
-        (WIDTH * HEIGHT * 4) as usize,
-        "frame RGBA length mismatch"
-    );
-
-    if update_goldens() {
-        let img = image::RgbaImage::from_raw(WIDTH, HEIGHT, actual.to_vec())
-            .expect("RGBA buffer -> image");
-        img.save(golden)
-            .map_err(|e| format!("write golden {}: {e}", golden.display()))?;
-        return Ok(());
-    }
-
-    let expected = image::open(golden)
-        .map_err(|e| {
-            format!(
-                "open golden {} ({e}); regenerate with TRD_UPDATE_GOLDENS=1",
-                golden.display()
-            )
-        })?
-        .to_rgba8();
-    if expected.dimensions() != (WIDTH, HEIGHT) {
-        return Err(format!(
-            "golden {} is {:?}, expected {WIDTH}x{HEIGHT}",
-            golden.display(),
-            expected.dimensions()
-        ));
-    }
-
-    let expected = expected.into_raw();
-    let total = (WIDTH * HEIGHT) as usize;
-    let mut differing = 0usize;
-    let mut max_diff = 0u8;
-    for p in 0..total {
-        let mut pixel_diff = 0u8;
-        for c in 0..4 {
-            let a = actual[p * 4 + c];
-            let e = expected[p * 4 + c];
-            let d = a.abs_diff(e);
-            pixel_diff = pixel_diff.max(d);
-        }
-        max_diff = max_diff.max(pixel_diff);
-        if pixel_diff > CHANNEL_EPS {
-            differing += 1;
-        }
-    }
-
-    let fraction = differing as f64 / total as f64;
-    if fraction > MAX_DIFF_FRACTION {
-        return Err(format!(
-            "{}: {differing}/{total} pixels differ beyond eps={CHANNEL_EPS} \
-             ({:.3}% > {:.3}%; max channel diff {max_diff}). \
-             If this change is intentional, regenerate with TRD_UPDATE_GOLDENS=1",
-            golden.display(),
-            fraction * 100.0,
-            MAX_DIFF_FRACTION * 100.0,
-        ));
-    }
-    Ok(())
+    golden_image::compare_or_update(actual, WIDTH, HEIGHT, golden, update_goldens())
 }
 
 /// Render a fixture and compare every frame to its golden PNG.
@@ -637,6 +609,7 @@ fn uv_sphere(radius: f32, segments: u32, rings: u32) -> Mesh {
 #[test]
 #[ignore = "requires a GPU adapter"]
 fn golden_environment_light_syncs_sky_and_reflection() {
+    init_adapter_log();
     let _serial = GPU_SERIAL
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());

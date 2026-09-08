@@ -17,6 +17,7 @@ workspace = true
 
 [dependencies]
 trd-core.workspace = true
+trd-placement.workspace = true
 wgpu = "30"
 winit = "0.30"
 pollster = "0.4"

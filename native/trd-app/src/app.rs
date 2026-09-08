@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 use trd_core::{
-    DisneyMaterial, EnvMapData, ImageBasedLighting, ImageTexture, Lighting, Mesh, PbrConfig,
-    RenderMode, RenderOptions, ToneMapping,
+    DisneyMaterial, EnvMapData, ImageBasedLighting, Lighting, MeshAsset, PbrConfig, RenderMode,
+    RenderOptions, ToneMapping,
 };
 use winit::application::ApplicationHandler;
 #[cfg(not(target_os = "windows"))]
@@ -33,16 +33,8 @@ struct App {
     gpu: Option<WindowRenderer>,
     /// Meshes + rate + frames arriving from the stdin reader thread.
     rx: Receiver<StreamMsg>,
-    /// The stream's mesh table (or the legacy built-in fallback), held until the
-    /// GPU surface exists so the renderer can be built.
-    pending_meshes: Option<Vec<Mesh>>,
-    /// The stream's bound texture (`0.0.4`), held until the renderer is built so
-    /// it can be uploaded; `None` for streams without a texture table.
-    pending_texture: Option<ImageTexture>,
-    /// Whether `pending_texture` has been applied to the built renderer (so it is
-    /// uploaded exactly once, even though it can arrive before or after the mesh
-    /// table triggers the renderer build).
-    texture_applied: bool,
+    /// Decoded assets and explicit reference-only mode, awaiting the GPU surface.
+    pending_mesh_assets: Option<(Vec<MeshAsset>, bool)>,
     /// Every frame received so far, retained so playback can loop.
     frames: Vec<FrameData>,
     /// The frame currently on screen (none until the first arrives).
@@ -72,6 +64,8 @@ struct App {
     pbr_config: Option<PbrConfig>,
     /// Whether `pbr_config` has been applied to the built renderer (once).
     pbr_applied: bool,
+    stream_tonemap: Option<trd_core::Tonemap>,
+    stream_tonemap_applied: bool,
 }
 
 impl App {
@@ -87,9 +81,7 @@ impl App {
         Self {
             gpu: None,
             rx,
-            pending_meshes: None,
-            pending_texture: None,
-            texture_applied: false,
+            pending_mesh_assets: None,
             frames: Vec::new(),
             current: None,
             rate_override,
@@ -103,6 +95,8 @@ impl App {
             options,
             pbr_config,
             pbr_applied: false,
+            stream_tonemap: None,
+            stream_tonemap_applied: false,
         }
     }
 
@@ -116,9 +110,20 @@ impl App {
     fn drain_stream(&mut self) {
         loop {
             match self.rx.try_recv() {
-                Ok(StreamMsg::Meshes(meshes)) => self.pending_meshes = Some(meshes),
-                Ok(StreamMsg::Texture(texture)) => self.pending_texture = Some(texture),
+                Ok(StreamMsg::Meshes {
+                    assets,
+                    reference_only,
+                }) => {
+                    self.pending_mesh_assets = Some((assets, reference_only));
+                }
                 Ok(StreamMsg::Rate(rate)) => self.stream_rate = rate,
+                Ok(StreamMsg::Tonemap(operator)) => {
+                    self.stream_tonemap = Some(operator);
+                    self.stream_tonemap_applied = false;
+                    if let Some(background) = self.options.env_background.as_mut() {
+                        background.tonemap = operator;
+                    }
+                }
                 Ok(StreamMsg::Frame(frame)) => self.frames.push(*frame),
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
@@ -248,47 +253,46 @@ impl ApplicationHandler for App {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.drain_stream();
 
-        // Build the scene renderer once both the GPU surface and the stream's
-        // mesh table (or built-in fallback) are available; then paint.
+        // Both the surface and decoded document assets must be ready.
         if let Some(gpu) = self.gpu.as_mut() {
             if gpu.renderer.is_none() {
-                if let Some(meshes) = self.pending_meshes.as_ref() {
-                    match gpu.set_meshes(meshes) {
+                if let Some((assets, reference_only)) = self.pending_mesh_assets.as_ref() {
+                    match gpu.set_mesh_assets(assets, *reference_only) {
                         Ok(()) => gpu.window.request_redraw(),
                         // An unusable mesh table is a bad stream, not a crash:
                         // report it and stop retrying it every wake (#235 R8).
                         Err(error) => {
                             log::error!("cannot render this stream's meshes: {error}");
-                            self.pending_meshes = None;
+                            self.pending_mesh_assets = None;
                         }
                     }
-                }
-            }
-            // Upload the stream's bound texture once the renderer exists (the
-            // texture can arrive before or after the mesh table).
-            if !self.texture_applied && gpu.renderer.is_some() {
-                if let Some(texture) = self.pending_texture.as_ref() {
-                    gpu.set_texture(texture);
-                    self.texture_applied = true;
-                    gpu.window.request_redraw();
                 }
             }
             // Apply the Disney PBR material + env probe once the renderer exists.
             if !self.pbr_applied && gpu.renderer.is_some() {
                 if let Some(pbr) = self.pbr_config.take() {
                     gpu.set_lighting(pbr.lighting);
-                    gpu.set_appearance(trd_core::MeshAppearance {
-                        material: pbr.material,
-                        ibl: pbr.ibl,
-                        tone_mapping: pbr.tone_mapping,
-                        ..Default::default()
-                    });
+                    if self.options.mode == RenderMode::Shaded {
+                        gpu.set_appearance(trd_core::MeshAppearance {
+                            material: pbr.material,
+                            ibl: pbr.ibl,
+                            tone_mapping: pbr.tone_mapping,
+                            ..Default::default()
+                        });
+                    }
                     if let Some(env) = pbr.env_map {
                         gpu.set_env_map(env);
                     }
                     gpu.window.request_redraw();
                 }
                 self.pbr_applied = true;
+            }
+            if !self.stream_tonemap_applied && gpu.renderer.is_some() {
+                if let Some(operator) = self.stream_tonemap {
+                    gpu.set_tonemap_operator(operator);
+                    gpu.window.request_redraw();
+                }
+                self.stream_tonemap_applied = true;
             }
         }
 
@@ -335,7 +339,7 @@ pub fn run() -> Result<(), AppError> {
     // The `.hdr` is decoded here so trd-core does no file/codec I/O, and
     // downscaled to the renderer's portable 2048px limit. `--env-background`
     // needs it too: the sky is the same probe the surfaces reflect.
-    let pbr_config = if cli.pbr || cli.env_background {
+    let pbr_config = if cli.pbr || cli.env_background || cli.env.is_some() {
         let material = DisneyMaterial {
             metallic: cli.metallic,
             roughness: cli.roughness,
@@ -370,9 +374,8 @@ pub fn run() -> Result<(), AppError> {
     };
 
     let (tx, rx) = mpsc::channel();
-    spawn_stdin_reader(tx, cli.frames_base.clone());
-
     let event_loop = EventLoop::new()?;
+    spawn_stdin_reader(tx, cli.frames_base.clone(), event_loop.create_proxy());
     // Playback is paced with `ControlFlow::WaitUntil` in `about_to_wait`; start
     // by waiting until the app schedules the first frame.
     event_loop.set_control_flow(ControlFlow::Wait);

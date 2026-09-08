@@ -31,12 +31,7 @@ const SECTIONS: [(&str, Section); 6] = [
 pub(super) fn details_ui(ui: &mut egui::Ui, video: &trd_core::VideoInfo, facts: &DisplayedFacts) {
     ui.horizontal(|ui| {
         if ui.small_button("Copy details").clicked() {
-            let mut text = TextRows::default();
-            for (title, section) in SECTIONS {
-                text.section(title);
-                section(video, facts, &mut text);
-            }
-            ui.ctx().copy_text(text.0);
+            ui.ctx().copy_text(format_details(video, facts));
         }
         ui.weak("Values follow the displayed render.");
     });
@@ -49,6 +44,15 @@ pub(super) fn details_ui(ui: &mut egui::Ui, video: &trd_core::VideoInfo, facts: 
                 .show(ui, |ui| section(video, facts, &mut EguiRows(ui)));
         });
     }
+}
+
+pub(super) fn format_details(video: &trd_core::VideoInfo, facts: &DisplayedFacts) -> String {
+    let mut text = TextRows::default();
+    for (title, section) in SECTIONS {
+        text.section(title);
+        section(video, facts, &mut text);
+    }
+    text.0
 }
 
 // ── row sinks ───────────────────────────────────────────────────────────────
@@ -243,7 +247,14 @@ fn timeline_rows(video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut dy
     );
     r.row(
         "Arrow present_index",
-        &option_u32(frame.map(|f| f.present_index)),
+        &facts
+            .source_frame
+            .as_ref()
+            .and_then(|frame| frame.present_index)
+            .map_or_else(
+                || option_u32(frame.map(|f| f.present_index)),
+                |index| index.to_string(),
+            ),
     );
     r.row(
         "Arrow timestamp_us",
@@ -261,7 +272,15 @@ fn timeline_rows(video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut dy
     );
     r.row(
         "tracking state",
-        frame.map_or("none", |f| if f.tracked { "tracked" } else { "video-only" }),
+        if facts
+            .source_frame
+            .as_ref()
+            .is_some_and(|frame| frame.objects.iter().any(|object| object.quad.is_some()))
+        {
+            "tracked source"
+        } else {
+            frame.map_or("none", |f| if f.tracked { "tracked" } else { "video-only" })
+        },
     );
     r.row("source size", &format!("{}x{}", video.width, video.height));
     r.row(
@@ -297,10 +316,16 @@ fn timeline_rows(video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut dy
 
 fn tracking_rows(_video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut dyn Rows) {
     match facts
-        .timeline_frame
+        .source_frame
         .as_ref()
-        .and_then(|frame| frame.placement_quad)
-    {
+        .and_then(|frame| frame.objects.get(facts.inspected_object))
+        .and_then(|object| object.quad)
+        .or_else(|| {
+            facts
+                .timeline_frame
+                .as_ref()
+                .and_then(|frame| frame.placement_quad)
+        }) {
         Some(points) => {
             for (label, point) in ["TL", "TR", "BR", "BL"].into_iter().zip(points) {
                 r.row(label, &vec2_label(point));
@@ -308,7 +333,13 @@ fn tracking_rows(_video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut d
         }
         None => r.row("quad points", "none"),
     }
-    match facts.timeline_frame.as_ref().and_then(|frame| frame.k) {
+    match facts
+        .source_frame
+        .as_ref()
+        .and_then(|frame| frame.params.k)
+        .map(super::protocol_k_from_row_major)
+        .or_else(|| facts.timeline_frame.as_ref().and_then(|frame| frame.k))
+    {
         Some(k) => r.row(
             "K (fx, fy, cx, cy)",
             &format!("{:.4}, {:.4}, {:.4}, {:.4}", k[0], k[4], k[2], k[5]),
@@ -377,7 +408,7 @@ fn tracking_rows(_video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut d
 
 fn placement_rows(_video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut dyn Rows) {
     let scene = &facts.scene;
-    let object = scene.objects[0];
+    let object = scene.objects.get(facts.inspected_object);
     let asset = facts
         .renderer
         .as_ref()
@@ -407,18 +438,39 @@ fn placement_rows(_video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut 
         "preview scale",
         &asset.map_or_else(|| "none".to_owned(), |a| format!("{:.6}", a.preview_scale)),
     );
-    r.row("Olympic preset", "size 0.24, e1 1.30, e2 -1.70, lift 1.00");
-    r.row("object translation", &vec3_label(object.translation));
     r.row(
-        "object rotation",
-        &format!(
-            "yaw {:.3}, pitch {:.3}, roll {:.3} deg",
-            object.yaw.to_degrees(),
-            object.pitch.to_degrees(),
-            object.roll.to_degrees()
+        "placement",
+        if facts.source_frame.is_some() {
+            "source quad; no preset offset or lift"
+        } else {
+            "Olympic preset: size 0.24, e1 1.30, e2 -1.70, lift 1.00"
+        },
+    );
+    r.row(
+        "object translation",
+        &object.map_or_else(
+            || "none".to_owned(),
+            |object| vec3_label(object.translation),
         ),
     );
-    r.row("object scale", &vec3_label(object.scale));
+    r.row(
+        "object rotation",
+        &object.map_or_else(
+            || "none".to_owned(),
+            |object| {
+                format!(
+                    "yaw {:.3}, pitch {:.3}, roll {:.3} deg",
+                    object.yaw.to_degrees(),
+                    object.pitch.to_degrees(),
+                    object.roll.to_degrees()
+                )
+            },
+        ),
+    );
+    r.row(
+        "object scale",
+        &object.map_or_else(|| "none".to_owned(), |object| vec3_label(object.scale)),
+    );
     r.row("movement basis", &facts.movement_basis.join(" / "));
     r.row("visibility", facts.visibility_reason);
     r.row(
@@ -431,16 +483,17 @@ fn placement_rows(_video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut 
 
 fn material_rows(_video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut dyn Rows) {
     let scene = &facts.scene;
-    let material = &scene.materials[0];
-    let ibl = scene.image_based_lighting[0];
-    let tone_mapping = scene.tone_mappings[0];
+    let index = facts.inspected_object;
+    let material = scene.materials.get(index);
+    let ibl = scene.image_based_lighting.get(index);
+    let tone_mapping = scene.tone_mappings.get(index);
     let imported = facts
         .renderer
         .as_ref()
         .and_then(|renderer| renderer.asset.as_ref())
         .map(|asset| &asset.imported_material);
 
-    r.row("render mode", render_mode_label(scene.modes[0]));
+    r.row("render mode", displayed_mode(facts));
     r.row(
         "imported metallic",
         &option_f32(imported.map(|m| m.metallic)),
@@ -461,10 +514,22 @@ fn material_rows(_video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut d
         "normal map",
         yes_no(imported.is_some_and(|m| m.auxiliary.textures.normal)),
     );
-    r.row("metallic", &format!("{:.4}", material.metallic));
-    r.row("roughness", &format!("{:.4}", material.roughness));
-    r.row("specular", &format!("{:.4}", material.specular));
-    r.row("clearcoat", &format!("{:.4}", material.clearcoat));
+    r.row(
+        "metallic",
+        &option_f32(material.map(|material| material.metallic)),
+    );
+    r.row(
+        "roughness",
+        &option_f32(material.map(|material| material.roughness)),
+    );
+    r.row(
+        "specular",
+        &option_f32(material.map(|material| material.specular)),
+    );
+    r.row(
+        "clearcoat",
+        &option_f32(material.map(|material| material.clearcoat)),
+    );
     r.row(
         "IBL",
         if scene.environment_available {
@@ -476,8 +541,9 @@ fn material_rows(_video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut d
     r.row(
         "IBL gain (object x scene)",
         &format!(
-            "{:.4} x {:.4}",
-            ibl.intensity, scene.lighting.environment.intensity
+            "{} x {:.4}",
+            option_f32(ibl.map(|ibl| ibl.intensity)),
+            scene.lighting.environment.intensity
         ),
     );
     r.row(
@@ -494,9 +560,22 @@ fn material_rows(_video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut d
             scene.lighting.scale, scene.lighting.ambient
         ),
     );
-    r.row("exposure", &format!("{:.4}", tone_mapping.exposure));
-    r.row("tone map", tone_map_label(tone_mapping.operator));
-    r.row("PBR debug", pbr_debug_view_label(scene.pbr_debug_views[0]));
+    r.row(
+        "exposure",
+        &option_f32(tone_mapping.map(|mapping| mapping.exposure)),
+    );
+    r.row(
+        "tone map",
+        tone_mapping.map_or("none", |mapping| tone_map_label(mapping.operator)),
+    );
+    r.row(
+        "PBR debug",
+        scene
+            .pbr_debug_views
+            .get(index)
+            .copied()
+            .map_or("none", pbr_debug_view_label),
+    );
     if facts.reflective_tracking_warning {
         r.warning(
             "tracking/material",
@@ -539,7 +618,7 @@ fn renderer_rows(video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut dy
             facts.render_target_size.0, facts.render_target_size.1
         ),
     );
-    r.row("mode", render_mode_label(facts.scene.modes[0]));
+    r.row("mode", displayed_mode(facts));
     // Observed frame-path CPU↔GPU traffic for the last frame, so a later claim
     // that a copy is gone is read off a meter rather than asserted (#229).
     //
@@ -657,6 +736,24 @@ fn yes_no(value: bool) -> &'static str {
 
 fn vec2_label(value: [f32; 2]) -> String {
     format!("[{:.3}, {:.3}]", value[0], value[1])
+}
+
+fn displayed_mode(facts: &DisplayedFacts) -> &'static str {
+    if facts
+        .source_frame
+        .as_ref()
+        .and_then(|frame| frame.objects.get(facts.inspected_object))
+        .is_some_and(|object| object.selection == trd_core::DrawSelection::Shadow)
+    {
+        "blob shadow"
+    } else {
+        facts
+            .scene
+            .modes
+            .get(facts.inspected_object)
+            .copied()
+            .map_or("none", render_mode_label)
+    }
 }
 
 fn vec3_label(value: [f32; 3]) -> String {

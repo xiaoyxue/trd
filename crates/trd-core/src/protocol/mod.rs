@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use arrow::array::RecordBatch;
+use arrow::array::{Array, RecordBatch};
 use arrow::datatypes::{DataType, Schema};
 use arrow::error::ArrowError;
 
@@ -11,24 +11,38 @@ use crate::texture::TEXTURE_COLUMN;
 use crate::{FrameError, FrameParams, MeshError};
 
 mod arrow_decode;
+mod document_edit;
+mod document_params;
+mod glb_mesh;
 mod image_encode;
 mod input_session;
 mod output_session;
+mod scene_document;
+mod scene_encode;
 
+pub use document_edit::ModelEdit;
+pub use document_params::{DocumentFrame, DocumentMesh, DocumentObject};
+#[cfg(test)]
+pub(crate) use glb_mesh::triangle_glb;
+pub use glb_mesh::GlbMesh;
+pub use scene_document::SceneDocument;
+
+pub(crate) use arrow_decode::{
+    check_version, decode_batch, decode_draws, decode_frame_ids, decode_frame_refs, decode_tonemap,
+};
 pub(crate) use image_encode::tightly_pack_rgba;
 pub use image_encode::{output_schema, read_image_stream, OutputError};
 pub use input_session::InputSession;
 pub use output_session::OutputSession;
-/// The encode half of the wire format, compiled for tests only (#202): it
-/// authors the `0.0.6` tables that this module's tests — and its own round-trip
-/// tests — feed back through the real decoders.
-#[cfg(test)]
-mod scene_encode;
-pub(crate) use arrow_decode::{
-    check_version, decode_batch, decode_draws, decode_frame_ids, decode_frame_refs,
+pub use scene_encode::{
+    encode_scene, encode_scene_assets_with_frame_indices_and_tonemap,
+    encode_scene_assets_with_tonemap, encode_scene_resources,
+    encode_scene_resources_with_frame_indices,
+    encode_scene_resources_with_frame_indices_and_tonemap, encode_scene_resources_with_tonemap,
+    encode_scene_with_tonemap, encode_texture_assets, SceneEncodeError, SceneMesh, SceneTexture,
 };
 
-pub const PROTOCOL_VERSION: &str = "0.0.6";
+pub const PROTOCOL_VERSION: &str = "0.0.7";
 pub const PROTOCOL_VERSION_KEY: &str = "trd.protocol.version";
 pub const TABLE_KIND_KEY: &str = "trd.table.kind";
 
@@ -38,8 +52,8 @@ pub(crate) const FRAMES_TABLE_KIND: &str = "frames";
 pub(crate) const PARAMS_TABLE_KIND: &str = "params";
 
 /// Input schema versions this build accepts. The protocol is **not** backward
-/// compatible: only the current [`PROTOCOL_VERSION`] (`0.0.6`) is accepted. A
-/// stream is `[mesh][texture?][frames?][params]`; every sub-stream declares its
+/// compatible: only the current [`PROTOCOL_VERSION`] (`0.0.7`) is accepted.
+/// Scene documents are `[params][mesh?]`; versioned sub-streams declare their
 /// kind through [`TABLE_KIND_KEY`].
 pub const SUPPORTED_INPUT_VERSIONS: &[&str] = &[PROTOCOL_VERSION];
 
@@ -82,6 +96,8 @@ pub type FrameBatch = Vec<DecodedFrame>;
 /// `frame_id` is an optional index into the preceding inline frames table.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecodedFrame {
+    /// Optional sidecar-video frame key for sparse scene streams.
+    pub video_frame_index: Option<u32>,
     pub params: FrameParams,
     pub draws: Option<Vec<Draw>>,
     pub frame_ref: Option<String>,
@@ -189,6 +205,29 @@ pub enum ProtocolError {
     },
     #[error("draw_mode byte {value} is not a valid render mode (0/1/2/255)")]
     InvalidDrawMode { value: u8 },
+    #[error("mesh reference index {index} is out of range ({mesh_count} mesh row(s))")]
+    MeshReferenceIndex { index: u32, mesh_count: usize },
+    #[error("mesh row {index} is embedded geometry, not an unresolved glTF reference")]
+    MeshReferenceExpected { index: u32 },
+    #[error("glTF reference at mesh row {index} failed to import: {source}")]
+    GltfImport {
+        index: u32,
+        #[source]
+        source: crate::GltfImportError,
+    },
+    #[error("a texture row cannot target a glTF reference")]
+    TextureWithGltfReference,
+    #[error(
+        "video_frame_index must be strictly increasing across the params stream: \
+         {current} follows {previous}"
+    )]
+    NonIncreasingVideoFrameIndex { previous: u32, current: u32 },
+    #[error("params batches cannot mix indexed and unindexed video_frame_index rows")]
+    MixedVideoFrameIndexMode,
+}
+
+fn parse_error(message: impl Into<String>) -> ProtocolError {
+    ProtocolError::Arrow(ArrowError::ParseError(message.into()))
 }
 
 /// Which kind of concatenated IPC sub-stream the session is currently decoding.
@@ -250,6 +289,7 @@ fn decode_frame_batch(
     frame_count: usize,
 ) -> Result<FrameBatch, ProtocolError> {
     let params = decode_batch(batch)?;
+    let video_frame_indices = decode_video_frame_indices(batch)?;
     let draws = decode_draws(batch)?;
     let frame_refs = decode_frame_refs(batch)?;
     let frame_ids = decode_frame_ids(batch, frames_table_present, frame_count)?;
@@ -263,6 +303,7 @@ fn decode_frame_batch(
                 return Err(ProtocolError::ConflictingFrameSources { row });
             }
             Ok(DecodedFrame {
+                video_frame_index: video_frame_indices.as_ref().map(|rows| rows[row]),
                 params,
                 draws: draws.as_ref().map(|rows| rows[row].clone()),
                 frame_ref,
@@ -270,6 +311,24 @@ fn decode_frame_batch(
             })
         })
         .collect()
+}
+
+fn decode_video_frame_indices(batch: &RecordBatch) -> Result<Option<Vec<u32>>, ProtocolError> {
+    let Some(column) = batch.column_by_name("video_frame_index") else {
+        return Ok(None);
+    };
+    let values = column
+        .as_any()
+        .downcast_ref::<arrow::array::UInt32Array>()
+        .ok_or_else(|| ProtocolError::ColumnType {
+            column: "video_frame_index",
+            expected: "UInt32",
+            actual: column.data_type().clone(),
+        })?;
+    if values.null_count() > 0 {
+        return Err(ProtocolError::NullValues("video_frame_index"));
+    }
+    Ok(Some(values.values().to_vec()))
 }
 
 /// Decodes a standalone **params** Arrow IPC stream (the bytes authored by
@@ -299,8 +358,8 @@ mod tests {
     use std::sync::Arc;
 
     use arrow::array::{
-        Array, ArrayRef, FixedSizeListArray, Float32Array, Int32Array, RecordBatch, StringArray,
-        UInt32Array,
+        Array, ArrayRef, BinaryArray, FixedSizeListArray, Float32Array, Int32Array, RecordBatch,
+        StringArray, UInt32Array, UInt8Array,
     };
     use arrow::buffer::NullBuffer;
     use arrow::datatypes::{DataType, Field, Schema};
@@ -377,6 +436,7 @@ mod tests {
         frames
             .into_iter()
             .map(|params| DecodedFrame {
+                video_frame_index: None,
                 params,
                 draws: None,
                 frame_ref: None,
@@ -514,6 +574,76 @@ mod tests {
     }
 
     #[test]
+    fn tonemap_decodes_and_rejects_unknown_values() {
+        assert_eq!(crate::Tonemap::default(), crate::Tonemap::Reinhard);
+
+        let schema = schema_with(
+            Some(PROTOCOL_VERSION),
+            vec![Field::new("tonemap", DataType::UInt8, false)],
+        );
+        let aces = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(UInt8Array::from(vec![1])) as ArrayRef],
+        )
+        .unwrap();
+        assert_eq!(decode_tonemap(&aces).unwrap(), Some(crate::Tonemap::Aces));
+
+        let invalid = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(UInt8Array::from(vec![2])) as ArrayRef],
+        )
+        .unwrap();
+        let error = decode_tonemap(&invalid).unwrap_err().to_string();
+        assert!(error.contains("tonemap byte 2 is not valid"));
+
+        let mixed = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(UInt8Array::from(vec![0, 1])) as ArrayRef],
+        )
+        .unwrap();
+        let error = decode_tonemap(&mixed).unwrap_err().to_string();
+        assert!(error.contains("tonemap must be constant"));
+
+        let empty = RecordBatch::try_new(
+            schema_with(
+                Some(PROTOCOL_VERSION),
+                vec![Field::new("tonemap", DataType::UInt8, false)],
+            ),
+            vec![Arc::new(UInt8Array::from(Vec::<u8>::new())) as ArrayRef],
+        )
+        .unwrap();
+        let error = decode_tonemap(&empty).unwrap_err().to_string();
+        assert!(error.contains("tonemap column must contain at least one row"));
+
+        let reinhard = RecordBatch::try_new(
+            schema_with(
+                Some(PROTOCOL_VERSION),
+                vec![Field::new("tonemap", DataType::UInt8, false)],
+            ),
+            vec![Arc::new(UInt8Array::from(vec![0])) as ArrayRef],
+        )
+        .unwrap();
+        let mut session = InputSession::new();
+        let error = session
+            .push(&test_stream(&[reinhard, aces]))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("tonemap must be constant"));
+
+        let nullable_schema = schema_with(
+            Some(PROTOCOL_VERSION),
+            vec![Field::new("tonemap", DataType::UInt8, true)],
+        );
+        assert!(matches!(
+            super::arrow_decode::validate_schema(nullable_schema.as_ref()),
+            Err(ProtocolError::ColumnType {
+                column: "tonemap",
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn rejects_repeated_schema_truncation_eos_bytes_and_later_calls() {
         let valid = test_stream(&[test_batch(&[FrameParams::IDENTITY])]);
 
@@ -600,13 +730,14 @@ mod tests {
 
     #[test]
     fn accepts_only_current_version_and_rejects_others() {
-        // 0.0.6 is the only supported version: there is no backward compat for
-        // 0.0.1–0.0.5, and future versions are rejected too.
+        // Only the current version is accepted, not previous or future versions.
         let mut session = InputSession::new();
         session.push(&version_stream(PROTOCOL_VERSION)).unwrap();
         session.finish().unwrap();
 
-        for version in ["0.0.1", "0.0.2", "0.0.3", "0.0.4", "0.0.5", "0.0.7"] {
+        for version in [
+            "0.0.1", "0.0.2", "0.0.3", "0.0.4", "0.0.5", "0.0.6", "0.0.8",
+        ] {
             let mut session = InputSession::new();
             assert!(
                 matches!(
@@ -1029,6 +1160,28 @@ mod tests {
         buf
     }
 
+    fn write_mesh_batches(meshes: &[crate::Mesh]) -> Vec<u8> {
+        let batches = meshes
+            .iter()
+            .map(|mesh| {
+                let bytes = scene_encode::encode_mesh_stream(std::slice::from_ref(mesh)).unwrap();
+                arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(bytes), None)
+                    .unwrap()
+                    .next()
+                    .unwrap()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let schema = batches[0].schema();
+        let mut bytes = Vec::new();
+        let mut writer = StreamWriter::try_new(&mut bytes, &schema).unwrap();
+        for batch in &batches {
+            writer.write(batch).unwrap();
+        }
+        writer.finish().unwrap();
+        bytes
+    }
+
     /// A one-row params stream whose frame carries a `draw_mesh`/`draw_model`
     /// instanced draw list of the given `(mesh_id, model)` pairs.
     fn params_stream_with_draws(draws: &[(u32, [f32; 16])]) -> Vec<u8> {
@@ -1116,6 +1269,53 @@ mod tests {
     }
 
     #[test]
+    fn mesh_ids_continue_across_mesh_record_batches() {
+        let meshes = [crate::Mesh::hello_triangle(), crate::Mesh::hello_triangle()];
+        let texture0 = crate::ImageTexture::from_rgba(1, 1, vec![255, 0, 0, 255]).unwrap();
+        let texture1 =
+            crate::ImageTexture::from_rgba(2, 1, vec![0, 255, 0, 255, 0, 0, 255, 255]).unwrap();
+        let mut bytes = write_mesh_batches(&meshes);
+        bytes.extend(
+            crate::encode_texture_assets(&[
+                crate::SceneTexture {
+                    mesh_id: 0,
+                    texture: &texture0,
+                },
+                crate::SceneTexture {
+                    mesh_id: 1,
+                    texture: &texture1,
+                },
+            ])
+            .unwrap(),
+        );
+        bytes.extend(params_stream_with_draws(&[
+            (0, Matrix4::IDENTITY.to_cols_array()),
+            (1, Matrix4::IDENTITY.to_cols_array()),
+        ]));
+
+        let mut session = InputSession::new();
+        session.push(&bytes).unwrap();
+        session.finish().unwrap();
+
+        assert_eq!(
+            session
+                .mesh_assets()
+                .iter()
+                .map(|asset| asset.mesh_id)
+                .collect::<Vec<_>>(),
+            vec![Some(0), Some(1)]
+        );
+        assert_eq!(
+            session.mesh_assets()[0].base_color_texture.as_ref(),
+            Some(&texture0)
+        );
+        assert_eq!(
+            session.mesh_assets()[1].base_color_texture.as_ref(),
+            Some(&texture1)
+        );
+    }
+
+    #[test]
     fn decodes_mesh_then_params_across_every_split() {
         // The mesh→params boundary (an end-of-stream marker) must be recovered no
         // matter which byte the chunk boundary falls on, including inside the EOS
@@ -1144,6 +1344,7 @@ mod tests {
         // Absent draw list (`None`, legacy single-object stream) ⇒ one default
         // instance of mesh 0 placed by the frame's own model.
         let absent = DecodedFrame {
+            video_frame_index: None,
             params: identity_frame(),
             draws: None,
             frame_ref: None,
@@ -1156,6 +1357,7 @@ mod tests {
         // Explicit *empty* draw list ⇒ no meshes: the frame is just its
         // background plate (e.g. an AR frame where tracking dropped out).
         let empty = DecodedFrame {
+            video_frame_index: None,
             params: identity_frame(),
             draws: Some(Vec::new()),
             frame_ref: None,
@@ -1170,6 +1372,7 @@ mod tests {
             selection: DrawSelection::INHERIT,
         };
         let explicit = DecodedFrame {
+            video_frame_index: None,
             params: identity_frame(),
             draws: Some(vec![one]),
             frame_ref: None,
@@ -1222,7 +1425,7 @@ mod tests {
         assert_eq!(batches, vec![plain(frames)]);
     }
 
-    /// Serializes a `[height, width, 4]` RGBA image as a `0.0.4` **texture table**
+    /// Serializes a `[height, width, 4]` RGBA image as a legacy **texture table**
     /// Arrow IPC stream (one row: `rgba` `FixedSizeList<UInt8>[H*W*4]` carrying the
     /// `arrow.fixed_shape_tensor` extension), mirroring `texture::from_arrow`'s
     /// expected wire form.
@@ -1274,6 +1477,106 @@ mod tests {
         bytes
     }
 
+    fn write_legacy_texture_batches(width: usize, height: usize, rgba: Vec<u8>) -> Vec<u8> {
+        let bytes = write_texture_stream(width, height, rgba);
+        let mut reader =
+            arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(bytes), None).unwrap();
+        let schema = reader.schema();
+        let batch = reader.next().unwrap().unwrap();
+        let empty = RecordBatch::new_empty(schema.clone());
+        let mut bytes = Vec::new();
+        let mut writer = StreamWriter::try_new(&mut bytes, &schema).unwrap();
+        writer.write(&empty).unwrap();
+        writer.write(&batch).unwrap();
+        writer.write(&batch).unwrap();
+        writer.finish().unwrap();
+        bytes
+    }
+
+    fn write_keyed_texture_stream(rows: &[(u32, u32, u32, Vec<u8>)]) -> Vec<u8> {
+        use arrow::array::ListArray;
+        use arrow::buffer::OffsetBuffer;
+
+        let schema = Arc::new(
+            Schema::new(vec![
+                Field::new(
+                    crate::TEXTURE_MESH_ID_COLUMN,
+                    DataType::List(Arc::new(Field::new("item", DataType::UInt32, false))),
+                    false,
+                ),
+                Field::new(
+                    crate::TEXTURE_WIDTH_COLUMN,
+                    DataType::List(Arc::new(Field::new("item", DataType::UInt32, false))),
+                    false,
+                ),
+                Field::new(
+                    crate::TEXTURE_HEIGHT_COLUMN,
+                    DataType::List(Arc::new(Field::new("item", DataType::UInt32, false))),
+                    false,
+                ),
+                Field::new(
+                    crate::TEXTURE_RGBA_BYTES_COLUMN,
+                    DataType::List(Arc::new(Field::new("item", DataType::Binary, false))),
+                    false,
+                ),
+            ])
+            .with_metadata(
+                [
+                    (
+                        PROTOCOL_VERSION_KEY.to_string(),
+                        PROTOCOL_VERSION.to_string(),
+                    ),
+                    (TABLE_KIND_KEY.to_string(), TEXTURE_TABLE_KIND.to_string()),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+        );
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(ListArray::new(
+                    Arc::new(Field::new("item", DataType::UInt32, false)),
+                    OffsetBuffer::from_lengths([rows.len()]),
+                    Arc::new(UInt32Array::from(
+                        rows.iter().map(|row| row.0).collect::<Vec<_>>(),
+                    )),
+                    None,
+                )),
+                Arc::new(ListArray::new(
+                    Arc::new(Field::new("item", DataType::UInt32, false)),
+                    OffsetBuffer::from_lengths([rows.len()]),
+                    Arc::new(UInt32Array::from(
+                        rows.iter().map(|row| row.1).collect::<Vec<_>>(),
+                    )),
+                    None,
+                )),
+                Arc::new(ListArray::new(
+                    Arc::new(Field::new("item", DataType::UInt32, false)),
+                    OffsetBuffer::from_lengths([rows.len()]),
+                    Arc::new(UInt32Array::from(
+                        rows.iter().map(|row| row.2).collect::<Vec<_>>(),
+                    )),
+                    None,
+                )),
+                Arc::new(ListArray::new(
+                    Arc::new(Field::new("item", DataType::Binary, false)),
+                    OffsetBuffer::from_lengths([rows.len()]),
+                    Arc::new(BinaryArray::from_iter_values(
+                        rows.iter().map(|row| row.3.as_slice()),
+                    )),
+                    None,
+                )),
+            ],
+        )
+        .unwrap();
+        let mut bytes = Vec::new();
+        let mut writer = StreamWriter::try_new(&mut bytes, &schema).unwrap();
+        writer.write(&batch).unwrap();
+        writer.finish().unwrap();
+        bytes
+    }
+
     #[test]
     fn decodes_mesh_then_texture_then_params() {
         // A full `[mesh][texture][params]` stream: the mesh table, a 2x2
@@ -1299,6 +1602,53 @@ mod tests {
         assert_eq!((texture.width(), texture.height()), (2, 2));
         assert_eq!(texture.rgba(), rgba.as_slice());
         assert_eq!(batches, vec![plain(frames)]);
+    }
+
+    #[test]
+    fn legacy_texture_uses_first_nonempty_batch_and_ignores_later_batches() {
+        let mesh = crate::Mesh::hello_triangle();
+        let rgba = vec![7u8; 2 * 2 * 4];
+        let frames = vec![identity_frame()];
+        let mut bytes = write_mesh_stream(&mesh);
+        bytes.extend(write_legacy_texture_batches(2, 2, rgba.clone()));
+        bytes.extend(test_stream(&[test_batch(&frames)]));
+
+        let mut session = InputSession::new();
+        let batches = session.push(&bytes).unwrap();
+        session.finish().unwrap();
+
+        assert_eq!(session.texture().unwrap().rgba(), rgba);
+        assert_eq!(batches, vec![plain(frames)]);
+    }
+
+    #[test]
+    fn keyed_texture_rows_validate_mesh_ids() {
+        let mesh = crate::Mesh::hello_triangle();
+        let frames = vec![identity_frame()];
+        let params = test_stream(&[test_batch(&frames)]);
+
+        let mut duplicate =
+            scene_encode::encode_mesh_stream(&[mesh.clone(), mesh.clone()]).unwrap();
+        duplicate.extend(write_keyed_texture_stream(&[
+            (0, 1, 1, vec![255; 4]),
+            (0, 1, 1, vec![0; 4]),
+        ]));
+        duplicate.extend(params.clone());
+        let mut session = InputSession::new();
+        let error = session.push(&duplicate).unwrap_err().to_string();
+        assert!(error.contains("duplicate mesh_id 0"));
+
+        let mut out_of_range = scene_encode::encode_mesh_stream(&[mesh]).unwrap();
+        out_of_range.extend(write_keyed_texture_stream(&[(1, 1, 1, vec![255; 4])]));
+        out_of_range.extend(params);
+        let mut session = InputSession::new();
+        assert!(matches!(
+            session.push(&out_of_range),
+            Err(ProtocolError::MeshReferenceIndex {
+                index: 1,
+                mesh_count: 1
+            })
+        ));
     }
 
     #[test]

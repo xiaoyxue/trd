@@ -44,10 +44,9 @@
 # modes (trd-cli, trd-app and the web renderer share trd-core). Only the playback
 # rate is a live URL param for -Web: append ?fps=N.
 #
-# The stream protocol is 0.0.6-only and mesh-first: every stream begins with a
-# mesh table (scripts\obj_to_arrow.py encodes the OBJ) concatenated with the
-# params stream, so trd renders the loaded mesh (centered + uniformly scaled to
-# fit) driven by InputPath. When no -Mesh (and no -PlacementQuad) is given, the
+# The input document is params-first with self-contained GLB resources.
+# scripts\scene_to_arrow.py converts OBJ/albedo offline, retaining the old
+# preview fit without changing the camera/model params. When no -Mesh is given, the
 # bunny (assets\meshes\bunny.obj) is loaded as the default demo object. Try:
 # examples\render.ps1 -CLI -Mesh assets\meshes\bunny.obj `
 # examples\frames.turntable.jsonl output\bunny.gif. -Mesh is repeatable: pass it
@@ -55,8 +54,8 @@
 # `draws` list then references them by 0-based index. Two-mesh demo:
 # examples\render.ps1 -CLI -Wireframe -Mesh assets\meshes\bunny.obj `
 # -Mesh examples\cube.obj examples\frames.multimesh.jsonl output\scene.gif.
-# (-Mesh needs pyarrow via uv/python.)
-# With -Texture IMG trd binds IMG as a texture table (sampled albedo) and
+# (-Mesh needs pyarrow, numpy and Pillow via uv/python.)
+# With -Texture IMG the converted GLB embeds IMG as its albedo and
 # renders textured, sampling it at each vertex UV (#20). Requires -Mesh (with
 # UVs); mutually exclusive with -Wireframe. Needs pyarrow + pillow + numpy;
 # downscaled to 2048 (portable limit).
@@ -190,7 +189,7 @@ CONTENT FLAGS (apply to -CLI, -Native and -Web):
                     Repeatable: pass several times to load several meshes (row 0,
                     1, ...); a frame's `draws` list references them by index.
                     Defaults to assets\meshes\bunny.obj when no mesh is given.
-  -Texture IMG      Bind IMG as a texture table and render textured - sampling it
+  -Texture IMG      Embed IMG in the first GLB and render textured - sampling it
                     at each vertex UV (#20). Requires -Mesh (with UVs); mutually
                     exclusive with -Wireframe.
   -Wireframe        Draw mesh edges as a line list instead of filled triangles (#38).
@@ -209,9 +208,7 @@ CONTENT FLAGS (apply to -CLI, -Native and -Web):
                     Tint the placement quad (0..1 floats; default cyan). Implies -PlacementQuad.
   -FramesBase DIR   Resolve each external background still (`frame_path`,
                     relative to DIR) beneath the scene via a FramePlane (#63).
-  -FramesTable FILE Splice a 0.0.6 inline frames table before params. Params rows
-                    select resources by `frame_id`; author FILE with
-                    scripts\frames_to_arrow.py or extract_frames.py --embed.
+  -FramesTable FILE Retired. Use external frame_path/frame_url and -FramesBase.
 
 PBR SHADING (-CLI and -Native; the Disney principled BRDF, #112):
   -Pbr              Shade the bound albedo with the Disney BRDF instead of flat texturing.
@@ -259,14 +256,6 @@ Examples:
     -Texture assets\meshes\bunny_with_texture\bunny_uv_map1.jpg `
     -FramesBase output\cornellbox `
     examples\frames.cornellbox.stage2.jsonl output\cornellbox_stage2.gif 960 540 25  # stage 2: placed bunny
-  # Full self-contained tensor e2e: all 250 frames, correctly placed bunny only.
-  #   uv run --with pyarrow --with pillow --with numpy scripts\extract_frames.py `
-  #     assets\videos\cornellbox\CameraMovement.mp4 --format jpg --width 1920 --height 1080 `
-  #     --embed pixels -o output\cornellbox-inline
-  examples\render.ps1 -CLI -FramesTable output\cornellbox-inline\frames.arrow `
-    -Mesh assets\meshes\bunny_with_texture\bunny.obj `
-    -Texture assets\meshes\bunny_with_texture\bunny_uv_map1.jpg `
-    examples\frames.cornellbox.inline.jsonl output\cornellbox-inline-tensor-bunny.gif 1920 1080 25
   examples\render.ps1 -Web -CanvasRenderer -PlacementQuad -AxesLocal `
     -FramesBase output\cornellbox examples\frames.cornellbox.stage1.jsonl '' 960 540 25  # replay stage 1 in the browser
   #   then open http://localhost:8080  (append ?fps=N to tune playback)
@@ -297,8 +286,8 @@ if ($rendererCount -ge 1 -and -not $Web) { Write-Error 'error: -CanvasRenderer /
 # PowerShell can't bind a named parameter more than once, so the repeatable
 # -Mesh flag (parity with render.sh's `--mesh`) is captured by
 # ValueFromRemainingArguments into $Rest and unpacked here, preserving order
-# (mesh 0 = first -Mesh). Each mesh becomes one row of the leading mesh
-# table (scripts\obj_to_arrow.py); a frame's `draws` list references them by
+# (mesh 0 = first -Mesh). Each converted GLB becomes one resource row;
+# a CG frame's `draws` list references them by
 # 0-based index. Also accepts the -Mesh=OBJ / -Mesh:OBJ forms. Anything else in
 # $Rest is an unrecognised argument.
 $meshes = @()
@@ -326,7 +315,7 @@ if (-not $InputPath) { $InputPath = Join-Path $PSScriptRoot 'frames.bunny_dolly.
 # --placement-quad-color).
 $quad = [bool]$PlacementQuad -or [bool]$PlacementQuadColor
 
-# -Texture binds a texture table (sampled albedo) and renders textured. It
+# -Texture embeds sampled albedo in the first converted GLB. It
 # needs a real -Mesh (UVs to sample; the placement quad is added later and does
 # not count) and is mutually exclusive with -Wireframe.
 if ($Texture) {
@@ -357,19 +346,8 @@ if ((Test-Path $devEnv) -and -not $env:TRD_SKIP_DEV_ENV) {
     . $devEnv -Quiet -NoInstall
 }
 
-# Binary-safe concatenation of Arrow IPC files into one stream. render.sh pipes
-# the mesh/texture/frames/params producers into a single trd stdin; on Windows (no
-# binary-safe pipes) we stage each stage to a temp file and concatenate the bytes
-# here, reproducing the exact [mesh][texture?][frames?][params] byte order trd reads.
-function Join-Files([string[]]$Parts, [string]$Dest) {
-    $out = [System.IO.File]::Create($Dest)
-    try {
-        foreach ($p in $Parts) {
-            $in = [System.IO.File]::OpenRead($p)
-            try { $in.CopyTo($out) } finally { $in.Dispose() }
-        }
-    }
-    finally { $out.Dispose() }
+if ($FramesTable) {
+    throw '-FramesTable is retired. Use frame_path/frame_url params and -FramesBase for external images.'
 }
 
 $serve = $null
@@ -405,10 +383,7 @@ f 1 3 4
         $meshes += $quadObj
     }
 
-    # The stream protocol is mesh-first (0.0.6 requires a leading [mesh] table;
-    # there is no params-only fallback). When neither -Mesh nor -PlacementQuad
-    # supplied a mesh, load the bunny as the default demo object so the stream is a
-    # valid [mesh][params].
+    # Keep the demo's default bunny, converted offline to a self-contained GLB.
     if ($meshes.Count -eq 0) {
         $meshes += (Join-Path $root 'assets/meshes/bunny.obj')
     }
@@ -464,43 +439,13 @@ f 1 3 4
         if ($dollyGen.ExitCode -ne 0) { throw "bunny_dolly.py failed (exit $($dollyGen.ExitCode))" }
     }
 
-    # Choose a frame producer for the params stream: scripts\jsonl_to_arrow.py via
-    # uv/python. The stream protocol is 0.0.6-only and mesh-first, so the params
-    # batch carries the model/camera/draws/frame-source columns the pyarrow producer
-    # emits (the old DuckDB 'arrow' path only understood the retired 0.0.1/0.0.2
-    # center/size/theta/model columns and is gone).
+    # Params stay unchanged; the bundler converts OBJ/albedo into GLB resources.
     $jsonlToArrow = Join-Path $root 'scripts/jsonl_to_arrow.py'
     $producer = $null
     if ($uvOk) { $producer = 'uv' }
-    elseif ($pyarrowOk) { $producer = 'python' }
+    elseif ($pyTextureOk) { $producer = 'python' }
     else {
-        Write-Error "error: need uv or python with pyarrow to build the Arrow frame stream.`nrun '. scripts\dev-env.ps1', or 'pip install pyarrow'."
-    }
-
-    # -Mesh (repeatable) encodes the leading mesh table via scripts\obj_to_arrow.py
-    # (one row per OBJ, in order). This always needs a pyarrow-capable Python.
-    $objToArrow = Join-Path $root 'scripts/obj_to_arrow.py'
-    $meshProducer = $null
-    if ($meshes.Count -gt 0) {
-        if ($uvOk) { $meshProducer = 'uv' }
-        elseif ($pyarrowOk) { $meshProducer = 'python' }
-        else {
-            Write-Error "error: -Mesh/-PlacementQuad needs uv or a python with pyarrow to encode $($meshes -join ', ').`nrun '. scripts\dev-env.ps1', or 'pip install pyarrow'."
-        }
-    }
-
-    # -Texture encodes the image into a texture table via
-    # scripts\texture_to_arrow.py, concatenated between the mesh table and the
-    # params ([mesh][texture][frames?][params]). Needs pyarrow + pillow + numpy; downscaled
-    # to --max-size 2048 to stay within the portable (downlevel/WebGL2) limit.
-    $textureToArrow = Join-Path $root 'scripts/texture_to_arrow.py'
-    $textureProducer = $null
-    if ($Texture) {
-        if ($uvOk) { $textureProducer = 'uv' }
-        elseif ($pyTextureOk) { $textureProducer = 'python' }
-        else {
-            Write-Error "error: -Texture needs uv or a python with pyarrow + pillow + numpy to encode $Texture.`nrun '. scripts\dev-env.ps1', or 'pip install pyarrow pillow numpy'."
-        }
+        Write-Error "error: need uv or python with pyarrow, numpy and Pillow to build params/GLB input."
     }
 
     # encode.py needs pyarrow + numpy. Prefer `uv run` (as render.sh does); fall
@@ -524,19 +469,10 @@ f 1 3 4
         }
     }
 
-    # --- Build the trd input stream: [mesh][texture?][frames?][params] ---------
+    # --- Build the trd input document: [params][mesh] ------------------------
     $framesArrow = Join-Path $work 'frames.arrows'
-    $meshArrow = Join-Path $work 'mesh.arrows'
-    $textureArrow = Join-Path $work 'texture.arrows'
     $streamArrow = Join-Path $work 'stream.arrows'
     $imagesArrow = Join-Path $work 'images.arrows'
-
-    if ($FramesTable) {
-        if (-not (Test-Path -LiteralPath $FramesTable)) {
-            Write-Error "error: -FramesTable '$FramesTable' not found."
-        }
-        $FramesTable = (Resolve-Path -LiteralPath $FramesTable).Path
-    }
 
     # 1. Build a streaming Arrow IPC file of frame params from the JSONL via
     #    scripts\jsonl_to_arrow.py (pyarrow): the always-present `model` column
@@ -548,54 +484,28 @@ f 1 3 4
     else {
         $genArgs = @($jsonlToArrow, $InputPath, '-o', $framesArrow)
     }
-    $gen = Start-Process -FilePath $producer -NoNewWindow -Wait -PassThru -ArgumentList $genArgs
-    if ($gen.ExitCode -ne 0) { throw "jsonl_to_arrow ($producer) failed (exit $($gen.ExitCode))" }
-
-    # 1b. -Mesh: encode the OBJ(s) into a leading mesh table (one row per
-    #     -Mesh, in order) and concatenate it *before* the params so trd reads
-    #     [mesh][params] (or [mesh][texture][params] with -Texture). A frame's
-    #     `draws` list references these meshes by 0-based index. Without -Mesh,
-    #     trd reads the params stream directly.
-    if ($meshes.Count -gt 0) {
-        if ($meshProducer -eq 'uv') {
-            $meshArgs = @('run', '--with', 'pyarrow', $objToArrow) + $meshes + @('-o', $meshArrow)
-        }
-        else {
-            $meshArgs = @($objToArrow) + $meshes + @('-o', $meshArrow)
-        }
-        $meshGen = Start-Process -FilePath $meshProducer -NoNewWindow -Wait -PassThru -ArgumentList $meshArgs
-        if ($meshGen.ExitCode -ne 0) { throw "obj_to_arrow ($meshProducer) failed (exit $($meshGen.ExitCode))" }
-
-        # 1c. -Texture: encode the image into a texture table. Then splice an
-        #     optional pre-authored inline frames table before params.
-        $streamParts = @($meshArrow)
-        if ($Texture) {
-            if ($textureProducer -eq 'uv') {
-                $textureArgs = @('run', '--with', 'pyarrow', '--with', 'pillow', '--with', 'numpy', $textureToArrow, $Texture, '--max-size', '2048', '-o', $textureArrow)
-            }
-            else {
-                $textureArgs = @($textureToArrow, $Texture, '--max-size', '2048', '-o', $textureArrow)
-            }
-            $texGen = Start-Process -FilePath $textureProducer -NoNewWindow -Wait -PassThru -ArgumentList $textureArgs
-            if ($texGen.ExitCode -ne 0) { throw "texture_to_arrow ($textureProducer) failed (exit $($texGen.ExitCode))" }
-            $streamParts += $textureArrow
-        }
-        if ($FramesTable) { $streamParts += $FramesTable }
-        $streamParts += $framesArrow
-        Join-Files -Parts $streamParts -Dest $streamArrow
-        $trdInput = $streamArrow
+    $genArgs += @('--fps', $Fps)
+    & $producer @genArgs
+    if ($LASTEXITCODE -ne 0) { throw "jsonl_to_arrow ($producer) failed (exit $LASTEXITCODE)" }
+    $sceneToArrow = Join-Path $root 'scripts\scene_to_arrow.py'
+    $bundleArgs = if ($uvOk) {
+        @('run', '--with', 'pyarrow', '--with', 'numpy', '--with', 'pillow', $sceneToArrow)
+    } else {
+        @($sceneToArrow)
     }
-    else {
-        $trdInput = $framesArrow
-    }
+    $bundleArgs += @('--params', $framesArrow, '-o', $streamArrow)
+    foreach ($mesh in $meshes) { $bundleArgs += @('--mesh', $mesh) }
+    if ($Texture) { $bundleArgs += @('--texture', $Texture) }
+    & $producer @bundleArgs
+    if ($LASTEXITCODE -ne 0) { throw "scene_to_arrow ($producer) failed (exit $LASTEXITCODE)" }
+    $trdInput = $streamArrow
 
     # --- Appearance flags (pass through to trd-cli/trd-app and config.json) ----
     $sceneArgs = @()
     if ($Wireframe) { $sceneArgs += '--wireframe' }
     # --pbr shades the same bound albedo with the Disney BRDF; it replaces
     # --textured (mutually exclusive at the trd-cli/trd-app layer) and forwards the
-    # material + optional HDR env probe. The texture table is still spliced into
-    # the stream so --pbr samples it as albedo.
+    # material + optional HDR env probe. The albedo is embedded in the GLB.
     if ($Texture -and -not $Pbr) { $sceneArgs += '--textured' }
     if ($Pbr) {
         $sceneArgs += @(
@@ -759,7 +669,7 @@ Bun.serve({
         Write-Host ''
         Write-Host "trd web (wasm) server - port $port  (press Ctrl-C to stop)"
         Write-Host "  renderer: $rendererLabel"
-        Write-Host "  scene:    mode=$mode aabb=$([bool]$Aabb) axes=$([bool]$Axes) axes-local=$([bool]$AxesLocal) external-background=$([bool]$FramesBase) inline-frames=$([bool]$FramesTable)"
+        Write-Host "  scene:    mode=$mode aabb=$([bool]$Aabb) axes=$([bool]$Axes) axes-local=$([bool]$AxesLocal) external-background=$([bool]$FramesBase)"
         Write-Host "  stream:   ${Width}x${Height}, default ${Fps}fps  (override live with ?fps=N)"
         Write-Host ''
         Write-Host "  On this machine:        http://localhost:$port"
@@ -780,7 +690,7 @@ Bun.serve({
     }
     elseif ($Native) {
         # Play the frame stream live in the interactive trd-app window
-        # (trd-native). It reads the same [mesh][texture][params] stream trd-cli
+        # (trd-native). It reads the same [params][mesh] document trd-cli
         # consumes and renders the Scene (meshes + overlays) via trd-core. The
         # appearance flags pass through to trd-app too.
         $appArgs = @(

@@ -1,12 +1,13 @@
-//! The **texture abstraction** + its columnar Arrow decode (protocol `0.0.4`, #20).
+//! The **texture abstraction** + its columnar Arrow decode (protocol `0.0.6`, #20).
 //!
 //! [`Texture`] is the abstraction over a *surface texture*: a function from a
 //! surface coordinate (UV, and later position) to sampled data. It is a **trait**
 //! rather than a single struct so many *kinds* of texture share one interface —
 //! new kinds are added by implementing the trait, not by editing an enum:
 //!
-//!   * [`ImageTexture`] — an **image map**: RGBA8 pixels, decoded from an Arrow
-//!     `fixed_shape_tensor<u8>[H, W, 4]` table (the bunny albedo). This is the
+//!   * [`ImageTexture`] — an **image map**: RGBA8 pixels, decoded from keyed
+//!     `mesh_id`/dimensions/binary rows or the legacy Arrow
+//!     `fixed_shape_tensor<u8>[H, W, 4]` table. The legacy form is the
 //!     self-describing image tensor trd already *emits* on output
 //!     (`protocol/output_session.rs`),
 //!     so a texture input is symmetric with a rendered frame.
@@ -27,12 +28,18 @@
 //! the existing output path. Decode here is byte-exact / colorspace-agnostic;
 //! the sRGB choice lives at upload (`render.rs`).
 
-use arrow::array::{Array, FixedSizeListArray, RecordBatch, UInt8Array};
+use arrow::array::{
+    Array, BinaryArray, FixedSizeListArray, ListArray, RecordBatch, UInt32Array, UInt8Array,
+};
 use arrow::datatypes::DataType;
 use thiserror::Error;
 
 /// The single image column of an Arrow texture table.
 pub const TEXTURE_COLUMN: &str = "rgba";
+pub const TEXTURE_MESH_ID_COLUMN: &str = "mesh_id";
+pub const TEXTURE_WIDTH_COLUMN: &str = "width";
+pub const TEXTURE_HEIGHT_COLUMN: &str = "height";
+pub const TEXTURE_RGBA_BYTES_COLUMN: &str = "rgba_bytes";
 
 /// Arrow canonical-extension metadata keys carried on the `rgba` field.
 pub(crate) const EXTENSION_NAME_KEY: &str = "ARROW:extension:name";
@@ -141,7 +148,10 @@ impl ImageTexture {
         if width == 0 || height == 0 {
             return Err(TextureError::InvalidDimensions { width, height });
         }
-        let expected = width as usize * height as usize * 4;
+        let expected = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or(TextureError::InvalidDimensions { width, height })?;
         if rgba.len() != expected {
             return Err(TextureError::ByteLength {
                 actual: rgba.len(),
@@ -172,6 +182,71 @@ impl ImageTexture {
         &self.rgba
     }
 
+    /// Decodes texture assets keyed by dense mesh-table row ID.
+    ///
+    /// New one-row tables carry parallel `mesh_id`, `width`, `height`, and
+    /// variable-length `rgba_bytes` lists so each model may use different image
+    /// dimensions. A legacy fixed-shape `rgba` table remains one texture for
+    /// mesh 0.
+    pub(crate) fn from_arrow_assets(batch: &RecordBatch) -> Result<Vec<(u32, Self)>, TextureError> {
+        let keyed = [
+            TEXTURE_MESH_ID_COLUMN,
+            TEXTURE_WIDTH_COLUMN,
+            TEXTURE_HEIGHT_COLUMN,
+            TEXTURE_RGBA_BYTES_COLUMN,
+        ]
+        .into_iter()
+        .any(|name| batch.column_by_name(name).is_some());
+        if !keyed {
+            return Self::from_arrow(batch).map(|texture| vec![(0, texture)]);
+        }
+        if batch.num_rows() == 0 {
+            return Err(TextureError::Empty);
+        }
+        if batch.num_rows() != 1 {
+            return Err(TextureError::ColumnType {
+                column: TEXTURE_MESH_ID_COLUMN,
+                expected: "one-row List<UInt32>",
+                actual: batch
+                    .column_by_name(TEXTURE_MESH_ID_COLUMN)
+                    .map_or(DataType::Null, |column| column.data_type().clone()),
+            });
+        }
+
+        let mesh_ids = required_u32_list(batch, TEXTURE_MESH_ID_COLUMN)?;
+        let widths = required_u32_list(batch, TEXTURE_WIDTH_COLUMN)?;
+        let heights = required_u32_list(batch, TEXTURE_HEIGHT_COLUMN)?;
+        let rgba = required_binary_list(batch, TEXTURE_RGBA_BYTES_COLUMN)?;
+        if mesh_ids.is_empty() {
+            return Err(TextureError::Empty);
+        }
+        if widths.len() != mesh_ids.len()
+            || heights.len() != mesh_ids.len()
+            || rgba.len() != mesh_ids.len()
+        {
+            return Err(TextureError::ColumnType {
+                column: TEXTURE_MESH_ID_COLUMN,
+                expected: "parallel texture asset lists with equal lengths",
+                actual: batch
+                    .column_by_name(TEXTURE_MESH_ID_COLUMN)
+                    .expect("required list decoded above")
+                    .data_type()
+                    .clone(),
+            });
+        }
+
+        (0..mesh_ids.len())
+            .map(|index| {
+                let texture = Self::from_rgba(
+                    widths.value(index),
+                    heights.value(index),
+                    rgba.value(index).to_vec(),
+                )?;
+                Ok((mesh_ids.value(index), texture))
+            })
+            .collect()
+    }
+
     /// Decodes the first row of an Arrow **texture table** into an image map.
     ///
     /// Expects a `rgba` column of type `FixedSizeList<UInt8>[H*W*4]` bearing the
@@ -181,6 +256,7 @@ impl ImageTexture {
         if batch.num_rows() == 0 {
             return Err(TextureError::Empty);
         }
+
         let index = batch
             .schema()
             .index_of(TEXTURE_COLUMN)
@@ -238,6 +314,71 @@ impl ImageTexture {
         }
         Self::from_rgba(width, height, bytes.values().to_vec())
     }
+}
+
+fn required_u32_list(batch: &RecordBatch, name: &'static str) -> Result<UInt32Array, TextureError> {
+    let column = batch
+        .column_by_name(name)
+        .ok_or(TextureError::MissingColumn(name))?;
+    let list =
+        column
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .ok_or_else(|| TextureError::ColumnType {
+                column: name,
+                expected: "List<UInt32>",
+                actual: column.data_type().clone(),
+            })?;
+    if list.is_null(0) {
+        return Err(TextureError::NullValues(name));
+    }
+    let values = list.value(0);
+    let array = values
+        .as_any()
+        .downcast_ref::<UInt32Array>()
+        .ok_or_else(|| TextureError::ColumnType {
+            column: name,
+            expected: "List<UInt32>",
+            actual: values.data_type().clone(),
+        })?;
+    if array.null_count() > 0 {
+        return Err(TextureError::NullValues(name));
+    }
+    Ok(array.clone())
+}
+
+fn required_binary_list(
+    batch: &RecordBatch,
+    name: &'static str,
+) -> Result<BinaryArray, TextureError> {
+    let column = batch
+        .column_by_name(name)
+        .ok_or(TextureError::MissingColumn(name))?;
+    let list =
+        column
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .ok_or_else(|| TextureError::ColumnType {
+                column: name,
+                expected: "List<Binary>",
+                actual: column.data_type().clone(),
+            })?;
+    if list.is_null(0) {
+        return Err(TextureError::NullValues(name));
+    }
+    let values = list.value(0);
+    let array = values
+        .as_any()
+        .downcast_ref::<BinaryArray>()
+        .ok_or_else(|| TextureError::ColumnType {
+            column: name,
+            expected: "List<Binary>",
+            actual: values.data_type().clone(),
+        })?;
+    if array.null_count() > 0 {
+        return Err(TextureError::NullValues(name));
+    }
+    Ok(array.clone())
 }
 
 impl Texture for ImageTexture {
@@ -373,6 +514,10 @@ mod tests {
         ));
         assert!(matches!(
             ImageTexture::from_rgba(0, 2, vec![]),
+            Err(TextureError::InvalidDimensions { .. })
+        ));
+        assert!(matches!(
+            ImageTexture::from_rgba(u32::MAX, u32::MAX, vec![]),
             Err(TextureError::InvalidDimensions { .. })
         ));
     }

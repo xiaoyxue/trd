@@ -19,6 +19,7 @@ console_error_panic_hook = "0.1"
 image = { version = "0.25", default-features = false, features = ["hdr"] }
 js-sys = "0.3"
 trd-core.workspace = true
+trd-placement.workspace = true
 # The GUI entry points live here too: `trd-gui` is a plain rlib holding the UI,
 # interaction, and scene authoring; this crate owns its JS ABI (#180).
 trd-gui = { path = "../trd-gui" }
