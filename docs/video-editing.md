@@ -75,6 +75,13 @@ paths without changing the editor, protocol, source assets or golden baselines:
 | `shared_orthonormal` | Orthonormal placement frame | The same orthonormal frame |
 | `shared_raw` | Raw quad half-edges | The same raw frame; potentially affine/sheared |
 
+The requested experimental expansion is
+`P(u,v,k) = O + u*r1 + v*r2 + k*e3`, using the full reconstructed edges
+`r1 = 2*half_edge1`, `r2 = 2*half_edge2` and the existing plane normal `e3`.
+Mesh-axis conversion and the existing default asset size are explicit operations
+on the local coefficients before this expansion; `r2` is not normalized or
+replaced by a cross-product direction. The other variants are controls.
+
 The source quad outline/grid remains unchanged as an observation reference.
 The unit quad uses an identity local model; its projected edges are compared
 with projected axes at the **same starting point**. A shared basis proves
@@ -96,6 +103,7 @@ $env:TRD_FIBA_PARAMS = 'D:\Code\trd-assets\fiba.params.arrow'
 $env:TRD_DRAGON_PARAMS = 'D:\Code\trd-assets\fiba.dragon.no-model.arrow'
 $env:TRD_BASIS_OUTPUT = Join-Path $PWD 'output\placement-basis-experiment'
 $env:TRD_BASIS_FRAMES = Join-Path $env:TRD_BASIS_OUTPUT 'frames'
+$env:TRD_BASIS_REFERENCE = Join-Path $env:TRD_BASIS_OUTPUT 'direct_basis_python.json'
 New-Item -ItemType Directory -Force $env:TRD_BASIS_FRAMES | Out-Null
 foreach ($frame in 168, 204, 220) {
     $name = 'frame_{0:D6}.png' -f $frame
@@ -104,6 +112,9 @@ foreach ($frame in 168, 204, 220) {
         (Join-Path $env:TRD_BASIS_FRAMES $name)
     if ($LASTEXITCODE -ne 0) { throw "Frame $frame extraction failed" }
 }
+python crates\trd-placement\tests\support\direct_basis_reference.py `
+    $env:TRD_FIBA_PARAMS -o $env:TRD_BASIS_REFERENCE
+if ($LASTEXITCODE -ne 0) { throw 'Python direct-basis generation failed' }
 cargo test -p trd-placement --test basis_experiment -- `
     --include-ignored --nocapture --test-threads=1
 ```
@@ -114,6 +125,15 @@ Source indices 168, 204 and 220 are player labels 169, 205 and 221. Dragon
 observations use unlit filled geometry so affine normal-matrix assumptions
 cannot be mistaken for a geometry result. These are headless observations,
 not editor UI E2E or new golden images.
+
+The Python companion is a separate placement implementation, not a modification
+of `examples/placement_quad_by_local_coord.py`. It reuses camera/quad
+reconstruction, then independently expands full-edge `(u,v,k)` coefficients,
+emits camera/GL matrices and projected unit vertices, and supplies the ignored
+`direct_basis_matches_python` Rust case. It writes reference JSON, not an
+application Arrow document. It requires the existing NumPy/PyArrow tooling;
+where those imports are unavailable, run the same command through
+`uv run --with numpy --with pyarrow python`.
 
 ## Arrow scene export and round-trip
 
