@@ -23,6 +23,10 @@ pub struct DecodedFrame {
 /// seek point, not the source timestamp. Shared by both call sites.
 const REPORTING_FLAGS: [&str; 4] = ["-hide_banner", "-v", "info", "-copyts"];
 
+// The container supplies our timeline; decoding packets to guess stream facts
+// adds tens of MiB to each ranged HTTP metadata probe.
+const CONTAINER_PROBE_FLAGS: [&str; 1] = ["-nofind_stream_info"];
+
 /// Fallback timestamp when a decode produced no picture (phantom final index, #324).
 /// Steps one nominal interval back — one packet past the last real picture.
 fn fallback_timestamp_seconds(index: u32, fps_num: u32, fps_den: u32) -> Option<f64> {
@@ -503,6 +507,7 @@ pub(crate) fn probe_tail_packets(
     // 1-second window: enough to catch trailing discarded packets.
     let from = (duration_seconds - 1.0).max(0.0);
     let output = Command::new("ffprobe")
+        .args(CONTAINER_PROBE_FLAGS)
         .args([
             "-v",
             "error",
@@ -553,6 +558,7 @@ fn probe_video_info(
     source: &NativeVideoSource,
 ) -> Result<trd_core::VideoInfo, NativeVideoEditingError> {
     let output = Command::new("ffprobe")
+        .args(CONTAINER_PROBE_FLAGS)
         .args([
             "-v",
             "error",
@@ -639,6 +645,7 @@ fn validate_probe(
     info: &trd_core::VideoInfo,
 ) -> Result<Option<trd_core::UnpresentedTail>, NativeVideoEditingError> {
     let output = Command::new("ffprobe")
+        .args(CONTAINER_PROBE_FLAGS)
         .args([
             "-v",
             "error",
