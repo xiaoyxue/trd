@@ -165,6 +165,11 @@ generation. VideoFrames pass directly to Rust for GPU-to-GPU upload.
 Queued tail frames remain playable after the reader reaches EOF. When playback
 ends, Details reports playing=false/ended=true; seeking back clears ended.
 
+A browser-emitted terminal container sample that native discards is an
+[accepted EOF difference](../AGENTS.md#accepted-eof-tail-sample-difference),
+not a reason to discard the last frame of every file. Record the actual frame
+IDs and timing; earlier seeks and valid-frame identity remain strict.
+
 Rust matches presented video identity to sparse source rows. K and placement are
 selected with that same frame; there is no separate Arrow playback timer.
 Native playback uses the last **presentable** sample rather than demanding a

@@ -476,6 +476,29 @@ Expect, on **both** surfaces:
 The big MP4 stays **external and uncommitted**; name the file and its size in the
 PR so a reviewer knows which one was used.
 
+###### Accepted EOF tail-sample difference
+
+**A single terminal container sample may be emitted by the browser and discarded
+by the native reader. This is an accepted EOF difference: report that item as
+✅ (accepted EOF tail sample), not as a failure requiring a playback fix.**
+This policy applies to small and large video files; file size is not the cause.
+
+Record the actual final frame IDs, sample PTS/duration and container tail
+evidence. The accepted case is limited to a terminal sample starting at or beyond
+the declared presentation end, after the valid frames have been presented,
+with playback ending normally and no pending/in-flight work. For the reference
+recording, native ends at `694838` / `27793.520s`; the browser emits the terminal
+sample at `27793.600s` and reports the clamped container index `694839`.
+Preserve those observations rather than claiming the two readers output the
+same last frame.
+
+Do not unconditionally subtract one from frame counts or drop the last decoded
+frame: ordinary files may have a valid final frame. Earlier frame/seek identity,
+premature EOF, ordering, source retention and reader reuse remain strict.
+This exception does **not** waive the opening-read budget, render-resolution
+requirements or another matrix item; the combined §4.7 row is green only when
+its other requirements are satisfied.
+
 ### Cross-mode e2e recipe — coca-cola can (PBR + AABB + axes)
 
 A concrete, reproducible pass that drives **every** front-end with one scene: the
