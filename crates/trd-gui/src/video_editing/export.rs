@@ -128,7 +128,6 @@ impl ArrowScene {
 
 #[derive(Debug, Clone)]
 pub enum VideoEditingInput {
-    Annotation(trd_core::VideoEditingDocument),
     Scene(ArrowScene),
 }
 
@@ -141,20 +140,11 @@ pub struct ArrowExport {
 }
 
 pub fn decode_video_editing_input(bytes: &[u8]) -> Result<VideoEditingInput, String> {
-    match trd_core::decode_video_editing_document(bytes) {
-        Ok(document) => Ok(VideoEditingInput::Annotation(document)),
-        Err(document_error) => decode_arrow_scene(bytes)
-            .map(VideoEditingInput::Scene)
-            .map_err(|scene_error| {
-                format!(
-                    "input is neither a video-editing document ({document_error}) nor a \
-                     protocol {} scene ({scene_error})",
-                    trd_core::PROTOCOL_VERSION
-                )
-            }),
-    }
+    let document = trd_core::SceneDocument::read(bytes).map_err(|error| error.to_string())?;
+    ArrowScene::from_source(document).map(VideoEditingInput::Scene)
 }
 
+#[cfg(test)]
 fn decode_arrow_scene(bytes: &[u8]) -> Result<ArrowScene, String> {
     if trd_core::SceneDocument::starts_with_params(bytes).map_err(|error| error.to_string())? {
         let source = trd_core::SceneDocument::read(bytes).map_err(|error| error.to_string())?;
@@ -585,10 +575,7 @@ mod tests {
         let export = app.shared.take_arrow_export().unwrap();
         assert!(!export.bytes.is_empty());
         assert!(app.shared.take_arrow_export().is_none());
-        let VideoEditingInput::Scene(scene) = decode_video_editing_input(&export.bytes).unwrap()
-        else {
-            panic!("export must decode as a protocol scene");
-        };
+        let scene = decode_arrow_scene(&export.bytes).unwrap();
         assert_eq!(scene.tonemap, Some(trd_core::Tonemap::Aces));
         app.set_arrow_scene(Some(Rc::new(scene)));
         assert!(app.document.is_none());
@@ -615,9 +602,7 @@ mod tests {
             Some(24.0),
         )
         .unwrap();
-        let VideoEditingInput::Scene(scene) = decode_video_editing_input(&bytes).unwrap() else {
-            panic!("legacy protocol stream must decode as a scene");
-        };
+        let scene = decode_arrow_scene(&bytes).unwrap();
 
         assert_eq!(scene.tonemap, None);
         app.set_arrow_scene(Some(Rc::new(scene)));
@@ -672,10 +657,7 @@ mod tests {
             })));
 
         let export = app.build_arrow_export().unwrap();
-        let VideoEditingInput::Scene(scene) = decode_video_editing_input(&export.bytes).unwrap()
-        else {
-            panic!("OBJ export must decode as a scene");
-        };
+        let scene = decode_arrow_scene(&export.bytes).unwrap();
         let assets = scene.mesh_assets().unwrap();
 
         assert_eq!(assets.len(), 1);
@@ -693,11 +675,7 @@ mod tests {
             .replace(Some(Rc::new(VideoExportAsset::Gltf(reference.clone()))));
 
         let export = app.build_arrow_export().unwrap();
-        let VideoEditingInput::Scene(mut scene) =
-            decode_video_editing_input(&export.bytes).unwrap()
-        else {
-            panic!("Dragon export must decode as a scene");
-        };
+        let mut scene = decode_arrow_scene(&export.bytes).unwrap();
         assert_eq!(
             scene.mesh_resources,
             vec![trd_core::MeshResource::Gltf(reference)]
@@ -714,15 +692,23 @@ mod tests {
     }
 
     #[test]
-    fn real_annotation_input_is_not_misclassified_as_a_scene() {
+    fn editor_rejects_legacy_annotation_instead_of_opening_the_retired_ui() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../assets/videos/fiba/fiba-shot1.arrow");
         let bytes = std::fs::read(path).unwrap();
 
-        assert!(matches!(
-            decode_video_editing_input(&bytes).unwrap(),
-            VideoEditingInput::Annotation(_)
-        ));
+        assert!(decode_video_editing_input(&bytes)
+            .unwrap_err()
+            .contains("retired"));
+    }
+
+    #[test]
+    fn editor_accepts_only_current_params_glb_and_rejects_mesh_first_input() {
+        let current = include_bytes!("../../../trd-core/tests/golden/stage1.arrow");
+        let VideoEditingInput::Scene(scene) = decode_video_editing_input(current).unwrap();
+        assert!(scene.source.is_some());
+        let legacy = export_ready_app().build_arrow_export().unwrap();
+        assert!(decode_video_editing_input(&legacy.bytes).is_err());
     }
 
     #[test]

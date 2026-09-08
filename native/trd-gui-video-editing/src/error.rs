@@ -13,8 +13,6 @@ pub enum NativeVideoEditingError {
     Gui(#[from] trd_gui::error::GuiError),
     #[error("video editor renderer failed: {0}")]
     Renderer(String),
-    #[error("video source mismatch: {0}")]
-    SourceMismatch(String),
     #[error("failed to run {program}: {source}")]
     Spawn {
         program: &'static str,

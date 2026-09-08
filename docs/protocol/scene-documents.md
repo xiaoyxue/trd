@@ -5,6 +5,12 @@ version/fixture migration is not complete; the existing stream reader is not
 yet retired. The agreed target is the
 [render sub-schema](../../assets/schemas/trd-render-sub-schema.md).
 
+Both native and browser video editors expose only this current workflow.
+The old annotation/catalog UI, implicit default annotation and runtime
+mesh-first/annotation fallback are removed. A video-edit 0.2.0 input is explicitly
+rejected with the offline conversion command; original data and conversion
+tools remain. Ordinary internal OBJ viewers are unaffected.
+
 ## Retained input
 
 `trd_core::SceneDocument` retains the original params schemas/RecordBatches and

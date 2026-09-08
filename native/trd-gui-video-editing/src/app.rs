@@ -6,8 +6,7 @@ use std::time::{Duration, Instant};
 use crate::error::NativeVideoEditingError;
 use crate::media::{preview_size, DecodedFrame, NativeVideo, NativeVideoSource};
 use trd_gui::video_editing::{
-    CatalogAsset, ErrorScope, VideoEditingApp, VideoEditingCommand, VideoEditingShared,
-    VideoSourceKind,
+    ErrorScope, VideoEditingApp, VideoEditingCommand, VideoEditingShared, VideoSourceKind,
 };
 use trd_gui::video_editing_renderer::VideoPlacementRenderer;
 
@@ -33,10 +32,8 @@ impl PlaybackClock {
 }
 
 pub struct NativeVideoEditingApp {
-    /// The timeline in force: the document's when there is one, otherwise what
-    /// ffprobe read from the container (#264).
+    /// Playback uses the container timeline independently of sparse scene rows.
     video_info: trd_core::VideoInfo,
-    document: Option<trd_core::VideoEditingDocument>,
     shared: Rc<VideoEditingShared>,
     editor: VideoEditingApp,
     video_source: Option<NativeVideoSource>,
@@ -100,34 +97,21 @@ impl NativeVideoEditingApp {
         preview_width: u32,
         gpu: Option<std::sync::Arc<trd_core::GpuContext>>,
     ) -> Result<Self, NativeVideoEditingError> {
-        let (document, arrow_scene) = match input {
-            Some(trd_gui::video_editing::VideoEditingInput::Annotation(document)) => {
-                (Some(document), None)
-            }
+        let arrow_scene = match input {
             Some(trd_gui::video_editing::VideoEditingInput::Scene(scene)) => {
                 let mut scene = scene;
                 resolve_arrow_scene(&mut scene).map_err(NativeVideoEditingError::Input)?;
-                (None, Some(Rc::new(scene)))
+                Some(Rc::new(scene))
             }
-            None => (None, None),
+            None => None,
         };
-        // With a document the video is validated against it; without one the
-        // container *is* the timeline, so the probe supplies it (#264).
-        let (mut video, video_info) = match (video_source.clone(), document.as_ref()) {
-            (Some(source), Some(document)) => {
-                let (video, unpresented_tail) =
-                    NativeVideo::open(source, &document.video, preview_width)?;
-                let mut info = document.video.clone();
-                info.unpresented_tail = unpresented_tail.or(info.unpresented_tail);
-                (Some(video), info)
-            }
-            (Some(source), None) => {
+        let (mut video, video_info) = match video_source.clone() {
+            Some(source) => {
                 let (video, info) = NativeVideo::probe(source, preview_width)?;
                 (Some(video), info)
             }
-            (None, Some(document)) => (None, document.video.clone()),
             // Neither yet: an empty timeline the Open dialog will replace.
-            (None, None) => (None, empty_video_info()),
+            None => (None, empty_video_info()),
         };
         let initial_frame = video
             .as_ref()
@@ -181,16 +165,12 @@ impl NativeVideoEditingApp {
         if let Some(gpu) = gpu {
             shared.set_shared_gpu(gpu);
         }
-        let mut editor = match document.clone() {
-            Some(document) => VideoEditingApp::new(document, shared.clone()),
-            None => VideoEditingApp::player(video_info.clone(), shared.clone()),
-        };
+        let mut editor = VideoEditingApp::player(video_info.clone(), shared.clone());
         if let Some(scene) = arrow_scene {
             editor.set_arrow_scene(Some(scene));
         }
         let mut app = Self {
             video_info,
-            document,
             shared,
             editor,
             video_source,
@@ -333,23 +313,6 @@ impl NativeVideoEditingApp {
         if let Some(index) = self.shared.take_seek_frame() {
             self.seek(index);
         }
-        if let Some(asset) = self.shared.take_asset_request() {
-            // Logged, not merely surfaced in the UI. A catalog load reads and
-            // decodes up to tens of megabytes and rebuilds the renderer, so it
-            // is worth being able to see that it was asked for and that it
-            // finished.
-            log::info!("loading catalog asset {asset:?}");
-            match self.load_catalog_asset(asset) {
-                Ok(()) => {
-                    log::info!("catalog asset {asset:?} loaded");
-                    self.shared.clear_error(ErrorScope::Catalog);
-                }
-                Err(error) => {
-                    log::error!("catalog asset {asset:?} failed to load: {error}");
-                    self.shared.set_error(ErrorScope::Catalog, error);
-                }
-            }
-        }
     }
 
     /// Picks a local annotation document. **Mock**: the choice is recorded and
@@ -471,7 +434,6 @@ impl NativeVideoEditingApp {
             // document authored against a different source would be worse than
             // dropping it (#264).
             self.shared.clear_document();
-            self.document = None;
             self.picked_document = None;
             return;
         };
@@ -496,11 +458,6 @@ impl NativeVideoEditingApp {
 
     fn load_input_bytes(&mut self, bytes: &[u8]) -> Result<&'static str, String> {
         match trd_gui::video_editing::decode_video_editing_input(bytes)? {
-            trd_gui::video_editing::VideoEditingInput::Annotation(document) => {
-                self.document = Some(document.clone());
-                self.shared.queue_annotation_document(document);
-                Ok("annotation document")
-            }
             trd_gui::video_editing::VideoEditingInput::Scene(scene) => {
                 let mut scene = scene;
                 resolve_arrow_scene(&mut scene)?;
@@ -524,7 +481,6 @@ impl NativeVideoEditingApp {
                         &scene, env, width, height,
                     )),
                 }?;
-                self.document = None;
                 self.shared.set_renderer(renderer);
                 self.shared.queue_arrow_scene(Rc::new(scene));
                 Ok("protocol scene")
@@ -534,20 +490,7 @@ impl NativeVideoEditingApp {
 
     fn open_video_source(&mut self, source: NativeVideoSource) -> bool {
         self.stop_playback();
-        // With a document the source must match it; without one the container is
-        // the timeline, so probe and adopt what it says (#264).
-        let opened = match self.document.as_ref() {
-            Some(document) => {
-                NativeVideo::open(source.clone(), &document.video, self.preview_width).map(
-                    |(video, unpresented_tail)| {
-                        let mut info = document.video.clone();
-                        info.unpresented_tail = unpresented_tail.or(info.unpresented_tail);
-                        (video, info)
-                    },
-                )
-            }
-            None => NativeVideo::probe(source.clone(), self.preview_width),
-        };
+        let opened = NativeVideo::probe(source.clone(), self.preview_width);
         let (video, info) = match opened {
             Ok(opened) => opened,
             Err(error) => {
@@ -641,57 +584,6 @@ impl NativeVideoEditingApp {
         self.sync_video_status();
     }
 
-    fn load_catalog_asset(&mut self, asset: CatalogAsset) -> Result<(), String> {
-        let (model_path, texture_path) = catalog_paths(asset);
-        let source = trd_core::MeshReference::new(
-            Some(model_path.to_string_lossy().replace('\\', "/")),
-            None,
-        )
-        .expect("catalog path is non-empty");
-        let model_bytes = read_asset(&self.assets_root, model_path)?;
-        let texture_bytes = texture_path
-            .map(|path| read_asset(&self.assets_root, path))
-            .transpose()?
-            .unwrap_or_default();
-        if self.env_bytes.is_none() {
-            self.env_bytes = Some(read_asset(
-                &self.assets_root,
-                Path::new("assets/envmap/uffizi-large.hdr"),
-            )?);
-        }
-        let (width, height) = self
-            .video
-            .as_ref()
-            .map(|video| (video.width, video.height))
-            .unwrap_or_else(|| preview_size(&self.video_info, self.preview_width));
-        // A catalog swap rebuilds the renderer, so it has to land on the *same*
-        // device egui samples — otherwise the re-registered texture belongs to a
-        // device the toolkit knows nothing about.
-        let renderer = match self.shared.shared_gpu() {
-            Some(gpu) => VideoPlacementRenderer::new_with_gpu(
-                gpu,
-                asset,
-                source.clone(),
-                &model_bytes,
-                &texture_bytes,
-                self.env_bytes.as_deref().expect("loaded above"),
-                width,
-                height,
-            ),
-            None => pollster::block_on(VideoPlacementRenderer::new(
-                asset,
-                source,
-                &model_bytes,
-                &texture_bytes,
-                self.env_bytes.as_deref().expect("loaded above"),
-                width,
-                height,
-            )),
-        }?;
-        self.shared.set_catalog_renderer(asset, renderer);
-        Ok(())
-    }
-
     fn sync_video_status(&self) {
         self.shared
             .set_video_status(self.video.is_some(), self.playback.is_some());
@@ -783,25 +675,6 @@ fn load_mesh_reference(reference: &trd_core::MeshReference) -> Result<Vec<u8>, S
         .as_deref()
         .ok_or_else(|| "glTF reference has neither a readable path nor a URL".to_owned())?;
     fetch_document(url)
-}
-
-fn catalog_paths(asset: CatalogAsset) -> (&'static Path, Option<&'static Path>) {
-    match asset {
-        CatalogAsset::CocaColaCan => (
-            Path::new("assets/meshes/can/coke.obj"),
-            Some(Path::new("assets/meshes/can/can_around.jpg")),
-        ),
-        CatalogAsset::BeerCan => (
-            Path::new("assets/meshes/qd_beer/source/3d66.com_JDH5455878326.obj"),
-            Some(Path::new(
-                "assets/meshes/qd_beer/textures/3d66-export-JDH5455878326-001.jpg",
-            )),
-        ),
-        CatalogAsset::Dragon => (
-            Path::new("assets/meshes/glb/Meshy_AI_Dragon_0804104424_texture.glb"),
-            None,
-        ),
-    }
 }
 
 fn read_asset(root: &Path, relative: &Path) -> Result<Vec<u8>, String> {

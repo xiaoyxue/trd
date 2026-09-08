@@ -10,7 +10,8 @@ pub fn video_editing_gltf_references(
     let input = trd_gui::video_editing::decode_video_editing_input(&bytes)
         .map_err(|error| wasm_bindgen::JsValue::from_str(&error))?;
     let result = js_sys::Array::new();
-    if let trd_gui::video_editing::VideoEditingInput::Scene(scene) = input {
+    let trd_gui::video_editing::VideoEditingInput::Scene(scene) = input;
+    {
         for (index, reference) in scene.unresolved_mesh_references() {
             let value = js_sys::Object::new();
             js_sys::Reflect::set(
@@ -109,26 +110,18 @@ pub async fn start(
             .map(|bytes| trd_gui::video_editing::decode_video_editing_input(&bytes))
             .transpose()
             .map_err(|error| wasm_bindgen::JsValue::from_str(&error))?;
-        let (document, scene) = match input {
-            Some(trd_gui::video_editing::VideoEditingInput::Annotation(document)) => {
-                (Some(document), None)
-            }
+        let scene = match input {
             Some(trd_gui::video_editing::VideoEditingInput::Scene(mut scene)) => {
                 resolve_video_editing_scene(&mut scene, &gltf_bytes)?;
-                (None, Some(Rc::new(scene)))
+                Some(Rc::new(scene))
             }
-            None => (None, None),
+            None => None,
         };
         let shared = Rc::new(trd_gui::video_editing::VideoEditingShared::default());
-        let handle = match document.as_ref() {
-            Some(document) => VideoEditingHandle::new(document, shared.clone()),
-            None => VideoEditingHandle::player(shared.clone()),
-        };
+        let handle = VideoEditingHandle::player(shared.clone());
         // A placeholder until a video is opened: the real size arrives with the
         // container probe, and the target is resized to the fitted panel anyway.
-        let (width, height) = document.as_ref().map_or((1280, 720), |document| {
-            (document.video.width, document.video.height)
-        });
+        let (width, height) = (1920, 1080);
         let creator_shared = shared.clone();
         let creator_scene = scene.clone();
         eframe::WebRunner::new()
@@ -162,19 +155,12 @@ pub async fn start(
                     };
                     creator_shared.set_renderer(renderer);
                     creator_shared.set_shared_gpu(gpu);
-                    Ok(match (document, creator_scene) {
-                        (Some(document), _) => Box::new(
-                            trd_gui::video_editing::VideoEditingApp::new(document, creator_shared),
-                        ),
-                        (None, scene) => {
-                            let mut app = trd_gui::video_editing::VideoEditingApp::player(
-                                player_timeline(width, height),
-                                creator_shared,
-                            );
-                            app.set_arrow_scene(scene);
-                            Box::new(app)
-                        }
-                    })
+                    let mut app = trd_gui::video_editing::VideoEditingApp::player(
+                        player_timeline(width, height),
+                        creator_shared,
+                    );
+                    app.set_arrow_scene(creator_scene);
+                    Ok(Box::new(app))
                 }),
             )
             .await?;
@@ -395,26 +381,6 @@ pub struct VideoEditingHandle {
 }
 
 impl VideoEditingHandle {
-    pub(crate) fn new(
-        document: &trd_core::VideoEditingDocument,
-        shared: Rc<trd_gui::video_editing::VideoEditingShared>,
-    ) -> Self {
-        Self {
-            shared,
-            expected: Some((
-                document.video.source_name.clone(),
-                document.video.byte_length,
-            )),
-            timeline: std::cell::Cell::new(TimelineFacts {
-                fps_num: document.video.fps_num,
-                fps_den: document.video.fps_den,
-                frame_count: document.video.frame_count,
-                width: document.video.width,
-                height: document.video.height,
-            }),
-        }
-    }
-
     /// Plain-player handle: no document, placeholder timeline until container is probed.
     pub(crate) fn player(shared: Rc<trd_gui::video_editing::VideoEditingShared>) -> Self {
         Self {
@@ -650,12 +616,7 @@ impl VideoEditingHandle {
         self.shared.cancel_arrow_export();
     }
 
-    #[wasm_bindgen::prelude::wasm_bindgen(js_name = takeAssetRequest)]
-    pub fn take_asset_request(&self) -> u8 {
-        self.shared.take_asset_request_code()
-    }
-
-    /// Loads an annotation document or exported protocol scene from bytes.
+    /// Loads a current params/GLB scene document from bytes.
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = loadDocument)]
     pub async fn load_document(&self, bytes: Vec<u8>) -> Result<(), wasm_bindgen::JsValue> {
         self.load_document_with_gltf(bytes, js_sys::Array::new(), Vec::new())
@@ -672,9 +633,6 @@ impl VideoEditingHandle {
         match trd_gui::video_editing::decode_video_editing_input(&bytes)
             .map_err(|error| wasm_bindgen::JsValue::from_str(&error))?
         {
-            trd_gui::video_editing::VideoEditingInput::Annotation(document) => {
-                self.shared.queue_annotation_document(document);
-            }
             trd_gui::video_editing::VideoEditingInput::Scene(mut scene) => {
                 resolve_video_editing_scene(&mut scene, &gltf_bytes)?;
                 let timeline = self.timeline.get();
@@ -765,51 +723,5 @@ impl VideoEditingHandle {
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = takeSeekFrame)]
     pub fn take_seek_frame(&self) -> i32 {
         self.shared.take_seek_frame_code()
-    }
-
-    #[wasm_bindgen::prelude::wasm_bindgen(js_name = loadCatalogAsset)]
-    pub async fn load_catalog_asset(
-        &self,
-        asset_code: u8,
-        source_path: String,
-        source_url: String,
-        model_bytes: Vec<u8>,
-        texture_bytes: Vec<u8>,
-        env_bytes: Vec<u8>,
-    ) -> Result<(), wasm_bindgen::JsValue> {
-        let asset = trd_gui::video_editing::CatalogAsset::from_code(asset_code)
-            .ok_or_else(|| wasm_bindgen::JsValue::from_str("unknown catalog asset"))?;
-        let source = trd_core::MeshReference::new(Some(source_path), Some(source_url))
-            .ok_or_else(|| wasm_bindgen::JsValue::from_str("catalog asset reference is empty"))?;
-        // Must use the same device egui samples — a different device yields an unusable texture.
-        let renderer = match self.shared.shared_gpu() {
-            Some(gpu) => trd_gui::video_editing_renderer::VideoPlacementRenderer::new_with_gpu(
-                gpu,
-                asset,
-                source.clone(),
-                &model_bytes,
-                &texture_bytes,
-                &env_bytes,
-                self.timeline.get().width,
-                self.timeline.get().height,
-            ),
-            None => {
-                trd_gui::video_editing_renderer::VideoPlacementRenderer::new(
-                    asset,
-                    source,
-                    &model_bytes,
-                    &texture_bytes,
-                    &env_bytes,
-                    self.timeline.get().width,
-                    self.timeline.get().height,
-                )
-                .await
-            }
-        }
-        .map_err(|error| wasm_bindgen::JsValue::from_str(&error))?;
-        self.shared.set_catalog_renderer(asset, renderer);
-        self.shared
-            .clear_error(trd_gui::video_editing::ErrorScope::Catalog);
-        Ok(())
     }
 }

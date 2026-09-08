@@ -1,10 +1,8 @@
 //! The editor's egui surface (#163/#167): left-pane editing controls,
-//! quad/catalog interaction, and player footer.
+//! source-model interaction, and player footer.
 
 use super::details_ui::details_ui;
-use super::{
-    point_in_quad, CatalogAsset, VideoEditingApp, VideoSourceKind, COMMAND_PAUSE, COMMAND_PLAY,
-};
+use super::{point_in_quad, VideoEditingApp, VideoSourceKind, COMMAND_PAUSE, COMMAND_PLAY};
 
 impl eframe::App for VideoEditingApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -80,24 +78,8 @@ impl eframe::App for VideoEditingApp {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     self.source_controls(ui);
                     ui.separator();
-                    if source_mode {
-                        needs_render |= self.source_model_controls(ui);
-                    } else {
-                        needs_render |= crate::ui::controls_sections(
-                            ui,
-                            &mut self.controller,
-                            crate::ui::Controls {
-                                camera_locked: true,
-                                move_reference_labels: Some(super::QUAD_MOVE_LABELS),
-                            },
-                        );
-                    }
+                    needs_render |= self.source_model_controls(ui);
                     ui.separator();
-                    if !source_mode {
-                        self.shot_controls(ui);
-                        self.quad_controls(ui, overlay_frame_index, quad_frame);
-                        self.catalog_controls(ui);
-                    }
                     self.export_controls(ui);
                     self.details_controls(ui);
                     needs_render |= crate::ui::reset_button(ui, &mut self.controller);
@@ -168,9 +150,14 @@ impl VideoEditingApp {
     fn source_model_controls(&mut self, ui: &mut egui::Ui) -> bool {
         ui.heading("Placement / source models");
         let Some(scene) = self.arrow_scene.as_ref() else {
+            ui.weak("Load params Arrow with optional GLB mesh resources. Video playback is independent.");
             return false;
         };
         let Some(source) = scene.source.clone() else {
+            ui.colored_label(
+                egui::Color32::LIGHT_RED,
+                "This scene is not a current params/GLB document.",
+            );
             return false;
         };
         let mut overlay_changed = ui
@@ -428,78 +415,6 @@ impl VideoEditingApp {
         });
     }
 
-    /// The standalone placement-quad readout.
-    fn quad_controls(
-        &mut self,
-        ui: &mut egui::Ui,
-        frame_index: u32,
-        quad_frame: Option<trd_placement::QuadFrame>,
-    ) {
-        ui.collapsing("Placement quad (standalone)", |ui| {
-            let Some(frame) = self.frame_row(frame_index) else {
-                ui.label(format!("Frame {frame_index}"));
-                ui.label(if self.has_document() {
-                    "Not annotated: this frame is plain video"
-                } else {
-                    "No annotation document: the video plays as-is"
-                });
-                return;
-            };
-            ui.label(format!("Frame {}", frame.video_frame_index));
-            ui.label(if frame.tracked {
-                if self.shared.video_playing.get() && !self.show_placement_quads {
-                    "Placement quad hidden during playback"
-                } else if !self.selected_quad {
-                    "Click the green quad to select it"
-                } else {
-                    "Placement quad selected"
-                }
-            } else {
-                "Background-only row: quad and object hidden"
-            });
-            ui.weak(format!(
-                "Pointer: {} · quad: {}",
-                if self.hovered_quad {
-                    "over the quad"
-                } else {
-                    "off the quad"
-                },
-                if self.selected_quad {
-                    "selected"
-                } else {
-                    "not selected"
-                }
-            ));
-            if let Some(local) = quad_frame {
-                ui.label(format!("Local axis length: {:.4}", local.axis_length));
-                ui.weak("RGB axes: e1 / e2 / e3");
-                ui.weak("Quad overlay follows the displayed tracking row.");
-                ui.weak("Object edit state persists; quad basis updates per frame.");
-                ui.weak("Local X/Y/Z rotate with the placed object.");
-                ui.weak("Initial can placement matches the Olympic upper-can preset.");
-            }
-        });
-    }
-
-    /// The fixed catalog. Selecting an asset loads it immediately.
-    fn catalog_controls(&mut self, ui: &mut egui::Ui) {
-        ui.add_enabled_ui(self.selected_quad, |ui| {
-            ui.collapsing("Object catalog", |ui| {
-                for asset in CatalogAsset::ALL {
-                    if ui
-                        .selectable_label(self.selected_asset == Some(asset), asset.label())
-                        .clicked()
-                    {
-                        self.select_catalog_asset(asset);
-                        ui.ctx().request_repaint();
-                    }
-                }
-            });
-        })
-        .response
-        .on_disabled_hover_text("Select a placement quad first");
-    }
-
     fn export_controls(&self, ui: &mut egui::Ui) {
         ui.group(|ui| {
             ui.strong("Scene export");
@@ -519,10 +434,10 @@ impl VideoEditingApp {
                     ui.colored_label(egui::Color32::LIGHT_RED, error);
                 }
                 None => {
-                    ui.weak("Protocol 0.0.6 scene; the source video remains a sidecar.");
+                    ui.weak("Params and original GLB resources; video remains external.");
                 }
             }
-            ui.weak("OBJ embeds albedo + material; GLB exports only its path/URL reference.");
+            ui.weak("Edits persist in all corresponding sparse-frame model matrices.");
             ui.weak("Replay uses uffizi-large.hdr as the default IBL probe.");
         });
     }
@@ -580,60 +495,6 @@ impl VideoEditingApp {
         }
     }
 
-    /// Shots section: click a shot to seek to its first frame (#264).
-    fn shot_controls(&mut self, ui: &mut egui::Ui) {
-        let shots = self.shots();
-        ui.collapsing(format!("Shots ({})", shots.len()), |ui| {
-            let mut changed = ui
-                .checkbox(&mut self.show_placement_quads, "Show placement quads")
-                .on_hover_text(
-                    "Draw the placement quad on annotated frames, including while playing",
-                )
-                .changed();
-            changed |= ui
-                .checkbox(&mut self.show_gizmos, "Show gizmos")
-                .on_hover_text("Draw the quad's local floor grid and basis axes (e1 / e2 / e3)")
-                .changed();
-            if changed {
-                self.shared.request_overlay();
-            }
-            let state = super::overlay_state(
-                self.show_placement_quads || self.show_gizmos,
-                self.has_document(),
-                self.current_frame_index,
-                self.frame_row(self.current_frame_index)
-                    .map(|frame| frame.tracked),
-            );
-            ui.weak(state.label());
-            if shots.is_empty() {
-                ui.weak(if self.has_document() {
-                    "The document annotates no frames"
-                } else {
-                    "No annotation document: the whole video is plain playback"
-                });
-                return;
-            }
-            let current = self.current_frame_index;
-            for (index, shot) in shots.iter().enumerate() {
-                let label = format!(
-                    "Shot {} · frames {}-{} ({})",
-                    index + 1,
-                    shot.start_frame,
-                    shot.end_frame,
-                    shot.frame_count()
-                );
-                if ui
-                    .selectable_label(shot.contains(current), label)
-                    .on_hover_text("Jump to the first frame of this shot")
-                    .clicked()
-                {
-                    self.seek_to(shot.start_frame);
-                    ui.ctx().request_repaint();
-                }
-            }
-        });
-    }
-
     fn seek_to(&mut self, frame_index: u32) {
         if frame_index == self.current_frame_index {
             return;
@@ -644,20 +505,6 @@ impl VideoEditingApp {
             frame_index,
             id: self.shared.request_seek(frame_index),
         });
-    }
-
-    fn select_catalog_asset(&mut self, asset: CatalogAsset) {
-        self.selected_asset = Some(asset);
-        self.selected_quad = true;
-        self.show_gizmos = true;
-        self.controller.state.objects[0] = crate::scene::ObjectTransform::default();
-        self.controller.state.selected = Some(0);
-        self.controller.target = crate::interaction::InteractionTarget::Object;
-        self.shared.clear_export_asset();
-        self.shared.cancel_arrow_export();
-        self.shared.renderer.borrow_mut().take();
-        self.shared.asset_request.set(asset.code());
-        self.shared.request_overlay();
     }
 
     /// Labels basis arms `e1`/`e2`/`e3` at their tips using projected egui text.

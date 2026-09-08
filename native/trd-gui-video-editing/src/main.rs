@@ -118,18 +118,6 @@ fn run() -> Result<(), error::NativeVideoEditingError> {
     if cli.probe_only {
         let wanted = cli.probe_frame;
         match (video_source, input.as_ref()) {
-            (
-                Some(source),
-                Some(trd_gui::video_editing::VideoEditingInput::Annotation(document)),
-            ) => {
-                let (video, _) =
-                    media::NativeVideo::open(source, &document.video, cli.preview_width)?;
-                let frame = video.decode_one(wanted)?;
-                println!(
-                    "native video-editing source validated; {}",
-                    describe(wanted, &frame)
-                );
-            }
             (Some(source), _) => {
                 let (video, info) = media::NativeVideo::probe(source, cli.preview_width)?;
                 let frame = video.decode_one(wanted)?;
@@ -143,9 +131,6 @@ fn run() -> Result<(), error::NativeVideoEditingError> {
                     describe(wanted, &frame)
                 );
             }
-            (None, Some(trd_gui::video_editing::VideoEditingInput::Annotation(_))) => println!(
-                "native video-editing annotation document validated; no video source supplied"
-            ),
             (None, Some(trd_gui::video_editing::VideoEditingInput::Scene(scene))) => println!(
                 "protocol scene validated: {} mesh row(s), {} params row(s); no video source supplied",
                 scene.mesh_resources.len(),

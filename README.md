@@ -139,8 +139,8 @@ Linux, the vendor driver on Windows).
 cargo build --workspace                                # shared crates + native delivery apps
 cargo run -p trd-cli -- --width 256 --height 256       # headless Arrow filter (stdin → stdout)
 cargo run -p trd-gui-app -- --mesh assets/meshes/bunny.obj # interactive viewer window
-cargo run -p trd-gui-video-editing -- --document web/gui-video-editing/data/fiba-shot1.arrow \
-  --video /path/to/shot_0001.mp4                    # native video timeline/player
+cargo run -p trd-gui-video-editing -- --document output/fiba.dragon.arrow \
+  --video /path/to/shot_0001.mp4 --preview-width 1920 # current params/GLB editor
 examples/render.sh --cli                               # end-to-end demo → output/out.gif
 ( cd web && bun run --cwd viewer dev )                 # stream viewer on :8080
 ( cd web && bun run --cwd gui-viewer dev )             # GUI viewer on :8082
@@ -154,8 +154,8 @@ examples/render.sh --cli                               # end-to-end demo → out
 cargo build --workspace
 cargo run -p trd-cli -- --width 256 --height 256       # headless Arrow filter (stdin → stdout)
 cargo run -p trd-gui-app -- --mesh assets\meshes\bunny.obj # interactive viewer window
-cargo run -p trd-gui-video-editing -- --document web\gui-video-editing\data\fiba-shot1.arrow `
-  --video C:\path\to\shot_0001.mp4                   # native video timeline/player
+cargo run -p trd-gui-video-editing -- --document output\fiba.dragon.arrow `
+  --video C:\path\to\shot_0001.mp4 --preview-width 1920 # current params/GLB editor
 examples\render.ps1 -CLI                               # end-to-end demo → output\out.gif
 cd web; bun run --cwd viewer dev                       # stream viewer on :8080
 # use `bun run --cwd gui-viewer dev` for :8082
@@ -239,11 +239,11 @@ params: **[`docs/rendering.md`](docs/rendering.md#interactive-viewer--trd-gui)**
 
 ## [Video editing](docs/video-editing.md)
 
-`web/gui-video-editing` is a Rust-owned WebGPU editor for placing catalog objects on
+`web/gui-video-editing` is a Rust-owned WebGPU editor for placing GLB objects on
 the tracked FIBA court quad while an external MP4 plays. The browser owns media
 decode and hands each presented `VideoFrame` to Rust untouched — the pixels stay
 on the GPU (`frame upload: 0 B`); Rust owns the separate
-`trd.video_edit.version = 0.2.0` Arrow timeline, quad reconstruction,
+params/GLB Arrow document, quad reconstruction,
 quad/object-local transforms, GPU picking, PBR/IBL, final composition, and a
 collapsed **Details** inspector. Its typed snapshot follows the displayed render
 and exposes source/synchronization, raw tracking pose deltas, placement,
@@ -255,7 +255,7 @@ material/lighting, and renderer facts.
 `displayed` / `rendered`) are reported separately, and how to read the
 `expected … / observed …` `[MATCH]` comparisons.
 
-Generate the ignored local timeline first using
+Convert the matching source annotation to current params/GLB Arrow first using
 [`docs/video-editing.md`](docs/video-editing.md#generate-the-document), then:
 
 ```sh
@@ -266,8 +266,9 @@ bun install --frozen-lockfile
 bun run --cwd gui-video-editing dev  # http://localhost:8085
 ```
 
-The MP4 remains local and uncommitted. The initial fixed catalog contains the
-Coca-Cola can, beer can, and Dragon; every PBR object uses
+The MP4 remains local and uncommitted. The old annotation/catalog UI is removed:
+both surfaces reject old annotation and mesh-first inputs rather than silently
+falling back. The empty browser page loads no legacy demo. Every PBR object uses
 `assets/envmap/uffizi-large.hdr` by default. Current behavior, document schema,
 placement conventions, generation command, and known limitations are in
 **[`docs/video-editing.md`](docs/video-editing.md)**.
@@ -278,8 +279,8 @@ by the browser, without temporary frame files:
 
 ```sh
 cargo run -p trd-gui-video-editing -- \
-  --document web/gui-video-editing/data/fiba-shot1.arrow \
-  --video /path/to/shot_0001.mp4
+  --document output/fiba.dragon.arrow \
+  --video /path/to/shot_0001.mp4 --preview-width 1920
 ```
 
 `--video-url https://example.com/shot_0001.mp4` launches the same native editor
@@ -292,7 +293,7 @@ source width when comparing the two surfaces. See
 [`docs/video-editing.md`](docs/video-editing.md).
 
 The native and browser surfaces share the same panels, timeline, quad selection,
-catalog, object transforms, GPU picking, PBR/IBL controls, and three-layer
+source-model transforms, GPU picking, PBR/IBL, and depth-separated
 composition. Only the media adapter differs: [mediabunny] demux/decode behind the
 `FrameReader` seam in the
 browser, ffmpeg/ffprobe in the native shell. Native **Open video** supports both
@@ -323,9 +324,10 @@ MP4 opens and seeks in megabytes.
 - [`docs/gui-design.md`](docs/gui-design.md) — the `trd-gui` interactive-viewer design.
 - [`docs/video-editing.md`](docs/video-editing.md) — FIBA timeline document,
   the browser media boundary (mediabunny + ranged reads), quad-local placement,
-  catalog, playback, and known limits. Its schema is also machine-readable as
-  [`video-editing.schema.json`](docs/video-editing.schema.json) — the **sparse**
-  table: one row per *annotated* frame, not per video frame.
+  current params/GLB editing, playback, and known limits. The offline annotation
+  source schema remains documented as
+  [`video-editing.schema.json`](docs/video-editing.schema.json); convert it
+  explicitly before loading the editor.
 - [`docs/comments.md`](docs/comments.md) — what comments are for, what to cut and
   what to keep, and `scripts/comment_audit.py` for when you want a number.
 - [`AGENTS.md`](AGENTS.md) — contributor/agent guide: which gates a change owes

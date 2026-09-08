@@ -300,6 +300,15 @@ impl SceneDocument {
 }
 
 fn validate_table(schema: &arrow::datatypes::Schema, kind: &str) -> Result<(), ProtocolError> {
+    if schema
+        .metadata()
+        .contains_key(crate::VIDEO_EDIT_VERSION_KEY)
+    {
+        return Err(parse_error(
+            "legacy video-edit annotation input is retired; convert it offline with \
+             scripts/timeline_to_params.py and load the params/GLB Arrow document",
+        ));
+    }
     if kind == "params" && is_source_subset(schema) {
         return Ok(());
     }

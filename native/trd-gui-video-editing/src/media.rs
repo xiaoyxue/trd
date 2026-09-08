@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::io::{BufRead, Read};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
@@ -117,21 +117,6 @@ pub(crate) fn preview_size(info: &trd_core::VideoInfo, preview_width: u32) -> (u
 }
 
 impl NativeVideo {
-    pub fn open(
-        source: NativeVideoSource,
-        info: &trd_core::VideoInfo,
-        preview_width: u32,
-    ) -> Result<(Self, Option<trd_core::UnpresentedTail>), NativeVideoEditingError> {
-        if let NativeVideoSource::Local(path) = &source {
-            validate_file(path, info)?;
-        }
-        let unpresented_tail = validate_probe(&source, info)?;
-        Ok((
-            Self::with_timeline(source, info, preview_width),
-            unpresented_tail,
-        ))
-    }
-
     /// Opens without a document (#264): derives the timeline from the container.
     /// Returns the derived `VideoInfo` so the editor can adopt it.
     pub fn probe(
@@ -460,31 +445,6 @@ fn index_at(media_time_seconds: f64, fps_num: u32, fps_den: u32, frame_count: u3
     )
 }
 
-fn validate_file(path: &Path, info: &trd_core::VideoInfo) -> Result<(), NativeVideoEditingError> {
-    let actual_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("");
-    if actual_name != info.source_name {
-        return Err(NativeVideoEditingError::SourceMismatch(format!(
-            "expected filename {}, got {actual_name}",
-            info.source_name
-        )));
-    }
-    let metadata = std::fs::metadata(path).map_err(|source| NativeVideoEditingError::Read {
-        path: path.display().to_string(),
-        source,
-    })?;
-    if metadata.len() != info.byte_length {
-        return Err(NativeVideoEditingError::SourceMismatch(format!(
-            "expected {} bytes, got {}",
-            info.byte_length,
-            metadata.len()
-        )));
-    }
-    Ok(())
-}
-
 /// Counts trailing discard-flagged packets (#331). Local sources only (#326);
 /// returns `None` for URLs and on probe failure — `None` means "not checked",
 /// not "checked, zero".
@@ -640,111 +600,10 @@ fn probe_video_info(
     })
 }
 
-fn validate_probe(
-    source: &NativeVideoSource,
-    info: &trd_core::VideoInfo,
-) -> Result<Option<trd_core::UnpresentedTail>, NativeVideoEditingError> {
-    let output = Command::new("ffprobe")
-        .args(CONTAINER_PROBE_FLAGS)
-        .args([
-            "-v",
-            "error",
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=codec_name,width,height,nb_frames,duration",
-            "-of",
-            "default=noprint_wrappers=1",
-        ])
-        .arg(source.as_os_str())
-        .output()
-        .map_err(|source| NativeVideoEditingError::Spawn {
-            program: "ffprobe",
-            source,
-        })?;
-    if !output.status.success() {
-        return Err(NativeVideoEditingError::Command {
-            program: "ffprobe",
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        });
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let fields: HashMap<_, _> = text
-        .lines()
-        .filter_map(|line| line.split_once('='))
-        .collect();
-    let parse_u32 = |field: &'static str| -> Result<u32, NativeVideoEditingError> {
-        let value = fields
-            .get(field)
-            .ok_or(NativeVideoEditingError::ProbeField(field))?;
-        value
-            .parse()
-            .map_err(|_| NativeVideoEditingError::ProbeValue {
-                field,
-                value: (*value).to_owned(),
-            })
-    };
-    let width = parse_u32("width")?;
-    let height = parse_u32("height")?;
-    if (width, height) != (info.width, info.height) {
-        return Err(NativeVideoEditingError::SourceMismatch(format!(
-            "expected {}x{}, got {width}x{height}",
-            info.width, info.height
-        )));
-    }
-    let codec = fields
-        .get("codec_name")
-        .copied()
-        .ok_or(NativeVideoEditingError::ProbeField("codec_name"))?;
-    if codec != info.codec {
-        return Err(NativeVideoEditingError::SourceMismatch(format!(
-            "expected codec {}, got {codec}",
-            info.codec
-        )));
-    }
-    if let Some(value) = fields
-        .get("nb_frames")
-        .copied()
-        .filter(|value| *value != "N/A")
-    {
-        let frames: u32 = value
-            .parse()
-            .map_err(|_| NativeVideoEditingError::ProbeValue {
-                field: "nb_frames",
-                value: value.to_owned(),
-            })?;
-        if frames != info.frame_count {
-            return Err(NativeVideoEditingError::SourceMismatch(format!(
-                "expected {} frames, got {frames}",
-                info.frame_count
-            )));
-        }
-    }
-    let duration_value = fields
-        .get("duration")
-        .copied()
-        .ok_or(NativeVideoEditingError::ProbeField("duration"))?;
-    let duration: f64 =
-        duration_value
-            .parse()
-            .map_err(|_| NativeVideoEditingError::ProbeValue {
-                field: "duration",
-                value: duration_value.to_owned(),
-            })?;
-    let expected_duration =
-        f64::from(info.frame_count) * f64::from(info.fps_den) / f64::from(info.fps_num);
-    let frame_duration = f64::from(info.fps_den) / f64::from(info.fps_num);
-    if (duration - expected_duration).abs() > frame_duration {
-        return Err(NativeVideoEditingError::SourceMismatch(format!(
-            "expected {expected_duration:.3}s duration, got {duration:.3}s"
-        )));
-    }
-    Ok(probe_unpresented_tail(source, duration))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     fn info(width: u32, height: u32) -> trd_core::VideoInfo {
         trd_core::VideoInfo {

@@ -42,9 +42,10 @@ violate without anything noticing:
   hard-rejected, never silently upgraded. To evolve it, **bump the version and
   migrate all producers + fixtures in one change** (`scripts/*_to_arrow.py` stamp
   it; regenerate `stage{1,2}.arrow`). Never re-add retired versions (#82/#90).
-- **The video-editing document (`trd.video_edit.version = 0.2.0`) is deliberately
-  independent of `PROTOCOL_VERSION`** — no editor columns in `0.0.6`, no protocol
-  bump for editor state.
+- **Native and browser video-editing accept only current params/GLB documents.**
+  No old annotation/catalog UI or runtime fallback is retained. The independent
+  `trd.video_edit.version = 0.2.0` annotation remains offline source data:
+  explicitly convert it with `scripts/timeline_to_params.py` before loading.
 - **Protocol `0.0.6` asset rule:** embedded OBJ geometry uses the mesh columns,
   the mesh row index is its `mesh_id`, the material on that row belongs to that
   ID, and keyed texture rows carry the same `mesh_id`. A legacy texture table
@@ -363,7 +364,7 @@ The contents of the test levels: tiers 1–2 are **L2**, tiers 3–4 are **L3**.
 - **trd-gui (wasm + web):** build the gui wasm, serve, and load a mesh
   (`?mesh=…&texture=…`) in the browser.
 - **video editor:** serve `web/gui-video-editing`, open the FIBA MP4, and exercise
-  quad selection, all three catalog assets, object picking/editing,
+  quad selection, params-only and single/multiple-GLB inputs, object picking/editing,
   play/pause/seek, and the video-only 222–287 tail. Confirm PBR/IBL and colors
   match the other front-ends. Open **Details** and confirm its displayed frame
   identity does not jump ahead during rapid seek/render, and that the Dragon
@@ -416,7 +417,7 @@ Use the [coca-cola can recipe](#cross-mode-e2e-recipe--coca-cola-can-pbr--aabb--
 for 4.1-4.4 so all four are driven by one scene and their colours can be compared
 directly. For 4.2 also confirm playback runs at the stream's declared rate and
 loops; for 4.5/4.6 run the editor checks listed under §3 — quad selection, all
-three catalog assets, picking/editing, play/pause/seek, the video-only 222-287
+current params-only/single/multiple-GLB cases, picking/editing, play/pause/seek, the video-only 222-287
 tail, and Details' frame identity under rapid seek.
 
 ##### 4.7 — large-file seek (Windows, required for any media-layer change)

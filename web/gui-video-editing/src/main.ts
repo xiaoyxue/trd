@@ -1,27 +1,14 @@
 import uffiziEnvUrl from "../../../assets/envmap/uffizi-large.hdr" with { type: "file" };
-import cokeTextureUrl from "../../../assets/meshes/can/can_around.jpg" with { type: "file" };
-import cokeObjUrl from "../../../assets/meshes/can/coke.obj" with { type: "file" };
-import dragonUrl from "../../../assets/meshes/glb/Meshy_AI_Dragon_0804104424_texture.glb" with {
-  type: "file",
-};
-import beerObjUrl from "../../../assets/meshes/qd_beer/source/3d66.com_JDH5455878326.obj" with {
-  type: "file",
-};
-import beerTextureUrl from "../../../assets/meshes/qd_beer/textures/3d66-export-JDH5455878326-001.jpg" with {
-  type: "file",
-};
-import editingDocumentUrl from "../data/fiba-shot1.arrow" with { type: "file" };
-import init, { startVideoEditing, videoEditingGltfReferences } from "../pkg/trd_wasm.js";
+import init, { startVideoEditing } from "../pkg/trd_wasm.js";
 import wasmUrl from "../pkg/trd_wasm_bg.wasm" with { type: "file" };
-import { byteSourceFor, MediabunnyReader, type MediaInput } from "./media/mediabunny-reader.ts";
+import { MediabunnyReader, type MediaInput } from "./media/mediabunny-reader.ts";
 import { VideoPlayer } from "./media/player.ts";
 
 /// Which path an error came from. Mirrors Rust's `ErrorScope` codes, which the
 /// editor uses to keep one path's success from clearing another's failure.
-type ErrorScope = "media" | "catalog" | "document" | "export";
+type ErrorScope = "media" | "document" | "export";
 const errorScopes: Record<ErrorScope, number> = {
   media: 1,
-  catalog: 2,
   document: 3,
   export: 6,
 };
@@ -33,10 +20,8 @@ async function main(): Promise<void> {
     throw new Error("missing #video-editing-canvas");
   }
   const query = new URLSearchParams(location.search);
-  // The annotation document is optional (#264). `?document=none` opens the
-  // editor as a plain player; anything else names a document to load, and the
-  // FIBA one is the default so the demo keeps working unchanged.
-  const requestedDocument = query.get("document") ?? editingDocumentUrl;
+  // No implicit legacy annotation: opening the page and selecting data are separate.
+  const requestedDocument = query.get("document") ?? "none";
   let documentBytes: Uint8Array | undefined;
   if (requestedDocument !== "none") {
     const response = await fetch(requestedDocument);
@@ -52,32 +37,10 @@ async function main(): Promise<void> {
     throw new Error(`failed to fetch Uffizi environment: ${envResponse.status}`);
   }
   const defaultEnvBytes = new Uint8Array(await envResponse.arrayBuffer());
-  const initialGltf = documentBytes ? await resolveGltfReferences(documentBytes) : [];
-  const editor = await startVideoEditing(canvas, documentBytes, initialGltf, defaultEnvBytes);
-
-  async function resolveGltfReferences(bytes: Uint8Array): Promise<Uint8Array[]> {
-    const references = videoEditingGltfReferences(bytes) as Array<{
-      index: number;
-      path?: string;
-      url?: string;
-    }>;
-    return Promise.all(
-      references.map(async (reference) => {
-        const target = reference.url ?? reference.path;
-        if (!target) {
-          throw new Error(`glTF mesh row ${reference.index} has no path or URL`);
-        }
-        const response = await fetch(new URL(target, location.href));
-        if (!response.ok) {
-          throw new Error(`failed to fetch glTF mesh row ${reference.index}: ${response.status}`);
-        }
-        return new Uint8Array(await response.arrayBuffer());
-      }),
-    );
-  }
+  const editor = await startVideoEditing(canvas, documentBytes, [], defaultEnvBytes);
 
   async function loadArrowInput(bytes: Uint8Array): Promise<void> {
-    await editor.loadDocumentWithGltf(bytes, await resolveGltfReferences(bytes), defaultEnvBytes);
+    await editor.loadDocumentWithGltf(bytes, [], defaultEnvBytes);
   }
 
   /// Surfaces a failure. The editor's UI is a canvas, so an error drawn there
@@ -85,44 +48,19 @@ async function main(): Promise<void> {
   /// well is what makes a failure reportable and reproducible.
   ///
   /// `scope` names the path that failed, so a recovered decode cannot clear a
-  /// catalog or document failure (#329).
+  /// document failure (#329).
   function reportError(scope: ErrorScope, message: string): void {
     console.error(`video editing (${scope}): ${message}`);
     editor.setError(errorScopes[scope], message);
   }
 
-  const catalog = new Map<number, { modelPath: string; modelUrl: string; textureUrl?: string }>([
-    [
-      1,
-      {
-        modelPath: "assets/meshes/can/coke.obj",
-        modelUrl: cokeObjUrl,
-        textureUrl: cokeTextureUrl,
-      },
-    ],
-    [
-      2,
-      {
-        modelPath: "assets/meshes/qd_beer/source/3d66.com_JDH5455878326.obj",
-        modelUrl: beerObjUrl,
-        textureUrl: beerTextureUrl,
-      },
-    ],
-    [
-      3,
-      {
-        modelPath: "assets/meshes/glb/Meshy_AI_Dragon_0804104424_texture.glb",
-        modelUrl: dragonUrl,
-      },
-    ],
-  ]);
   const input = document.createElement("input");
   input.type = "file";
   input.accept = "video/mp4";
   input.hidden = true;
   document.body.append(input);
 
-  // The optional annotation document. A second picker rather than one filtered
+  // The optional params/GLB document. A second picker rather than one filtered
   // for both, because the two sources are independent: either may be chosen
   // first, and the document may be cleared without touching the video (#264).
   const documentInput = document.createElement("input");
@@ -172,8 +110,6 @@ async function main(): Promise<void> {
     }
     editor.clearDocument();
   }
-  let loadingAsset = false;
-  let envBytesPromise: Promise<Uint8Array> | undefined = Promise.resolve(defaultEnvBytes);
   let sourceReady = false;
   let sourceGeneration = 0;
 
@@ -236,10 +172,6 @@ async function main(): Promise<void> {
   /// Opens a video for decoding. The source is a local file or a URL behind the
   /// same interface, so this path no longer forks on which one it has (#282).
   ///
-  /// Which reader demuxes it *is* a fork, deliberately: `?reader=mediabunny`
-  /// delegates that layer to a library, and the default keeps the hand-written
-  /// mp4box path. Both run under the same player, so a difference between them
-  /// is a difference in demuxing and nothing else.
   async function loadVideoSource(
     media: MediaInput,
     localFile?: { filename: string; byteLength: number },
@@ -254,17 +186,9 @@ async function main(): Promise<void> {
     editor.setVideoStatus(false, false);
     try {
       const label = media.kind === "file" ? media.file.name : media.url;
-      let opened: VideoPlayer;
-      let byteLength: number;
-      if (query.get("reader") === "mediabunny") {
-        const reader = await MediabunnyReader.open(media);
-        byteLength = localFile?.byteLength ?? 0;
-        opened = VideoPlayer.attach(reader, frameSink(generation));
-      } else {
-        const source = await byteSourceFor(media);
-        byteLength = source.size;
-        opened = await VideoPlayer.open(source, frameSink(generation));
-      }
+      const reader = await MediabunnyReader.open(media);
+      const byteLength = localFile?.byteLength ?? 0;
+      const opened = VideoPlayer.attach(reader, frameSink(generation));
       if (generation !== sourceGeneration) {
         opened.close();
         return;
@@ -390,48 +314,6 @@ async function main(): Promise<void> {
         .seekToSeconds(editor.mediaTimeAtFrame(seekFrame))
         .catch((error: unknown) => reportError("media", String(error)));
     }
-    const assetCode = loadingAsset ? 0 : editor.takeAssetRequest();
-    const entry = catalog.get(assetCode);
-    if (entry) {
-      loadingAsset = true;
-      envBytesPromise ??= fetch(uffiziEnvUrl).then(async (response) => {
-        if (!response.ok) {
-          throw new Error(`failed to fetch Uffizi environment: ${response.status}`);
-        }
-        return new Uint8Array(await response.arrayBuffer());
-      });
-      void Promise.all([
-        fetch(entry.modelUrl).then(async (response) => {
-          if (!response.ok) {
-            throw new Error(`failed to fetch catalog model: ${response.status}`);
-          }
-          return new Uint8Array(await response.arrayBuffer());
-        }),
-        entry.textureUrl
-          ? fetch(entry.textureUrl).then(async (response) => {
-              if (!response.ok) {
-                throw new Error(`failed to fetch catalog texture: ${response.status}`);
-              }
-              return new Uint8Array(await response.arrayBuffer());
-            })
-          : Promise.resolve(new Uint8Array()),
-        envBytesPromise,
-      ])
-        .then(([modelBytes, textureBytes, envBytes]) =>
-          editor.loadCatalogAsset(
-            assetCode,
-            entry.modelPath,
-            entry.modelUrl,
-            modelBytes,
-            textureBytes,
-            envBytes,
-          ),
-        )
-        .catch((error: unknown) => reportError("catalog", String(error)))
-        .finally(() => {
-          loadingAsset = false;
-        });
-    }
     requestAnimationFrame(serviceRustCommands);
   }
   requestAnimationFrame(serviceRustCommands);
@@ -444,9 +326,9 @@ async function main(): Promise<void> {
     void loadVideoSource({ kind: "url", url: requestedVideo }).then(() => {
       // `&play=1` starts playback too, so a scripted run can exercise the
       // decode/pace loop without driving the egui transport bar.
-      if (query.get("play") === "1") {
+      if (query.get("play") === "1" && sourceReady) {
         player?.play();
-        editor.setVideoStatus(true, true);
+        editor.setVideoStatus(sourceReady, player?.playing ?? false);
       }
     });
   }
@@ -454,5 +336,8 @@ async function main(): Promise<void> {
 
 main().catch((error: unknown) => {
   console.error("video editing failed:", error);
-  document.body.innerHTML = `<pre style="color:#f88;padding:1rem">${String(error)}</pre>`;
+  const message = document.createElement("pre");
+  message.style.cssText = "color:#f88;padding:1rem";
+  message.textContent = String(error);
+  document.body.replaceChildren(message);
 });

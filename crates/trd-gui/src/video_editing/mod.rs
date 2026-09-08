@@ -1160,6 +1160,22 @@ impl VideoEditingApp {
         self.controller.rebase_reset();
         self.shared.clear_export_asset();
         self.shared.cancel_arrow_export();
+        if self
+            .arrow_scene
+            .as_ref()
+            .is_some_and(|scene| scene.source.is_some())
+        {
+            // Reset controls/selection, not the saved document or its GPU assets.
+            self.source_controller_row = None;
+            self.source_model_baselines.clear();
+            self.source_applied_adjustments.clear();
+            self.source_selected_instance = 0;
+            if let Err(error) = self.sync_source_controller() {
+                self.shared.set_error(ErrorScope::Document, error);
+            }
+            self.shared.request_overlay();
+            return;
+        }
         // Drop the renderer to clear the GPU-side asset too.
         self.shared.renderer.borrow_mut().take();
         self.shared.asset_request.set(0);

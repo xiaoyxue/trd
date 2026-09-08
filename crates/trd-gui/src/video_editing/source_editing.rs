@@ -468,6 +468,27 @@ mod tests {
     }
 
     #[test]
+    fn resetting_controls_keeps_the_source_document_and_persisted_track_models() {
+        let mut app = app();
+        app.controller.state.objects[0].translation[0] = 0.25;
+        assert!(app.apply_source_transforms().unwrap());
+        let source = app
+            .arrow_scene
+            .as_ref()
+            .unwrap()
+            .source
+            .as_ref()
+            .unwrap()
+            .clone();
+        let edited = source.borrow().write().unwrap();
+        app.reset_all();
+        assert!(app.arrow_scene.is_some());
+        assert_eq!(source.borrow().write().unwrap(), edited);
+        assert!(!app.apply_source_transforms().unwrap());
+        assert!(!app.selected_quad);
+    }
+
+    #[test]
     fn single_quad_and_mesh_have_an_automatic_initial_binding() {
         let object = trd_core::DocumentObject {
             mesh: Some(trd_core::DocumentMesh::Index(0)),
