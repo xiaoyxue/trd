@@ -106,7 +106,12 @@ command that covers the change while iterating, but a task is not complete until
 every gate its **test level** requires has passed on **both** platforms — and
 **the results are recorded on the PR**.
 
-For GPT-driven work, run long builds and test suites through test subagents so
+For GPT-driven work, default to the main agent; do not create subagents unless
+delegation has a clear benefit. Handle simple lookups, small edits and short
+commands directly. Reuse an existing suitable subagent rather than creating
+another, and do not keep delegating work after the user narrows or cancels it.
+
+Run long builds and test suites through test subagents so
 the main session stays responsive. The parent agent still selects the test level,
 supplies the exact commands, reviews every result, and ensures no required gate
 is omitted. Use GPT-6 Astra with `high` reasoning for test subagents unless the
