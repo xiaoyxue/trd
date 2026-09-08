@@ -302,6 +302,9 @@ MP4 opens and seeks in megabytes.
 - [`docs/rendering.md`](docs/rendering.md) — running every front-end
   (wrappers ⇄ `cargo run`), all CLI flags, PBR / tone-map / MSAA, camera forms,
   AR demos, the native window, the interactive viewer, web, and Windows setup.
+- [`docs/trd-wasm.md`](docs/trd-wasm.md) — public WASM/TS/JS APIs, initialization,
+  external editor control, scene editing, canvas/offscreen rendering, image IPC,
+  media-shell integration and lifecycle/error handling.
 - [`docs/pbr.md`](docs/pbr.md) — the Disney principled-BRDF material model, all PBR
   parameters + defaults, tone mapping, and the HDR environment probe.
 - [`docs/protocol/0.0.7.md`](docs/protocol/0.0.7.md) — the current params/GLB contract,

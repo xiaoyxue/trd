@@ -380,6 +380,9 @@ Use `--probe-only` for a headless metadata + frame-0 decode smoke test.
 
 ## Web (wasm)
 
+For initialization, embedding and public TS/JS calls, see the
+[trd-wasm API guide](trd-wasm.md). This section covers launching the applications.
+
 ```sh
 nix build .#web    # Rust core → wasm-bindgen lib → bun dist/  (in ./result)
 nix run   .#web    # serve dist/ over HTTP  (PORT, default 8080)

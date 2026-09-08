@@ -43,6 +43,9 @@ Internal renderer slots never overwrite those UUIDs.
 
 ## Browser API
 
+The [trd-wasm public API guide](../trd-wasm.md) covers initialization, all browser
+entry points, lifecycle rules and end-to-end usage examples.
+
 For an already-running video editor, external TS uses
 `await window.trdVideoEditorReady`, then `loadArrow`, `resetState`, `exportArrow`
 and `seekToSeconds`. These delegate to the actual `VideoEditingHandle` WASM

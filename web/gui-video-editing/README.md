@@ -68,6 +68,9 @@ cargo run -p trd-gui-video-editing -- --document output\fiba.dragon.arrow `
 
 ## External TS/JS API
 
+For the complete generated WASM surface, standalone renderers and custom media
+integration, see the [trd-wasm public API guide](../../docs/trd-wasm.md).
+
 The running page exposes `window.trdVideoEditorReady: Promise<VideoEditorApi>`.
 Await it before calling the editor. The API operates on the existing player and
 renderer; it does not create a second media pipeline.
