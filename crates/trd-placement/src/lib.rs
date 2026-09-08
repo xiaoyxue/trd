@@ -138,14 +138,14 @@ pub fn quad_frame(
     })
 }
 
-/// Expands along the raw quad directions, with every axis scaled to `|r1|`.
-/// `P = O + u*r1 + v*(|r1|/|r2|)*r2 + w*(|r1|/|e3|)*e3`.
+/// Expands along the raw quad directions, with every axis scaled to `|0.5*r1|`.
+/// `P = O + u*0.5*r1 + v*(L/|r2|)*r2 + w*(L/|e3|)*e3`, `L = |0.5*r1|`.
 /// A Y-up mesh maps to `(u,v,w) = (x, -handedness*z, y)`.
 pub fn quad_origin_model(frame: QuadFrame) -> Result<Matrix4, PlacementError> {
-    let r1 = scale3(frame.half_edge1, 2.0);
+    let first_axis = frame.half_edge1;
     let r2 = scale3(frame.half_edge2, 2.0);
-    let lengths = [length(r1), length(r2), length(frame.e3)];
-    if !r1
+    let lengths = [length(first_axis), length(r2), length(frame.e3)];
+    if !first_axis
         .iter()
         .chain(&r2)
         .chain(&frame.e3)
@@ -161,7 +161,7 @@ pub fn quad_origin_model(frame: QuadFrame) -> Result<Matrix4, PlacementError> {
     let r2_direction = scale3(r2, 1.0 / lengths[1]);
     let normal_direction = scale3(frame.e3, 1.0 / lengths[2]);
     let orientation = dot(
-        cross(scale3(r1, 1.0 / lengths[0]), r2_direction),
+        cross(scale3(first_axis, 1.0 / lengths[0]), r2_direction),
         normal_direction,
     );
     if orientation == 0.0 {
@@ -172,7 +172,7 @@ pub fn quad_origin_model(frame: QuadFrame) -> Result<Matrix4, PlacementError> {
     let up = scale3(normal_direction, lengths[0]);
     let mut model = [0.0; 16];
     for (row, camera_sign) in [1.0, -1.0, -1.0].into_iter().enumerate() {
-        model[row] = r1[row] * camera_sign;
+        model[row] = first_axis[row] * camera_sign;
         model[4 + row] = up[row] * camera_sign;
         model[8 + row] = forward[row] * camera_sign;
         model[12 + row] = frame.origin_camera[row] * camera_sign;
@@ -484,7 +484,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_origin_equalizes_lengths_without_changing_directions() {
+    fn direct_origin_uses_half_edge_length_without_changing_directions() {
         for normal_sign in [-1.0, 1.0] {
             let frame = QuadFrame {
                 origin_camera: [0.2, -0.1, 3.0],
@@ -501,7 +501,7 @@ mod tests {
             for start in [0, 4, 8] {
                 assert_relative_eq!(
                     length([columns[start], columns[start + 1], columns[start + 2]]),
-                    2.0,
+                    1.0,
                     epsilon = 1e-6
                 );
             }
@@ -516,10 +516,10 @@ mod tests {
                 let expected = add(
                     frame.origin_camera,
                     add(
-                        scale3([2.0, 0.0, 0.0], local[0]),
+                        scale3([1.0, 0.0, 0.0], local[0]),
                         add(
-                            scale3([1.2, 1.6, 0.0], -normal_sign * local[2]),
-                            scale3([0.0, 0.0, 2.0 * normal_sign], local[1]),
+                            scale3([0.6, 0.8, 0.0], -normal_sign * local[2]),
+                            scale3([0.0, 0.0, normal_sign], local[1]),
                         ),
                     ),
                 );
@@ -630,7 +630,7 @@ mod tests {
             }
             assert_relative_eq!(
                 length([columns[4], columns[5], columns[6]]),
-                2.0 * axis_length,
+                axis_length,
                 epsilon = 1e-6
             );
         }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Direct placement with raw directions and all three axis lengths equal to |r1|.
+"""Direct placement with raw directions and all axis lengths equal to |0.5*r1|.
 
 Read current params-only FHC input and write comparison matrices/vertices, not
 an application document. Keep the original placement reference unchanged.
@@ -28,8 +28,8 @@ def load_module(name, path):
 
 def expand(origin, r1, r2, e3, coordinates):
     u, v, w = coordinates
-    length = np.linalg.norm(r1)
-    return (origin + u * r1 + v * (length / np.linalg.norm(r2)) * r2
+    length = np.linalg.norm(0.5 * r1)
+    return (origin + u * 0.5 * r1 + v * (length / np.linalg.norm(r2)) * r2
             + w * (length / np.linalg.norm(e3)) * e3)
 
 
@@ -109,7 +109,8 @@ def comparison_row(reference, row):
         [0.0, 0.0, 0.0, 1.0],
     ])
     lengths = np.linalg.norm(raw[:3, :3], axis=0)
-    equal_lengths = np.diag([1.0, lengths[0] / lengths[1], lengths[0] / lengths[2], 1.0])
+    unit_length = 0.5 * lengths[0]
+    equal_lengths = np.diag([0.5, unit_length / lengths[1], unit_length / lengths[2], 1.0])
     scaled_basis = CV_TO_GL @ raw @ equal_lengths
     placement = scaled_basis @ mesh_to_coefficients
     axis = CV_TO_GL @ raw @ np.diag([0.5, 0.5, axis_length, 1.0])
@@ -133,7 +134,7 @@ def comparison_row(reference, row):
         "r2": r2.tolist(),
         "e3": e3.tolist(),
         "axis_length": float(axis_length),
-        "placement_axis_length": float(lengths[0]),
+        "placement_axis_length": float(unit_length),
         "handedness": handedness,
         "raw_basis_model": reference.colmajor(CV_TO_GL @ raw),
         "scaled_basis_model": reference.colmajor(scaled_basis),
@@ -183,7 +184,7 @@ def main():
     if any(right <= left for left, right in zip(indices, indices[1:])):
         raise ValueError("source frame identities must be strictly increasing")
     result = {
-        "formula": "P = O + u*r1 + v*(|r1|/|r2|)*r2 + w*(|r1|/|e3|)*e3",
+        "formula": "P = O + u*0.5*r1 + v*(L/|r2|)*r2 + w*(L/|e3|)*e3; L = |0.5*r1|",
         "matrix_layout": "column-major GL camera models; k_row_major is pixel OpenCV K",
         "source_name": metadata.get(b"trd.video.source_name", b"").decode(),
         "source_sha256": metadata.get(b"trd.video.sha256", b"").decode(),
