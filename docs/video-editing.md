@@ -64,6 +64,57 @@ rows. Each row retains its own camera and quad. `track_id` survives reordered
 instances and gaps; without IDs, consistent ordered bindings are required.
 Ambiguous correspondence is an error, not permission to edit another object.
 
+### Opt-in placement-basis experiment
+
+`crates/trd-placement/tests/basis_experiment.rs` compares three Rust placement
+paths without changing the editor, protocol, source assets or golden baselines:
+
+| Variant | Displayed axes | Mesh / unit-quad basis |
+|---|---|---|
+| `legacy` | Raw quad half-edges | Existing orthonormal placement |
+| `shared_orthonormal` | Orthonormal placement frame | The same orthonormal frame |
+| `shared_raw` | Raw quad half-edges | The same raw frame; potentially affine/sheared |
+
+The source quad outline/grid remains unchanged as an observation reference.
+The unit quad uses an identity local model; its projected edges are compared
+with projected axes at the **same starting point**. A shared basis proves
+consistency, not correct camera calibration. In particular, `shared_raw` must
+not be described as preserving a rigid cube when the raw frame is nonorthogonal.
+
+Run the synthetic case without external inputs:
+
+```powershell
+cargo test -p trd-placement --test basis_experiment
+```
+
+The real-source cases require the matching external params, Dragon bundle and
+1920x1080 video. From the repository root, prepare the three named source frames
+and run the CPU observations plus real-GPU render:
+
+```powershell
+$env:TRD_FIBA_PARAMS = 'D:\Code\trd-assets\fiba.params.arrow'
+$env:TRD_DRAGON_PARAMS = 'D:\Code\trd-assets\fiba.dragon.no-model.arrow'
+$env:TRD_BASIS_OUTPUT = Join-Path $PWD 'output\placement-basis-experiment'
+$env:TRD_BASIS_FRAMES = Join-Path $env:TRD_BASIS_OUTPUT 'frames'
+New-Item -ItemType Directory -Force $env:TRD_BASIS_FRAMES | Out-Null
+foreach ($frame in 168, 204, 220) {
+    $name = 'frame_{0:D6}.png' -f $frame
+    ffmpeg -v error -y -i 'E:\Asset\Video\shot_0001.mp4' `
+        -vf "select=eq(n\,$frame)" -frames:v 1 -update 1 `
+        (Join-Path $env:TRD_BASIS_FRAMES $name)
+    if ($LASTEXITCODE -ne 0) { throw "Frame $frame extraction failed" }
+}
+cargo test -p trd-placement --test basis_experiment -- `
+    --include-ignored --nocapture --test-threads=1
+```
+
+`TRD_BASIS_OUTPUT` receives `basis_metrics.csv` and original 1080p PNGs named
+`{case}_{source_frame:06}_{variant}.png` for the unit quad, cube and Dragon.
+Source indices 168, 204 and 220 are player labels 169, 205 and 221. Dragon
+observations use unlit filled geometry so affine normal-matrix assumptions
+cannot be mistaken for a geometry result. These are headless observations,
+not editor UI E2E or new golden images.
+
 ## Arrow scene export and round-trip
 
 **Export Arrow** writes the retained params and original GLB resources:
