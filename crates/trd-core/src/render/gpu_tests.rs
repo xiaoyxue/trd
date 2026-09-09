@@ -731,7 +731,7 @@ fn automatic_blob_shadows_do_not_accumulate_across_frames() {
         0.9,
         Viewport { width, height },
     );
-    let mut frame = |renderer: &mut Renderer, scene: &Scene| {
+    let frame = |renderer: &mut Renderer, scene: &Scene| {
         render_with_readback(&gpu, format, width, height, |encoder, view| {
             renderer.encode(encoder, view, camera, scene);
         })

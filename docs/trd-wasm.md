@@ -292,6 +292,11 @@ matching sparse rows. See [scene editing semantics](protocol/scene-documents.md)
 
 ## CanvasRenderer and OffscreenRenderer
 
+The bundled stream viewer starts its playback clock on the first animation-frame
+callback, not during asynchronous renderer setup. Both targets begin at row zero
+and then select rows from elapsed RAF time; initialization cannot produce a
+negative row index.
+
 Both accept the same source document and appearance controls. They do not own a
 video reader or a playback clock. The host selects rows and supplies backgrounds.
 
@@ -399,8 +404,9 @@ viewer's inputs, not permission to encode OBJ geometry in protocol Arrow.
 
 The host's `onPickModel` callback opens a browser file picker after the GUI's
 Load model action. Hand the selected GLB back with
-`handle.loadModel(name, glbBytes, envBytes?)`. This queues work for the GUI;
-its `void` return is **not** a load-completion promise.
+`handle.loadModel(name, glbBytes, envBytes?)`. This queues work and requests a GUI
+repaint, so an idle viewer processes the upload without another pointer or keyboard
+event. Its `void` return is **not** a load-completion promise.
 
 Use the [GUI viewer bootstrap](../web/gui-viewer/src/main.ts) for complete
 picker/texture/environment handling. It is a different application from the
@@ -424,5 +430,7 @@ The [video editor API E2E recipe](../web/gui-video-editing/README.md#real-browse
 exercises actual WASM, external TS, GUI loading, reset while playing, source
 retention, exported edits and seeks. The
 [standalone renderer recipe](rendering.md#web-wasm) covers Canvas/Offscreen
-pixels, lifecycle and image IPC. Full platform gates and handoff rules remain
+pixels, lifecycle and image IPC. The shared startup/loop clock also has a
+GPU-free regression: `bun test web\viewer\tests\frame-clock.test.js`.
+Full platform gates and handoff rules remain
 in [AGENTS.md](../AGENTS.md#testing).
