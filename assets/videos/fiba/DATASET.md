@@ -1,12 +1,14 @@
 <!--
 trd vendoring note (issue #110)
 ===============================
-Only `per_frame_KVP_cube_best.parquet` + `per_frame_KVP_cube_best_schema.json` are
-vendored into this repo — pure numeric camera calibration (K, floor quads,
+`per_frame_KVP_cube_best.parquet` + `per_frame_KVP_cube_best_schema.json` are
+vendored into this repo as numeric camera calibration (K, floor quads,
 homographies) for the two most-accurate methods (2VP + 1circle), no imagery. They
 are all the FIBA court AR demo needs (see the repo README "FIBA court AR demo" +
 `scripts/fiba_perception_to_arrow.py`). `fiba-shot1.arrow` is the sparse `0.2.0`
 video-editing document built from them: geometry on the 222 tracked frames only.
+The current `0.0.7` scene documents `fiba.params.arrow` and `fiba.dragon.arrow`
+are also vendored; see "Current scene documents" below.
 
 NOT vendored (copyrighted broadcast footage / bulky / not needed by the demo):
 `shot_0001.mp4`, `2024-Olympic-Basketball-1.mp4`, `inputs/`, the other
@@ -105,6 +107,33 @@ why multiple methods are stored: the best method flips with the footage.
 ---
 
 ## Files
+
+### Current scene documents
+
+These files are byte-for-byte copies of the supplied `trd-assets` documents,
+not regenerated fixtures. Both use protocol `0.0.7`, retain 222 sparse params
+rows (`present_index` 0-221), and declare the external `shot_0001.mp4` source:
+1920x1080, 24/1 fps, 288 frames and 6,664,274 bytes. Video is not embedded.
+Rows 222-287 remain video-only; no padding is added.
+
+| File | Bytes | Contents |
+|---|---:|---|
+| `fiba.params.arrow` | 345,000 | Params-only placement quads; no mesh resources or explicit model column |
+| `fiba.dragon.arrow` | 60,932,648 | Params followed by one mesh resource containing the original Dragon GLB and UUID binding |
+
+The Dragon resource is bound to UUID `5386f43b-538b-53f9-83fa-e12b127127c1`;
+its GLB is 60,566,720 bytes. Neither document has explicit `trd.render.config`
+metadata, so current default render settings apply. No application or test is
+switched to these files automatically by vendoring them.
+
+SHA-256:
+
+```text
+fiba.params.arrow  b403113e61872b72a2122be83a90bb0f7c3af730e50a8b44397489a23e3568df
+fiba.dragon.arrow  71056df024d48e2eb4ad0613ce5f82c184168e15fde3eda1315c75ba70ebc7ae
+```
+
+### Upstream calibration files
 
 | File | Frames | Methods | What |
 |---|---|---|---|
