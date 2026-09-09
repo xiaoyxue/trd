@@ -49,6 +49,7 @@ fn assert_parity(fixture_name: &str) {
         assert_eq!(native.schema(), browser.schema());
         assert_eq!(native.batches(), browser.batches());
         assert_eq!(native.meshes(), browser.meshes());
+        assert_eq!(native.render_config(), browser.render_config());
         assert_eq!(
             native.row_count(),
             frames.len(),
@@ -88,4 +89,32 @@ fn native_and_wasm_decoders_agree_stage1() {
 #[test]
 fn native_and_wasm_decoders_agree_stage2() {
     assert_parity("stage2.arrow");
+}
+
+#[test]
+fn shadow_metadata_edits_survive_fragmented_read_and_preserve_source_data() {
+    let original = SceneDocument::read(&std::fs::read(fixture("stage2.arrow")).unwrap()).unwrap();
+    for enable in [true, false] {
+        let mut document = original.clone();
+        let mut config = document.render_config();
+        config.shadow.enable = enable;
+        document.set_render_config(config).unwrap();
+        let bytes = document.write().unwrap();
+        let browser = SceneDocument::read(&bytes).unwrap();
+        let native = SceneDocument::read_from(ChunkedReader {
+            bytes: &bytes,
+            chunk_size: 1,
+        })
+        .unwrap();
+        assert_eq!(native.render_config(), config);
+        assert_eq!(native.schema(), browser.schema());
+        assert_eq!(native.batches(), browser.batches());
+        assert_eq!(native.meshes(), original.meshes());
+        assert_eq!(native.frames().unwrap(), original.frames().unwrap());
+        assert_eq!(native.schema().fields(), original.schema().fields());
+        for (after, before) in native.batches().iter().zip(original.batches()) {
+            assert_eq!(after.columns(), before.columns());
+            assert_eq!(after.num_rows(), before.num_rows());
+        }
+    }
 }

@@ -183,6 +183,7 @@ impl ObjectTransform {
 /// mesh is the degenerate one-draw scene.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SceneState {
+    pub render_config: trd_core::RenderConfig,
     /// The orbit camera framing the object(s).
     pub camera: OrbitCamera,
     /// The placement of each drawn object (one per loaded mesh), laid out
@@ -254,6 +255,7 @@ pub struct SceneState {
 impl Default for SceneState {
     fn default() -> Self {
         Self {
+            render_config: trd_core::RenderConfig::default(),
             camera: OrbitCamera::default(),
             objects: vec![ObjectTransform::default()],
             mesh_ids: vec![0],

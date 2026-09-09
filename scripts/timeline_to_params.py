@@ -22,7 +22,7 @@ import uuid
 
 import pyarrow as pa
 
-from protocol_version import PROTOCOL_VERSION
+from protocol_version import PROTOCOL_VERSION, render_config_metadata
 
 SOURCE_VERSION_KEY = b"trd.video_edit.version"
 SOURCE_KIND_KEY = b"trd.video_edit.table.kind"
@@ -146,6 +146,7 @@ def convert(
     del metadata[SOURCE_KIND_KEY]
     metadata[b"trd.protocol.version"] = PROTOCOL_VERSION.encode()
     metadata[b"trd.table.kind"] = b"params"
+    metadata.update(render_config_metadata())
     metadata[b"trd.stream.frame_rate"] = str(fps_num / fps_den).encode()
     metadata[b"trd.source.conversion"] = b"video_edit_0.2.0_to_fhc_params"
     output_schema = pa.schema(fields, metadata=metadata)

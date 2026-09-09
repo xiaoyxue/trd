@@ -253,6 +253,31 @@ impl DrawableObject {
         Self::new(Primitive::BlobShadow, model)
     }
 
+    /// Projects already-transformed bounds onto the Y-up support plane.
+    pub fn blob_shadow_for_bounds(bounds: crate::Aabb3, ground_y: f32) -> Self {
+        let center = bounds.center();
+        // Leave a feathered rim outside the projected object footprint.
+        let half = bounds.half_extents() * 1.25;
+        Self::blob_shadow(Matrix4::from_cols_array(&[
+            half.x(),
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            -half.z(),
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            center.x(),
+            ground_y,
+            center.z(),
+            1.0,
+        ]))
+    }
+
     /// Which primitive this draws — also its batch key.
     pub fn primitive(&self) -> Primitive {
         self.primitive

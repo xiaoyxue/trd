@@ -20,6 +20,33 @@
       "required": false,
       "type": "positive float string",
       "default": 30
+    },
+    "trd.render.config": {
+      "required": false,
+      "scope": "params schema; shared by all record batches and sparse rows",
+      "type": "JSON object",
+      "default": {
+        "shadow": {
+          "enable": true,
+          "shadow_type": "blob"
+        }
+      },
+      "shadow": {
+        "enable": {
+          "type": "boolean",
+          "default": true
+        },
+        "shadow_type": {
+          "supported": [
+            "blob"
+          ],
+          "reserved_unsupported": [
+            "shadow_map"
+          ],
+          "default": "blob"
+        }
+      },
+      "validation": "Missing fields use defaults; malformed JSON, null/wrong types, unknown fields/types and shadow_map are errors."
     }
   },
   "source_adapter_exception": "Unversioned FHC source tables use the explicit tracked adapter; declared old versions are never upgraded.",

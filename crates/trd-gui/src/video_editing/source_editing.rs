@@ -8,6 +8,26 @@ pub(super) fn initial_bound_instance(
 }
 
 impl VideoEditingApp {
+    pub(super) fn set_source_render_config(
+        &mut self,
+        config: trd_core::RenderConfig,
+    ) -> Result<(), String> {
+        let source = self
+            .arrow_scene
+            .as_ref()
+            .and_then(|scene| scene.source.as_ref())
+            .ok_or_else(|| {
+                "load a current params/GLB document before editing shadows".to_owned()
+            })?;
+        source
+            .borrow_mut()
+            .set_render_config(config)
+            .map_err(|error| error.to_string())?;
+        self.controller.state.render_config = config;
+        self.shared.request_overlay();
+        Ok(())
+    }
+
     pub(super) fn sync_source_controller(&mut self) -> Result<(), String> {
         let Some(scene) = self.arrow_scene.as_ref() else {
             return Ok(());
@@ -15,6 +35,7 @@ impl VideoEditingApp {
         let Some(source) = scene.source.clone() else {
             return Ok(());
         };
+        self.controller.state.render_config = source.borrow().render_config();
         let Some(row) = scene.source_row(self.displayed_frame_index) else {
             self.source_controller_row = None;
             self.controller.state.selected = None;
@@ -154,6 +175,45 @@ mod tests {
         app.sync_source_controller().unwrap();
         app.controller.state.selected = Some(0);
         app
+    }
+
+    #[test]
+    fn shadow_config_is_global_survives_seek_reset_and_ui_export() {
+        let mut author = app();
+        let source = author
+            .arrow_scene
+            .as_ref()
+            .unwrap()
+            .source
+            .as_ref()
+            .unwrap()
+            .clone();
+        let original = source.borrow().clone();
+        let mut config = original.render_config();
+        config.shadow.enable = false;
+        author.set_source_render_config(config).unwrap();
+        author.displayed_frame_index = u32::MAX;
+        author.sync_source_controller().unwrap();
+        assert_eq!(author.controller.state.render_config, config);
+        author.reset_all();
+        assert_eq!(author.controller.state.render_config, config);
+        assert_eq!(
+            source.borrow().frames().unwrap(),
+            original.frames().unwrap()
+        );
+        assert_eq!(source.borrow().meshes(), original.meshes());
+        author.shared.video_loaded.set(true);
+        author.request_arrow_export();
+        let export = author.shared.take_arrow_export().unwrap();
+        let reopened = trd_core::SceneDocument::read(&export.bytes).unwrap();
+        assert_eq!(reopened.render_config(), config);
+        let replay = app_from_source(reopened);
+        assert_eq!(replay.controller.state.render_config, config);
+        author.set_arrow_scene(None);
+        assert_eq!(
+            author.controller.state.render_config,
+            trd_core::RenderConfig::default()
+        );
     }
 
     #[test]

@@ -178,6 +178,10 @@ bytes; geometry, materials and textures stay inside GLB. Params-only input
 renders reference geometry. Video is external, and a missing sparse row remains
 video-only.
 
+Document-wide render settings live once in params schema metadata, never in every
+row. Blob shadows default to enabled; shared GUI **Shadows** controls persist
+enable/type settings through Arrow export and replay.
+
 Tracked FHC `model` is row-major on the wire; the separate CG/CV adapter retains
 column-major matrices and existing camera behavior. Editor transforms persist
 in all corresponding sparse rows and survive a fresh play/seek roundtrip.

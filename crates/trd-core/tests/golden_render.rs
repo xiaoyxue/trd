@@ -179,6 +179,7 @@ fn pbr_material() -> DisneyMaterial {
 /// like `stage2`, 4× MSAA.
 fn pbr_options(tonemap: Tonemap) -> RenderOptions {
     RenderOptions {
+        render_config: Default::default(),
         mode: RenderMode::Shaded,
         show_aabb: true,
         show_axes: false,
@@ -358,6 +359,7 @@ fn golden_stage1_placement_quad() {
         "stage1",
         "stage1.arrow",
         RenderOptions {
+            render_config: Default::default(),
             mode: RenderMode::Filled,
             show_aabb: false,
             show_axes: false,
@@ -389,6 +391,7 @@ fn golden_stage1_placement_quad_no_msaa() {
         "stage1_noaa",
         "stage1.arrow",
         RenderOptions {
+            render_config: Default::default(),
             mode: RenderMode::Filled,
             show_aabb: false,
             show_axes: false,
@@ -422,6 +425,7 @@ fn golden_stage2_textured_bunny() {
         "stage2",
         "stage2.arrow",
         RenderOptions {
+            render_config: Default::default(),
             mode: RenderMode::Textured,
             show_aabb: true,
             show_axes: false,
@@ -453,6 +457,7 @@ fn golden_stage2_textured_bunny_no_msaa() {
         "stage2_noaa",
         "stage2.arrow",
         RenderOptions {
+            render_config: Default::default(),
             mode: RenderMode::Textured,
             show_aabb: true,
             show_axes: false,
@@ -646,6 +651,13 @@ fn golden_environment_light_syncs_sky_and_reflection() {
         }],
         &RenderOptions {
             mode: RenderMode::Shaded,
+            // This baseline isolates sky/reflection synchronization, not grounding.
+            render_config: trd_core::RenderConfig {
+                shadow: trd_core::ShadowConfig {
+                    enable: false,
+                    ..Default::default()
+                },
+            },
             // The sky is an ordinary appearance option (#235 R2) — the same one
             // `--env-background` and the browsers' `setEnvBackground` set.
             env_background: Some(EnvironmentBackground {

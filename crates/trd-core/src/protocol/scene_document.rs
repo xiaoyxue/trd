@@ -18,6 +18,7 @@ use super::{check_version, parse_error, GlbMesh, ProtocolError, TABLE_KIND_KEY};
 pub struct SceneDocument {
     schema: SchemaRef,
     batches: Vec<RecordBatch>,
+    render_config: crate::RenderConfig,
     meshes: Vec<GlbMesh>,
     mesh_layout: Option<MeshTableLayout>,
 }
@@ -114,9 +115,11 @@ impl SceneDocument {
             ));
         }
         validate_mesh_ids(&meshes)?;
+        let render_config = Self::render_config_from_schema(&schema)?;
         let document = Self {
             schema,
             batches,
+            render_config,
             meshes,
             mesh_layout: None,
         };
@@ -134,6 +137,37 @@ impl SceneDocument {
 
     pub fn meshes(&self) -> &[GlbMesh] {
         &self.meshes
+    }
+
+    pub fn render_config(&self) -> crate::RenderConfig {
+        self.render_config
+    }
+
+    /// Changes only params schema metadata; the column buffers remain shared.
+    pub fn set_render_config(&mut self, config: crate::RenderConfig) -> Result<(), ProtocolError> {
+        let mut metadata = self.schema.metadata().clone();
+        metadata.insert(
+            super::RENDER_CONFIG_KEY.to_owned(),
+            config
+                .to_json()
+                .map_err(|error| parse_error(error.to_string()))?,
+        );
+        let schema = Arc::new(arrow::datatypes::Schema::new_with_metadata(
+            self.schema.fields().clone(),
+            metadata,
+        ));
+        let batches = self
+            .batches
+            .iter()
+            .map(|batch| {
+                RecordBatch::try_new_with_options(
+                    Arc::clone(&schema),
+                    batch.columns().to_vec(),
+                    &arrow::array::RecordBatchOptions::new().with_row_count(Some(batch.num_rows())),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.replace_batches(schema, batches)
     }
 
     pub fn decoded_assets(&self) -> Result<Vec<crate::MeshAsset>, ProtocolError> {
@@ -281,9 +315,26 @@ impl SceneDocument {
                 "an edit must preserve row and batch boundaries",
             ));
         }
+        let render_config = Self::render_config_from_schema(&schema)?;
         self.schema = schema;
         self.batches = batches;
+        self.render_config = render_config;
         Ok(())
+    }
+
+    fn render_config_from_schema(
+        schema: &arrow::datatypes::Schema,
+    ) -> Result<crate::RenderConfig, ProtocolError> {
+        schema
+            .metadata()
+            .get(super::RENDER_CONFIG_KEY)
+            .map(|json| {
+                crate::RenderConfig::from_json(json).map_err(|error| {
+                    parse_error(format!("invalid {}: {error}", super::RENDER_CONFIG_KEY))
+                })
+            })
+            .transpose()
+            .map(Option::unwrap_or_default)
     }
 
     fn validate_render_view(&self) -> Result<(), ProtocolError> {
@@ -355,6 +406,97 @@ mod tests {
             }]]),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn render_config_is_shared_metadata_and_edits_preserve_column_buffers() {
+        let mut source = SceneDocument::read(&params()).unwrap();
+        let original = source.batches()[0].clone();
+        let mut config = source.render_config();
+        config.shadow.enable = false;
+        source.set_render_config(config).unwrap();
+        assert_eq!(source.schema().fields(), original.schema().fields());
+        for (before, after) in original.columns().iter().zip(source.batches()[0].columns()) {
+            assert!(Arc::ptr_eq(before, after));
+        }
+        let bytes = source.write().unwrap();
+        for decoded in [
+            SceneDocument::read(&bytes).unwrap(),
+            SceneDocument::read_from(Cursor::new(&bytes)).unwrap(),
+        ] {
+            assert_eq!(decoded.render_config(), config);
+            assert_eq!(decoded.batches(), source.batches());
+            assert_eq!(decoded.meshes().len(), source.meshes().len());
+        }
+        source
+            .apply_model_edits(&[ModelEdit {
+                row: 0,
+                object: 0,
+                model: Matrix4::IDENTITY,
+            }])
+            .unwrap();
+        assert_eq!(source.render_config(), config);
+    }
+
+    #[test]
+    fn render_config_defaults_do_not_materialize_metadata_and_invalid_config_is_rejected() {
+        let source = SceneDocument::read(&params()).unwrap();
+        let mut metadata = source.schema().metadata().clone();
+        metadata.remove(super::super::RENDER_CONFIG_KEY);
+        for json in [None, Some(r#"{"shadow":{"enable":false}}"#), Some("{}")] {
+            let mut metadata = metadata.clone();
+            if let Some(json) = json {
+                metadata.insert(super::super::RENDER_CONFIG_KEY.to_owned(), json.to_owned());
+            }
+            let schema = Arc::new(arrow::datatypes::Schema::new_with_metadata(
+                source.schema().fields().clone(),
+                metadata.clone(),
+            ));
+            let batches = source
+                .batches()
+                .iter()
+                .map(|batch| {
+                    RecordBatch::try_new(Arc::clone(&schema), batch.columns().to_vec()).unwrap()
+                })
+                .collect();
+            let document = SceneDocument::from_batches(schema, batches, vec![]).unwrap();
+            assert_eq!(
+                document.render_config().shadow.enable,
+                json != Some(r#"{"shadow":{"enable":false}}"#)
+            );
+            assert_eq!(document.schema().metadata(), &metadata);
+            assert_eq!(
+                SceneDocument::read(&document.write().unwrap())
+                    .unwrap()
+                    .schema()
+                    .metadata(),
+                &metadata
+            );
+        }
+        for json in ["null", r#"{"shadow":{"shadow_type":"shadow_map"}}"#] {
+            let mut metadata = metadata.clone();
+            metadata.insert(super::super::RENDER_CONFIG_KEY.to_owned(), json.to_owned());
+            let schema = Arc::new(arrow::datatypes::Schema::new_with_metadata(
+                source.schema().fields().clone(),
+                metadata,
+            ));
+            let batch =
+                RecordBatch::try_new(Arc::clone(&schema), source.batches()[0].columns().to_vec())
+                    .unwrap();
+            let mut bytes = Vec::new();
+            let mut writer = StreamWriter::try_new(&mut bytes, &schema).unwrap();
+            writer.write(&batch).unwrap();
+            writer.finish().unwrap();
+            for result in [
+                SceneDocument::read(&bytes),
+                SceneDocument::read_from(Cursor::new(&bytes)),
+            ] {
+                assert!(result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("trd.render.config"));
+            }
+        }
     }
 
     #[test]

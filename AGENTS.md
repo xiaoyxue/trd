@@ -181,7 +181,7 @@ have run.
 | a vendored `assets/**` data file no build, test or front-end reads | **L1** |
 | a manifest change that *builds* differently — a dependency, feature, profile, lint or workspace-member edit in `Cargo.toml`/`Cargo.lock`, `web/**/package.json` deps or `bun.lock` | **L3** — it changes what every binary compiles to, so the blast radius is the whole tree |
 | Rust/TS that changes behaviour but cannot reach pixels, a window or media — `crates/trd-placement`, `protocol/` decode, CLI arg parsing, `math/` helpers | **L2** |
-| `crates/trd-core/src/render/**`, `src/shader/*.wgsl`, PBR/tone-map, `math/` transforms feeding the GPU `Uniform`, or the golden fixtures | **L3** |
+| `crates/trd-core/src/render/**`, `crates/trd-core/src/render_config.rs`, `src/shader/*.wgsl`, PBR/tone-map, `math/` transforms feeding the GPU `Uniform`, or the golden fixtures | **L3** |
 | a delivery surface or shell — `native/**`, `crates/trd-wasm/**`, `crates/trd-gui/**`, `web/**` | **L3** |
 | `web/gui-video-editing/src/media/**`, or anything else that demuxes, decodes or seeks | **L3, and §4.7 is required** |
 | `scripts/golden_fixtures.py`, `scripts/{jsonl,scene}_to_arrow.py`, `scripts/{glb_assets,obj_geometry,protocol_version,timeline_to_params}.py`, `scripts/fiba_video_editing_bundle.py` — they generate render inputs, goldens or stamp a version | **L3** |
@@ -284,8 +284,9 @@ that would also change local gizmos.
 | `golden_params_reference_quad_axes_cube` | params only: the quad outline, local axes and centered wireframe cube |
 | `golden_params_single_glb_edit_roundtrip` | absent/identity model → edit → export → reload, with exact same-device pixels and retained source data |
 | `golden_params_multiple_glb_bindings` | two distinguishable GLBs with independent transforms; reversing mesh rows cannot change UUID bindings |
+| `golden_params_blob_shadows_toggle_and_replay` | default-enabled blobs over a visible background, shadow-off, exact export/replay pixels, and no shadows from reference-only guides |
 
-The three new baselines live under `crates/trd-placement/tests/golden/` and use
+The placement baselines live under `crates/trd-placement/tests/golden/` and use
 Uffizi for model shading. They are headless pixel regressions, **not** the
 native/Chrome UI end-to-end cases. L3 still owes those windows and interactions.
 

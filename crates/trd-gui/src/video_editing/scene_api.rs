@@ -386,6 +386,25 @@ mod tests {
     }
 
     #[test]
+    fn api_export_retains_document_shadow_config() {
+        let mut app = app();
+        app.set_arrow_scene(Some(scene("stage2.arrow")));
+        let mut config = trd_core::RenderConfig::default();
+        config.shadow.enable = false;
+        app.set_source_render_config(config).unwrap();
+        let (result, complete) = completion();
+        app.shared.export_arrow_scene(complete);
+        app.process_scene_operations();
+        let bytes = result.borrow_mut().take().unwrap().unwrap();
+        assert_eq!(
+            trd_core::SceneDocument::read(&bytes)
+                .unwrap()
+                .render_config(),
+            config
+        );
+    }
+
+    #[test]
     #[ignore = "requires a GPU adapter"]
     fn reset_releases_old_source_and_assets_preserves_media_and_loads_a_new_scene() {
         let env = std::fs::read(

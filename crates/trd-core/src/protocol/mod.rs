@@ -45,6 +45,8 @@ pub use scene_encode::{
 pub const PROTOCOL_VERSION: &str = "0.0.7";
 pub const PROTOCOL_VERSION_KEY: &str = "trd.protocol.version";
 pub const TABLE_KIND_KEY: &str = "trd.table.kind";
+/// JSON document-wide settings on the params schema, never a per-row column.
+pub const RENDER_CONFIG_KEY: &str = "trd.render.config";
 
 pub(crate) const MESH_TABLE_KIND: &str = "mesh";
 pub(crate) const TEXTURE_TABLE_KIND: &str = "texture";

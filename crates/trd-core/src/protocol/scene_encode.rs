@@ -60,6 +60,8 @@ pub enum SceneEncodeError {
     /// A Disney material could not be represented as JSON.
     #[error("material JSON encode failed: {0}")]
     Material(#[from] serde_json::Error),
+    #[error("render config JSON encode failed: {0}")]
+    RenderConfig(serde_json::Error),
     /// A reference-only mesh must name at least one path or URL.
     #[error("glTF mesh row {0} has neither a path nor a URL")]
     MissingGltfReference(usize),
@@ -252,6 +254,12 @@ fn params_metadata(
     frame_rate: Option<f64>,
 ) -> Result<std::collections::HashMap<String, String>, SceneEncodeError> {
     let mut metadata = table_metadata(PARAMS_TABLE_KIND);
+    metadata.insert(
+        super::RENDER_CONFIG_KEY.to_owned(),
+        crate::RenderConfig::default()
+            .to_json()
+            .map_err(SceneEncodeError::RenderConfig)?,
+    );
     if let Some(frame_rate) = frame_rate {
         if !frame_rate.is_finite() || frame_rate <= 0.0 {
             return Err(SceneEncodeError::InvalidFrameRate(frame_rate));

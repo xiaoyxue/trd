@@ -250,6 +250,7 @@ fn main() -> Result<(), trd_core::StreamError> {
         cli.width,
         cli.height,
         trd_core::RenderOptions {
+            render_config: Default::default(),
             mode,
             show_aabb: cli.aabb,
             show_axes: cli.axes,

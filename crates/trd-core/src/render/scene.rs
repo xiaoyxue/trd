@@ -93,6 +93,8 @@ pub struct Background {
 pub struct Scene {
     background: Background,
     objects: Vec<DrawableObject>,
+    // The shared batcher has the uploaded mesh bounds and preview transforms.
+    automatic_shadows: bool,
     /// The light rig every PBR object in this frame is lit by.
     ///
     /// Scene-level like `objects` and `background`, so it arrives **with** the
@@ -169,6 +171,17 @@ impl Scene {
         &self.objects
     }
 
+    /// A placement adapter supplies blobs on its reconstructed support planes.
+    #[must_use]
+    pub fn without_automatic_shadows(mut self) -> Self {
+        self.automatic_shadows = false;
+        self
+    }
+
+    pub(crate) fn automatic_shadows(&self) -> bool {
+        self.automatic_shadows
+    }
+
     /// The **one** place a frame's scene is assembled from a wire draw list plus
     /// appearance options.
     ///
@@ -185,7 +198,24 @@ impl Scene {
     /// probe can draw it as a background from the same shared assembly instead of
     /// reaching around this function to set `background_mut()` (#235 R2).
     pub fn from_draws(draws: &[Draw], options: &RenderOptions, frame: Option<FrameFit>) -> Self {
+        Self::from_draws_with_config(draws, options, frame, options.render_config)
+    }
+
+    /// Applies document settings without cloning the caller's HDR image data.
+    pub fn from_draws_with_config(
+        draws: &[Draw],
+        options: &RenderOptions,
+        frame: Option<FrameFit>,
+        config: crate::RenderConfig,
+    ) -> Self {
         let mut scene = build_scene(draws, options, frame);
+        scene.automatic_shadows =
+            config.shadow.enable && !draws.iter().any(|draw| !draw.selection.is_mesh());
+        if !config.shadow.enable {
+            scene
+                .objects
+                .retain(|object| object.primitive() != super::Primitive::BlobShadow);
+        }
         // World / object plane grids (#140) are ungated by render mode, so a
         // filled or shaded object still gets a floor. `encode` buckets by
         // primitive type, so appending here still draws them in the grid pass.
@@ -410,6 +440,31 @@ pub(crate) fn selection_aabb_overlay(draws: &[Draw], selected: Option<u32>) -> V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shadow_config_gates_authored_shadows_and_automatic_generation() {
+        let mesh = Draw {
+            mesh_id: 0,
+            model: Matrix4::IDENTITY,
+            selection: super::super::DrawSelection::INHERIT,
+        };
+        let options = RenderOptions::default();
+        let automatic = Scene::from_draws(&[mesh], &options, None);
+        assert!(automatic.automatic_shadows());
+        let authored = Draw {
+            selection: super::super::DrawSelection::Shadow,
+            ..mesh
+        };
+        let enabled = Scene::from_draws(&[mesh, authored], &options, None);
+        assert!(!enabled.automatic_shadows());
+        assert_eq!(enabled.objects().len(), 2);
+        let mut config = crate::RenderConfig::default();
+        config.shadow.enable = false;
+        let disabled = Scene::from_draws_with_config(&[mesh, authored], &options, None, config);
+        assert!(!disabled.automatic_shadows());
+        assert_eq!(disabled.objects(), &automatic.objects()[..1]);
+        assert!(Scene::from_draws(&[], &options, None).objects().is_empty());
+    }
     use crate::render::DrawSelection;
     use crate::render::Primitive;
 

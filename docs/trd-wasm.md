@@ -262,6 +262,12 @@ replace resources in an already bundled document. For multiple bindings,
 provide actual UUID strings, not renderer-local numeric slots.
 
 `frameCount()`, `objectCount(row)` and `meshIds()` inspect the document.
+`renderConfig()` returns the document-wide JSON configuration;
+`setRenderConfig(json)` validates and replaces only its params schema metadata.
+The default is `{"shadow":{"enable":true,"shadow_type":"blob"}}`.
+Unknown fields, invalid types, and reserved `shadow_map` are explicit errors.
+This setting is shared by every row and retained by `exportArrow()`.
+
 `getModel(row, object)` returns a `Float32Array` copy with **16 column-major**
 elements. Changing that copy alone does not edit the document:
 
@@ -329,7 +335,7 @@ The examples are separate recipes, not one concatenated script.
 `gltfPath` or `gltfUrl` input path. Load a new complete document to replace one.
 These standalone renderers do not provide the video editor's `resetState`.
 
-`loadSceneDocument` retains a reference to the same source, so later `setModel`
+`loadSceneDocument` retains a reference to the same source, so later `setRenderConfig` or `setModel`
 calls are visible when rendering another row without re-uploading meshes.
 `loadIpc` is the convenience path when the caller does not need an editable handle.
 

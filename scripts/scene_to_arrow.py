@@ -17,7 +17,7 @@ from PIL import Image
 
 from glb_assets import glb_bytes, image_to_rgba, png_bytes
 from obj_geometry import parse_obj
-from protocol_version import PROTOCOL_VERSION
+from protocol_version import PROTOCOL_VERSION, render_config_metadata, validate_render_config_metadata
 
 
 def bundle(params: bytes, paths: list[Path], texture_path: Path | None) -> bytes:
@@ -31,6 +31,11 @@ def bundle(params: bytes, paths: list[Path], texture_path: Path | None) -> bytes
         raise ValueError("params must declare the current protocol version and table kind")
     if "frame_id" in schema.names:
         raise ValueError("inline frame_id is retired; use frame_path/frame_url and --frames-base")
+    for key, value in render_config_metadata().items():
+        metadata.setdefault(key, value)
+    validate_render_config_metadata(metadata)
+    schema = schema.with_metadata(metadata)
+    batches = [batch.replace_schema_metadata(metadata) for batch in batches]
     if texture_path and not paths:
         raise ValueError("a texture requires an OBJ mesh")
     texture = None

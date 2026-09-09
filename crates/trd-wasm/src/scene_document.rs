@@ -138,6 +138,24 @@ impl ArrowSceneDocument {
     pub fn export_arrow(&self) -> Result<Vec<u8>, JsValue> {
         self.inner.borrow().write().map_err(crate::js_error)
     }
+
+    #[wasm_bindgen(js_name = renderConfig)]
+    pub fn render_config(&self) -> Result<String, JsValue> {
+        self.inner
+            .borrow()
+            .render_config()
+            .to_json()
+            .map_err(crate::js_error)
+    }
+
+    #[wasm_bindgen(js_name = setRenderConfig)]
+    pub fn set_render_config(&mut self, json: &str) -> Result<(), JsValue> {
+        let config = trd_core::RenderConfig::from_json(json).map_err(crate::js_error)?;
+        self.inner
+            .borrow_mut()
+            .set_render_config(config)
+            .map_err(crate::js_error)
+    }
 }
 
 pub(crate) fn document_renderer(

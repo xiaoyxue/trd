@@ -50,7 +50,7 @@ import sys
 import pyarrow as pa
 from pyarrow import ipc
 
-from protocol_version import PROTOCOL_VERSION
+from protocol_version import PROTOCOL_VERSION, render_config_metadata
 PROTOCOL_VERSION_KEY = b"trd.protocol.version"
 TABLE_KIND_KEY = b"trd.table.kind"
 FRAME_RATE_KEY = b"trd.stream.frame_rate"
@@ -72,6 +72,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("input", help="JSONL frame-params file")
     ap.add_argument("-o", "--output", default="-", help="output path ('-' = stdout)")
+    ap.add_argument("--no-shadows", action="store_true", help="disable document-wide blob shadows")
     ap.add_argument(
         "--fps",
         type=float,
@@ -91,6 +92,7 @@ def main() -> None:
     metadata = {
         PROTOCOL_VERSION_KEY: PROTOCOL_VERSION.encode(),
         TABLE_KIND_KEY: b"params",
+        **render_config_metadata(enable=not args.no_shadows),
     }
     if args.fps and args.fps > 0:
         metadata[FRAME_RATE_KEY] = str(args.fps).encode()

@@ -23,6 +23,7 @@ pub struct ImageRgba {
 pub fn render_options(state: &SceneState) -> trd_core::RenderOptions {
     let xz = |on: bool| on.then_some(trd_core::GridPlane::Xz);
     trd_core::RenderOptions {
+        render_config: state.render_config,
         mode: trd_core::RenderMode::Filled, // per-draw Some(mode) overrides; this is only a fallback
         show_aabb: state.show_aabb,
         show_axes: state.show_axes,

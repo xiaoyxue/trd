@@ -1180,9 +1180,16 @@ impl Renderer {
         let Self {
             batches, meshes, ..
         } = self;
-        build_batches(batches, scene.objects(), |mesh_id| {
-            meshes.get(mesh_id).map(|mesh| mesh.geometry.base_model)
-        });
+        build_batches(
+            batches,
+            scene.objects(),
+            scene.automatic_shadows(),
+            |mesh_id| {
+                meshes
+                    .get(mesh_id)
+                    .map(|mesh| (mesh.geometry.base_model, mesh.geometry.aabb_bounds))
+            },
+        );
         self.instances.upload(&self.gpu, &self.batches.instances);
 
         // 3. Match the depth + (when MSAA is on) color attachments to the viewport
