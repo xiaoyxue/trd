@@ -18,6 +18,12 @@
 //! | [`drawable`] | [`Primitive`] — *what* can be drawn — and [`DrawableObject`], one placed by a model |
 //! | [`draw`] | [`Draw`] + [`DrawSelection`], the *wire* instance record and its byte codec |
 //! | [`draw_config`] | [`RenderMode`], [`FrameFit`], [`GridPlane`] — the per-drawable configuration a front-end selects |
+//! | [`render_config`] | [`RenderConfig`] — the *document-global* settings a scene document carries on the wire |
+//!
+//! [`RenderConfig`] sits here rather than at the crate root for the same reason:
+//! [`ShadowType`] enumerates the techniques **this** rasterizer implements — it
+//! rejects `shadow_map` as unimplemented — so it is renderer taxonomy, not the
+//! domain vocabulary (`Mesh`, `Light`, `DisneyMaterial`) the root holds (#180).
 //!
 //! Assembly ([`Scene::from_draws`]) is the **one** place a wire [`Draw`] becomes
 //! a [`DrawableObject`], which is what keeps every front-end rendering the same
@@ -52,6 +58,7 @@ mod pbr;
 mod picking;
 mod pipeline;
 mod platform;
+mod render_config;
 mod render_pipelines;
 mod render_target;
 mod renderer;
@@ -82,6 +89,7 @@ pub use gpu_types::Vertex;
 pub use mesh_store::MeshAppearance;
 pub use options::{Msaa, PbrConfig, RenderOptions};
 pub use pbr::PbrDebugView;
+pub use render_config::{RenderConfig, ShadowConfig, ShadowType};
 pub use render_target::{
     RenderTarget, RenderTargetType, SceneLayer, SurfaceTarget, TargetError, TextureTarget,
     TEXTURE_TARGET_FORMAT,

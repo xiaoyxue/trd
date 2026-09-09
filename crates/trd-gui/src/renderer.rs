@@ -23,7 +23,6 @@ pub struct ImageRgba {
 pub fn render_options(state: &SceneState) -> trd_core::RenderOptions {
     let xz = |on: bool| on.then_some(trd_core::GridPlane::Xz);
     trd_core::RenderOptions {
-        render_config: state.render_config,
         mode: trd_core::RenderMode::Filled, // per-draw Some(mode) overrides; this is only a fallback
         show_aabb: state.show_aabb,
         show_axes: state.show_axes,
@@ -54,10 +53,15 @@ pub fn render_options(state: &SceneState) -> trd_core::RenderOptions {
 /// setting* on the scene rather than a drawable or an overlay toggle (#204) —
 /// plus the frame's light rig.
 pub fn scene_for(state: &SceneState) -> trd_core::Scene {
-    trd_core::Scene::from_draws(&state.draws(), &render_options(state), None)
-        // The light rig travels with the frame now, not as sticky renderer
-        // state (#182).
-        .with_lighting(state.lighting)
+    trd_core::Scene::from_draws_with_config(
+        &state.draws(),
+        &render_options(state),
+        None,
+        state.render_config,
+    )
+    // The light rig travels with the frame now, not as sticky renderer
+    // state (#182).
+    .with_lighting(state.lighting)
 }
 
 /// Pushes `state`'s per-object PBR material state onto the renderer.

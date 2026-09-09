@@ -171,7 +171,9 @@ impl Scene {
         &self.objects
     }
 
-    /// A placement adapter supplies blobs on its reconstructed support planes.
+    /// The caller places its own blobs on support planes the renderer cannot
+    /// reconstruct — a placement quad's floor, not the object's own AABB base —
+    /// so the generic expansion must not add a second set (#375).
     #[must_use]
     pub fn without_automatic_shadows(mut self) -> Self {
         self.automatic_shadows = false;
@@ -198,10 +200,17 @@ impl Scene {
     /// probe can draw it as a background from the same shared assembly instead of
     /// reaching around this function to set `background_mut()` (#235 R2).
     pub fn from_draws(draws: &[Draw], options: &RenderOptions, frame: Option<FrameFit>) -> Self {
-        Self::from_draws_with_config(draws, options, frame, options.render_config)
+        Self::from_draws_with_config(draws, options, frame, crate::RenderConfig::default())
     }
 
-    /// Applies document settings without cloning the caller's HDR image data.
+    /// [`from_draws`](Self::from_draws) for a caller holding a scene document's
+    /// own [`RenderConfig`](crate::RenderConfig).
+    ///
+    /// A separate entry point rather than a field on `options`: the config is
+    /// document state read off the wire, while [`RenderOptions`] is the
+    /// front-end's appearance choice, and carrying it in both let a caller pass
+    /// two disagreeing values. Taking it by argument also avoids cloning the
+    /// options' HDR image data just to override one setting.
     pub fn from_draws_with_config(
         draws: &[Draw],
         options: &RenderOptions,
@@ -209,8 +218,7 @@ impl Scene {
         config: crate::RenderConfig,
     ) -> Self {
         let mut scene = build_scene(draws, options, frame);
-        scene.automatic_shadows =
-            config.shadow.enable && !draws.iter().any(|draw| !draw.selection.is_mesh());
+        scene.automatic_shadows = config.shadow.automatic_for(draws);
         if !config.shadow.enable {
             scene
                 .objects
@@ -421,6 +429,42 @@ pub(crate) fn plane_grid_overlays(
     grids
 }
 
+/// The **generated** blob shadows for a scene's mesh instances (#375).
+///
+/// The third overlay builder, beside [`plane_grid_overlays`] and
+/// [`selection_aabb_overlay`] — and like them it produces
+/// [`DrawableObject`]s, so blobs stay ordinary scene primitives rather than
+/// something the batcher invents.
+///
+/// It runs at *render* time rather than in [`Scene::from_draws`] because a blob
+/// is placed from the mesh's bounds and preview transform, which live in the
+/// renderer's decode-once store: assembly names meshes by id and has never seen
+/// their geometry. `mesh_geometry` is that lookup, returning `(base_model,
+/// bounds)`; an instance whose mesh it cannot resolve is skipped exactly as the
+/// batcher skips it.
+///
+/// Each blob is projected onto the Y-up plane through the *effective* bounds
+/// (`model · base_model`), so it tracks the instance as placed. Only
+/// [`Primitive::Mesh`](super::Primitive::Mesh) casts: gizmos, grids and the
+/// blobs themselves have no volume to ground.
+pub(super) fn automatic_blob_shadows<'a>(
+    objects: &'a [DrawableObject],
+    mut mesh_geometry: impl FnMut(usize) -> Option<(Matrix4, crate::Aabb3)> + 'a,
+) -> impl Iterator<Item = DrawableObject> + 'a {
+    objects.iter().filter_map(move |object| {
+        let super::Primitive::Mesh { mesh_id, .. } = object.primitive() else {
+            return None;
+        };
+        let (base_model, bounds) = mesh_geometry(mesh_id as usize)?;
+        let bounds =
+            crate::Transform::from_matrix(object.model() * base_model).transform_aabb(bounds);
+        Some(DrawableObject::blob_shadow_for_bounds(
+            bounds,
+            bounds.min().y(),
+        ))
+    })
+}
+
 /// A **selection-highlight** overlay (#141): the [`Primitive::AabbBox`](super::Primitive::AabbBox) of a
 /// single object — the `selected` 0-based index into `draws` — so *only* that
 /// object's bounding box is drawn (unlike the global "show all AABBs" toggle).
@@ -440,6 +484,36 @@ pub(crate) fn selection_aabb_overlay(draws: &[Draw], selected: Option<u32>) -> V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automatic_blobs_use_effective_bounds_and_only_meshes_cast() {
+        let bounds = crate::Aabb3::new(
+            crate::Point3::new(-1.0, -2.0, -3.0),
+            crate::Point3::new(1.0, 2.0, 3.0),
+        );
+        let base = Matrix4::from_scale(crate::Vector3::new(2.0, 0.5, 1.0));
+        let model = Matrix4::from_translation(crate::Vector3::new(4.0, 5.0, 6.0));
+        let objects = [
+            DrawableObject::mesh(0, model, super::super::RenderMode::Shaded),
+            DrawableObject::aabb_box(0, model),
+            DrawableObject::coordinate_axes(model),
+        ];
+
+        let blobs: Vec<_> = automatic_blob_shadows(&objects, |_| Some((base, bounds))).collect();
+        assert_eq!(blobs.len(), 1, "only the mesh instance casts");
+        let blob = blobs[0].model().to_cols_array();
+        // Half-extents (1,2,3) scaled by the base (2,0.5,1) give (2,1,3), then
+        // the rim widens the disc to (2.5, _, 3.75).
+        assert_eq!(blob[0], 2.5);
+        assert_eq!(blob[6], -3.75);
+        // Flattened onto the plane, and grounded at the effective bounds' base
+        // (centre y 5 less half-extent 1), not at the object's origin.
+        assert_eq!(blob[1], 0.0);
+        assert_eq!(blob[5], 0.0);
+        assert_eq!(&blob[12..15], &[4.0, 4.0, 6.0]);
+
+        assert_eq!(automatic_blob_shadows(&objects, |_| None).count(), 0);
+    }
 
     #[test]
     fn shadow_config_gates_authored_shadows_and_automatic_generation() {

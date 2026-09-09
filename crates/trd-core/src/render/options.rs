@@ -58,8 +58,6 @@ impl Msaa {
 /// 4× MSAA.
 #[derive(Debug, Clone, Default)]
 pub struct RenderOptions {
-    /// Caller defaults; a scene document supplies its own global configuration.
-    pub render_config: crate::RenderConfig,
     /// How meshes are drawn (filled / wireframe / textured / PBR).
     pub mode: RenderMode,
     /// Overlay each drawn mesh instance's axis-aligned bounding box (#42).

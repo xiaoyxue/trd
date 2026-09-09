@@ -1,5 +1,14 @@
 //! Document-wide appearance settings, independent of the delivery surface.
+//!
+//! These sit in `render/` rather than at the crate root because [`ShadowType`]
+//! enumerates the techniques **this** rasterizer implements — it rejects
+//! `shadow_map` as unimplemented — which makes it renderer taxonomy like
+//! [`Primitive`](super::Primitive), not the domain vocabulary (`Mesh`, `Light`,
+//! `DisneyMaterial`) the crate root holds (#180). A scene document carries it as
+//! params schema metadata, so `protocol/` names it the same way it already names
+//! [`Draw`] and [`DrawSelection`](super::DrawSelection).
 
+use super::Draw;
 use serde::{Deserialize, Deserializer, Serialize};
 
 /// Shared by every row and record batch in a scene document.
@@ -23,6 +32,10 @@ impl RenderConfig {
         D: Deserializer<'de>,
         T: Deserialize<'de>,
     {
+        // A derived struct impl also accepts a JSON *array*, filling missing
+        // fields from `#[serde(default)]` — so `[]` would silently decode as a
+        // fully default config. Visiting only a map makes a malformed document
+        // an error instead of a silent default.
         struct ObjectVisitor<T>(std::marker::PhantomData<T>);
         impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for ObjectVisitor<T> {
             type Value = T;
@@ -59,6 +72,23 @@ impl Default for ShadowConfig {
     }
 }
 
+impl ShadowConfig {
+    /// Whether this frame's blobs still have to be generated from mesh bounds.
+    ///
+    /// A [`DrawSelection::Shadow`](super::DrawSelection::Shadow) draw is a
+    /// shadow the *document* authored, already placed on a support plane the
+    /// renderer cannot reconstruct; generating more would double them. This is
+    /// the one definition of that rule, so the headless, browser and placement
+    /// assemblies cannot drift on it the way per-front-end overlay flags once
+    /// did (#180).
+    pub fn automatic_for(self, draws: &[Draw]) -> bool {
+        self.enable
+            && !draws
+                .iter()
+                .any(|draw| matches!(draw.selection, super::DrawSelection::Shadow))
+    }
+}
+
 /// Only implemented techniques can enter the renderer's typed configuration.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -83,6 +113,37 @@ impl<'de> Deserialize<'de> for ShadowType {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_an_authored_shadow_draw_suppresses_generation() {
+        let mesh = |selection| Draw {
+            mesh_id: 0,
+            model: crate::Matrix4::IDENTITY,
+            selection,
+        };
+        let meshes = [
+            mesh(super::super::DrawSelection::INHERIT),
+            mesh(super::super::DrawSelection::Mesh(Some(
+                super::super::RenderMode::Wireframe,
+            ))),
+        ];
+        let config = ShadowConfig::default();
+        assert!(config.automatic_for(&meshes), "mesh draws still need blobs");
+        assert!(config.automatic_for(&[]));
+
+        let authored = [meshes[0], mesh(super::super::DrawSelection::Shadow)];
+        assert!(
+            !config.automatic_for(&authored),
+            "the document placed its own shadow, so generating more would double it"
+        );
+
+        let disabled = ShadowConfig {
+            enable: false,
+            ..ShadowConfig::default()
+        };
+        assert!(!disabled.automatic_for(&meshes));
+        assert!(!disabled.automatic_for(&authored));
+    }
 
     #[test]
     fn omitted_fields_default_to_enabled_blob() {

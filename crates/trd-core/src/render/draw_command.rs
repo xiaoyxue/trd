@@ -63,14 +63,16 @@ pub(super) struct Batches {
 /// [`Primitive::sort_key`], then groups equal primitives into instanced
 /// commands. Out-of-range mesh ids are skipped.
 ///
-/// Mesh-backed primitives compose the base (preview) model beneath the drawable's.
-/// Automatic blobs project those same effective bounds onto a Y-up support plane;
-/// placement scenes supply their own plane-aligned blobs and disable this expansion.
-/// Other primitives use their own model alone.
+/// The only thing this has to *decide* is the model: mesh-backed primitives
+/// compose the mesh's base (preview) model beneath the drawable's, everything
+/// else is placed by its own model alone. Choosing the geometry is no longer
+/// part of batching — the primitive already is the batch key (#204).
 ///
-/// Takes the objects alone: every one of them is a placed primitive that becomes
-/// an instance, so there is no longer a non-instanced member to filter out
-/// (#204).
+/// `generated` is batched after `objects` and on the same terms: it is the
+/// renderer's own scratch of drawables that could not be assembled without the
+/// mesh store (today, the automatic blob shadows from
+/// [`automatic_blob_shadows`](super::scene::automatic_blob_shadows)). Batching
+/// stays a pure function of the drawables it is handed — it never invents one.
 ///
 /// `into` is an out-parameter, cleared and refilled here: the function stays a
 /// pure function of `objects` (nothing is carried over between calls — only the
@@ -79,8 +81,8 @@ pub(super) struct Batches {
 pub(super) fn build_batches(
     into: &mut Batches,
     objects: &[DrawableObject],
-    automatic_shadows: bool,
-    mut mesh_geometry: impl FnMut(usize) -> Option<(Matrix4, crate::Aabb3)>,
+    generated: &[DrawableObject],
+    mut mesh_base_model: impl FnMut(usize) -> Option<Matrix4>,
 ) {
     let Batches {
         instances,
@@ -90,30 +92,19 @@ pub(super) fn build_batches(
     instances.clear();
     commands.clear();
     staged.clear();
-    staged.reserve(objects.len());
+    staged.reserve(objects.len() + generated.len());
 
-    for object in objects {
+    for object in objects.iter().chain(generated) {
         let primitive = object.primitive();
         let model = match primitive {
             // Mesh-backed primitives ride on the mesh's base (preview) model;
             // gizmos are tied to no mesh and are placed by their own model alone.
             // Listed exhaustively so a new primitive has to answer the question.
             Primitive::Mesh { mesh_id, .. } | Primitive::AabbBox { mesh_id } => {
-                let Some((base_model, bounds)) = mesh_geometry(mesh_id as usize) else {
+                let Some(base_model) = mesh_base_model(mesh_id as usize) else {
                     continue;
                 };
-                let model = object.model() * base_model;
-                if automatic_shadows && matches!(primitive, Primitive::Mesh { .. }) {
-                    let bounds = crate::Transform::from_matrix(model).transform_aabb(bounds);
-                    let shadow = DrawableObject::blob_shadow_for_bounds(bounds, bounds.min().y());
-                    staged.push((
-                        Primitive::BlobShadow,
-                        InstanceRaw {
-                            model: shadow.model(),
-                        },
-                    ));
-                }
-                model
+                object.model() * base_model
             }
             Primitive::PlaneGrid { .. }
             | Primitive::QuadOutline { .. }
@@ -144,29 +135,24 @@ mod tests {
     use crate::render::{GridPlane, RenderMode};
 
     #[test]
-    fn automatic_shadows_use_effective_bounds_but_gizmos_do_not_cast() {
-        let bounds = crate::Aabb3::new(
-            crate::Point3::new(-1.0, -2.0, -3.0),
-            crate::Point3::new(1.0, 2.0, 3.0),
-        );
-        let base = Matrix4::from_scale(crate::Vector3::new(2.0, 0.5, 1.0));
+    fn generated_drawables_batch_on_the_same_terms_as_the_scene_s_own() {
         let model = Matrix4::from_translation(crate::Vector3::new(4.0, 5.0, 6.0));
-        let objects = [
-            DrawableObject::mesh(0, model, RenderMode::Shaded),
-            DrawableObject::aabb_box(0, model),
-            DrawableObject::coordinate_axes(model),
-        ];
+        let base = Matrix4::from_scale(crate::Vector3::new(2.0, 0.5, 1.0));
+        let objects = [DrawableObject::mesh(0, model, RenderMode::Shaded)];
+        let generated = [DrawableObject::blob_shadow(model)];
+
         let mut batches = Batches::default();
-        build_batches(&mut batches, &objects, true, |_| Some((base, bounds)));
-        assert_eq!(batches.commands[0].primitive, Primitive::BlobShadow);
-        assert_eq!(batches.commands[0].count, 1);
-        let shadow = batches.instances[0].model.to_cols_array();
-        assert_eq!(&shadow[12..15], &[4.0, 4.0, 6.0]);
-        assert_eq!(shadow[0], 2.5);
-        assert_eq!(shadow[6], -3.75);
-        assert_eq!(shadow[1], 0.0);
-        assert_eq!(shadow[5], 0.0);
-        build_batches(&mut batches, &objects, false, |_| Some((base, bounds)));
+        build_batches(&mut batches, &objects, &generated, |_| Some(base));
+        let blob = batches
+            .commands
+            .iter()
+            .find(|command| command.primitive == Primitive::BlobShadow)
+            .expect("the generated blob is batched");
+        assert_eq!(blob.count, 1);
+        // A blob is placed by its own model alone: no mesh base is composed in.
+        assert_eq!(batches.instances[blob.start as usize].model, model);
+
+        build_batches(&mut batches, &objects, &[], |_| Some(base));
         assert!(!batches
             .commands
             .iter()
@@ -225,10 +211,8 @@ mod tests {
         let base_models = [Matrix4::IDENTITY, Matrix4::IDENTITY];
 
         let mut batches = Batches::default();
-        build_batches(&mut batches, &scene, false, |mesh_id| {
-            base_models
-                .get(mesh_id)
-                .map(|&model| (model, crate::Aabb3::default()))
+        build_batches(&mut batches, &scene, &[], |mesh_id| {
+            base_models.get(mesh_id).copied()
         });
         let commands = batches
             .commands
@@ -290,11 +274,7 @@ mod tests {
     #[test]
     fn a_reused_scratch_batches_exactly_like_a_fresh_one() {
         let base_models = [Matrix4::IDENTITY, Matrix4::IDENTITY];
-        let base = |mesh_id: usize| {
-            base_models
-                .get(mesh_id)
-                .map(|&model| (model, crate::Aabb3::default()))
-        };
+        let base = |mesh_id: usize| base_models.get(mesh_id).copied();
         let crowded = [
             mesh(0, 10.0, RenderMode::Filled),
             mesh(1, 11.0, RenderMode::Filled),
@@ -304,11 +284,11 @@ mod tests {
         let sparse = [mesh(1, 21.0, RenderMode::Textured)];
 
         let mut reused = Batches::default();
-        build_batches(&mut reused, &crowded, false, base);
-        build_batches(&mut reused, &sparse, false, base);
+        build_batches(&mut reused, &crowded, &[], base);
+        build_batches(&mut reused, &sparse, &[], base);
 
         let mut fresh = Batches::default();
-        build_batches(&mut fresh, &sparse, false, base);
+        build_batches(&mut fresh, &sparse, &[], base);
 
         assert_eq!(reused.commands, fresh.commands);
         assert_eq!(

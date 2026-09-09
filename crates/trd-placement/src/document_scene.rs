@@ -140,12 +140,11 @@ fn assemble_document_scene(
     let mut reference = Vec::new();
     let mut cubes = Vec::new();
     let config = document.render_config();
-    let automatic_shadows = config.shadow.enable
-        && !frame
-            .objects
-            .iter()
-            .any(|object| !object.selection.is_mesh());
-    let mut shadows = Vec::new();
+    // Collected during the walk, resolved after it: whether blobs are generated
+    // depends on the finished draw list, but each blob's support plane is only
+    // known here — a quad-placed object grounds on the quad's floor (y = 0 in
+    // its origin frame), a free object on its own bounds.
+    let mut supports: Vec<(Matrix4, trd_core::Aabb3, bool)> = Vec::new();
     for (index, object) in frame.objects.iter().enumerate() {
         let mut reference_frame = Matrix4::IDENTITY;
         let mut cube_model = Matrix4::IDENTITY;
@@ -188,17 +187,11 @@ fn assemble_document_scene(
             } else {
                 Matrix4::IDENTITY
             };
-            if automatic_shadows {
-                let bounds = trd_core::Transform::from_matrix(object.model * asset_model)
-                    .transform_aabb(bounds);
-                let ground_y = if object.quad.is_some() {
-                    0.0
-                } else {
-                    bounds.min().y()
-                };
-                let shadow = DrawableObject::blob_shadow_for_bounds(bounds, ground_y);
-                shadows.push(DrawableObject::blob_shadow(origin * shadow.model()));
-            }
+            supports.push((
+                origin,
+                trd_core::Transform::from_matrix(object.model * asset_model).transform_aabb(bounds),
+                object.quad.is_some(),
+            ));
             draws.push(Draw {
                 mesh_id: u32::try_from(slot).map_err(|_| DocumentSceneError::Row(slot))?,
                 model: origin * object.model * asset_model,
@@ -208,7 +201,13 @@ fn assemble_document_scene(
     }
     let mut foreground =
         Scene::from_draws_with_config(&draws, options, None, config).without_automatic_shadows();
-    foreground.extend(shadows);
+    if config.shadow.automatic_for(&draws) {
+        foreground.extend(supports.into_iter().map(|(origin, bounds, on_quad)| {
+            let ground_y = if on_quad { 0.0 } else { bounds.min().y() };
+            let shadow = DrawableObject::blob_shadow_for_bounds(bounds, ground_y);
+            DrawableObject::blob_shadow(origin * shadow.model())
+        }));
+    }
     foreground.extend(cubes);
     let background = Scene::from(reference)
         .with_background(trd_core::Background {
