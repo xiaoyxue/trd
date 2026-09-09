@@ -680,6 +680,88 @@ fn a_material_change_between_frames_still_reaches_the_slots() {
 
 #[test]
 #[ignore = "requires a GPU adapter"]
+fn automatic_blob_shadows_do_not_accumulate_across_frames() {
+    // The generated blobs live in renderer scratch rather than in the `&Scene`,
+    // so a missing clear would stack another alpha-blended disc on the same spot
+    // every frame. No golden covers this: the stage fixtures are shadow-off and
+    // the placement goldens supply their own blobs, so it is pinned here (#375).
+    let gpu = test_gpu();
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+    let (width, height) = (64, 64);
+    let mut renderer = single(format, &Mesh::hello_triangle());
+    // A shadow *darkens*, so it is invisible against the default black clear.
+    // Give it a light backdrop to fall on, as the placement golden does.
+    renderer.update_frame_texture_rgba(
+        &[190u8, 190, 190, 255].repeat((width * height) as usize),
+        width,
+        height,
+    );
+
+    let draws = [crate::Draw {
+        mesh_id: 0,
+        // Tilted: the triangle is flat at z = 0, and a footprint with no depth
+        // would project to a degenerate disc that draws nothing.
+        model: crate::Transform::from_scale_rotation_translation(
+            Vector3::new(1.0, 1.0, 1.0),
+            crate::Rotation::from_rotation_x(0.9),
+            Vector3::new(0.0, 0.0, 0.0),
+        )
+        .matrix(),
+        selection: crate::DrawSelection::Mesh(Some(RenderMode::Filled)),
+    }];
+    let options = RenderOptions::default();
+    let shadowed = Scene::from_draws(&draws, &options, Some(FrameFit::Stretch));
+    let bare = Scene::from_draws_with_config(
+        &draws,
+        &options,
+        Some(FrameFit::Stretch),
+        crate::RenderConfig {
+            shadow: crate::ShadowConfig {
+                enable: false,
+                ..Default::default()
+            },
+        },
+    );
+
+    // Angled and above, so the ground disc is seen face-on rather than edge-on.
+    let camera = crate::Camera::look_at(
+        Point3::new(0.0, 1.2, 2.2),
+        Point3::new(0.0, 0.0, 0.0),
+        Vector3::new(0.0, 1.0, 0.0),
+        0.9,
+        Viewport { width, height },
+    );
+    let frame = |renderer: &mut Renderer, scene: &Scene| {
+        render_with_readback(&gpu, format, width, height, |encoder, view| {
+            renderer.encode(encoder, view, camera, scene);
+        })
+    };
+
+    let first = frame(&mut renderer, &shadowed);
+    let second = frame(&mut renderer, &shadowed);
+    assert_eq!(
+        first, second,
+        "the same shadowed scene rendered twice through one renderer must be identical"
+    );
+
+    // Without this the test would pass even if no blob were ever drawn.
+    let unshadowed = frame(&mut renderer, &bare);
+    assert_ne!(
+        first, unshadowed,
+        "the blob must actually reach the target, or the check above is vacuous"
+    );
+
+    // And the scratch must not leak the other way either: a shadowed frame after
+    // an unshadowed one still renders exactly the shadowed image.
+    assert_eq!(
+        first,
+        frame(&mut renderer, &shadowed),
+        "switching the config back must restore the original image"
+    );
+}
+
+#[test]
+#[ignore = "requires a GPU adapter"]
 fn first_frame_renders_with_no_setters_called() {
     let gpu = test_gpu();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;

@@ -638,7 +638,7 @@ fn golden_environment_light_syncs_sky_and_reflection() {
     );
 
     // A yaw no symmetry can hide: 2.2 rad ≈ 126°, inside the second quadrant.
-    let scene = Scene::from_draws(
+    let scene = Scene::from_draws_with_config(
         &[Draw {
             mesh_id: 0,
             model: Matrix4::IDENTITY,
@@ -656,6 +656,13 @@ fn golden_environment_light_syncs_sky_and_reflection() {
             ..RenderOptions::default()
         },
         None,
+        // This baseline isolates sky/reflection synchronization, not grounding.
+        trd_core::RenderConfig {
+            shadow: trd_core::ShadowConfig {
+                enable: false,
+                ..Default::default()
+            },
+        },
     )
     .with_lighting(Lighting {
         // Kill the direct rig so the picture is *only* the probe: any change is

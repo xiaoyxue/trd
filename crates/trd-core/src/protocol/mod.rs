@@ -45,6 +45,12 @@ pub use scene_encode::{
 pub const PROTOCOL_VERSION: &str = "0.0.7";
 pub const PROTOCOL_VERSION_KEY: &str = "trd.protocol.version";
 pub const TABLE_KIND_KEY: &str = "trd.table.kind";
+/// JSON document-wide settings on the params schema, never a per-row column.
+///
+/// Optional: an absent key means [`RenderConfig::default`](crate::RenderConfig)
+/// — so the encoder does not stamp a default it has no way to vary, and a
+/// document only carries the key once something has actually set it.
+pub const RENDER_CONFIG_KEY: &str = "trd.render.config";
 
 pub(crate) const MESH_TABLE_KIND: &str = "mesh";
 pub(crate) const TEXTURE_TABLE_KIND: &str = "texture";

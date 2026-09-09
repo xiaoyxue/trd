@@ -193,6 +193,11 @@ keeping them equal (#182).
 
 ## Interactive editing — `trd-gui`
 
+The shared **Shadows** section controls document-wide blob shadows independently
+of PBR materials and IBL. **Enable shadows** defaults on; **Shadow type** supports
+only **Blob**, with shadow mapping visibly unavailable. Current Arrow documents
+retain these settings in [params schema metadata](protocol/0.0.7.md#global-render-configuration).
+
 The interactive viewer starts in PBR mode with `--pbr` and exposes per-object
 surface, IBL, and tone-mapping controls (metallic, roughness, clearcoat,
 env-intensity, exposure, tone-map), plus Shaded / Roughness / Metallic / Normal

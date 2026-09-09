@@ -68,9 +68,11 @@ pub(super) struct Batches {
 /// else is placed by its own model alone. Choosing the geometry is no longer
 /// part of batching — the primitive already is the batch key (#204).
 ///
-/// Takes the objects alone: every one of them is a placed primitive that becomes
-/// an instance, so there is no longer a non-instanced member to filter out
-/// (#204).
+/// `generated` is batched after `objects` and on the same terms: it is the
+/// renderer's own scratch of drawables that could not be assembled without the
+/// mesh store (today, the automatic blob shadows from
+/// [`automatic_blob_shadows`](super::scene::automatic_blob_shadows)). Batching
+/// stays a pure function of the drawables it is handed — it never invents one.
 ///
 /// `into` is an out-parameter, cleared and refilled here: the function stays a
 /// pure function of `objects` (nothing is carried over between calls — only the
@@ -79,6 +81,7 @@ pub(super) struct Batches {
 pub(super) fn build_batches(
     into: &mut Batches,
     objects: &[DrawableObject],
+    generated: &[DrawableObject],
     mut mesh_base_model: impl FnMut(usize) -> Option<Matrix4>,
 ) {
     let Batches {
@@ -89,9 +92,9 @@ pub(super) fn build_batches(
     instances.clear();
     commands.clear();
     staged.clear();
-    staged.reserve(objects.len());
+    staged.reserve(objects.len() + generated.len());
 
-    for object in objects {
+    for object in objects.iter().chain(generated) {
         let primitive = object.primitive();
         let model = match primitive {
             // Mesh-backed primitives ride on the mesh's base (preview) model;
@@ -130,6 +133,32 @@ pub(super) fn build_batches(
 mod tests {
     use super::*;
     use crate::render::{GridPlane, RenderMode};
+
+    #[test]
+    fn generated_drawables_batch_on_the_same_terms_as_the_scene_s_own() {
+        let model = Matrix4::from_translation(crate::Vector3::new(4.0, 5.0, 6.0));
+        let base = Matrix4::from_scale(crate::Vector3::new(2.0, 0.5, 1.0));
+        let objects = [DrawableObject::mesh(0, model, RenderMode::Shaded)];
+        let generated = [DrawableObject::blob_shadow(model)];
+
+        let mut batches = Batches::default();
+        build_batches(&mut batches, &objects, &generated, |_| Some(base));
+        let blob = batches
+            .commands
+            .iter()
+            .find(|command| command.primitive == Primitive::BlobShadow)
+            .expect("the generated blob is batched");
+        assert_eq!(blob.count, 1);
+        // A blob is placed by its own model alone: no mesh base is composed in.
+        assert_eq!(batches.instances[blob.start as usize].model, model);
+
+        build_batches(&mut batches, &objects, &[], |_| Some(base));
+        assert!(!batches
+            .commands
+            .iter()
+            .any(|command| command.primitive == Primitive::BlobShadow));
+        assert_eq!(batches.instances.len(), objects.len());
+    }
 
     /// A model tagged by its x-translation, so an instance can be identified by
     /// `model.to_cols_array()[12]` in the assertions below.
@@ -182,7 +211,7 @@ mod tests {
         let base_models = [Matrix4::IDENTITY, Matrix4::IDENTITY];
 
         let mut batches = Batches::default();
-        build_batches(&mut batches, &scene, |mesh_id| {
+        build_batches(&mut batches, &scene, &[], |mesh_id| {
             base_models.get(mesh_id).copied()
         });
         let commands = batches
@@ -255,11 +284,11 @@ mod tests {
         let sparse = [mesh(1, 21.0, RenderMode::Textured)];
 
         let mut reused = Batches::default();
-        build_batches(&mut reused, &crowded, base);
-        build_batches(&mut reused, &sparse, base);
+        build_batches(&mut reused, &crowded, &[], base);
+        build_batches(&mut reused, &sparse, &[], base);
 
         let mut fresh = Batches::default();
-        build_batches(&mut fresh, &sparse, base);
+        build_batches(&mut fresh, &sparse, &[], base);
 
         assert_eq!(reused.commands, fresh.commands);
         assert_eq!(

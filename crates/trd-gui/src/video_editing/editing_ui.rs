@@ -81,6 +81,8 @@ impl eframe::App for VideoEditingApp {
                     ui.separator();
                     needs_render |= self.source_model_controls(ui);
                     ui.separator();
+                    needs_render |= self.source_shadow_controls(ui);
+                    ui.separator();
                     self.export_controls(ui);
                     self.details_controls(ui);
                     needs_render |= crate::ui::reset_button(ui, &mut self.controller);
@@ -148,6 +150,27 @@ impl eframe::App for VideoEditingApp {
 }
 
 impl VideoEditingApp {
+    fn source_shadow_controls(&mut self, ui: &mut egui::Ui) -> bool {
+        let source = self
+            .arrow_scene
+            .as_ref()
+            .and_then(|scene| scene.source.clone());
+        let Some(source) = source else {
+            return false;
+        };
+        let mut config = source.borrow().render_config();
+        if !crate::ui::shadow_section(ui, &mut config) {
+            return false;
+        }
+        match self.set_source_render_config(config) {
+            Ok(()) => true,
+            Err(error) => {
+                self.shared.set_error(super::ErrorScope::Document, error);
+                false
+            }
+        }
+    }
+
     fn source_model_controls(&mut self, ui: &mut egui::Ui) -> bool {
         ui.heading("Placement / source models");
         let Some(scene) = self.arrow_scene.as_ref() else {

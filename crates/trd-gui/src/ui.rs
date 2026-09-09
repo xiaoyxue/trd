@@ -199,6 +199,7 @@ pub fn controls_sections(
     needs_render |= transform_section(ui, controller);
     needs_render |= render_mode_section(ui, controller);
     needs_render |= pbr_material_section(ui, controller);
+    needs_render |= shadow_section(ui, &mut controller.state.render_config);
     needs_render |= overlays_section(ui, controller);
     needs_render |= selection_section(ui, controller);
     needs_render
@@ -208,6 +209,28 @@ pub fn controls_sections(
 pub fn reset_button(ui: &mut egui::Ui, controller: &mut InteractionController) -> bool {
     ui.add_space(4.0);
     ui.button("Reset view").clicked() && controller.apply(InteractionEvent::Reset)
+}
+
+pub fn shadow_section(ui: &mut egui::Ui, config: &mut trd_core::RenderConfig) -> bool {
+    section(ui, "Shadows", |ui| {
+        let changed = ui
+            .checkbox(&mut config.shadow.enable, "Enable shadows")
+            .changed();
+        ui.add_enabled_ui(config.shadow.enable, |ui| {
+            egui::ComboBox::from_label("Shadow type")
+                .selected_text("Blob")
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut config.shadow.shadow_type,
+                        trd_core::ShadowType::Blob,
+                        "Blob",
+                    );
+                    ui.add_enabled(false, egui::Button::new("Shadow map (not supported yet)"))
+                        .on_disabled_hover_text("Only blob shadows are implemented.");
+                });
+        });
+        changed
+    })
 }
 
 /// The render-size / last-render readout and the input legend.

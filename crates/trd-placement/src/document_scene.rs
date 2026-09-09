@@ -139,6 +139,12 @@ fn assemble_document_scene(
     let mut draws = Vec::new();
     let mut reference = Vec::new();
     let mut cubes = Vec::new();
+    let config = document.render_config();
+    // Collected during the walk, resolved after it: whether blobs are generated
+    // depends on the finished draw list, but each blob's support plane is only
+    // known here — a quad-placed object grounds on the quad's floor (y = 0 in
+    // its origin frame), a free object on its own bounds.
+    let mut supports: Vec<(Matrix4, trd_core::Aabb3, bool)> = Vec::new();
     for (index, object) in frame.objects.iter().enumerate() {
         let mut reference_frame = Matrix4::IDENTITY;
         let mut cube_model = Matrix4::IDENTITY;
@@ -175,11 +181,20 @@ fn assemble_document_scene(
         }
         if !reference_only {
             let slot = document.object_mesh_slot(frame, index)?;
+            let bounds = document.meshes()[slot].bounds()?;
             let asset_model = if object.quad.is_some() {
-                grounded_asset_model(document.meshes()[slot].bounds()?)?
+                grounded_asset_model(bounds)?
             } else {
                 Matrix4::IDENTITY
             };
+            if config.shadow.enable {
+                supports.push((
+                    origin,
+                    trd_core::Transform::from_matrix(object.model * asset_model)
+                        .transform_aabb(bounds),
+                    object.quad.is_some(),
+                ));
+            }
             draws.push(Draw {
                 mesh_id: u32::try_from(slot).map_err(|_| DocumentSceneError::Row(slot))?,
                 model: origin * object.model * asset_model,
@@ -187,7 +202,15 @@ fn assemble_document_scene(
             });
         }
     }
-    let mut foreground = Scene::from_draws(&draws, options, None);
+    let mut foreground =
+        Scene::from_draws_with_config(&draws, options, None, config).without_automatic_shadows();
+    if config.shadow.automatic_for(&draws) {
+        foreground.extend(supports.into_iter().map(|(origin, bounds, on_quad)| {
+            let ground_y = if on_quad { 0.0 } else { bounds.min().y() };
+            let shadow = DrawableObject::blob_shadow_for_bounds(bounds, ground_y);
+            DrawableObject::blob_shadow(origin * shadow.model())
+        }));
+    }
     foreground.extend(cubes);
     let background = Scene::from(reference)
         .with_background(trd_core::Background {
@@ -268,6 +291,96 @@ mod tests {
                 selection: trd_core::DrawSelection::INHERIT,
             }],
         }
+    }
+
+    #[test]
+    fn blob_shadows_stay_on_support_planes_and_respect_document_config() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../trd-core/tests/golden/stage1.arrow");
+        let meshes = SceneDocument::read(&std::fs::read(fixture).unwrap()).unwrap();
+        let source = cg_source();
+        let mut document = SceneDocument::from_batches(
+            source.schema().clone(),
+            source.batches().to_vec(),
+            vec![meshes.meshes()[0].clone()],
+        )
+        .unwrap();
+        let mut frame = frame();
+        frame.objects[0].model = trd_core::Transform::from_scale_rotation_translation(
+            trd_core::Vector3::new(0.8, 1.2, 0.6),
+            trd_core::Rotation::from_rotation_x(0.4),
+            trd_core::Vector3::new(0.3, 2.0, -0.2),
+        )
+        .matrix();
+        let viewport = Viewport {
+            width: 1920,
+            height: 1080,
+        };
+        let render = |document: &SceneDocument, frame: &DocumentFrame| {
+            document_scene(document, frame, viewport, &RenderOptions::default(), None)
+                .unwrap()
+                .1
+        };
+        let enabled = render(&document, &frame);
+        let shadow = enabled
+            .objects()
+            .iter()
+            .find(|object| object.primitive() == trd_core::Primitive::BlobShadow)
+            .unwrap();
+        let quad = quad_frame(
+            CameraIntrinsics {
+                row_major: [1000.0, 0.0, 960.0, 0.0, 1000.0, 540.0, 0.0, 0.0, 1.0],
+            },
+            PlacementQuad {
+                points_px: frame.objects[0].quad.unwrap(),
+            },
+        )
+        .unwrap();
+        let local = (quad_origin_model(quad).unwrap().inverse() * shadow.model()).to_cols_array();
+        for index in [1, 5, 13] {
+            assert!(
+                local[index].abs() < 1e-5,
+                "blob left the support plane: {local:?}"
+            );
+        }
+        let mut config = document.render_config();
+        config.shadow.enable = false;
+        document.set_render_config(config).unwrap();
+        let disabled = render(&document, &frame);
+        assert_eq!(
+            disabled.objects(),
+            enabled
+                .objects()
+                .iter()
+                .copied()
+                .filter(|object| object.primitive() != trd_core::Primitive::BlobShadow)
+                .collect::<Vec<_>>()
+        );
+
+        config.shadow.enable = true;
+        document.set_render_config(config).unwrap();
+        frame.objects[0].quad = None;
+        let non_quad = render(&document, &frame);
+        let shadow = non_quad
+            .objects()
+            .iter()
+            .find(|object| object.primitive() == trd_core::Primitive::BlobShadow)
+            .unwrap();
+        let bounds = trd_core::Transform::from_matrix(frame.objects[0].model)
+            .transform_aabb(document.meshes()[0].bounds().unwrap());
+        assert_eq!(shadow.model().to_cols_array()[13], bounds.min().y());
+        let mut authored = frame.objects[0].clone();
+        authored.selection = trd_core::DrawSelection::Shadow;
+        authored.model = Matrix4::IDENTITY;
+        frame.objects.push(authored);
+        let scene = render(&document, &frame);
+        let shadows = scene
+            .objects()
+            .iter()
+            .filter(|object| object.primitive() == trd_core::Primitive::BlobShadow)
+            .collect::<Vec<_>>();
+        assert_eq!(shadows.len(), 1, "authored shadows must not be duplicated");
+        assert_eq!(shadows[0].model(), Matrix4::IDENTITY);
     }
 
     #[test]

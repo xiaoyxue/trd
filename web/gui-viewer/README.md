@@ -44,3 +44,8 @@ texture.
 Same as native: left-drag orbits the camera (or rotates the object, per the side
 panel), right/middle-drag moves the object, scroll zooms; the side panel toggles
 render mode (Filled/Wireframe/Textured) and overlays.
+
+**Load model** opens the native file chooser for a GLB. When its asynchronous
+file read completes, the queued upload wakes the idle GUI automatically; no
+additional click is needed. Document-global shadow settings survive model loads
+and **Reset view**.

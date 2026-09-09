@@ -216,6 +216,12 @@ pub struct Renderer {
     /// previous one instead of allocating three vectors per frame. It is scratch,
     /// not state — nothing outside `encode_pass` reads it between frames.
     batches: Batches,
+    /// Per-frame scratch for the drawables a scene cannot assemble itself: the
+    /// automatic blob shadows, whose placement needs the mesh bounds and preview
+    /// transforms this store owns. Cleared and refilled per frame beside
+    /// `batches`, for the same reason — the scene arrives by `&`, so the
+    /// generated objects need somewhere to live that outlives assembly.
+    shadows: Vec<DrawableObject>,
     frame_plane: FramePlane,
     /// The mesh pass's depth attachment, (re)created lazily in `encode` to match
     /// the viewport. Gives solid (filled/textured) meshes real z-occlusion.
@@ -434,6 +440,7 @@ impl Renderer {
             gizmos,
             instances,
             batches: Batches::default(),
+            shadows: Vec::new(),
             frame_plane,
             depth: None,
             msaa: MsaaColor::new(format, sample_count),
@@ -1178,9 +1185,25 @@ impl Renderer {
         // scratch while reading the mesh store (#235 R6) — the same shape S3 used
         // for the pick target: keep the buffer in `self`, don't move it out.
         let Self {
-            batches, meshes, ..
+            batches,
+            meshes,
+            shadows,
+            ..
         } = self;
-        build_batches(batches, scene.objects(), |mesh_id| {
+        // Generated before batching, not during it: a blob is a scene primitive
+        // like any other, it just needs the mesh geometry assembly never sees.
+        shadows.clear();
+        if scene.automatic_shadows() {
+            shadows.extend(super::scene::automatic_blob_shadows(
+                scene.objects(),
+                |mesh_id| {
+                    meshes
+                        .get(mesh_id)
+                        .map(|mesh| (mesh.geometry.base_model, mesh.geometry.aabb_bounds))
+                },
+            ));
+        }
+        build_batches(batches, scene.objects(), shadows, |mesh_id| {
             meshes.get(mesh_id).map(|mesh| mesh.geometry.base_model)
         });
         self.instances.upload(&self.gpu, &self.batches.instances);

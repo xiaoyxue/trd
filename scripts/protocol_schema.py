@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pyarrow as pa
 
-from protocol_version import PROTOCOL_VERSION
+from protocol_version import PROTOCOL_VERSION, validate_render_config_metadata
 ROOT = Path(__file__).resolve().parent.parent
 PROTOCOL_OUTPUT = ROOT / "docs/protocol/0.0.7.schema.json"
 PROTOCOL_FIXTURES = [ROOT / f"crates/trd-core/tests/golden/stage{stage}.arrow" for stage in (1, 2)]
@@ -62,6 +62,17 @@ def build():
             "trd.protocol.version": PROTOCOL_VERSION,
             "trd.table.kind": ["params", "mesh"],
             "trd.stream.frame_rate": {"required": False, "type": "positive float string", "default": 30},
+            "trd.render.config": {
+                "required": False,
+                "scope": "params schema; shared by all record batches and sparse rows",
+                "type": "JSON object",
+                "default": {"shadow": {"enable": True, "shadow_type": "blob"}},
+                "shadow": {
+                    "enable": {"type": "boolean", "default": True},
+                    "shadow_type": {"supported": ["blob"], "reserved_unsupported": ["shadow_map"], "default": "blob"},
+                },
+                "validation": "Missing fields use defaults; malformed JSON, null/wrong types, unknown fields/types and shadow_map are errors.",
+            },
         },
         "source_adapter_exception": "Unversioned FHC source tables use the explicit tracked adapter; declared old versions are never upgraded.",
         "tables": {
@@ -141,6 +152,7 @@ def check_fixture(path):
             if schema.names != list(types) or any(field.nullable for field in schema):
                 raise ValueError(f"{path.name}: mesh has only non-null mesh_id/glb")
         else:
+            validate_render_config_metadata(metadata)
             types = tracked_types() if "bottom_quads" in schema.names else camera_types()
             if "frame_id" in schema.names:
                 raise ValueError(f"{path.name}: inline frames are retired")

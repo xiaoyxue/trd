@@ -18,6 +18,14 @@
 use super::{GridPlane, RenderMode};
 use crate::math::Matrix4;
 
+/// How far a generated blob spreads past the footprint it is projected from.
+///
+/// The shader fades the blob out towards its own edge, so a disc scaled to the
+/// exact bounds would have its falloff finish where the object's silhouette
+/// does — a hard rim. The extra quarter keeps the feathered edge outside the
+/// contact patch.
+const BLOB_SHADOW_RIM: f32 = 1.25;
+
 /// **What** the renderer draws: the closed list of primitives it knows, with the
 /// per-primitive configuration that selects the geometry and pipeline — but
 /// *not* the model that places it, which is [`DrawableObject`]'s half.
@@ -251,6 +259,30 @@ impl DrawableObject {
     /// A contact/blob grounding shadow placed by `model`.
     pub fn blob_shadow(model: Matrix4) -> Self {
         Self::new(Primitive::BlobShadow, model)
+    }
+
+    /// Projects already-transformed bounds onto the Y-up support plane.
+    pub fn blob_shadow_for_bounds(bounds: crate::Aabb3, ground_y: f32) -> Self {
+        let center = bounds.center();
+        let half = bounds.half_extents() * BLOB_SHADOW_RIM;
+        Self::blob_shadow(Matrix4::from_cols_array(&[
+            half.x(),
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            -half.z(),
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            center.x(),
+            ground_y,
+            center.z(),
+            1.0,
+        ]))
     }
 
     /// Which primitive this draws — also its batch key.

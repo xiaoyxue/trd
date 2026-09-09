@@ -1093,6 +1093,11 @@ impl VideoEditingApp {
             }
         }
         self.document = None;
+        self.controller.state.render_config = scene
+            .as_ref()
+            .and_then(|scene| scene.source.as_ref())
+            .map(|source| source.borrow().render_config())
+            .unwrap_or_default();
         if let Some(scene) = scene.as_ref() {
             if scene.source.is_some() {
                 self.render_sizing = crate::ui::ImageSizing::OriginalResolution;

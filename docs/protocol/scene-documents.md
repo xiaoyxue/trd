@@ -41,6 +41,13 @@ arrays. `apply_model_edits` edits source row/instance pairs atomically:
 Sources naming several UUIDs require `bind_meshes` with explicit bindings.
 Internal renderer slots never overwrite those UUIDs.
 
+`render_config()` returns the document-global typed configuration, defaulting
+to enabled blob shadows when metadata is absent. `set_render_config(config)`
+changes only the params schema's `trd.render.config` JSON; all column buffers,
+batch boundaries, and original GLB resources are retained. Reading a default
+does not rewrite metadata. See [global render configuration](0.0.7.md#global-render-configuration)
+for validation and support-plane rules.
+
 ## Browser API
 
 The [trd-wasm public API guide](../trd-wasm.md) covers initialization, all browser
@@ -69,6 +76,9 @@ renderer.loadSceneDocument(single); // CanvasRenderer or OffscreenRenderer
 const matrix = single.getModel(row, object); // 16 column-major float32 values
 matrix[12] += 0.1;
 single.setModel(row, object, matrix);
+const config = JSON.parse(single.renderConfig());
+config.shadow.enable = false;
+single.setRenderConfig(JSON.stringify(config)); // once for the entire document
 await renderer.renderIndex(row);
 const exportedBytes = single.exportArrow(); // params plus unchanged mesh resources
 ```
@@ -77,6 +87,10 @@ const exportedBytes = single.exportArrow(); // params plus unchanged mesh resour
 the single-resource case. `meshIds()` exposes generated/preserved bindings.
 Both renderers observe edits to the same document handle; they do not re-upload
 meshes for matrix-only changes.
+
+`renderConfig()` and `setRenderConfig(json)` use the same Rust configuration
+parser as the native document reader. Unsupported `shadow_map`, malformed
+values, and unknown fields fail without changing the current document.
 
 The native and wasm video-editor loaders also accept scene documents. A
 single-mesh/single-quad input binds and selects its quad on load. Clicking the

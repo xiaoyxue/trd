@@ -494,6 +494,8 @@ fn material_rows(_video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut d
         .map(|asset| &asset.imported_material);
 
     r.row("render mode", displayed_mode(facts));
+    r.row("shadows enabled", yes_no(scene.render_config.shadow.enable));
+    r.row("shadow type", "blob");
     r.row(
         "imported metallic",
         &option_f32(imported.map(|m| m.metallic)),

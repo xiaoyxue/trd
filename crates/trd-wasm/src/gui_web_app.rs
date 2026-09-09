@@ -9,7 +9,7 @@
 //! egui texture. A single-flight guard coalesces rapid interactions so at most one
 //! render is in flight.
 
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::rc::Rc;
 
 use egui::{TextureHandle, TextureOptions};
@@ -30,6 +30,7 @@ pub struct GuiShared {
     pending_model: RefCell<Option<trd_gui::model::PendingModel>>,
     /// Called to open the shell's `<input type=file>`.
     on_pick_model: Option<js_sys::Function>,
+    context: OnceCell<egui::Context>,
 }
 
 impl GuiShared {
@@ -37,11 +38,23 @@ impl GuiShared {
         Self {
             pending_model: RefCell::new(None),
             on_pick_model,
+            context: OnceCell::new(),
         }
+    }
+
+    pub fn attach_context(&self, context: &egui::Context) {
+        self.context
+            .set(context.clone())
+            .expect("the viewer attaches its context once before returning GuiHandle");
     }
 
     pub fn queue_model(&self, model: trd_gui::model::PendingModel) {
         self.pending_model.replace(Some(model));
+        // File reads complete after the picker's focus events; egui may be asleep.
+        self.context
+            .get()
+            .expect("GuiHandle is returned only after the viewer context is attached")
+            .request_repaint();
     }
 
     /// Asks the shell to open its file picker. A gesture the browser refuses is

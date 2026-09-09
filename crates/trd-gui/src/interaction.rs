@@ -165,10 +165,13 @@ impl InteractionController {
                 true
             }
             InteractionEvent::Reset => {
-                if self.state == self.initial {
+                let mut reset = self.initial.clone();
+                // View resets must not replace document-wide appearance settings.
+                reset.render_config = self.state.render_config;
+                if self.state == reset {
                     return false;
                 }
-                self.state = self.initial.clone();
+                self.state = reset;
                 true
             }
         }
@@ -394,6 +397,17 @@ mod tests {
         assert_eq!(c.state, c.initial);
         assert_eq!(c.state.objects[0].scale, [1.0, 1.0, 1.0]);
         assert!(!c.apply(InteractionEvent::Reset));
+    }
+
+    #[test]
+    fn view_reset_preserves_shadow_config_for_all_input_paths() {
+        let mut controller = selected_controller();
+        controller.rebase_reset();
+        controller.state.render_config.shadow.enable = false;
+        assert!(!controller.apply(InteractionEvent::Reset));
+        controller.apply(InteractionEvent::Zoom { delta: 2.0 });
+        assert!(controller.apply(InteractionEvent::Reset));
+        assert!(!controller.state.render_config.shadow.enable);
     }
 
     #[test]

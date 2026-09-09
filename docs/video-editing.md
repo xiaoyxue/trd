@@ -120,6 +120,22 @@ The helper uses NumPy/PyArrow; where those imports are unavailable, use
 `uv run --with numpy --with pyarrow python`. It does not generate or overwrite an
 application Arrow document.
 
+### Document-wide shadows
+
+**Shadows -> Enable shadows -> Shadow type** controls one shared setting for
+the entire loaded document, independent of the selected object and current
+sparse row. Shadows default to enabled, with **Blob** as the only selectable
+type; **Shadow map (not supported yet)** is disabled. Turning shadows off disables
+the type selector and removes only shadows, not models or IBL.
+
+The value lives once in params schema metadata as `trd.render.config`. Changes
+redraw a paused frame, survive seek/play, and persist through both **Export Arrow**
+and the programmatic export API. Loading another document restores its own
+setting; an omitted config means enabled/blob. **Reset view** does not reset it.
+Details' **Material / lighting** section and **Copy details** include the
+displayed render's shadow enable/type. Video-only tails and reference guides
+never acquire shadow objects.
+
 ## Arrow scene export and round-trip
 
 **Export Arrow** writes the retained params and original GLB resources:

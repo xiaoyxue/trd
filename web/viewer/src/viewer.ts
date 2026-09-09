@@ -12,6 +12,7 @@
 // resolution is baked into the stream, so it is a render.sh argument).
 import init, { ArrowSceneDocument, CanvasRenderer, OffscreenRenderer } from "trd-wasm";
 import wasmUrl from "trd-wasm/trd_wasm_bg.wasm" with { type: "file" };
+import { createFrameClock } from "./frame-clock";
 
 /// The flags render.sh bakes alongside the generated `stream.arrow`. Mirrors the
 /// `--cli` scene flags plus the chosen web target and default playback rate.
@@ -206,11 +207,11 @@ async function runCanvas(
   // wall-clock advance()). rAF is capped at the refresh rate, so a slower `fps`
   // simply repeats the same frame across several callbacks; we re-render only
   // when the selected frame index changes.
-  const start = performance.now();
+  const frameAt = createFrameClock(fps, total);
   let shown = -1;
   const tick = (now: number): void => {
     requestAnimationFrame(tick);
-    const index = Math.floor(((now - start) / 1000) * fps) % total;
+    const index = frameAt(now);
     if (index === shown) {
       return;
     }
@@ -245,7 +246,7 @@ async function runOffscreen(
   // Same wall-clock frame selection as the canvas path, scheduled on rAF. Here
   // `renderIndex` is async (offscreen texture → RGBA readback), so a `busy` guard
   // skips ticks while a readback is still in flight rather than overlapping them.
-  const start = performance.now();
+  const frameAt = createFrameClock(fps, total);
   let shown = -1;
   let busy = false;
   const tick = (now: number): void => {
@@ -253,7 +254,7 @@ async function runOffscreen(
     if (busy) {
       return;
     }
-    const index = Math.floor(((now - start) / 1000) * fps) % total;
+    const index = frameAt(now);
     if (index === shown) {
       return;
     }

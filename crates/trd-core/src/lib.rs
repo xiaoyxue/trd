@@ -52,7 +52,7 @@ pub use protocol::{
     read_image_stream, DecodedFrame, DocumentFrame, DocumentMesh, DocumentObject, FrameBatch,
     GlbMesh, InputSession, ModelEdit, OutputError, OutputSession, ProtocolError, SceneDocument,
     SceneEncodeError, SceneMesh, SceneTexture, DEFAULT_FRAME_RATE, FRAME_RATE_KEY,
-    PROTOCOL_VERSION, PROTOCOL_VERSION_KEY, TABLE_KIND_KEY,
+    PROTOCOL_VERSION, PROTOCOL_VERSION_KEY, RENDER_CONFIG_KEY, TABLE_KIND_KEY,
 };
 // Material models are plain data (no wgpu, no bytemuck), so they sit beside
 // `mesh`/`texture`/`camera` at the crate root rather than inside the render
@@ -70,7 +70,7 @@ pub use render::{
 // renderer that dispatches on it (#223). Public paths are unchanged.
 pub use render::{
     Background, Draw, DrawSelection, DrawableObject, EnvironmentBackground, FrameFit, GridPlane,
-    Primitive, RenderMode, Scene, SceneError,
+    Primitive, RenderConfig, RenderMode, Scene, SceneError, ShadowConfig, ShadowType,
 };
 // The render harness; available on both platforms since readback became async
 // (#180) — the browser could not use it while it blocked on readback.

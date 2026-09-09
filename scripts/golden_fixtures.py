@@ -75,7 +75,7 @@ def build_stage(stage, temporary):
         rows.append(row)
     jsonl = temporary / f"stage{stage}.jsonl"
     jsonl.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
-    params = subprocess.run([sys.executable, str(ROOT / "scripts/jsonl_to_arrow.py"), str(jsonl)],
+    params = subprocess.run([sys.executable, str(ROOT / "scripts/jsonl_to_arrow.py"), str(jsonl), "--no-shadows"],
                             capture_output=True, check=True).stdout
     resources = []
     if stage == 2:

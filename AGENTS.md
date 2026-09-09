@@ -106,16 +106,26 @@ command that covers the change while iterating, but a task is not complete until
 every gate its **test level** requires has passed on **both** platforms — and
 **the results are recorded on the PR**.
 
-For GPT-driven work, default to the main agent; do not create subagents unless
-delegation has a clear benefit. Handle simple lookups, small edits and short
-commands directly. Reuse an existing suitable subagent rather than creating
-another, and do not keep delegating work after the user narrows or cancels it.
+**Linux SSH handoff boundary.** The Linux RTX host is accessed only over SSH, so
+a Linux handoff runs the L1/L2 automated gates only. **Do not run any §3
+end-to-end test over Linux SSH**, including CLI render recipes, headless browser
+or editor probes, and native/browser UI launches. For an L3 change, report the
+Linux L1/L2 results and leave its E2E acceptance as 🤝 with the exact command for
+an interactive device. SSH port forwarding and headless Chrome are not E2E
+acceptance.
 
-Run long builds and test suites through test subagents so
-the main session stays responsive. The parent agent still selects the test level,
-supplies the exact commands, reviews every result, and ensures no required gate
-is omitted. Use GPT-6 Astra with `high` reasoning for test subagents unless the
-user explicitly selects another model; do not use Terra.
+For GPT-driven work, use the main agent for exploration, implementation, reviews,
+builds, and ordinary tests, including long unit, integration, and GPU suites.
+**Only heavy end-to-end tests may use subagents.** Use **GPT-6 Astra
+(`gpt-6-astra`) with `high` reasoning** for those E2E subagents unless the user
+explicitly selects another model; do not use Terra. Reuse a suitable existing
+E2E subagent rather than creating another, and stop delegating when the user
+narrows or cancels the work.
+
+The main agent selects the test level, supplies the exact E2E commands and
+acceptance cases, reviews every result, and ensures no required gate is omitted.
+Keep long commands responsive with their tracked shell sessions rather than
+delegating ordinary builds or tests.
 
 Optimize execution overhead, not acceptance coverage. Reuse audited helpers and
 incremental build outputs after checking source freshness, batch independent
@@ -282,8 +292,9 @@ that would also change local gizmos.
 | `golden_params_reference_quad_axes_cube` | params only: the quad outline, local axes and centered wireframe cube |
 | `golden_params_single_glb_edit_roundtrip` | absent/identity model → edit → export → reload, with exact same-device pixels and retained source data |
 | `golden_params_multiple_glb_bindings` | two distinguishable GLBs with independent transforms; reversing mesh rows cannot change UUID bindings |
+| `golden_params_blob_shadows_toggle_and_replay` | default-enabled blobs over a visible background, shadow-off, exact export/replay pixels, and no shadows from reference-only guides |
 
-The three new baselines live under `crates/trd-placement/tests/golden/` and use
+The placement baselines live under `crates/trd-placement/tests/golden/` and use
 Uffizi for model shading. They are headless pixel regressions, **not** the
 native/Chrome UI end-to-end cases. L3 still owes those windows and interactions.
 
@@ -357,6 +368,10 @@ The contents of the test levels: tiers 1–2 are **L2**, tiers 3–4 are **L3**.
    `cargo test -p trd-gui -- --ignored`
 
 #### 3. End-to-end — Linux *and* Windows (L3)
+
+These remain product-level L3 requirements, but the Linux SSH handoff does not
+execute them; apply the [Linux SSH handoff boundary](#testing) and hand them to
+an interactive device.
 
 - **trd-core / trd-cli:** stream a real Arrow input through the CLI and read an
   image stream back — `nix run .#trd-cli -- …` / `examples/render.sh` (Linux),
@@ -583,13 +598,10 @@ box and the R/G/B world axes. The `trd-gui` viewers start in PBR from `--env` /
 `?env=` (tick the overlay checkboxes; nudge roughness → 0.35). Colors must match
 across trd-cli, trd-app, and both web renderers.
 
-> **Linux web access — always SSH port-forward, always the PBR coca-can.** The RTX
-> Linux box is headless (no local display), so the browser viewers (`trd-wasm` and
-> `trd-gui` web) are **always** reached over an **SSH port-forward**: tunnel the bun
-> dev-server port from your workstation (`ssh -L 8082:localhost:8082 <host>`, add
-> `-N` to forward only) and open the `http://localhost:8082/?mesh=…&texture=…&env=…`
-> URL locally. The **PBR coca-cola can** (`coke.obj` + `can_around.jpg` +
-> `uffizi-large.hdr`) is the standard demo scene for these launches.
+> **Linux SSH handoffs do not run web E2E.** The RTX Linux box is headless and
+> accessed over SSH, so leave browser-viewer acceptance 🤝 for an interactive
+> device. The commands above are manual launch references, not handoff gates to
+> execute through SSH or a headless browser.
 
 ### Verification matrix
 

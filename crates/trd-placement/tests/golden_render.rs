@@ -179,6 +179,14 @@ fn gpu() -> Arc<GpuContext> {
 }
 
 fn render(document: &SceneDocument, gpu: Arc<GpuContext>) -> Vec<u8> {
+    render_with_background(document, gpu, None)
+}
+
+fn render_with_background(
+    document: &SceneDocument,
+    gpu: Arc<GpuContext>,
+    background: Option<[u8; 4]>,
+) -> Vec<u8> {
     let assets = trd_placement::document_assets(document).unwrap();
     let mut renderer =
         Renderer::with_assets(gpu, trd_core::TEXTURE_TARGET_FORMAT, &assets).unwrap();
@@ -198,6 +206,9 @@ fn render(document: &SceneDocument, gpu: Arc<GpuContext>) -> Vec<u8> {
         2048,
     ));
     renderer.set_tonemap_operator(trd_core::MeshTarget::All, trd_core::Tonemap::Aces);
+    if let Some(color) = background {
+        renderer.update_frame_texture_rgba(&color.repeat((WIDTH * HEIGHT) as usize), WIDTH, HEIGHT);
+    }
     let options = RenderOptions {
         mode: RenderMode::Shaded,
         ..Default::default()
@@ -210,7 +221,7 @@ fn render(document: &SceneDocument, gpu: Arc<GpuContext>) -> Vec<u8> {
             height: HEIGHT,
         },
         &options,
-        None,
+        background.map(|_| trd_core::FrameFit::Stretch),
     )
     .unwrap();
     renderer.draw_layers(&[SceneLayer::new(camera, &scene)], &target);
@@ -278,6 +289,9 @@ fn golden_params_single_glb_edit_roundtrip() {
             std::slice::from_ref(&mesh),
             include_model,
         );
+        let mut config = document.render_config();
+        config.shadow.enable = false;
+        document.set_render_config(config).unwrap();
         let before = render(&document, gpu.clone());
         document
             .apply_model_edits(&[ModelEdit {
@@ -319,6 +333,9 @@ fn golden_params_multiple_glb_bindings() {
     let gpu = gpu();
     let meshes = fixture_meshes();
     let mut document = source(&[quad(92.0, 100.0), quad(228.0, 100.0)], &meshes, true);
+    let mut config = document.render_config();
+    config.shadow.enable = false;
+    document.set_render_config(config).unwrap();
     document
         .apply_model_edits(&[
             ModelEdit {
@@ -346,6 +363,73 @@ fn golden_params_multiple_glb_bindings() {
         "mesh row order changed UUID bindings"
     );
     check("params_multiple", &image);
+}
+
+#[test]
+#[ignore = "requires a real GPU"]
+fn golden_params_blob_shadows_toggle_and_replay() {
+    let _serial = GPU_SERIAL.lock().unwrap_or_else(|error| error.into_inner());
+    let gpu = gpu();
+    let meshes = fixture_meshes();
+    let mut document = source(&[quad(92.0, 100.0), quad(228.0, 100.0)], &meshes, true);
+    assert!(!document
+        .schema()
+        .metadata()
+        .contains_key(trd_core::RENDER_CONFIG_KEY));
+    assert_eq!(document.render_config(), trd_core::RenderConfig::default());
+    document
+        .apply_model_edits(&[
+            ModelEdit {
+                row: 0,
+                object: 0,
+                model: edit(0.5, -0.1, 0.3),
+            },
+            ModelEdit {
+                row: 0,
+                object: 1,
+                model: edit(0.4, 0.1, -0.5),
+            },
+        ])
+        .unwrap();
+    let enabled = render_with_background(&document, gpu.clone(), Some([190, 190, 190, 255]));
+    let original_frames = document.frames().unwrap();
+    let mut config = document.render_config();
+    config.shadow.enable = false;
+    document.set_render_config(config).unwrap();
+    let disabled = render_with_background(&document, gpu.clone(), Some([190, 190, 190, 255]));
+    let darker = enabled
+        .chunks_exact(4)
+        .zip(disabled.chunks_exact(4))
+        .filter(|(on, off)| on[0].saturating_add(5) < off[0])
+        .count();
+    assert!(
+        darker > 100,
+        "enabled shadows must visibly darken the background: {darker} pixels"
+    );
+    let reopened = SceneDocument::read(&document.write().unwrap()).unwrap();
+    assert_eq!(reopened.frames().unwrap(), original_frames);
+    assert_eq!(reopened.meshes(), document.meshes());
+    assert_eq!(
+        disabled,
+        render_with_background(&reopened, gpu.clone(), Some([190, 190, 190, 255]))
+    );
+    config.shadow.enable = true;
+    document.set_render_config(config).unwrap();
+    let reopened = SceneDocument::read(&document.write().unwrap()).unwrap();
+    assert_eq!(
+        enabled,
+        render_with_background(&reopened, gpu.clone(), Some([190, 190, 190, 255]))
+    );
+    check("params_blob_shadows", &enabled);
+
+    let mut reference = source(&[quad(160.0, 100.0)], &[], false);
+    let before = render_with_background(&reference, gpu.clone(), Some([190, 190, 190, 255]));
+    config.shadow.enable = false;
+    reference.set_render_config(config).unwrap();
+    assert_eq!(
+        before,
+        render_with_background(&reference, gpu, Some([190, 190, 190, 255]))
+    );
 }
 
 #[test]
