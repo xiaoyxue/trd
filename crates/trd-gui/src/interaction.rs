@@ -402,6 +402,7 @@ mod tests {
     #[test]
     fn view_reset_preserves_shadow_config_for_all_input_paths() {
         let mut controller = selected_controller();
+        controller.rebase_reset();
         controller.state.render_config.shadow.enable = false;
         assert!(!controller.apply(InteractionEvent::Reset));
         controller.apply(InteractionEvent::Zoom { delta: 2.0 });
