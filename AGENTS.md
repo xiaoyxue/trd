@@ -106,16 +106,18 @@ command that covers the change while iterating, but a task is not complete until
 every gate its **test level** requires has passed on **both** platforms — and
 **the results are recorded on the PR**.
 
-For GPT-driven work, default to the main agent; do not create subagents unless
-delegation has a clear benefit. Handle simple lookups, small edits and short
-commands directly. Reuse an existing suitable subagent rather than creating
-another, and do not keep delegating work after the user narrows or cancels it.
+For GPT-driven work, use the main agent for exploration, implementation, reviews,
+builds, and ordinary tests, including long unit, integration, and GPU suites.
+**Only heavy end-to-end tests may use subagents.** Use **GPT-6 Astra
+(`gpt-6-astra`) with `high` reasoning** for those E2E subagents unless the user
+explicitly selects another model; do not use Terra. Reuse a suitable existing
+E2E subagent rather than creating another, and stop delegating when the user
+narrows or cancels the work.
 
-Run long builds and test suites through test subagents so
-the main session stays responsive. The parent agent still selects the test level,
-supplies the exact commands, reviews every result, and ensures no required gate
-is omitted. Use GPT-6 Astra with `high` reasoning for test subagents unless the
-user explicitly selects another model; do not use Terra.
+The main agent selects the test level, supplies the exact E2E commands and
+acceptance cases, reviews every result, and ensures no required gate is omitted.
+Keep long commands responsive with their tracked shell sessions rather than
+delegating ordinary builds or tests.
 
 Optimize execution overhead, not acceptance coverage. Reuse audited helpers and
 incremental build outputs after checking source freshness, batch independent
