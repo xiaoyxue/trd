@@ -106,6 +106,14 @@ command that covers the change while iterating, but a task is not complete until
 every gate its **test level** requires has passed on **both** platforms — and
 **the results are recorded on the PR**.
 
+**Linux SSH handoff boundary.** The Linux RTX host is accessed only over SSH, so
+a Linux handoff runs the L1/L2 automated gates only. **Do not run any §3
+end-to-end test over Linux SSH**, including CLI render recipes, headless browser
+or editor probes, and native/browser UI launches. For an L3 change, report the
+Linux L1/L2 results and leave its E2E acceptance as 🤝 with the exact command for
+an interactive device. SSH port forwarding and headless Chrome are not E2E
+acceptance.
+
 For GPT-driven work, use the main agent for exploration, implementation, reviews,
 builds, and ordinary tests, including long unit, integration, and GPU suites.
 **Only heavy end-to-end tests may use subagents.** Use **GPT-6 Astra
@@ -361,6 +369,10 @@ The contents of the test levels: tiers 1–2 are **L2**, tiers 3–4 are **L3**.
 
 #### 3. End-to-end — Linux *and* Windows (L3)
 
+These remain product-level L3 requirements, but the Linux SSH handoff does not
+execute them; apply the [Linux SSH handoff boundary](#testing) and hand them to
+an interactive device.
+
 - **trd-core / trd-cli:** stream a real Arrow input through the CLI and read an
   image stream back — `nix run .#trd-cli -- …` / `examples/render.sh` (Linux),
   `examples/render.ps1` (Windows).
@@ -586,13 +598,10 @@ box and the R/G/B world axes. The `trd-gui` viewers start in PBR from `--env` /
 `?env=` (tick the overlay checkboxes; nudge roughness → 0.35). Colors must match
 across trd-cli, trd-app, and both web renderers.
 
-> **Linux web access — always SSH port-forward, always the PBR coca-can.** The RTX
-> Linux box is headless (no local display), so the browser viewers (`trd-wasm` and
-> `trd-gui` web) are **always** reached over an **SSH port-forward**: tunnel the bun
-> dev-server port from your workstation (`ssh -L 8082:localhost:8082 <host>`, add
-> `-N` to forward only) and open the `http://localhost:8082/?mesh=…&texture=…&env=…`
-> URL locally. The **PBR coca-cola can** (`coke.obj` + `can_around.jpg` +
-> `uffizi-large.hdr`) is the standard demo scene for these launches.
+> **Linux SSH handoffs do not run web E2E.** The RTX Linux box is headless and
+> accessed over SSH, so leave browser-viewer acceptance 🤝 for an interactive
+> device. The commands above are manual launch references, not handoff gates to
+> execute through SSH or a headless browser.
 
 ### Verification matrix
 
