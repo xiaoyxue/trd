@@ -187,11 +187,14 @@ fn assemble_document_scene(
             } else {
                 Matrix4::IDENTITY
             };
-            supports.push((
-                origin,
-                trd_core::Transform::from_matrix(object.model * asset_model).transform_aabb(bounds),
-                object.quad.is_some(),
-            ));
+            if config.shadow.enable {
+                supports.push((
+                    origin,
+                    trd_core::Transform::from_matrix(object.model * asset_model)
+                        .transform_aabb(bounds),
+                    object.quad.is_some(),
+                ));
+            }
             draws.push(Draw {
                 mesh_id: u32::try_from(slot).map_err(|_| DocumentSceneError::Row(slot))?,
                 model: origin * object.model * asset_model,
