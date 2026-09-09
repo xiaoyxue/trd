@@ -64,6 +64,62 @@ rows. Each row retains its own camera and quad. `track_id` survives reordered
 instances and gaps; without IDs, consistent ordered bindings are required.
 Ambiguous correspondence is an error, not permission to edit another object.
 
+### Direct-basis WASM preview
+
+The experimental placement branch uses the requested expansion in the actual
+Rust document renderer, including the WASM editor:
+
+```text
+L = length(0.5*r1)
+P(u,v,w) = O + u*0.5*r1 + v*(L/length(r2))*r2 + w*(L/length(e3))*e3
+homogeneous_pixel = K * P
+pixel = homogeneous_pixel.xy / homogeneous_pixel.z
+```
+
+`r1 = 2*half_edge1` and `r2 = 2*half_edge2` retain the reconstructed quad
+directions; `e3` is its plane normal. A Y-up mesh maps to
+`(u,v,w) = (x, -handedness*z, y)`: the model preserves the three directions
+and gives every axis length `length(0.5*r1)`. This halves the previous
+full-edge placement uniformly; there is no additional height multiplier.
+The mesh, its AABB and
+the reference cube use this same frame. The quad/grid/gizmo remain unchanged.
+The raw triad's normal-flip sign is handled once, without mirroring the mesh.
+
+This changes placement behavior on the experimental branch; it is not only a
+test-driver mode. Nonorthogonal input remains affine rather than being called a
+rigid cube. PBR/Disney normals use inverse-transpose directions for this affine
+transform. Source Arrow, GLB, camera calibration and golden baselines are not
+rewritten.
+
+Build and launch the real editor, then open the matching video and either
+`fiba.params.arrow` or `fiba.dragon.no-model.arrow` through **Load Arrow**:
+
+```powershell
+bun run --cwd web\gui-video-editing build:wasm
+cd web\gui-video-editing
+$env:BUN_PORT = '8085'
+bun .\index.html
+```
+
+URL loading also supports `?document=<params-or-bundle-url>&video=<video-url>`.
+Inspect source frames 168, 204 and 220 (player labels 169, 205 and 221), with
+quad coordinates and cube/Dragon AABB visible. Compare corresponding projected
+directions at a common anchor, not a corner direction against center axes.
+
+The separate Python candidate keeps the original
+`examples/placement_quad_by_local_coord.py` unchanged. It reuses reconstruction
+but independently expands the requested coefficients and writes reference JSON:
+
+```powershell
+python crates\trd-placement\tests\support\direct_basis_reference.py `
+    'D:\Code\trd-assets\fiba.params.arrow' `
+    -o output\placement-basis-experiment\direct_basis_python.json
+```
+
+The helper uses NumPy/PyArrow; where those imports are unavailable, use
+`uv run --with numpy --with pyarrow python`. It does not generate or overwrite an
+application Arrow document.
+
 ## Arrow scene export and round-trip
 
 **Export Arrow** writes the retained params and original GLB resources:

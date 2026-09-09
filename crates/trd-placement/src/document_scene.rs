@@ -271,7 +271,7 @@ mod tests {
     }
 
     #[test]
-    fn origin_basis_uses_python_half_edge_units_without_offset_or_lift() {
+    fn origin_basis_uses_equal_half_edge_lengths_without_offset_or_lift() {
         let frame = frame();
         let quad = quad_frame(
             CameraIntrinsics {
@@ -287,7 +287,16 @@ mod tests {
         assert!(columns[12].abs() < 1e-5);
         assert!(columns[13].abs() < 1e-5);
         assert!((columns[14] + 5.0).abs() < 1e-5);
-        assert!((matrix.determinant() - quad.axis_length.powi(3)).abs() < 1e-5);
+        let unit_length = quad.axis_length;
+        for start in [0, 4, 8] {
+            let length = columns[start..start + 3]
+                .iter()
+                .map(|value| value * value)
+                .sum::<f32>()
+                .sqrt();
+            assert!((length - unit_length).abs() < 1e-5);
+        }
+        assert!((matrix.determinant() - unit_length.powi(3)).abs() < 1e-5);
     }
 
     #[test]

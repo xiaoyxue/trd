@@ -23,8 +23,8 @@ fn project(matrix: Matrix4, point: [f32; 3], width: u32, height: u32) -> [f32; 2
 }
 
 #[test]
-#[ignore = "requires converted FIBA params and Python-generated reference JSON"]
-fn original_fiba_quad_origin_axes_and_cube_match_python() {
+#[ignore = "requires FIBA params and support/direct_basis_reference.py output"]
+fn equal_length_fiba_quad_origin_axes_and_cube_match_python() {
     let bytes = std::fs::read(input("TRD_FIBA_PARAMS")).unwrap();
     let document = SceneDocument::read(&bytes).unwrap();
     assert!(
@@ -37,18 +37,30 @@ fn original_fiba_quad_origin_axes_and_cube_match_python() {
     assert_eq!(rows.len(), 222);
     assert_eq!(document.row_count(), rows.len());
     let viewport = Viewport {
-        width: expected["width"].as_u64().unwrap() as u32,
-        height: expected["height"].as_u64().unwrap() as u32,
+        width: rows[0]["width"].as_u64().unwrap() as u32,
+        height: rows[0]["height"].as_u64().unwrap() as u32,
     };
     let mut maximum_corner_error = 0.0f32;
     let mut maximum_origin_error = 0.0f32;
     let mut maximum_cube_anchor_error = 0.0f32;
+    let mut maximum_vertex_error = 0.0f32;
+    let mut maximum_axis_length_error = 0.0f32;
     let cube = trd_core::Mesh::reference_cube().unwrap();
     assert_eq!(cube.aabb().min().to_array(), [-0.5; 3]);
     assert_eq!(cube.aabb().max().to_array(), [0.5; 3]);
     for (index, reference) in rows.iter().enumerate() {
         let frame = document.frame(index).unwrap();
+        assert_eq!(
+            frame.present_index,
+            Some(reference["video_frame_index"].as_i64().unwrap())
+        );
         assert_eq!(frame.present_index, reference["present_index"].as_i64());
+        assert_eq!(frame.objects[0].model, Matrix4::IDENTITY);
+        assert_eq!(reference["width"].as_u64(), Some(u64::from(viewport.width)));
+        assert_eq!(
+            reference["height"].as_u64(),
+            Some(u64::from(viewport.height))
+        );
         let source_quad: Vec<[f32; 2]> = serde_json::from_value(reference["quad"].clone()).unwrap();
         let input_quad = frame.objects[0].quad.unwrap();
         for (actual, original) in input_quad
@@ -104,6 +116,40 @@ fn original_fiba_quad_origin_axes_and_cube_match_python() {
             );
         }
         let vp = camera.view_projection().matrix();
+        let cube_columns = objects[2].model().to_cols_array();
+        let target_length = reference["placement_axis_length"].as_f64().unwrap() as f32;
+        for start in [0, 4, 8] {
+            let length = cube_columns[start..start + 3]
+                .iter()
+                .map(|value| value * value)
+                .sum::<f32>()
+                .sqrt();
+            maximum_axis_length_error =
+                maximum_axis_length_error.max((length - target_length).abs());
+        }
+        let handedness = reference["handedness"].as_f64().unwrap() as f32;
+        for (coefficients_key, pixels_key) in [
+            ("unit_quad_coefficients", "unit_quad_pixels"),
+            ("unit_axes_coefficients", "unit_axes_pixels"),
+        ] {
+            let coefficients: Vec<[f32; 3]> =
+                serde_json::from_value(reference[coefficients_key].clone()).unwrap();
+            let pixels: Vec<[f32; 2]> =
+                serde_json::from_value(reference[pixels_key].clone()).unwrap();
+            assert_eq!(coefficients.len(), pixels.len());
+            for ([u, v, w], expected) in coefficients.into_iter().zip(pixels) {
+                let actual = project(
+                    vp * objects[2].model(),
+                    [u, w - 0.5, -handedness * v],
+                    viewport.width,
+                    viewport.height,
+                );
+                for axis in 0..2 {
+                    maximum_vertex_error =
+                        maximum_vertex_error.max((actual[axis] - expected[axis]).abs());
+                }
+            }
+        }
         for (corner, expected) in [
             [-1.0, -1.0, 0.0],
             [1.0, -1.0, 0.0],
@@ -148,9 +194,13 @@ fn original_fiba_quad_origin_axes_and_cube_match_python() {
     eprintln!(
         "222 FIBA rows: max corner reprojection error {maximum_corner_error:.6}px; \
          max origin error {maximum_origin_error:.6}px; \
-         max cube bottom-center error {maximum_cube_anchor_error:.6}px"
+         max cube bottom-center error {maximum_cube_anchor_error:.6}px; \
+         max independently expanded vertex error {maximum_vertex_error:.6}px; \
+         max equal-axis length error {maximum_axis_length_error:.8}"
     );
     assert!(maximum_corner_error < 0.05);
     assert!(maximum_origin_error < 0.05);
     assert!(maximum_cube_anchor_error < 0.05);
+    assert!(maximum_vertex_error < 0.05);
+    assert!(maximum_axis_length_error < 1e-5);
 }
