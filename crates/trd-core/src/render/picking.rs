@@ -9,14 +9,15 @@
 //! than in `renderer.rs` (#221 §4).
 //!
 //! [`PickTarget`] is the target itself: a single-sample **linear**
-//! [`PICK_FORMAT`] color texture + a depth attachment, into which each drawn
-//! object is rasterized in a flat id color. After the pass, the **one** texel
-//! under the cursor is copied back and decoded to a 0-based object index (or
-//! `None` for the background) — so a click resolves *which* object it hit
-//! without ray-marching. Kept separate from the display
+//! [`PICK_FORMAT`](super::PICK_FORMAT) color attachment + a depth attachment,
+//! into which each drawn object is rasterized in a flat id color. After the
+//! pass, the **one** texel under the cursor is copied back and decoded to a
+//! 0-based object index (or `None` for the background) — so a click resolves
+//! *which* object it hit without ray-marching. Kept separate from the display
 //! [`TextureTarget`](super::TextureTarget) because picking must be
 //! single-sampled (ids must never be averaged at edges) and use a non-sRGB format
-//! (so the id bytes round-trip exactly).
+//! (so the id bytes round-trip exactly) — both pinned by
+//! [`AttachmentSpec::id_color`].
 //!
 //! Like every other target, it is **pure data** (#203, #235 R4): the pass that
 //! fills it and the read-back that decodes it are [`Renderer`](super::Renderer) methods, because
@@ -29,8 +30,8 @@ use super::GpuContext;
 
 use super::buffer::InstanceBuffer;
 use super::{
-    create_depth_target, create_mesh_bind_group_layout, create_picking_pipeline, DepthTarget,
-    PickInstanceRaw, PICK_FORMAT,
+    create_mesh_bind_group_layout, create_picking_pipeline, Attachment, AttachmentSpec,
+    PickInstanceRaw, ViewportAttachment,
 };
 
 /// The object-id **picking** pass's own state (#141, grouped in #203).
@@ -89,120 +90,90 @@ impl Picking {
     /// Ensures the pick target exists and matches `width` × `height`, creating it
     /// on first use — the lazy-allocation policy the `target` field documents.
     ///
-    /// Returns nothing: the caller reads it back through [`target`](Self::target)
+    /// Returns nothing: the caller reads it back through [`pass`](Self::pass)
     /// *after* the mutable work (writing the camera uniform, uploading the id
     /// instances) is done, which is how [`Renderer::pick`](super::Renderer::pick) encodes into a target
     /// it owns without moving it out of `self` (#235 R4).
     pub(super) fn ensure_target(&mut self, device: &wgpu::Device, width: u32, height: u32) {
-        match self.target.as_mut() {
-            Some(target) => target.resize(device, width, height),
-            None => self.target = Some(PickTarget::new(device, width, height)),
-        }
+        self.target
+            .get_or_insert_with(|| PickTarget::new(device))
+            .resize(device, width, height);
     }
 
-    /// The allocated pick target, or `None` before the first
-    /// [`ensure_target`](Self::ensure_target).
-    pub(super) fn target(&self) -> Option<&PickTarget> {
-        self.target.as_ref()
+    /// This pass's sized attachments and read-back buffer, or `None` before the
+    /// first [`ensure_target`](Self::ensure_target).
+    pub(super) fn pass(&self) -> Option<PickPass<'_>> {
+        self.target.as_ref()?.pass()
     }
 
     /// The current pick-target size, or `None` while nothing has been picked yet.
     pub(super) fn target_size(&self) -> Option<(u32, u32)> {
-        self.target.as_ref().map(PickTarget::size)
+        self.target.as_ref()?.size()
     }
 }
 
-/// A single-sample id-color render target + depth + a tiny read-back buffer for
-/// one pixel. Sized to the display; rebuilt when the render size changes.
+/// A single-sample id-color attachment + depth + a tiny read-back buffer for one
+/// pixel. Both attachments track the display size through their shared
+/// [`ViewportAttachment`] rule; the buffer is a fixed one-texel row, so it
+/// outlives every resize.
 pub(super) struct PickTarget {
-    texture: wgpu::Texture,
-    color_view: wgpu::TextureView,
-    depth: DepthTarget,
+    id: ViewportAttachment,
+    depth: ViewportAttachment,
     /// A `MAP_READ` staging buffer for a single texel's row (padded to the copy
     /// alignment). One row is enough — picking reads exactly one pixel.
     staging: wgpu::Buffer,
-    width: u32,
-    height: u32,
 }
 
 impl PickTarget {
-    /// Allocates the id-color target + depth + 1-texel read-back buffer for a
-    /// fixed `width` × `height`.
-    fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {
-        let width = width.max(1);
-        let height = height.max(1);
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("trd pick target"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: PICK_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let color_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let depth = create_depth_target(device, width, height, 1);
-        // A single 4-byte RGBA texel, padded to the copy row alignment.
-        let staging = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("trd pick readback"),
-            size: u64::from(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT),
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
+    /// Allocates the 1-texel read-back buffer; the attachments follow on the
+    /// first [`resize`](Self::resize).
+    fn new(device: &wgpu::Device) -> Self {
         Self {
-            texture,
-            color_view,
-            depth,
-            staging,
-            width,
-            height,
+            id: ViewportAttachment::new(AttachmentSpec::id_color()),
+            depth: ViewportAttachment::new(AttachmentSpec::depth(1)),
+            // A single 4-byte RGBA texel, padded to the copy row alignment.
+            staging: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("trd pick readback"),
+                size: u64::from(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT),
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            }),
         }
     }
 
-    /// The current pick-target dimensions.
-    fn size(&self) -> (u32, u32) {
-        (self.width, self.height)
-    }
-
-    /// Resizes the target to `width` × `height` (no-op when unchanged), so it
-    /// tracks the display render size.
+    /// Sizes both attachments to `width` × `height`, so the target tracks the
+    /// display render size.
     fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
-        let width = width.max(1);
-        let height = height.max(1);
-        if width == self.width && height == self.height {
-            return;
-        }
-        *self = Self::new(device, width, height);
+        self.id.ensure(device, width, height);
+        self.depth.ensure(device, width, height);
     }
 
-    /// The id-color attachment this pass renders into.
-    pub(super) fn color_view(&self) -> &wgpu::TextureView {
-        &self.color_view
+    /// The current dimensions, or `None` before the first
+    /// [`resize`](Self::resize).
+    fn size(&self) -> Option<(u32, u32)> {
+        self.id.current().map(Attachment::size)
     }
 
+    fn pass(&self) -> Option<PickPass<'_>> {
+        Some(PickPass {
+            id: self.id.current()?,
+            depth: self.depth.current()?,
+            staging: &self.staging,
+        })
+    }
+}
+
+/// One pick pass's attachments and its read-back buffer, borrowed together.
+///
+/// Flattening [`PickTarget`]'s options here is what keeps the encode and the
+/// read-back free of unwraps: a caller answers "is there a sized target?" once,
+/// with the `?` it already had.
+pub(super) struct PickPass<'a> {
+    /// The id-color attachment this pass renders into, and the texture the
+    /// picked texel is copied out of.
+    pub(super) id: &'a Attachment,
     /// The single-sample depth attachment, so the nearest object's id wins.
-    pub(super) fn depth_view(&self) -> &wgpu::TextureView {
-        &self.depth.view
-    }
-
-    /// The id-color texture, copied one texel at a time into
-    /// [`staging`](Self::staging).
-    pub(super) fn texture(&self) -> &wgpu::Texture {
-        &self.texture
-    }
-
+    pub(super) depth: &'a Attachment,
     /// The `MAP_READ` buffer the picked texel is copied into.
-    pub(super) fn staging(&self) -> &wgpu::Buffer {
-        &self.staging
-    }
-
-    /// Whether `(x, y)` is inside the target (a click outside it hits nothing).
-    pub(super) fn contains(&self, x: u32, y: u32) -> bool {
-        x < self.width && y < self.height
-    }
+    pub(super) staging: &'a wgpu::Buffer,
 }

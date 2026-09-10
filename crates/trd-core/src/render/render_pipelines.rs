@@ -73,6 +73,14 @@ pub(crate) struct SceneUniforms {
     /// light rig) at binding 0, and one `PbrUniform` slot per mesh at binding 1,
     /// which a PBR draw selects with a dynamic offset (#182).
     pub(super) pbr: BoundSceneSlots,
+    /// Whether the slot array still matches the meshes' appearance (#235 R5).
+    ///
+    /// A slot's contents — material / IBL / tone map / debug view — depend on
+    /// **no per-frame value** (the camera and light rig live in the scene
+    /// uniform, #182), so rewriting all of them every frame is redundant while
+    /// nothing has changed. It lives here, beside the slots it describes, rather
+    /// than on the renderer that used to pass it back in (#363).
+    slots_dirty: bool,
 }
 
 /// Builds the render pipelines and the uniforms they bind, together.
@@ -188,6 +196,8 @@ pub(crate) fn create_render_pipelines(
             "trd pbr",
             mesh_count,
         ),
+        // Nothing has been uploaded yet, so the first frame writes them all.
+        slots_dirty: true,
     };
     let pipelines = RenderPipelines {
         filled,
@@ -206,9 +216,20 @@ impl SceneUniforms {
     /// Widens the PBR slot array to one slot per mesh after a runtime mesh add
     /// (#353). The layout is a pure function of the device, so it is rebuilt
     /// here rather than retained — [`create_render_pipelines`] drops its own.
+    ///
+    /// It does **not** mark the slots stale on its own: it is a no-op when the
+    /// capacity already suffices, which is exactly the reused-hole case that
+    /// still needs its slot rewritten. The caller marks the add instead.
     pub(super) fn grow_pbr_slots(&mut self, device: &wgpu::Device, meshes: usize) {
         let layout = create_pbr_bind_group_layout(device);
         self.pbr.grow(device, &layout, meshes);
+    }
+
+    /// Marks the per-mesh slots stale, so the next frame rewrites every live
+    /// one. Every path that changes what a slot should hold — an appearance
+    /// edit, a mesh added into a fresh or reused id, a mesh removed — calls it.
+    pub(super) fn mark_slots_dirty(&mut self) {
+        self.slots_dirty = true;
     }
 
     /// Rewrites the camera `P·V` uniform for this frame's `camera`.
@@ -228,17 +249,16 @@ impl SceneUniforms {
     /// read straight off the [`MeshGpu`]s that own them (#203): they used to be
     /// four `Vec`s on the renderer, all sized to the mesh count with nothing
     /// enforcing it, joined here by a four-deep `zip`.
-    /// `write_slots` skips the per-mesh half when nothing has changed since the
-    /// last frame (#235 R5) — the scene half is always written, because the
-    /// camera moves every frame.
+    /// The per-mesh half is skipped when nothing has changed since the last
+    /// frame (#235 R5) — the scene half is always written, because the camera
+    /// moves every frame.
     pub(super) fn write_pbr(
-        &self,
+        &mut self,
         queue: &wgpu::Queue,
         camera: Camera,
         meshes: &[Option<MeshGpu>],
         lighting: Lighting,
         use_env: bool,
-        write_slots: bool,
     ) {
         let scene = PbrSceneUniform::new(
             camera.view_projection().matrix().to_cols_array(),
@@ -247,7 +267,7 @@ impl SceneUniforms {
             use_env,
         );
         self.pbr.write_scene(queue, &scene);
-        if !write_slots {
+        if !self.slots_dirty {
             return;
         }
         // A removed mesh leaves a hole whose slot nothing draws; skipping it
@@ -265,5 +285,7 @@ impl SceneUniforms {
             });
             self.pbr.write_slot(queue, slot, &uniform);
         }
+        // Cleared only once every live slot has been rewritten.
+        self.slots_dirty = false;
     }
 }
