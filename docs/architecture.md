@@ -64,6 +64,25 @@ field (#203).
 | `SurfaceTarget` | surface + config + sRGB view format | `trd-app`, `trd-wasm`'s `CanvasRenderer` |
 | `RenderTarget` | closed enum over the two, holding just the discriminant | the public render entry |
 
+A **target** is a place a frame lands and is read back from; the transient
+scratch a pass renders *through* is an **attachment**, and the two are separated
+by a usage flag rather than by taste — a target carries `COPY_SRC`, an attachment
+is `RENDER_ATTACHMENT` only and is discarded once the pass ends (#377).
+
+`render/attachments.rs` owns that second concept. `ViewportAttachment` holds the
+single copy of the "recreate when the viewport changed" logic that the depth,
+MSAA-color and pick targets each used to hand-roll, and `AttachmentSpec`'s
+kind-named constructors pair format with usage so depth cannot be allocated
+without `DEPTH_FORMAT`, nor the pick target without `COPY_SRC`. `MeshAttachments`
+sizes color and depth together, which is what makes their shared sample count
+structural instead of a lookup back into the renderer.
+
+Its `Option`s mean one thing each. `MeshAttachments.color` is `None` **only**
+when MSAA is off — decided at construction from the sample count, never by lazy
+allocation — so the depth view a pass receives is not optional and needs no
+`expect`. `PickTarget` keeps its name: it has `COPY_SRC` and a staging buffer, so
+one texel really is read back from it.
+
 **All** the behaviour is on the renderer, behind one match:
 `Renderer::render(camera, scene, &mut RenderTarget)` is the single render entry,
 dispatching to a private `render_surface` (acquire → encode through the sRGB view
