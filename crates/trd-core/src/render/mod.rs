@@ -88,7 +88,7 @@ pub(crate) use gpu_context::LimitsPreset;
 pub use gpu_context::{create_instance, AdapterFacts, GpuContext, GpuInitError, GpuRequest};
 pub use gpu_types::Vertex;
 pub use mesh_store::MeshAppearance;
-pub use options::{Msaa, PbrConfig, RenderOptions};
+pub use options::{GridScope, Msaa, ObjectGrid, Overlays, PbrConfig, RenderOptions};
 pub use pbr::PbrDebugView;
 pub use render_config::{RenderConfig, ShadowConfig, ShadowType};
 pub use render_target::{

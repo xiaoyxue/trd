@@ -251,15 +251,21 @@ fn main() -> Result<(), trd_core::StreamError> {
         cli.height,
         trd_core::RenderOptions {
             mode,
-            show_aabb: cli.aabb,
-            show_axes: cli.axes,
-            show_local_axes: cli.axes_local,
-            show_local_grid: cli.grid_local.map(Into::into),
-            show_local_grid_mesh: cli.grid_mesh,
-            // The CLI exposes no world/object grid or selection flags; those are
-            // interactive-only overlays.
-            show_world_grid: None,
-            show_object_grid: None,
+            overlays: trd_core::Overlays {
+                aabb: cli.aabb,
+                axes: cli.axes,
+                local_axes: cli.axes_local,
+                // `--grid-local` is the #77 placement-quad grid, so it is scoped
+                // to wireframe draws and optionally to the quad's own mesh.
+                object_grid: cli.grid_local.map(|plane| trd_core::ObjectGrid {
+                    plane: plane.into(),
+                    scope: trd_core::GridScope::Wireframe {
+                        mesh: cli.grid_mesh,
+                    },
+                }),
+                // The CLI exposes no world grid; it is an interactive-only overlay.
+                ..Default::default()
+            },
             selected: None,
             pbr,
             // The sky is a scene background, not a surface material, so it is a

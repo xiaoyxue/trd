@@ -216,17 +216,11 @@ pub struct SceneState {
     pub pbr_debug_views: Vec<PbrDebugView>,
     /// Scene light-rig controls shared by every PBR object.
     pub lighting: Lighting,
-    /// Overlay each drawn mesh instance's axis-aligned bounding box (#42).
-    pub show_aabb: bool,
-    /// Overlay a world-origin coordinate-axes gizmo (#42).
-    pub show_axes: bool,
-    /// Overlay a coordinate-axes gizmo at the object's own (model) frame (#77).
-    pub show_local_axes: bool,
-    /// Overlay a world-origin XZ **plane grid** (a floor at the world origin).
-    pub show_world_grid: bool,
-    /// Overlay an XZ **plane grid** at the object's own (model) frame — a grid
-    /// that follows the object as it is translated / rotated / scaled.
-    pub show_local_grid: bool,
+    /// The gizmo and grid overlays, in the **shared** core type rather than a
+    /// parallel set of `bool`s a hand-written translator had to keep in step
+    /// (#376). The panel's grids are always `Xz`; that is trd-gui's choice, not
+    /// the core's, so it lives in the checkbox binding rather than the type.
+    pub overlays: trd_core::Overlays,
     /// Whether the loaded HDR probe is also displayed behind the scene.
     pub show_environment_background: bool,
     /// Mip-based HDR background blur (`0` sharp, `1` fully blurred).
@@ -265,11 +259,7 @@ impl Default for SceneState {
             tone_mappings: vec![ToneMapping::default()],
             pbr_debug_views: vec![PbrDebugView::default()],
             lighting: Lighting::default(),
-            show_aabb: false,
-            show_axes: false,
-            show_local_axes: false,
-            show_world_grid: false,
-            show_local_grid: false,
+            overlays: trd_core::Overlays::default(),
             show_environment_background: false,
             environment_background_blur: 0.65,
             environment_background_tone_mapping: ToneMapping::default(),

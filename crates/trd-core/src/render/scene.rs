@@ -10,10 +10,10 @@
 //! (#204): an object is a placed, instanceable primitive; a background is a
 //! per-frame setting with no model, no instance and no place in the draw list.
 
-use super::{Draw, DrawableObject, FrameFit, GridPlane, RenderMode};
+use super::{Draw, DrawableObject, FrameFit};
 use crate::math::Matrix4;
 use crate::render::Tonemap;
-use crate::{DecodedFrame, Lighting, RenderOptions};
+use crate::{DecodedFrame, Lighting, Overlays, RenderOptions};
 
 /// Errors from assembling a [`Scene`] out of a decoded frame.
 ///
@@ -224,14 +224,6 @@ impl Scene {
                 .objects
                 .retain(|object| object.primitive() != super::Primitive::BlobShadow);
         }
-        // World / object plane grids (#140) are ungated by render mode, so a
-        // filled or shaded object still gets a floor. `encode` buckets by
-        // primitive type, so appending here still draws them in the grid pass.
-        scene.extend(plane_grid_overlays(
-            draws,
-            options.show_world_grid,
-            options.show_object_grid,
-        ));
         // Selection highlight (#141): drawn even when show-all-AABBs is off.
         scene.extend(selection_aabb_overlay(draws, options.selected));
         // The light rig is part of the frame, not sticky renderer state (#182),
@@ -297,35 +289,32 @@ impl From<Vec<DrawableObject>> for Scene {
 
 /// Builds a per-frame [`Scene`] from a wire `draws` list plus the appearance
 /// `options` every front-end already holds ([`RenderOptions::mode`] and the
-/// overlay flags; the grid/selection/PBR fields are applied by
+/// [`Overlays`]; the selection/PBR fields are applied by
 /// [`Scene::from_draws`] around this core). When `frame` is `Some`, the scene's
 /// [`Background::frame`] fit is set so the mesh scene composites on top of the
 /// bound frame texture (#63); the background is a scene-level setting rather
 /// than a leading drawable, since it carries no model and cannot be instanced
 /// (#204). Each [`Draw`] becomes one [`Primitive::Mesh`](super::Primitive::Mesh)
 /// in the draw's own [`Draw::mode`] when set, else [`RenderOptions::mode`]; with
-/// [`show_aabb`](RenderOptions::show_aabb), each also emits a tracking
-/// [`Primitive::AabbBox`](super::Primitive::AabbBox); with
-/// [`show_local_grid`](RenderOptions::show_local_grid) `= Some(plane)`, each
-/// **wireframe-mode** draw emits a [`Primitive::PlaneGrid`](super::Primitive::PlaneGrid) on `plane` at
-/// **its own `model`** (a coordinate-plane lattice in that object's local frame —
-/// e.g. the `Xy` grid on a #77 placement quad's surface; scoped to wireframe
-/// draws so a filled/textured content mesh whose local `Xy` is vertical gets no
-/// stray grid wall).
-/// [`show_local_grid_mesh`](RenderOptions::show_local_grid_mesh) `= Some(id)`
-/// narrows the grid further to draws of
-/// **that** mesh only (#110 follow-up): when the *content* mesh is also drawn
-/// wireframe (e.g. a wireframe-reveal intro over a placement quad), the grid
-/// would otherwise land on every wireframe object; pin it to the placement
-/// quad's `mesh_id` so exactly one floor grid is laid. `None` keeps
-/// the "all wireframe draws" behaviour. With
-/// [`show_axes`](RenderOptions::show_axes), one **world-origin**
+/// [`Overlays::aabb`], each also emits a tracking
+/// [`Primitive::AabbBox`](super::Primitive::AabbBox).
+///
+/// The grids are one [`Primitive::PlaneGrid`](super::Primitive::PlaneGrid) each:
+/// [`Overlays::world_grid`] lays a floor at the **world origin** (analogous to
+/// [`Overlays::axes`]), and [`Overlays::object_grid`] lays one at **each drawn
+/// object's own `model`** (analogous to [`Overlays::local_axes`]) — under every
+/// object for [`GridScope::AllMeshes`](crate::GridScope::AllMeshes), or only
+/// under wireframe draws (of one `mesh_id`, if narrowed) for
+/// [`GridScope::Wireframe`](crate::GridScope::Wireframe). Shadow draws get
+/// neither: a blob decal has no frame to grid.
+///
+/// With [`Overlays::axes`], one **world-origin**
 /// [`Primitive::CoordinateAxes`](super::Primitive::CoordinateAxes) is appended; with
-/// [`show_local_axes`](RenderOptions::show_local_axes), each
+/// [`Overlays::local_axes`], each
 /// draw also emits a [`Primitive::CoordinateAxes`](super::Primitive::CoordinateAxes) at **its own `model`** —
 /// i.e. that object's *local* coordinate frame (its model-space X/Y/Z axes as
 /// placed, e.g. #77's `(e1,e2,e3)` quad frame). The order (all meshes, then all
-/// boxes, then per-draw grids, then per-draw local axes, then the world-origin
+/// boxes, then the grids, then all local axes, then the world-origin
 /// axes — all of it over the background) matches the renderer's draw buckets so
 /// output is pixel-identical to the pre-scene, flag-driven path.
 ///
@@ -339,20 +328,24 @@ impl From<Vec<DrawableObject>> for Scene {
 fn build_scene(draws: &[Draw], options: &RenderOptions, frame: Option<FrameFit>) -> Scene {
     let RenderOptions {
         mode,
-        show_aabb,
-        show_axes,
-        show_local_axes,
-        show_local_grid: local_grid,
-        show_local_grid_mesh: grid_mesh,
+        overlays:
+            Overlays {
+                aabb,
+                axes,
+                local_axes,
+                object_grid,
+                world_grid,
+            },
         env_background,
         ..
     } = *options;
     let mut scene = Scene::with_capacity(
         draws.len()
-            * (1 + usize::from(show_aabb)
-                + usize::from(show_local_axes)
-                + usize::from(local_grid.is_some()))
-            + usize::from(show_axes),
+            * (1 + usize::from(aabb)
+                + usize::from(local_axes)
+                + usize::from(object_grid.is_some()))
+            + usize::from(axes)
+            + usize::from(world_grid.is_some()),
     )
     .with_background(Background {
         // Both slots are filled here, and independently: the environment sky is
@@ -368,73 +361,46 @@ fn build_scene(draws: &[Draw], options: &RenderOptions, frame: Option<FrameFit>)
             None => DrawableObject::blob_shadow(draw.model),
         });
     }
-    if show_aabb {
+    if aabb {
         for draw in draws.iter().filter(|d| d.selection.is_mesh()) {
             scene.push(DrawableObject::aabb_box(draw.mesh_id, draw.model));
         }
     }
-    if let Some(plane) = local_grid {
+    if let Some(plane) = world_grid {
+        scene.push(DrawableObject::plane_grid(plane, Matrix4::IDENTITY));
+    }
+    if let Some(grid) = object_grid {
         for draw in draws {
-            // Scope the grid to wireframe draws only — the #77 placement quad is
-            // always an outline (its local Xy *is* the placement surface), while a
-            // filled/textured content mesh's local Xy may be a vertical plane, so a
-            // per-mesh grid there would draw a stray grid "wall". When the content
-            // mesh is *also* wireframe (e.g. a wireframe-reveal intro), `grid_mesh`
-            // narrows the grid to the placement quad's `mesh_id` so exactly one
-            // floor grid is laid — not one under every wireframe object (#114).
-            let is_wireframe = draw.selection.mesh_mode(mode) == Some(RenderMode::Wireframe);
-            let mesh_selected = grid_mesh.is_none_or(|id| draw.mesh_id == id);
-            if is_wireframe && mesh_selected {
-                scene.push(DrawableObject::plane_grid(plane, draw.model));
+            // A `Wireframe` scope is what keeps the #77 placement quad's floor
+            // grid off a filled content mesh whose local plane is vertical, and
+            // off every *other* wireframe object when the content mesh is drawn
+            // wireframe too (#114) — see `GridScope`.
+            let Some(draw_mode) = draw.selection.mesh_mode(mode) else {
+                continue;
+            };
+            if grid.scope.covers(draw.mesh_id, draw_mode) {
+                scene.push(DrawableObject::plane_grid(grid.plane, draw.model));
             }
         }
     }
-    if show_local_axes {
+    if local_axes {
         // A shadow blob is a floor decal, not a placed object whose local frame
         // warrants an axes gizmo.
         for draw in draws.iter().filter(|d| d.selection.is_mesh()) {
             scene.push(DrawableObject::coordinate_axes(draw.model));
         }
     }
-    if show_axes {
+    if axes {
         scene.push(DrawableObject::coordinate_axes(Matrix4::IDENTITY));
     }
     scene
 }
 
-/// Builds **plane-grid overlay** drawables independent of [`build_scene`]'s
-/// wireframe-scoped [`show_local_grid`](RenderOptions::show_local_grid) (#114): a `world_grid` lays one
-/// [`Primitive::PlaneGrid`](super::Primitive::PlaneGrid) at the **world origin** (identity model — the
-/// world floor, analogous to `show_axes`), and an `object_grid` lays a
-/// `PlaneGrid` at **each drawn object's own model** frame (analogous to
-/// `show_local_axes`), ungated by render mode. Shadow draws are skipped (a blob
-/// decal has no frame to grid). Appended to a scene by front-ends that want a
-/// grid under a *filled/textured/PBR* object (e.g. the interactive `trd-gui`
-/// overlays) without the #77 wireframe-quad gating; `None`/`None` yields an empty
-/// list, so callers that don't opt in are byte-identical.
-pub(crate) fn plane_grid_overlays(
-    draws: &[Draw],
-    world_grid: Option<GridPlane>,
-    object_grid: Option<GridPlane>,
-) -> Vec<DrawableObject> {
-    let mut grids = Vec::new();
-    if let Some(plane) = world_grid {
-        grids.push(DrawableObject::plane_grid(plane, Matrix4::IDENTITY));
-    }
-    if let Some(plane) = object_grid {
-        for draw in draws.iter().filter(|d| d.selection.is_mesh()) {
-            grids.push(DrawableObject::plane_grid(plane, draw.model));
-        }
-    }
-    grids
-}
-
 /// The **generated** blob shadows for a scene's mesh instances (#375).
 ///
-/// The third overlay builder, beside [`plane_grid_overlays`] and
-/// [`selection_aabb_overlay`] — and like them it produces
-/// [`DrawableObject`]s, so blobs stay ordinary scene primitives rather than
-/// something the batcher invents.
+/// The other overlay builder, beside [`selection_aabb_overlay`] — and like it,
+/// it produces [`DrawableObject`]s, so blobs stay ordinary scene primitives
+/// rather than something the batcher invents.
 ///
 /// It runs at *render* time rather than in [`Scene::from_draws`] because a blob
 /// is placed from the mesh's bounds and preview transform, which live in the
@@ -539,11 +505,11 @@ mod tests {
         assert_eq!(disabled.objects(), &automatic.objects()[..1]);
         assert!(Scene::from_draws(&[], &options, None).objects().is_empty());
     }
-    use crate::render::DrawSelection;
-    use crate::render::Primitive;
+    use crate::render::{DrawSelection, GridPlane, Primitive, RenderMode};
+    use crate::{GridScope, ObjectGrid};
 
     #[test]
-    fn plane_grid_overlays_place_world_and_object_grids() {
+    fn the_world_grid_sits_at_the_origin_and_object_grids_at_each_model() {
         let draws = [
             Draw {
                 mesh_id: 0,
@@ -556,23 +522,46 @@ mod tests {
                 selection: DrawSelection::Shadow,
             },
         ];
-        // Neither grid ⇒ empty (opt-in only, byte-identical for non-users).
-        assert!(plane_grid_overlays(&draws, None, None).is_empty());
+        let grids = |overlays| {
+            Scene::from_draws(
+                &draws,
+                &RenderOptions {
+                    overlays,
+                    ..Default::default()
+                },
+                None,
+            )
+            .objects()
+            .iter()
+            .filter(|object| matches!(object.primitive(), Primitive::PlaneGrid { .. }))
+            .cloned()
+            .collect::<Vec<_>>()
+        };
+
+        // Neither grid ⇒ none (opt-in only, byte-identical for non-users).
+        assert!(grids(Overlays::default()).is_empty());
 
         // World grid ⇒ exactly one identity-model grid on the requested plane.
-        let world = plane_grid_overlays(&draws, Some(GridPlane::Xz), None);
-        assert_eq!(world.len(), 1);
+        let world = grids(Overlays {
+            world_grid: Some(GridPlane::Xz),
+            ..Default::default()
+        });
         assert_eq!(
-            world[0],
-            DrawableObject::plane_grid(GridPlane::Xz, Matrix4::IDENTITY)
+            world,
+            [DrawableObject::plane_grid(GridPlane::Xz, Matrix4::IDENTITY)]
         );
 
         // Object grid ⇒ one grid per *non-shadow* draw, at that draw's model.
-        let object = plane_grid_overlays(&draws, None, Some(GridPlane::Xz));
-        assert_eq!(object.len(), 1);
+        let object = grids(Overlays {
+            object_grid: Some(ObjectGrid {
+                plane: GridPlane::Xz,
+                scope: GridScope::AllMeshes,
+            }),
+            ..Default::default()
+        });
         assert_eq!(
-            object[0],
-            DrawableObject::plane_grid(GridPlane::Xz, draws[0].model)
+            object,
+            [DrawableObject::plane_grid(GridPlane::Xz, draws[0].model)]
         );
     }
 
@@ -589,8 +578,11 @@ mod tests {
             &draws,
             &RenderOptions {
                 mode: RenderMode::Filled,
-                show_aabb: true,
-                show_axes: true,
+                overlays: Overlays {
+                    aabb: true,
+                    axes: true,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             None,
@@ -604,8 +596,11 @@ mod tests {
             &draws,
             &RenderOptions {
                 mode: RenderMode::Filled,
-                show_aabb: true,
-                show_axes: true,
+                overlays: Overlays {
+                    aabb: true,
+                    axes: true,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             Some(FrameFit::Cover),
@@ -817,9 +812,12 @@ mod tests {
             &draws,
             &RenderOptions {
                 mode: RenderMode::Filled,
-                show_aabb: true,
-                show_axes: true,
-                show_local_axes: true,
+                overlays: Overlays {
+                    aabb: true,
+                    axes: true,
+                    local_axes: true,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             Some(FrameFit::Cover), // background frame plane
@@ -861,7 +859,10 @@ mod tests {
             &draws,
             &RenderOptions {
                 mode: RenderMode::Filled,
-                show_local_axes: true,
+                overlays: Overlays {
+                    local_axes: true,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             None,
@@ -925,7 +926,13 @@ mod tests {
             &draws,
             &RenderOptions {
                 mode: RenderMode::Wireframe,
-                show_local_grid: Some(GridPlane::Xy),
+                overlays: Overlays {
+                    object_grid: Some(ObjectGrid {
+                        plane: GridPlane::Xy,
+                        scope: GridScope::Wireframe { mesh: None },
+                    }),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             None,
@@ -941,7 +948,13 @@ mod tests {
             &draws,
             &RenderOptions {
                 mode: RenderMode::Wireframe,
-                show_local_grid: Some(GridPlane::Yz),
+                overlays: Overlays {
+                    object_grid: Some(ObjectGrid {
+                        plane: GridPlane::Yz,
+                        scope: GridScope::Wireframe { mesh: None },
+                    }),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             None,
@@ -977,7 +990,13 @@ mod tests {
             &mixed,
             &RenderOptions {
                 mode: RenderMode::Filled,
-                show_local_grid: Some(GridPlane::Xy),
+                overlays: Overlays {
+                    object_grid: Some(ObjectGrid {
+                        plane: GridPlane::Xy,
+                        scope: GridScope::Wireframe { mesh: None },
+                    }),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             None,
@@ -1034,7 +1053,13 @@ mod tests {
             &draws,
             &RenderOptions {
                 mode: RenderMode::Filled,
-                show_local_grid: Some(GridPlane::Xy),
+                overlays: Overlays {
+                    object_grid: Some(ObjectGrid {
+                        plane: GridPlane::Xy,
+                        scope: GridScope::Wireframe { mesh: None },
+                    }),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             None,
@@ -1051,8 +1076,13 @@ mod tests {
             &draws,
             &RenderOptions {
                 mode: RenderMode::Filled,
-                show_local_grid: Some(GridPlane::Xy),
-                show_local_grid_mesh: Some(1),
+                overlays: Overlays {
+                    object_grid: Some(ObjectGrid {
+                        plane: GridPlane::Xy,
+                        scope: GridScope::Wireframe { mesh: Some(1) },
+                    }),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             None,
@@ -1068,8 +1098,13 @@ mod tests {
             &draws,
             &RenderOptions {
                 mode: RenderMode::Filled,
-                show_local_grid: Some(GridPlane::Xy),
-                show_local_grid_mesh: Some(7),
+                overlays: Overlays {
+                    object_grid: Some(ObjectGrid {
+                        plane: GridPlane::Xy,
+                        scope: GridScope::Wireframe { mesh: Some(7) },
+                    }),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             None,
@@ -1113,8 +1148,11 @@ mod tests {
             &draws,
             &RenderOptions {
                 mode: RenderMode::Filled,
-                show_aabb: true,
-                show_local_axes: true,
+                overlays: Overlays {
+                    aabb: true,
+                    local_axes: true,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             None,
@@ -1216,8 +1254,11 @@ mod tests {
                 &draws,
                 &RenderOptions {
                     mode: RenderMode::Filled,
-                    show_aabb: true,
-                    show_axes: true,
+                    overlays: Overlays {
+                        aabb: true,
+                        axes: true,
+                        ..Default::default()
+                    },
                     ..Default::default()
                 },
                 None
@@ -1239,7 +1280,10 @@ mod tests {
                 &draws,
                 &RenderOptions {
                     mode: RenderMode::Filled,
-                    show_local_axes: true,
+                    overlays: Overlays {
+                        local_axes: true,
+                        ..Default::default()
+                    },
                     ..Default::default()
                 },
                 None

@@ -16,21 +16,18 @@ pub struct ImageRgba {
     pub rgba: Vec<u8>,
 }
 
-/// The appearance options for `state`: draw mode plus **every** overlay toggle,
-/// so [`scene_for`] produces exactly the scene the CLI produces from the same
-/// inputs. Platform-neutral, which is what stops native and browser overlay
-/// handling drifting apart again (#180).
+/// The appearance options for `state`: draw mode plus the state's own
+/// [`Overlays`](trd_core::Overlays), so [`scene_for`] produces exactly the scene
+/// the CLI produces from the same inputs. Platform-neutral, which is what stops
+/// native and browser overlay handling drifting apart again (#180).
+///
+/// The overlays are *moved*, not translated field by field: sharing the core
+/// type is what removed the translator — and the test that existed only to catch
+/// a forgotten line in it (#376).
 pub fn render_options(state: &SceneState) -> trd_core::RenderOptions {
-    let xz = |on: bool| on.then_some(trd_core::GridPlane::Xz);
     trd_core::RenderOptions {
         mode: trd_core::RenderMode::Filled, // per-draw Some(mode) overrides; this is only a fallback
-        show_aabb: state.show_aabb,
-        show_axes: state.show_axes,
-        show_local_axes: state.show_local_axes,
-        show_local_grid: None,
-        show_local_grid_mesh: None,
-        show_world_grid: xz(state.show_world_grid),
-        show_object_grid: xz(state.show_local_grid),
+        overlays: state.overlays,
         selected: state.selected,
         pbr: None,
         // No `rotation`: the probe yaw is a scene-level `EnvironmentLight`, so
@@ -338,28 +335,5 @@ mod tests {
             .expect("the background is enabled");
         assert_eq!(sky.exposure, 0.25, "the sky keeps its own exposure");
         assert_eq!(sky.tonemap, trd_core::Tonemap::Aces, "and its own operator");
-    }
-
-    /// `render_options` must forward **every** overlay toggle, so the one
-    /// `Scene::from_draws` assembly produces what the panel asked for.
-    #[test]
-    fn render_options_forward_the_overlay_toggles() {
-        let state = SceneState {
-            show_aabb: true,
-            show_axes: true,
-            show_local_axes: true,
-            show_world_grid: true,
-            show_local_grid: true,
-            selected: Some(0),
-            ..SceneState::default()
-        };
-        let options = render_options(&state);
-
-        assert!(options.show_aabb);
-        assert!(options.show_axes);
-        assert!(options.show_local_axes);
-        assert_eq!(options.show_world_grid, Some(trd_core::GridPlane::Xz));
-        assert_eq!(options.show_object_grid, Some(trd_core::GridPlane::Xz));
-        assert_eq!(options.selected, Some(0));
     }
 }

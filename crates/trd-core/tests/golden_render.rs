@@ -63,9 +63,9 @@ use arrow::array::{Array, FixedSizeListArray, UInt8Array};
 use arrow::ipc::reader::StreamReader;
 use trd_core::{
     run_stream, Camera, DisneyMaterial, Draw, DrawSelection, EnvMapData, EnvironmentBackground,
-    EnvironmentLight, ImageBasedLighting, Lighting, Matrix4, Mesh, Msaa, PbrConfig, Point3,
-    RenderMode, RenderOptions, Renderer, Scene, SceneLayer, ToneMapping, Tonemap, Vector3, Vertex,
-    Viewport,
+    EnvironmentLight, ImageBasedLighting, Lighting, Matrix4, Mesh, Msaa, Overlays, PbrConfig,
+    Point3, RenderMode, RenderOptions, Renderer, Scene, SceneLayer, ToneMapping, Tonemap, Vector3,
+    Vertex, Viewport,
 };
 
 /// Golden render resolution (16:9; the fixtures' CV `k` is rescaled to match).
@@ -180,14 +180,11 @@ fn pbr_material() -> DisneyMaterial {
 fn pbr_options(tonemap: Tonemap) -> RenderOptions {
     RenderOptions {
         mode: RenderMode::Shaded,
-        show_aabb: true,
-        show_axes: false,
-        show_local_axes: true,
-        show_local_grid: None,
-        show_local_grid_mesh: None,
-        show_world_grid: None,
-
-        show_object_grid: None,
+        overlays: Overlays {
+            aabb: true,
+            local_axes: true,
+            ..Default::default()
+        },
 
         selected: None,
 
@@ -359,14 +356,10 @@ fn golden_stage1_placement_quad() {
         "stage1.arrow",
         RenderOptions {
             mode: RenderMode::Filled,
-            show_aabb: false,
-            show_axes: false,
-            show_local_axes: true,
-            show_local_grid: None,
-            show_local_grid_mesh: None,
-            show_world_grid: None,
-
-            show_object_grid: None,
+            overlays: Overlays {
+                local_axes: true,
+                ..Default::default()
+            },
 
             selected: None,
 
@@ -390,14 +383,10 @@ fn golden_stage1_placement_quad_no_msaa() {
         "stage1.arrow",
         RenderOptions {
             mode: RenderMode::Filled,
-            show_aabb: false,
-            show_axes: false,
-            show_local_axes: true,
-            show_local_grid: None,
-            show_local_grid_mesh: None,
-            show_world_grid: None,
-
-            show_object_grid: None,
+            overlays: Overlays {
+                local_axes: true,
+                ..Default::default()
+            },
 
             selected: None,
 
@@ -423,14 +412,11 @@ fn golden_stage2_textured_bunny() {
         "stage2.arrow",
         RenderOptions {
             mode: RenderMode::Textured,
-            show_aabb: true,
-            show_axes: false,
-            show_local_axes: true,
-            show_local_grid: None,
-            show_local_grid_mesh: None,
-            show_world_grid: None,
-
-            show_object_grid: None,
+            overlays: Overlays {
+                aabb: true,
+                local_axes: true,
+                ..Default::default()
+            },
 
             selected: None,
 
@@ -454,14 +440,11 @@ fn golden_stage2_textured_bunny_no_msaa() {
         "stage2.arrow",
         RenderOptions {
             mode: RenderMode::Textured,
-            show_aabb: true,
-            show_axes: false,
-            show_local_axes: true,
-            show_local_grid: None,
-            show_local_grid_mesh: None,
-            show_world_grid: None,
-
-            show_object_grid: None,
+            overlays: Overlays {
+                aabb: true,
+                local_axes: true,
+                ..Default::default()
+            },
 
             selected: None,
 

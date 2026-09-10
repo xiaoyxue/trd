@@ -1631,11 +1631,7 @@ impl VideoEditingApp {
         let rendered_playing = self.shared.video_playing.get();
         if rendered_playing {
             state.selected = None;
-            state.show_aabb = false;
-            state.show_axes = false;
-            state.show_local_axes = false;
-            state.show_world_grid = false;
-            state.show_local_grid = false;
+            state.overlays = trd_core::Overlays::default();
         }
         self.shared.render_in_flight.set(true);
         self.shared
@@ -2163,10 +2159,10 @@ impl VideoEditingApp {
         let mut background_drawables =
             1 + u32::from(show_quad) + u32::from(quad_washed) + if show_gizmos { 2 } else { 0 };
         let mut foreground_drawables = if object_visible {
-            1 + u32::from(scene.show_local_axes)
-                + u32::from(scene.show_axes)
-                + u32::from(scene.show_local_grid)
-                + u32::from(scene.show_world_grid)
+            1 + u32::from(scene.overlays.local_axes)
+                + u32::from(scene.overlays.axes)
+                + u32::from(scene.overlays.object_grid.is_some())
+                + u32::from(scene.overlays.world_grid.is_some())
         } else {
             0
         };
@@ -2193,7 +2189,7 @@ impl VideoEditingApp {
             };
         }
         let selection_drawables =
-            u32::from(object_visible && (scene.show_aabb || scene.selected == Some(0)));
+            u32::from(object_visible && (scene.overlays.aabb || scene.selected == Some(0)));
         let render_target_size = renderer
             .as_ref()
             .map(|facts| facts.target_size)
