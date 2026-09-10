@@ -38,7 +38,8 @@
         # `include_wgsl!`) and the golden e2e fixtures/PNGs
         # (`crates/trd-core/tests/golden/`, read at test time via
         # `CARGO_MANIFEST_DIR`) and the real FIBA annotation fixture used by the
-        # editor input-format test; crane's default filter would drop non-Rust files.
+        # editor input-format and pose-delta tests; crane's default filter would
+        # drop non-Rust files.
         src = lib.cleanSourceWith {
           src = ./.;
           filter =
@@ -47,6 +48,7 @@
             || (lib.hasInfix "/crates/trd-core/tests/golden/" path)
             || (lib.hasInfix "/crates/trd-placement/tests/golden/" path)
             || (lib.hasSuffix "/assets/videos/fiba/fiba-shot1.arrow" path)
+            || (lib.hasSuffix "/assets/videos/fiba/fiba.params.arrow" path)
             || (lib.hasSuffix "/assets/meshes/can/coke.obj" path)
             || (lib.hasSuffix "/assets/meshes/cube/cube.obj" path)
             || (lib.hasSuffix "/assets/meshes/can/can_around.jpg" path)

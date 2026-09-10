@@ -1947,6 +1947,48 @@ impl VideoEditingApp {
         self.quad_frame_result_at(frame_index).ok()
     }
 
+    /// One frame's tracked quad, from whichever document supplies it.
+    ///
+    /// The *current* frame's quad already prefers the params document and falls
+    /// back to the timeline; the frame-to-frame pose delta needs its predecessor
+    /// chosen the same way. Asking `frame_row` unconditionally is what left that
+    /// diagnostic dead: `set_arrow_scene` clears `self.document`, so under a
+    /// params document — which is every current document — the lookup could
+    /// never succeed and the delta always degraded to `none` (#383).
+    fn tracked_quad_frame_at(
+        &self,
+        video_frame_index: u32,
+        object: usize,
+    ) -> Option<trd_placement::QuadFrame> {
+        self.params_quad_frame_at(video_frame_index, object)
+            .or_else(|| {
+                self.frame_row(video_frame_index)
+                    .filter(|frame| frame.tracked)
+                    .and_then(|_| self.quad_frame_at(video_frame_index))
+            })
+    }
+
+    /// One frame's quad as the params document states it, or `None` when that
+    /// document holds no row for the frame, no quad for the object, or no
+    /// intrinsics to place it with.
+    fn params_quad_frame_at(
+        &self,
+        video_frame_index: u32,
+        object: usize,
+    ) -> Option<trd_placement::QuadFrame> {
+        let scene = self.arrow_scene.as_ref()?;
+        let row = scene.source_row(video_frame_index)?;
+        let frame = scene.source.as_ref()?.borrow().frame(row).ok()?;
+        let (points_px, k) = frame.objects.get(object)?.quad.zip(frame.params.k)?;
+        trd_placement::quad_frame(
+            trd_placement::CameraIntrinsics {
+                row_major: protocol_k_from_row_major(k),
+            },
+            trd_placement::PlacementQuad { points_px },
+        )
+        .ok()
+    }
+
     fn quad_frame_result_at(
         &self,
         frame_index: u32,
@@ -2048,12 +2090,8 @@ impl VideoEditingApp {
         };
         let previous_quad = displayed_frame_index.and_then(|index| {
             (0..index).rev().find_map(|previous_index| {
-                self.frame_row(previous_index)
-                    .filter(|frame| frame.tracked)
-                    .and_then(|_| {
-                        self.quad_frame_at(previous_index)
-                            .map(|frame| (previous_index, frame))
-                    })
+                self.tracked_quad_frame_at(previous_index, inspected_object)
+                    .map(|frame| (previous_index, frame))
             })
         });
         let pose_delta =
@@ -2668,6 +2706,72 @@ pub(super) mod tests {
         assert!(!app.show_gizmos);
         assert!(!app.show_plane_grid);
         assert!(!app.show_reference_cube);
+    }
+
+    /// #383: the frame-to-frame pose delta must populate under a **params**
+    /// document — which is every current document.
+    ///
+    /// The predecessor lookup used to read `frame_row`, the legacy timeline that
+    /// `set_arrow_scene` clears, so `quad.zip(previous_quad)` always collapsed
+    /// and Details showed `pose delta: none`. The fixture is the vendored FIBA
+    /// document precisely because it carries consecutive tracked rows with
+    /// `placement_quad` and `k`; the one-frame `document()` fixture cannot reach
+    /// this path at all, which is why nothing caught it.
+    #[test]
+    fn pose_delta_populates_for_a_params_document_with_a_tracked_predecessor() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/videos/fiba/fiba.params.arrow");
+        let source = trd_core::SceneDocument::read(&std::fs::read(fixture).unwrap()).unwrap();
+        let scene = ArrowScene::from_source(source).unwrap();
+
+        // The row the editor would be displaying, taken from the document itself
+        // rather than hand-built, so the test cannot drift from the real decode.
+        let row = scene.source_row(12).expect("frame 12 has a params row");
+        let source_frame = scene
+            .source
+            .as_ref()
+            .unwrap()
+            .borrow()
+            .frame(row)
+            .expect("frame 12 decodes");
+        assert!(
+            source_frame
+                .objects
+                .first()
+                .is_some_and(|o| o.quad.is_some()),
+            "fixture must carry a placement quad for the delta to be computable"
+        );
+
+        let shared = Rc::new(VideoEditingShared::default());
+        let mut app = VideoEditingApp::player(document().video, shared);
+        app.arrow_scene = Some(Rc::new(scene));
+
+        let mut displayed = test_rendered_frame_diagnostics();
+        displayed.source_frame = Some(source_frame);
+        app.displayed_diagnostics = Some(displayed);
+        app.displayed_frame_ready = true;
+        app.displayed_frame_index = 12;
+        app.last_rendered_frame_index = Some(12);
+
+        let facts = app.displayed_facts();
+
+        assert!(
+            facts.quad.is_some(),
+            "the params source frame supplies this frame's quad"
+        );
+        let delta = facts
+            .pose_delta
+            .expect("a tracked frame with a tracked predecessor has a pose delta");
+        assert_eq!(
+            delta.previous_frame_index, 11,
+            "the nearest preceding tracked frame, not an arbitrary one"
+        );
+        assert!(
+            delta.translation.is_finite()
+                && delta.rotation_degrees.is_finite()
+                && delta.axis_length_ratio.is_finite(),
+            "delta components are real measurements, not NaN placeholders"
+        );
     }
 
     #[test]
