@@ -7,6 +7,9 @@
 /// the element play straight through but never scrub. WebCodecs unbundles the
 /// decoder from the container (#282), so the byte fetching becomes ours to do.
 /// The same bytes move; only the control does.
+
+import { fetchWithRetry } from "./fetch-retry.ts";
+
 export interface ByteSource {
   /// Total length in bytes.
   readonly size: number;
@@ -76,7 +79,9 @@ class HttpByteSource implements ByteSource {
     if (last < offset) {
       return new ArrayBuffer(0);
     }
-    const response = await fetch(this.#url, { headers: { Range: `bytes=${offset}-${last}` } });
+    const response = await fetchWithRetry(this.#url, {
+      headers: { Range: `bytes=${offset}-${last}` },
+    });
     // A `200` here means the server ignored the range and is sending the whole
     // file. Accepting it would turn one seek into a multi-gigabyte download, so
     // it is an error rather than a slow path.
@@ -132,11 +137,12 @@ export function fileByteSource(file: File): ByteSource {
 export async function urlByteSource(url: string): Promise<ByteSource> {
   let probe: Response;
   try {
-    probe = await fetch(url, { headers: { Range: "bytes=0-0" } });
+    probe = await fetchWithRetry(url, { headers: { Range: "bytes=0-0" } });
   } catch (error) {
     // A `fetch` rejection is the browser refusing the request rather than the
-    // server answering, so there is no status to report — almost always a
-    // missing CORS header or nothing listening.
+    // server answering, so there is no status to report. Transient rejections
+    // are already retried, so by here it is the standing condition — almost
+    // always a missing CORS header or nothing listening.
     throw new Error(`${String(error)} — a cross-origin video needs Access-Control-Allow-Origin`);
   }
   if (!probe.ok && probe.status !== 206) {
@@ -155,7 +161,7 @@ export async function urlByteSource(url: string): Promise<ByteSource> {
     // cross-origin server that serves ranges can still hide the length unless
     // it names the header in `Access-Control-Expose-Headers`. `Content-Length`
     // on a `HEAD` is safelisted, so ask that way instead of giving up.
-    const head = await fetch(url, { method: "HEAD" });
+    const head = await fetchWithRetry(url, { method: "HEAD" });
     size = Number(head.headers.get("content-length") ?? Number.NaN);
   }
   if (size === undefined || !Number.isFinite(size) || size <= 0) {

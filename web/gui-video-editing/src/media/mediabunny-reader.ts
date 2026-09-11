@@ -12,6 +12,7 @@ import { ALL_FORMATS, BlobSource, Input, UrlSource, VideoSampleSink } from "medi
 
 import type { ByteSource } from "./byte-source.ts";
 import { fileByteSource, urlByteSource } from "./byte-source.ts";
+import { retryDelaySeconds } from "./fetch-retry.ts";
 import type { FrameReader } from "./frame-reader.ts";
 import { locateMoov, type VideoTrackFacts } from "./mp4-video.ts";
 
@@ -68,7 +69,10 @@ export class MediabunnyReader implements FrameReader {
   }
 
   static async open(input: MediaInput): Promise<MediabunnyReader> {
-    const source = input.kind === "file" ? new BlobSource(input.file) : new UrlSource(input.url);
+    const source =
+      input.kind === "file"
+        ? new BlobSource(input.file)
+        : new UrlSource(input.url, { getRetryDelay: retryDelaySeconds });
     const label = input.kind === "file" ? input.file.name : input.url;
     // `ALL_FORMATS` costs bundle size for parsers we do not use; the editor
     // validates MP4 and nothing else, so say so.
