@@ -323,13 +323,13 @@ impl CanvasRenderer {
     /// Toggles the per-instance AABB overlay box for later frames.
     #[wasm_bindgen(js_name = setShowAabb)]
     pub fn set_show_aabb(&mut self, enabled: bool) {
-        self.options.show_aabb = enabled;
+        self.options.overlays.aabb = enabled;
     }
 
     /// Toggles the origin coordinate-axes overlay gizmo for later frames.
     #[wasm_bindgen(js_name = setShowAxes)]
     pub fn set_show_axes(&mut self, enabled: bool) {
-        self.options.show_axes = enabled;
+        self.options.overlays.axes = enabled;
     }
 
     /// Toggles the per-draw **local** coordinate-axes gizmo for later frames — one
@@ -338,7 +338,7 @@ impl CanvasRenderer {
     /// native `--axes-local` flag.
     #[wasm_bindgen(js_name = setShowLocalAxes)]
     pub fn set_show_local_axes(&mut self, enabled: bool) {
-        self.options.show_local_axes = enabled;
+        self.options.overlays.local_axes = enabled;
     }
 
     /// Toggles compositing the uploaded background frame beneath the scene as the

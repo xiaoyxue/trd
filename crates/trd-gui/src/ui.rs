@@ -408,25 +408,53 @@ pub fn pbr_material_section(ui: &mut egui::Ui, controller: &mut InteractionContr
     section(ui, "PBR material", |ui| pbr_panel(ui, controller))
 }
 
+/// A checkbox over an optional grid overlay: ticked writes `on`, cleared writes
+/// `None`.
+///
+/// The panel's grids are always `Xz`, so the *plane* is a constant here rather
+/// than a UI control — but that Xz-only assumption is trd-gui's, which is why it
+/// lives at the binding instead of as a toggle method on the core type (#376).
+fn grid_checkbox<T>(ui: &mut egui::Ui, grid: &mut Option<T>, on: T, label: &str) -> bool {
+    let mut enabled = grid.is_some();
+    let changed = ui.checkbox(&mut enabled, label).changed();
+    if changed {
+        *grid = enabled.then_some(on);
+    }
+    changed
+}
+
 /// Gizmo, grid, and environment-background toggles.
 pub fn overlays_section(ui: &mut egui::Ui, controller: &mut InteractionController) -> bool {
     section(ui, "Overlays", |ui| {
         let mut c = false;
         let state = &mut controller.state;
         ui.label("Gizmos");
-        c |= ui.checkbox(&mut state.show_aabb, "Bounding box").changed();
-        c |= ui.checkbox(&mut state.show_axes, "World axes").changed();
         c |= ui
-            .checkbox(&mut state.show_local_axes, "Local axes")
+            .checkbox(&mut state.overlays.aabb, "Bounding box")
+            .changed();
+        c |= ui
+            .checkbox(&mut state.overlays.axes, "World axes")
+            .changed();
+        c |= ui
+            .checkbox(&mut state.overlays.local_axes, "Local axes")
             .changed();
         ui.add_space(4.0);
         ui.label("Plane grid (XZ)");
-        c |= ui
-            .checkbox(&mut state.show_world_grid, "World grid")
-            .changed();
-        c |= ui
-            .checkbox(&mut state.show_local_grid, "Local grid")
-            .changed();
+        c |= grid_checkbox(
+            ui,
+            &mut state.overlays.world_grid,
+            trd_core::GridPlane::Xz,
+            "World grid",
+        );
+        c |= grid_checkbox(
+            ui,
+            &mut state.overlays.object_grid,
+            trd_core::ObjectGrid {
+                plane: trd_core::GridPlane::Xz,
+                scope: trd_core::GridScope::AllMeshes,
+            },
+            "Local grid",
+        );
         c |= ui
             .add_enabled(
                 state.environment_available,

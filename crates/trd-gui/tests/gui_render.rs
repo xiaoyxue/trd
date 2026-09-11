@@ -7,6 +7,7 @@
 //! on Linux, the MSVC toolchain on Windows) per the repo's dual-platform policy;
 //! CI skips it.
 
+use trd_core::Overlays;
 use trd_gui::renderer::GuiRenderer;
 use trd_gui::scene::SceneState;
 
@@ -137,7 +138,10 @@ fn overlay_toggles_change_the_rendered_image() {
     let base = pollster::block_on(renderer.render(&plain)).expect("render without overlays");
 
     let with_axes = SceneState {
-        show_axes: true,
+        overlays: Overlays {
+            axes: true,
+            ..Default::default()
+        },
         ..SceneState::default()
     };
     let axes = pollster::block_on(renderer.render(&with_axes)).expect("render with world axes");
@@ -149,7 +153,10 @@ fn overlay_toggles_change_the_rendered_image() {
     );
 
     let with_aabb = SceneState {
-        show_aabb: true,
+        overlays: Overlays {
+            aabb: true,
+            ..Default::default()
+        },
         ..SceneState::default()
     };
     let aabb = pollster::block_on(renderer.render(&with_aabb)).expect("render with AABB");

@@ -966,26 +966,25 @@ pub fn placement_scenes(
     let mut selection_overlay = trd_core::Scene::new();
     if let Some(model) = model {
         foreground.push(trd_core::DrawableObject::mesh(0, model, state.modes[0]));
-        if state.show_aabb || state.selected == Some(0) {
+        if state.overlays.aabb || state.selected == Some(0) {
             selection_overlay.push(trd_core::DrawableObject::aabb_box(0, model));
         }
-        if state.show_local_axes {
+        if state.overlays.local_axes {
             foreground.push(trd_core::DrawableObject::coordinate_axes(model));
         }
-        if state.show_axes {
+        if state.overlays.axes {
             foreground.push(trd_core::DrawableObject::coordinate_axes(
                 trd_core::Matrix4::IDENTITY,
             ));
         }
-        if state.show_local_grid {
-            foreground.push(trd_core::DrawableObject::plane_grid(
-                trd_core::GridPlane::Xz,
-                model,
-            ));
+        // The panel's object grid is unscoped (`AllMeshes`) and this layer holds
+        // the one editable object, so its scope needs no re-check here.
+        if let Some(grid) = state.overlays.object_grid {
+            foreground.push(trd_core::DrawableObject::plane_grid(grid.plane, model));
         }
-        if state.show_world_grid {
+        if let Some(plane) = state.overlays.world_grid {
             foreground.push(trd_core::DrawableObject::plane_grid(
-                trd_core::GridPlane::Xz,
+                plane,
                 trd_core::Matrix4::IDENTITY,
             ));
         }

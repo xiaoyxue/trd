@@ -423,7 +423,7 @@ scene authoring, and the image-display texture. All pixels come from trd-core.
   updated (`set`/`load_texture`) whenever a new RGBA frame arrives from the
   `SceneRenderer`. The image rect is the interaction surface.
 * **Side panel**: mode toggles (filled/wireframe/textured), overlay toggles
-  (aabb / world axes / local axes — already flags in `RenderOptions` /
+  (aabb / world axes / local axes — already `RenderOptions::overlays` fields /
   `build_scene`), fps, play/pause/step for streamed playback, "reset view".
 * **Input mapping**: read `response.dragged()`, `scroll_delta`,
   `hover_pos` relative to the image rect → `InteractionEvent` → controller →

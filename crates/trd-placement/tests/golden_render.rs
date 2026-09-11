@@ -11,8 +11,8 @@ use arrow::array::{
 use arrow::buffer::OffsetBuffer;
 use arrow::datatypes::{DataType, Field, Schema};
 use trd_core::{
-    GlbMesh, GpuContext, Matrix4, ModelEdit, RenderMode, RenderOptions, Renderer, SceneDocument,
-    SceneLayer, Viewport,
+    GlbMesh, GpuContext, Matrix4, ModelEdit, Overlays, RenderMode, RenderOptions, Renderer,
+    SceneDocument, SceneLayer, Viewport,
 };
 
 #[path = "../../trd-core/tests/support/golden_image.rs"]
@@ -465,8 +465,11 @@ fn quad_guides_stay_below_meshes_and_their_gizmos() {
                 target.viewport(),
                 &RenderOptions {
                     mode,
-                    show_aabb: true,
-                    show_local_axes: true,
+                    overlays: Overlays {
+                        aabb: true,
+                        local_axes: true,
+                        ..Default::default()
+                    },
                     selected: Some(1),
                     ..Default::default()
                 },

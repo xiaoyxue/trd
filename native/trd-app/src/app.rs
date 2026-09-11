@@ -388,11 +388,18 @@ pub fn run() -> Result<(), AppError> {
         cli.vsync,
         RenderOptions {
             mode,
-            show_aabb: cli.aabb,
-            show_axes: cli.axes,
-            show_local_axes: cli.axes_local,
-            show_local_grid: cli.grid_local.map(Into::into),
-            show_local_grid_mesh: cli.grid_mesh,
+            overlays: trd_core::Overlays {
+                aabb: cli.aabb,
+                axes: cli.axes,
+                local_axes: cli.axes_local,
+                object_grid: cli.grid_local.map(|plane| trd_core::ObjectGrid {
+                    plane: plane.into(),
+                    scope: trd_core::GridScope::Wireframe {
+                        mesh: cli.grid_mesh,
+                    },
+                }),
+                ..Default::default()
+            },
             env_background: cli.env_background.then(|| trd_core::EnvironmentBackground {
                 exposure: cli.exposure,
                 blur: cli.env_background_blur,
