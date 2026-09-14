@@ -87,8 +87,9 @@ pub enum PanelMode {
     /// Every section, including material editing and Load/Delete.
     #[default]
     Full,
-    /// For a host that supplies models itself: no **PBR material** section and
-    /// no **Load model…** / **Delete selected**. Picking, manipulation and the
+    /// For a host that supplies models itself: no **PBR material**, no
+    /// **Load model…** / **Delete selected**, no **Transform**, and no object
+    /// manipulation — every drag orbits the camera. Picking, render mode and the
     /// remaining sections are unchanged, and a load failure is still shown.
     Simple,
 }
@@ -109,6 +110,9 @@ pub struct View<'a> {
 pub fn show(ui: &mut egui::Ui, view: &mut View) -> ImageOutcome {
     let mut outcome = ImageOutcome::default();
     let controls = Controls::default();
+    // Before any gesture is read: simple mode edits the camera, never an object.
+    view.controller
+        .set_object_editing(view.panel == PanelMode::Full);
     egui::Panel::left("controls")
         .resizable(true)
         .default_size(264.0)
@@ -139,7 +143,13 @@ pub fn show(ui: &mut egui::Ui, view: &mut View) -> ImageOutcome {
                     controls_sections(ui, view.controller, controls, view.panel);
                 outcome.needs_render |= reset_button(ui, view.controller);
                 ui.separator();
-                status(ui, view.render_size, view.last_render_ms);
+                match view.panel {
+                    PanelMode::Full => status(ui, view.render_size, view.last_render_ms),
+                    PanelMode::Simple => {
+                        render_readout(ui, view.render_size, view.last_render_ms);
+                        legend(ui, "Left-drag: orbit\nClick: select\nScroll: zoom");
+                    }
+                }
             });
         });
     egui::CentralPanel::default().show(ui, |ui| {
@@ -230,8 +240,14 @@ pub fn controls_sections(
     controls: Controls,
     panel: PanelMode,
 ) -> bool {
-    let mut needs_render = interaction_section(ui, controller, controls);
-    needs_render |= transform_section(ui, controller);
+    let mut needs_render = false;
+    match panel {
+        PanelMode::Full => {
+            needs_render |= interaction_section(ui, controller, controls);
+            needs_render |= transform_section(ui, controller);
+        }
+        PanelMode::Simple => camera_only_interaction_section(ui),
+    }
     needs_render |= render_mode_section(ui, controller);
     if panel == PanelMode::Full {
         needs_render |= pbr_material_section(ui, controller);
@@ -272,19 +288,36 @@ pub fn shadow_section(ui: &mut egui::Ui, config: &mut trd_core::RenderConfig) ->
 
 /// The render-size / last-render readout and the input legend.
 pub fn status(ui: &mut egui::Ui, render_size: (u32, u32), last_render_ms: Option<f32>) {
+    render_readout(ui, render_size, last_render_ms);
+    legend(
+        ui,
+        "Left-drag: orbit / rotate / translate / scale\nAxis lock: drag rotates/translates on one axis\nRight-drag: translate object\nScroll: zoom (or scale)",
+    );
+}
+
+fn render_readout(ui: &mut egui::Ui, render_size: (u32, u32), last_render_ms: Option<f32>) {
     if let Some(ms) = last_render_ms {
         ui.weak(format!("Last render: {:.1} ms", ms * 1000.0));
     }
     let (w, h) = render_size;
     ui.weak(format!("Render size: {w}×{h}"));
+}
+
+fn legend(ui: &mut egui::Ui, text: &str) {
     ui.add_space(8.0);
-    ui.label(
-        egui::RichText::new(
-            "Left-drag: orbit / rotate / translate / scale\nAxis lock: drag rotates/translates on one axis\nRight-drag: translate object\nScroll: zoom (or scale)",
-        )
-        .small()
-        .color(Color32::GRAY),
-    );
+    ui.label(egui::RichText::new(text).small().color(Color32::GRAY));
+}
+
+/// Simple mode's Interaction section: the camera is the only drag target, so
+/// there is no Object button, manipulation mode or axis lock to offer (#387).
+fn camera_only_interaction_section(ui: &mut egui::Ui) {
+    section(ui, "Interaction", |ui| {
+        ui.label("Primary drag");
+        ui.horizontal_wrapped(|ui| {
+            ui.add_enabled(false, egui::Button::selectable(true, "Orbit camera"));
+        });
+        false
+    });
 }
 
 /// Primary-drag target, transform mode, translate direction, and axis lock.
@@ -855,7 +888,10 @@ mod tests {
 
     /// Every label and value the plain viewer exposes for one settled frame,
     /// read back through AccessKit: the text a user sees, with no renderer.
-    fn viewer_text(panel: PanelMode, model_error: Option<&str>) -> Vec<String> {
+    fn viewer_text(
+        panel: PanelMode,
+        model_error: Option<&str>,
+    ) -> (Vec<String>, InteractionTarget) {
         let ctx = egui::Context::default();
         ctx.enable_accesskit();
         let mut controller = InteractionController::new(crate::scene::SceneState::default());
@@ -892,26 +928,32 @@ mod tests {
             // Nothing paints here, so the font-atlas upload is discarded on purpose.
             output.drop_without_applying_deltas();
         }
-        update
+        let text = update
             .expect("AccessKit is enabled")
             .nodes
             .iter()
             .flat_map(|(_, node)| [node.label(), node.value()])
             .flatten()
             .map(str::to_owned)
-            .collect()
+            .collect();
+        (text, controller.target)
     }
 
     #[test]
-    fn simple_panel_drops_only_material_editing_and_model_buttons() {
-        let full = viewer_text(PanelMode::Full, None);
-        let simple = viewer_text(PanelMode::Simple, None);
+    fn simple_panel_drops_material_model_and_object_editing() {
+        let (full, full_target) = viewer_text(PanelMode::Full, None);
+        let (simple, simple_target) = viewer_text(PanelMode::Simple, None);
         let has = |text: &[String], wanted: &str| text.iter().any(|t| t == wanted);
         for hidden in [
             "Load model…",
             "Delete selected",
             "PBR material",
             "Roughness",
+            "Object",
+            "Rotate",
+            "Translate",
+            "Scale",
+            "Transform",
         ] {
             assert!(has(&full, hidden), "the full panel must show {hidden:?}");
             assert!(
@@ -921,27 +963,28 @@ mod tests {
         }
         for kept in [
             "Interaction",
-            "Rotate",
-            "Translate",
-            "Scale",
-            "Transform",
+            "Orbit camera",
             "Render mode",
             "PBR",
             "Overlays",
             "Selection",
             "Deselect",
+            "Reset view",
+            "Left-drag: orbit\nClick: select\nScroll: zoom",
         ] {
             assert!(has(&simple, kept), "the simple panel must keep {kept:?}");
         }
+        // The helper starts from an Object target; only simple mode drops it.
+        assert_eq!(full_target, InteractionTarget::Object);
+        assert_eq!(simple_target, InteractionTarget::Camera);
     }
 
     #[test]
     fn simple_panel_still_shows_a_model_load_failure() {
         let error = "'broken.glb' is not a GLB";
-        assert!(!viewer_text(PanelMode::Simple, None)
-            .iter()
-            .any(|t| t == "Model"));
-        let text = viewer_text(PanelMode::Simple, Some(error));
+        let (text, _) = viewer_text(PanelMode::Simple, None);
+        assert!(!text.iter().any(|t| t == "Model"));
+        let (text, _) = viewer_text(PanelMode::Simple, Some(error));
         assert!(text.iter().any(|t| t == "Model"));
         assert!(text.iter().any(|t| t == error));
         assert!(!text.iter().any(|t| t == "Load model…"));

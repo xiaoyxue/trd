@@ -45,11 +45,12 @@ texture.
 ## Simple mode
 
 For an application that supplies the models itself (#387). Simple mode hides the
-**PBR material** section and the **Load model…** / **Delete selected** buttons.
-Everything else stays: click-to-pick, **Interaction** (orbit, or rotate /
-translate / scale the picked object), **Transform**, **Render mode**,
-**Shadows**, **Overlays** and **Selection**. A failed load still appears in the
-panel.
+**PBR material** section, the **Load model…** / **Delete selected** buttons, the
+**Transform** section and the **Object** drag target with its Rotate / Translate
+/ Scale options. Objects cannot be moved: left-drag orbits the camera,
+right-drag does nothing, and the wheel only zooms. Click-to-pick, **Render mode**,
+**Shadows**, **Overlays**, **Selection** and **Reset view** stay. A failed load
+still appears in the panel.
 
 The default is the full UI. `?simple` and `?simple=true` turn simple mode on;
 no parameter or `?simple=false` keeps the full UI; any other value fails at
@@ -79,8 +80,8 @@ handle.loadModel("chair.glb", await fetchBytes("/models/chair.glb"), env);
 ```
 
 `serve.ts` also serves [`embed.html`](embed.html) at `/embed`, a working copy of
-that pattern. `/embed?case=runtime` starts on the built-in cube and loads the
-Dragon two seconds later with no user input. `/embed?case=invalid` loads bytes
+that pattern. `/embed?case=runtime` starts on the built-in cube, downloads the
+Dragon GLB, and loads it two seconds after that, with no user input. `/embed?case=invalid` loads bytes
 that are not a GLB, and the panel must show the error.
 
 ## Controls

@@ -91,9 +91,10 @@ fn resolve_video_editing_scene(
 /// stays in JS because opening one needs a user gesture the browser only grants
 /// to the page.
 ///
-/// `simple` (default `false`) hides material editing and **Load model…** /
-/// **Delete selected** for a host that supplies models itself, through `mesh_bytes`
-/// and [`GuiHandle::load_model`]; picking and manipulation stay (#387).
+/// `simple` (default `false`) hides material editing, **Load model…** /
+/// **Delete selected**, **Transform** and object manipulation, for a host that
+/// supplies models itself through `mesh_bytes` and [`GuiHandle::load_model`]; the
+/// camera still orbits and zooms, and picking stays (#387).
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub async fn start(
     canvas: web_sys::HtmlCanvasElement,

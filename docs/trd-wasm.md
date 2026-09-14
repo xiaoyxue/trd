@@ -408,9 +408,10 @@ Load model action. Hand the selected GLB back with
 repaint, so an idle viewer processes the upload without another pointer or keyboard
 event. Its `void` return is **not** a load-completion promise.
 
-`simple` defaults to `false`. When `true`, the panel drops material editing and
-the Load/Delete buttons, and `onPickModel` is never called. Picking, object
-manipulation, `loadModel` and its visible load errors all still work (#387).
+`simple` defaults to `false`. When `true`, the panel drops material editing, the
+Load/Delete buttons, Transform and object manipulation, and `onPickModel` is
+never called. Camera orbit/zoom, picking, `loadModel` and its visible load errors
+all still work (#387).
 See [simple mode](../web/gui-viewer/README.md#simple-mode).
 
 Use the [GUI viewer bootstrap](../web/gui-viewer/src/main.ts) for complete
