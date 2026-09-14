@@ -101,6 +101,9 @@ pub struct WebApp {
     /// Meshes whose objects were deleted, waiting for a frame where the renderer
     /// is not out on an async render or pick (#353).
     pending_free: Vec<u32>,
+    /// Which panel sections are drawn. Only the UI is gated: a queued model is
+    /// consumed the same way in either mode (#387).
+    panel: ui::PanelMode,
 }
 
 impl WebApp {
@@ -110,6 +113,7 @@ impl WebApp {
         controller: InteractionController,
         renderer: GuiRenderer,
         shared: Rc<GuiShared>,
+        panel: ui::PanelMode,
     ) -> Self {
         let render_size = renderer.size();
         Self {
@@ -126,6 +130,7 @@ impl WebApp {
             shared,
             model_error: None,
             pending_free: Vec::new(),
+            panel,
         }
     }
 
@@ -298,6 +303,7 @@ impl eframe::App for WebApp {
                 render_size: self.render_size,
                 last_render_ms: None,
                 model_error: self.model_error.as_deref(),
+                panel: self.panel,
             },
         );
         self.needs_render |= outcome.needs_render;

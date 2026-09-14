@@ -81,6 +81,18 @@ pub struct ImageOutcome {
     pub freed_mesh: Option<u32>,
 }
 
+/// Which of the plain viewer's panel sections a host exposes (#387).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PanelMode {
+    /// Every section, including material editing and Load/Delete.
+    #[default]
+    Full,
+    /// For a host that supplies models itself: no **PBR material** section and
+    /// no **Load model…** / **Delete selected**. Picking, manipulation and the
+    /// remaining sections are unchanged, and a load failure is still shown.
+    Simple,
+}
+
 /// The per-frame view [`show`] draws for the plain viewers.
 pub struct View<'a> {
     pub controller: &'a mut InteractionController,
@@ -90,6 +102,7 @@ pub struct View<'a> {
     /// The most recent model-load failure, shown in the panel until the next
     /// load succeeds (#353). The scene behind it is still the previous one.
     pub model_error: Option<&'a str>,
+    pub panel: PanelMode,
 }
 
 /// Runs the standard viewer: control sections plus central image.
@@ -104,11 +117,26 @@ pub fn show(ui: &mut egui::Ui, view: &mut View) -> ImageOutcome {
         .show(ui, |ui| {
             header(ui);
             egui::ScrollArea::vertical().show(ui, |ui| {
-                let model = model_section(ui, view.controller, view.model_error);
-                outcome.load_model |= model.load_requested;
-                outcome.needs_render |= model.needs_render;
-                outcome.freed_mesh = outcome.freed_mesh.or(model.freed_mesh);
-                outcome.needs_render |= controls_sections(ui, view.controller, controls);
+                match view.panel {
+                    PanelMode::Full => {
+                        let model = model_section(ui, view.controller, view.model_error);
+                        outcome.load_model |= model.load_requested;
+                        outcome.needs_render |= model.needs_render;
+                        outcome.freed_mesh = outcome.freed_mesh.or(model.freed_mesh);
+                    }
+                    // The host loads models programmatically, so a failure has
+                    // no button to sit under — but it must still be seen.
+                    PanelMode::Simple => {
+                        if let Some(error) = view.model_error {
+                            section(ui, "Model", |ui| {
+                                model_error_label(ui, error);
+                                false
+                            });
+                        }
+                    }
+                }
+                outcome.needs_render |=
+                    controls_sections(ui, view.controller, controls, view.panel);
                 outcome.needs_render |= reset_button(ui, view.controller);
                 ui.separator();
                 status(ui, view.render_size, view.last_render_ms);
@@ -182,23 +210,32 @@ pub fn model_section(
         });
         ui.weak("GLB — lit by the environment probe");
         if let Some(error) = error {
-            ui.add_space(4.0);
-            ui.colored_label(Color32::from_rgb(0xF0, 0x80, 0x80), error);
+            model_error_label(ui, error);
         }
         false
     });
     outcome
 }
 
+fn model_error_label(ui: &mut egui::Ui, error: &str) {
+    ui.add_space(4.0);
+    ui.colored_label(Color32::from_rgb(0xF0, 0x80, 0x80), error);
+}
+
+/// The shared control sections. [`PanelMode::Simple`] drops only material
+/// editing; picking, manipulation and render mode stay (#387).
 pub fn controls_sections(
     ui: &mut egui::Ui,
     controller: &mut InteractionController,
     controls: Controls,
+    panel: PanelMode,
 ) -> bool {
     let mut needs_render = interaction_section(ui, controller, controls);
     needs_render |= transform_section(ui, controller);
     needs_render |= render_mode_section(ui, controller);
-    needs_render |= pbr_material_section(ui, controller);
+    if panel == PanelMode::Full {
+        needs_render |= pbr_material_section(ui, controller);
+    }
     needs_render |= shadow_section(ui, &mut controller.state.render_config);
     needs_render |= overlays_section(ui, controller);
     needs_render |= selection_section(ui, controller);
@@ -814,6 +851,100 @@ mod tests {
             }
         });
         out.expect("test ui body ran")
+    }
+
+    /// Every label and value the plain viewer exposes for one settled frame,
+    /// read back through AccessKit: the text a user sees, with no renderer.
+    fn viewer_text(panel: PanelMode, model_error: Option<&str>) -> Vec<String> {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut controller = InteractionController::new(crate::scene::SceneState::default());
+        // A selected PBR object with Object manipulation is the state in which
+        // every section, including the material one, has something to draw.
+        controller.state.selected = Some(0);
+        *controller.state.selected_mode_mut().unwrap() = RenderMode::Shaded;
+        controller.target = InteractionTarget::Object;
+        // Tall enough that nothing in the scrolling panel is clipped away.
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                Vec2::new(1920.0, 4000.0),
+            )),
+            ..Default::default()
+        };
+        let mut update = None;
+        // The first pass only sizes the layout.
+        for _ in 0..2 {
+            let mut output = ctx.run_ui(input.clone(), |ui| {
+                show(
+                    ui,
+                    &mut View {
+                        controller: &mut controller,
+                        texture: None,
+                        render_size: (64, 64),
+                        last_render_ms: None,
+                        model_error,
+                        panel,
+                    },
+                );
+            });
+            update = output.platform_output.accesskit_update.take();
+            // Nothing paints here, so the font-atlas upload is discarded on purpose.
+            output.drop_without_applying_deltas();
+        }
+        update
+            .expect("AccessKit is enabled")
+            .nodes
+            .iter()
+            .flat_map(|(_, node)| [node.label(), node.value()])
+            .flatten()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn simple_panel_drops_only_material_editing_and_model_buttons() {
+        let full = viewer_text(PanelMode::Full, None);
+        let simple = viewer_text(PanelMode::Simple, None);
+        let has = |text: &[String], wanted: &str| text.iter().any(|t| t == wanted);
+        for hidden in [
+            "Load model…",
+            "Delete selected",
+            "PBR material",
+            "Roughness",
+        ] {
+            assert!(has(&full, hidden), "the full panel must show {hidden:?}");
+            assert!(
+                !has(&simple, hidden),
+                "the simple panel must hide {hidden:?}"
+            );
+        }
+        for kept in [
+            "Interaction",
+            "Rotate",
+            "Translate",
+            "Scale",
+            "Transform",
+            "Render mode",
+            "PBR",
+            "Overlays",
+            "Selection",
+            "Deselect",
+        ] {
+            assert!(has(&simple, kept), "the simple panel must keep {kept:?}");
+        }
+    }
+
+    #[test]
+    fn simple_panel_still_shows_a_model_load_failure() {
+        let error = "'broken.glb' is not a GLB";
+        assert!(!viewer_text(PanelMode::Simple, None)
+            .iter()
+            .any(|t| t == "Model"));
+        let text = viewer_text(PanelMode::Simple, Some(error));
+        assert!(text.iter().any(|t| t == "Model"));
+        assert!(text.iter().any(|t| t == error));
+        assert!(!text.iter().any(|t| t == "Load model…"));
     }
 
     #[test]

@@ -6,7 +6,9 @@
 //   - files under this `gui-viewer/` folder (e.g. the built pkg), and
 //   - the repo's real `assets/` directory, so `?mesh=/assets/meshes/bunny.obj`
 //     resolves to the same file the native `--mesh` reads — no copies.
+// `/embed` is the simple-mode embedding page (#387), bundled the same way.
 import { existsSync } from "node:fs";
+import embed from "./embed.html";
 import index from "./index.html";
 
 const port = Number(process.env.BUN_PORT ?? 8082);
@@ -15,7 +17,7 @@ const REPO_ROOT = new URL("../../", import.meta.url);
 const server = Bun.serve({
   port,
   development: true,
-  routes: { "/": index },
+  routes: { "/": index, "/embed": embed },
   async fetch(req) {
     const { pathname } = new URL(req.url);
     if (pathname === "/") {

@@ -80,31 +80,52 @@ async function main(): Promise<void> {
       })
     : await uffiziProbe();
 
-  // The "Load model…" button lives in the Rust panel, but opening a file picker
-  // needs a user gesture the browser only grants the page — so Rust calls out to
-  // this hidden input and the bytes go back in through the handle. JS parses
-  // nothing: `accept` is a hint to the dialog, and Rust re-checks the magic.
-  const picker = document.createElement("input");
-  picker.type = "file";
-  picker.accept = ".glb,model/gltf-binary";
-  picker.hidden = true;
-  document.body.appendChild(picker);
+  // `?simple` hides material editing and Load/Delete (#387). Simple mode has no
+  // Load button, so it gets no file picker either.
+  const simple = simpleFlag(params);
 
   let handle: GuiHandle | undefined;
-  picker.addEventListener("change", () => {
-    const file = picker.files?.[0];
-    // Reset so picking the same file twice still fires a change event.
-    picker.value = "";
-    if (!file || !handle) {
-      return;
-    }
-    void (async () => {
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      handle?.loadModel(file.name, bytes, await uffiziProbe());
-    })();
-  });
+  let onPickModel: (() => void) | undefined;
+  if (!simple) {
+    // The "Load model…" button lives in the Rust panel, but opening a file picker
+    // needs a user gesture the browser only grants the page — so Rust calls out to
+    // this hidden input and the bytes go back in through the handle. JS parses
+    // nothing: `accept` is a hint to the dialog, and Rust re-checks the magic.
+    const picker = document.createElement("input");
+    picker.type = "file";
+    picker.accept = ".glb,model/gltf-binary";
+    picker.hidden = true;
+    document.body.appendChild(picker);
 
-  handle = await start(canvas, meshBytes, textureBytes, envBytes, () => picker.click());
+    picker.addEventListener("change", () => {
+      const file = picker.files?.[0];
+      // Reset so picking the same file twice still fires a change event.
+      picker.value = "";
+      if (!file || !handle) {
+        return;
+      }
+      void (async () => {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        handle?.loadModel(file.name, bytes, await uffiziProbe());
+      })();
+    });
+    onPickModel = () => picker.click();
+  }
+
+  handle = await start(canvas, meshBytes, textureBytes, envBytes, onPickModel, simple);
+}
+
+/// `?simple` / `?simple=true` → simple; absent / `?simple=false` → full. Any
+/// other value is a typo, and silently showing the wrong UI would hide it.
+function simpleFlag(params: URLSearchParams): boolean {
+  const value = params.get("simple");
+  if (value === null || value === "false") {
+    return false;
+  }
+  if (value === "" || value === "true") {
+    return true;
+  }
+  throw new Error(`?simple must be "true", "false" or empty, got "${value}"`);
 }
 
 main().catch((err) => {
