@@ -397,7 +397,7 @@ mesh output and the sky. For a working playback loop, see
 
 ## Interactive model viewer
 
-`start(canvas, meshBytes, textureBytes, envBytes?, onPickModel?)` mounts the
+`start(canvas, meshBytes, textureBytes, envBytes?, onPickModel?, simple?)` mounts the
 Rust GUI and returns `Promise<GuiHandle>`. Supply arrays of OBJ/GLB bytes;
 texture entries align positionally with meshes. These are the internal model
 viewer's inputs, not permission to encode OBJ geometry in protocol Arrow.
@@ -407,6 +407,12 @@ Load model action. Hand the selected GLB back with
 `handle.loadModel(name, glbBytes, envBytes?)`. This queues work and requests a GUI
 repaint, so an idle viewer processes the upload without another pointer or keyboard
 event. Its `void` return is **not** a load-completion promise.
+
+`simple` defaults to `false`. When `true`, the panel drops material editing, the
+Load/Delete buttons, Transform and object manipulation, and `onPickModel` is
+never called. Camera orbit/zoom, picking, `loadModel` and its visible load errors
+all still work (#387).
+See [simple mode](../web/gui-viewer/README.md#simple-mode).
 
 Use the [GUI viewer bootstrap](../web/gui-viewer/src/main.ts) for complete
 picker/texture/environment handling. It is a different application from the

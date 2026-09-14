@@ -90,6 +90,11 @@ fn resolve_video_editing_scene(
 /// bytes come back through [`GuiHandle::load_model`] (#353). The file picker
 /// stays in JS because opening one needs a user gesture the browser only grants
 /// to the page.
+///
+/// `simple` (default `false`) hides material editing, **Load model…** /
+/// **Delete selected**, **Transform** and object manipulation, for a host that
+/// supplies models itself through `mesh_bytes` and [`GuiHandle::load_model`]; the
+/// camera still orbits and zooms, and picking stays (#387).
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub async fn start(
     canvas: web_sys::HtmlCanvasElement,
@@ -97,6 +102,7 @@ pub async fn start(
     texture_bytes: js_sys::Array,
     env_bytes: Option<Vec<u8>>,
     on_pick_model: Option<js_sys::Function>,
+    simple: Option<bool>,
 ) -> Result<GuiHandle, wasm_bindgen::JsValue> {
     use crate::gui_web_app::WebApp;
     use trd_gui::interaction::InteractionController;
@@ -308,7 +314,17 @@ pub async fn start(
         .await
         .map_err(to_js)?;
     let shared = Rc::new(crate::gui_web_app::GuiShared::new(on_pick_model));
-    let app = WebApp::new(InteractionController::new(scene), renderer, shared.clone());
+    let panel = if simple.unwrap_or(false) {
+        trd_gui::ui::PanelMode::Simple
+    } else {
+        trd_gui::ui::PanelMode::Full
+    };
+    let app = WebApp::new(
+        InteractionController::new(scene),
+        renderer,
+        shared.clone(),
+        panel,
+    );
     let app_shared = shared.clone();
 
     eframe::WebRunner::new()

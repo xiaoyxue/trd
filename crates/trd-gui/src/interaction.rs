@@ -97,6 +97,8 @@ pub struct InteractionController {
     pub axis: AxisConstraint,
     /// The state to restore on [`InteractionEvent::Reset`].
     initial: SceneState,
+    /// Whether gestures may edit objects; see [`Self::set_object_editing`].
+    object_editing: bool,
 }
 
 impl InteractionController {
@@ -110,6 +112,20 @@ impl InteractionController {
             move_reference_axes: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             axis: AxisConstraint::default(),
             initial,
+            object_editing: true,
+        }
+    }
+
+    /// Allows or forbids object edits from gestures (#387 simple mode).
+    ///
+    /// Forbidden, a primary drag always orbits and a secondary drag or scale
+    /// wheel leaves the selection alone. Hiding the panel's Object controls is
+    /// not enough on its own: right-drag pans the selected object regardless of
+    /// the target. The target is reset too, so the wheel zooms instead of scaling.
+    pub fn set_object_editing(&mut self, enabled: bool) {
+        self.object_editing = enabled;
+        if !enabled {
+            self.target = InteractionTarget::Camera;
         }
     }
 
@@ -125,17 +141,19 @@ impl InteractionController {
                     return false;
                 }
                 match self.target {
-                    InteractionTarget::Camera => {
+                    InteractionTarget::Object if self.object_editing => {
+                        return self.apply_object_drag(dx, dy)
+                    }
+                    _ => {
                         self.state
                             .camera
                             .orbit(dx * ROTATE_SPEED, -dy * ROTATE_SPEED);
                     }
-                    InteractionTarget::Object => return self.apply_object_drag(dx, dy),
                 }
                 true
             }
             InteractionEvent::Pan { dx, dy } => {
-                if dx == 0.0 && dy == 0.0 {
+                if !self.object_editing || (dx == 0.0 && dy == 0.0) {
                     return false;
                 }
                 // Pan moves the *selected* object; no selection ⇒ nothing to move.
@@ -155,7 +173,7 @@ impl InteractionController {
                 true
             }
             InteractionEvent::Scale { delta } => {
-                if delta == 0.0 {
+                if !self.object_editing || delta == 0.0 {
                     return false;
                 }
                 let Some(obj) = self.state.selected_object_mut() else {
@@ -274,6 +292,35 @@ mod tests {
             c.state.objects[0], obj0,
             "object unchanged with no selection"
         );
+    }
+
+    #[test]
+    fn without_object_editing_every_gesture_leaves_objects_alone() {
+        let mut c = selected_controller();
+        c.mode = TransformMode::Scale;
+        c.set_object_editing(false);
+        assert_eq!(c.target, InteractionTarget::Camera);
+        let obj0 = c.state.objects[0];
+        let yaw0 = c.state.camera.yaw;
+
+        // A host that sets the target back cannot re-enable object drags.
+        c.target = InteractionTarget::Object;
+        assert!(c.apply(InteractionEvent::Primary { dx: 0.5, dy: 0.2 }));
+        assert!(c.state.camera.yaw > yaw0, "the drag orbits instead");
+        assert!(!c.apply(InteractionEvent::Pan { dx: 0.2, dy: 0.2 }));
+        assert!(!c.apply(InteractionEvent::Scale { delta: 1.0 }));
+        assert_eq!(
+            c.state.objects[0], obj0,
+            "the selected object never changes"
+        );
+        let distance0 = c.state.camera.distance;
+        assert!(c.apply(InteractionEvent::Zoom { delta: 1.0 }));
+        assert!(c.state.camera.distance < distance0);
+
+        c.set_object_editing(true);
+        c.target = InteractionTarget::Object;
+        assert!(c.apply(InteractionEvent::Pan { dx: 0.2, dy: 0.2 }));
+        assert_ne!(c.state.objects[0], obj0);
     }
 
     #[test]

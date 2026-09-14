@@ -168,6 +168,7 @@ impl eframe::App for TrdGuiApp {
                 render_size: self.renderer.size(),
                 last_render_ms: self.last_render,
                 model_error: self.model_error.as_deref(),
+                panel: ui::PanelMode::Full,
             },
         );
         self.needs_render |= outcome.needs_render;

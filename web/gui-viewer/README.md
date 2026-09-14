@@ -3,8 +3,10 @@
 The interactive `trd-gui` viewer also targets the browser (issue #97, Slice 4):
 the egui UI runs on a `<canvas>` via eframe while `trd-core` renders the scene
 **offscreen** (wgpu 30) to RGBA shown as an egui texture (Strategy A). The whole
-UI + interaction + rendering are in Rust; `index.html` is the only JS — a thin
-bootstrap that loads the wasm module and calls `start(canvas)`.
+UI + interaction + rendering are in Rust; `index.html` (`src/main.ts`) is a thin
+bootstrap that loads the wasm module and calls `start(canvas, …)`, and
+`embed.html` (`src/embed.ts`) is the same bootstrap for an embedding
+application in [simple mode](#simple-mode).
 
 ## Build & run (Bun workspace)
 
@@ -34,10 +36,53 @@ runs on WebGPU through `egui-wgpu` since #257. There is no WebGL fallback.
 | *(default)* | `http://localhost:8082/` — built-in cube |
 | `--mesh assets/meshes/bunny.obj` | `?mesh=/assets/meshes/bunny.obj` |
 | `--mesh …bunny.obj --texture …map1.jpg` | `?mesh=/assets/meshes/bunny_with_texture/bunny.obj&texture=/assets/meshes/bunny_with_texture/bunny_uv_map1.jpg` |
+| *(browser only)* | `?simple` or `?simple=true` — [simple mode](#simple-mode) |
 
 `?mesh=`/`?texture=` accept any URL the dev server can reach; `/assets/…` maps to
 the repo's `assets/` folder. Select **Textured** in the side panel to see a bound
 texture.
+
+## Simple mode
+
+For an application that supplies the models itself (#387). Simple mode hides the
+**PBR material** section, the **Load model…** / **Delete selected** buttons, the
+**Transform** section and the **Object** drag target with its Rotate / Translate
+/ Scale options. Objects cannot be moved: left-drag orbits the camera,
+right-drag does nothing, and the wheel only zooms. Click-to-pick, **Render mode**,
+**Shadows**, **Overlays**, **Selection** and **Reset view** stay. A failed load
+still appears in the panel.
+
+The default is the full UI. `?simple` and `?simple=true` turn simple mode on;
+no parameter or `?simple=false` keeps the full UI; any other value fails at
+startup.
+
+```text
+http://localhost:8082/?simple=true&mesh=/assets/meshes/glb/Meshy_AI_Dragon_0804104424_texture.glb&env=/assets/envmap/uffizi-large.hdr
+```
+
+From JS/TS, pass `simple` as the last argument to `start`. Load models through
+the handle it returns:
+
+```ts
+import init, { start } from "./pkg/trd_wasm.js";
+
+await init({ module_or_path: wasmUrl });
+const fetchBytes = async (url: string) =>
+  new Uint8Array(await (await fetch(url)).arrayBuffer());
+const env = await fetchBytes("/assets/envmap/uffizi-large.hdr");
+const dragon = await fetchBytes("/models/dragon.glb");
+
+// No picker callback: simple mode has no Load button to call it.
+const handle = await start(canvas, [dragon], [], env, undefined, true);
+
+// Later, add another model. Returns void; a failure shows in the viewer panel.
+handle.loadModel("chair.glb", await fetchBytes("/models/chair.glb"), env);
+```
+
+`serve.ts` also serves [`embed.html`](embed.html) at `/embed`, a working copy of
+that pattern. `/embed?case=runtime` starts on the built-in cube, downloads the
+Dragon GLB, and loads it two seconds after that, with no user input. `/embed?case=invalid` loads bytes
+that are not a GLB, and the panel must show the error.
 
 ## Controls
 

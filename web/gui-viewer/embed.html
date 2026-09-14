@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>trd-gui — embedded simple viewer (wasm)</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #0c0c0c;
+        overflow: hidden;
+      }
+      #trd-gui-canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- An embedding application in miniature (#387): it keeps the handle
+         `start` returns and loads GLBs through it, with no file picker. -->
+    <canvas id="trd-gui-canvas"></canvas>
+    <script type="module" src="./src/embed.ts"></script>
+  </body>
+</html>
