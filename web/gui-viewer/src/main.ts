@@ -37,6 +37,9 @@ async function main(): Promise<void> {
   // params load multiple objects (laid out side-by-side; click to select one).
   // Absent → built-in cube / no texture / no env probe. `?env=` starts PBR mode.
   const params = new URLSearchParams(location.search);
+  // `?simple` hides material editing and Load/Delete (#387). Parsed before any
+  // fetch, so a mistyped value fails at once.
+  const simple = simpleFlag(params);
 
   const meshUrls = params.getAll("mesh");
   const meshBytes: Uint8Array[] = await Promise.all(
@@ -80,12 +83,9 @@ async function main(): Promise<void> {
       })
     : await uffiziProbe();
 
-  // `?simple` hides material editing and Load/Delete (#387). Simple mode has no
-  // Load button, so it gets no file picker either.
-  const simple = simpleFlag(params);
-
   let handle: GuiHandle | undefined;
   let onPickModel: (() => void) | undefined;
+  // Simple mode has no Load button, so it gets no file picker either.
   if (!simple) {
     // The "Load model…" button lives in the Rust panel, but opening a file picker
     // needs a user gesture the browser only grants the page — so Rust calls out to

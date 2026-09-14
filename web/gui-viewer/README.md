@@ -3,8 +3,10 @@
 The interactive `trd-gui` viewer also targets the browser (issue #97, Slice 4):
 the egui UI runs on a `<canvas>` via eframe while `trd-core` renders the scene
 **offscreen** (wgpu 30) to RGBA shown as an egui texture (Strategy A). The whole
-UI + interaction + rendering are in Rust; `index.html` is the only JS — a thin
-bootstrap that loads the wasm module and calls `start(canvas)`.
+UI + interaction + rendering are in Rust; `index.html` (`src/main.ts`) is a thin
+bootstrap that loads the wasm module and calls `start(canvas, …)`, and
+`embed.html` (`src/embed.ts`) is the same bootstrap for an embedding
+application in [simple mode](#simple-mode).
 
 ## Build & run (Bun workspace)
 
