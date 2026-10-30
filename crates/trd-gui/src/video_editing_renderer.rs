@@ -263,18 +263,14 @@ impl VideoPlacementRenderer {
         };
         configure_mesh_assets(&mut renderer, assets)?;
         renderer.set_env_map(assets::decode_env_hdr(env_bytes).map_err(|error| error.to_string())?);
-        let replay_lighting =
-            if assets.iter().flat_map(|asset| &asset.parts).any(|part| {
-                part.metallic_roughness_texture.is_some() || part.normal_texture.is_some()
-            }) {
-                trd_core::Lighting {
-                    ambient: 0.0,
-                    scale: 0.0,
-                    ..trd_core::Lighting::default()
-                }
-            } else {
-                trd_core::Lighting::default()
-            };
+        let replay_lighting = if assets
+            .iter()
+            .any(|asset| asset.source == trd_core::MeshAssetSource::Gltf)
+        {
+            crate::scene::ibl_only_lighting()
+        } else {
+            trd_core::Lighting::default()
+        };
         let default_material = assets
             .first()
             .map_or_else(trd_core::DisneyMaterial::default, |asset| {
@@ -822,8 +818,10 @@ fn configure_mesh_assets(
             .set_mesh_parts(mesh_id, &asset.parts)
             .map_err(|error| error.to_string())?;
         if asset.source == trd_core::MeshAssetSource::Gltf {
-            renderer
-                .set_tonemap_operator(trd_core::MeshTarget::One(mesh_id), trd_core::Tonemap::Aces);
+            renderer.set_tone_mapping(
+                trd_core::MeshTarget::One(mesh_id),
+                crate::model::gltf_tone_mapping(),
+            );
         }
     }
     Ok(())
@@ -1061,7 +1059,7 @@ mod tests {
 
     #[test]
     #[ignore = "requires a GPU adapter"]
-    fn gltf_editor_tonemap_matches_the_viewer_with_other_settings_unchanged() {
+    fn gltf_editor_defaults_match_the_viewer_without_changing_materials() {
         let mesh = trd_core::Mesh::from_obj(
             "v -1 -1 0\nv 0 -1 0\nv 0 1 0\nv -1 1 0\n\
              v 0 -1 0\nv 1 -1 0\nv 1 1 0\nv 0 1 0\n\
@@ -1077,6 +1075,7 @@ mod tests {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let env = std::fs::read(root.join("assets/envmap/uffizi-large.hdr")).unwrap();
         let gpu = pollster::block_on(VideoPlacementRenderer::own_gpu()).unwrap();
+        let mut cases = Vec::new();
         for split in [false, true] {
             let mut parts = vec![trd_core::MaterialPart::whole(&mesh, material.clone())];
             if split {
@@ -1088,10 +1087,17 @@ mod tests {
                 screen.material.roughness = 0.9;
                 parts.push(screen);
             }
-            let asset = trd_core::MeshAsset::from(trd_core::GltfAsset {
+            cases.push(trd_core::MeshAsset::from(trd_core::GltfAsset {
                 mesh: mesh.clone(),
                 parts,
-            });
+            }));
+        }
+        cases.push(
+            trd_core::import_glb(&std::fs::read(root.join("assets/meshes/glb/tv.glb")).unwrap())
+                .unwrap()
+                .into(),
+        );
+        for asset in cases {
             let mut editor = VideoPlacementRenderer::new_assets_with_gpu(
                 gpu.clone(),
                 std::slice::from_ref(&asset),
@@ -1102,7 +1108,7 @@ mod tests {
             )
             .unwrap();
             let mut viewer = pollster::block_on(crate::renderer::GuiRenderer::new(
-                std::slice::from_ref(&mesh),
+                std::slice::from_ref(&asset.mesh),
                 &[],
                 &[],
                 Some(assets::decode_env_hdr(&env).unwrap()),
@@ -1112,19 +1118,27 @@ mod tests {
             .unwrap();
             viewer.set_mesh_parts(0, &asset.parts).unwrap();
             let state = SceneState::seeded(crate::scene::SceneSeed {
-                materials: vec![material.clone()],
+                materials: vec![asset.primary().material.clone()],
                 mode: trd_core::RenderMode::Shaded,
                 image_based_lighting: Default::default(),
-                tone_mapping: trd_core::ToneMapping {
-                    operator: trd_core::Tonemap::Aces,
-                    ..Default::default()
-                },
-                lighting: editor.replay_lighting,
+                tone_mapping: crate::model::gltf_tone_mapping(),
+                lighting: crate::scene::ibl_only_lighting(),
                 environment_available: true,
                 show_environment_background: false,
             });
             let expected = pollster::block_on(viewer.render(&state)).unwrap().rgba;
-            let scene = crate::renderer::scene_for(&state).with_lighting(editor.replay_lighting);
+            let mut draws = state.draws();
+            draws[0].model = asset
+                .mesh
+                .preview_transform(trd_core::DEFAULT_PREVIEW_TARGET)
+                .matrix();
+            let scene = trd_core::Scene::from_draws_with_config(
+                &draws,
+                &crate::renderer::render_options(&state),
+                None,
+                state.render_config,
+            )
+            .with_lighting(editor.replay_lighting);
             editor.renderer.draw_layers(
                 &[trd_core::SceneLayer::new(
                     state.camera(editor.viewport()),
