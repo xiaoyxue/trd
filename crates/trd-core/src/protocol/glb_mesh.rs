@@ -243,6 +243,31 @@ mod tests {
     }
 
     #[test]
+    fn multi_mesh_glb_row_reports_the_merged_scene_bounds() {
+        let glb = crate::mesh::two_mesh_glb();
+        let params = crate::FrameParams {
+            model: Some(crate::Matrix4::IDENTITY.to_cols_array()),
+            ..crate::FrameParams::IDENTITY
+        };
+        let bytes = super::super::scene_encode::encode_params_stream(&[params], None).unwrap();
+        let mut document = SceneDocument::read(&bytes).unwrap();
+        document
+            .bind_meshes(vec![GlbMesh::new(
+                "00000000-0000-0000-0000-000000000002",
+                &glb,
+            )
+            .unwrap()])
+            .unwrap();
+        let reopened = SceneDocument::read(&document.write().unwrap()).unwrap();
+        let mesh = &reopened.meshes()[0];
+        assert_eq!(mesh.bytes(), glb);
+        let bounds = mesh.bounds().unwrap();
+        assert_eq!(bounds.min().to_array(), [0.0, 0.0, 0.0]);
+        assert_eq!(bounds.max().to_array(), [11.0, 1.0, 0.0]);
+        assert_eq!(mesh.decode(3).unwrap().mesh.vertices.len(), 6);
+    }
+
+    #[test]
     fn duplicate_ids_and_non_glb_payloads_are_rejected() {
         let id = "00000000-0000-0000-0000-000000000001";
         assert!(GlbMesh::new(id, b"v 0 0 0\nf 1 2 3").is_err());
