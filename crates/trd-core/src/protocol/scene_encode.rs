@@ -1145,11 +1145,17 @@ mod tests {
         let assets = session.mesh_assets();
         assert_eq!(assets.len(), 2);
         assert_eq!(assets[0].mesh_id, Some(0));
-        assert_eq!(assets[0].material, materials[0]);
-        assert_eq!(assets[0].base_color_texture.as_ref(), Some(&texture0));
+        assert_eq!(assets[0].primary().material, materials[0]);
+        assert_eq!(
+            assets[0].primary().base_color_texture.as_ref(),
+            Some(&texture0)
+        );
         assert_eq!(assets[1].mesh_id, Some(1));
-        assert_eq!(assets[1].material, materials[1]);
-        assert_eq!(assets[1].base_color_texture.as_ref(), Some(&texture1));
+        assert_eq!(assets[1].primary().material, materials[1]);
+        assert_eq!(
+            assets[1].primary().base_color_texture.as_ref(),
+            Some(&texture1)
+        );
         assert_eq!(session.tonemap_override(), Some(Tonemap::Aces));
         assert_eq!(
             decoded.into_iter().flatten().next().unwrap().draws,

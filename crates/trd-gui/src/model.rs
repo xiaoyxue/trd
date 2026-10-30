@@ -33,7 +33,7 @@ const GLB_MAGIC: &[u8; 4] = b"glTF";
 /// The output transform a glTF object is graded by — ACES at unit exposure,
 /// matching what `?mesh=<glb>` already seeds so a model loaded at runtime and
 /// one loaded at startup look the same.
-fn gltf_tone_mapping() -> trd_core::ToneMapping {
+pub(crate) fn gltf_tone_mapping() -> trd_core::ToneMapping {
     trd_core::ToneMapping {
         operator: trd_core::Tonemap::Aces,
         exposure: 1.0,
@@ -111,10 +111,10 @@ pub fn load_model(
         renderer.set_env(crate::assets::decode_env_hdr(env_bytes)?);
     }
 
-    let mesh_id = renderer.add_model(&asset);
+    let mesh_id = renderer.add_model(&asset)?;
     let index = state.add_object(
         mesh_id as u32,
-        asset.material,
+        asset.primary().material.clone(),
         trd_core::RenderMode::Shaded,
         gltf_tone_mapping(),
     );

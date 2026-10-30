@@ -290,8 +290,11 @@ The old fixed catalog is removed from both editor delivery surfaces. Supply
 the desired self-contained GLBs in the current document instead. Ordinary
 OBJ/internal mesh viewers remain supported outside this editor input contract.
 Models use `assets/envmap/uffizi-large.hdr` as the default IBL probe. Imported
-GLB maps/materials remain authoritative; Dragon's mapped-material setup uses
-zero direct/ambient light. Raw tracking is not temporally smoothed.
+GLB maps/materials remain authoritative. Every GLB uses the standalone viewers'
+viewing defaults: zero direct/ambient light, ACES, and exposure 1.0, including
+models without textures. These defaults do not rewrite asset materials or
+input params; an explicit document tone-map override still wins.
+Raw tracking is not temporally smoothed.
 
 ## Rendering and visibility
 

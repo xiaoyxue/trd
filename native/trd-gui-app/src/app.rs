@@ -160,6 +160,9 @@ impl eframe::App for TrdGuiApp {
             self.render_scene(&ctx);
         }
 
+        let selected_material_parts = self
+            .renderer
+            .selected_material_parts(&self.controller.state);
         let outcome = ui::show(
             ui,
             &mut ui::View {
@@ -168,6 +171,7 @@ impl eframe::App for TrdGuiApp {
                 render_size: self.renderer.size(),
                 last_render_ms: self.last_render,
                 model_error: self.model_error.as_deref(),
+                selected_material_parts,
             },
         );
         self.needs_render |= outcome.needs_render;

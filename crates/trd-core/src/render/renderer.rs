@@ -75,12 +75,14 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use super::bound_material_maps::BoundMaterialMaps;
-use super::buffer::{draw_indexed, draw_vertices, InstanceBuffer, VertexBuffer};
+use super::buffer::{
+    draw_indexed, draw_indexed_range, draw_vertices, InstanceBuffer, VertexBuffer,
+};
 use super::draw_command::{build_batches, Batches};
 use super::environment::{EnvBackgroundSettings, Environment};
 use super::frame_plane::FramePlane;
 use super::gizmo::GizmoGeometry;
-use super::mesh_store::{upload_mesh, MeshGpu, MeshStore};
+use super::mesh_store::{upload_mesh, MeshGpu, MeshPartGpu, MeshStore};
 use super::picking::{PickPass, Picking};
 use super::*;
 use super::{Draw, GridPlane, Primitive, RenderMode, Scene};
@@ -300,16 +302,7 @@ impl Renderer {
             sample_count,
         )?;
         for (slot, asset) in assets.iter().enumerate() {
-            renderer.set_disney_material(MeshTarget::One(slot), asset.material.clone());
-            if let Some(texture) = &asset.base_color_texture {
-                renderer.set_mesh_texture(slot, texture);
-            }
-            if let Some(texture) = &asset.metallic_roughness_texture {
-                renderer.set_mesh_metallic_roughness_texture(slot, texture);
-            }
-            if let Some(texture) = &asset.normal_texture {
-                renderer.set_mesh_normal_texture(slot, texture);
-            }
+            renderer.set_mesh_parts(slot, &asset.parts)?;
         }
         Ok(renderer)
     }
@@ -563,8 +556,8 @@ impl Renderer {
             &material_maps_layout,
         );
         let mesh_id = self.meshes.push(uploaded);
-        self.uniforms
-            .grow_pbr_slots(&self.gpu.device, self.meshes.len());
+        let slots = self.meshes.assign_slots();
+        self.uniforms.grow_pbr_slots(&self.gpu.device, slots);
         // Unconditional: growing reallocates and discards every slot, and when
         // it does *not* grow the id is a reused hole still holding the previous
         // occupant's material.
@@ -598,8 +591,9 @@ impl Renderer {
             // reclamation happens while servicing a submission rather than on
             // drop or on poll.
             self.gpu.queue.submit([]);
-            // The freed slot keeps its stale contents; the next frame rewrites
-            // every live one.
+            // Later meshes' parts move down into the freed slots; the next
+            // frame rewrites every live one.
+            self.meshes.assign_slots();
             self.uniforms.mark_slots_dirty();
         }
         removed
@@ -628,9 +622,14 @@ impl Renderer {
     /// skins each object with its **own** diffuse (#141). Out-of-range ids are
     /// ignored. The image uploads lazily on the next
     /// [`render`](Self::render).
+    ///
+    /// Applies to every material part; [`set_mesh_parts`](Self::set_mesh_parts)
+    /// binds per-part maps.
     pub fn set_mesh_texture(&mut self, mesh_id: usize, texture: &dyn Texture) {
         if let Some(mesh) = self.meshes.get_mut(mesh_id) {
-            mesh.textures.albedo.set(&self.gpu, texture);
+            for part in &mut mesh.parts {
+                part.textures.albedo.set(&self.gpu, texture);
+            }
         }
     }
 
@@ -639,9 +638,11 @@ impl Renderer {
     /// material values. Out-of-range ids are ignored.
     pub fn set_mesh_metallic_roughness_texture(&mut self, mesh_id: usize, texture: &dyn Texture) {
         if let Some(mesh) = self.meshes.get_mut(mesh_id) {
-            mesh.textures
-                .maps
-                .set_metallic_roughness(&self.gpu, texture);
+            for part in &mut mesh.parts {
+                part.textures
+                    .maps
+                    .set_metallic_roughness(&self.gpu, texture);
+            }
         }
     }
 
@@ -649,8 +650,95 @@ impl Renderer {
     /// shading normal in [`RenderMode::Shaded`]. Out-of-range ids are ignored.
     pub fn set_mesh_normal_texture(&mut self, mesh_id: usize, texture: &dyn Texture) {
         if let Some(mesh) = self.meshes.get_mut(mesh_id) {
-            mesh.textures.maps.set_normal(&self.gpu, texture);
+            for part in &mut mesh.parts {
+                part.textures.maps.set_normal(&self.gpu, texture);
+            }
         }
+    }
+
+    /// Splits mesh `mesh_id` into material `parts` and binds each one's
+    /// material and maps (#394). The parts must tile its index buffer in whole
+    /// triangles; they stay one object for picking, the AABB and transforms.
+    ///
+    /// A single part's material becomes the mesh's own
+    /// [`MeshAppearance::material`], so it stays editable exactly as before.
+    /// With several parts each keeps its own, and an appearance edit changes
+    /// only the mesh-wide IBL, tone mapping and debug view.
+    pub fn set_mesh_parts(
+        &mut self,
+        mesh_id: usize,
+        parts: &[crate::MaterialPart],
+    ) -> Result<(), RenderError> {
+        let texture_layout = create_texture_bind_group_layout(&self.gpu.device);
+        let material_maps_layout = BoundMaterialMaps::create_layout(&self.gpu.device);
+        let mesh = self
+            .meshes
+            .get_mut(mesh_id)
+            .ok_or_else(|| RenderError::InvalidMeshSet {
+                reason: format!("mesh {mesh_id} is not loaded"),
+            })?;
+        let index_count = mesh.geometry.triangles.count();
+        let mut covered = 0;
+        for part in parts {
+            let whole_triangles = part.indices.start == covered
+                && part.indices.end >= part.indices.start
+                && (part.indices.end - part.indices.start).is_multiple_of(3);
+            if !whole_triangles {
+                return Err(RenderError::InvalidMeshSet {
+                    reason: format!(
+                        "mesh {mesh_id} parts must tile its {index_count} indices in triangles; got {:?}",
+                        part.indices
+                    ),
+                });
+            }
+            covered = part.indices.end;
+        }
+        if parts.is_empty() || covered != index_count {
+            return Err(RenderError::InvalidMeshSet {
+                reason: format!("mesh {mesh_id} parts must cover all {index_count} indices"),
+            });
+        }
+
+        let mut uploaded = Vec::with_capacity(parts.len());
+        for part in parts {
+            let mut gpu_part = MeshPartGpu::new(
+                &self.gpu,
+                part.indices.clone(),
+                &texture_layout,
+                &material_maps_layout,
+            );
+            if let Some(texture) = &part.base_color_texture {
+                gpu_part.textures.albedo.set(&self.gpu, texture);
+            }
+            if let Some(texture) = &part.metallic_roughness_texture {
+                gpu_part
+                    .textures
+                    .maps
+                    .set_metallic_roughness(&self.gpu, texture);
+            }
+            if let Some(texture) = &part.normal_texture {
+                gpu_part.textures.maps.set_normal(&self.gpu, texture);
+            }
+            if parts.len() > 1 {
+                gpu_part.material = Some(part.material.clone());
+            }
+            uploaded.push(gpu_part);
+        }
+        for old in std::mem::replace(&mut mesh.parts, uploaded) {
+            old.destroy();
+        }
+        if let [only] = parts {
+            mesh.appearance_mut().material = only.material.clone();
+        }
+        let slots = self.meshes.assign_slots();
+        self.uniforms.grow_pbr_slots(&self.gpu.device, slots);
+        self.uniforms.mark_slots_dirty();
+        Ok(())
+    }
+
+    /// How many material parts mesh `mesh_id` draws, or `None` if not loaded.
+    pub fn mesh_part_count(&self, mesh_id: usize) -> Option<usize> {
+        self.meshes.get(mesh_id).map(|mesh| mesh.parts.len())
     }
 
     /// **The one path that mutates per-mesh appearance, and therefore the one
@@ -1584,24 +1672,28 @@ impl Renderer {
             RenderMode::Textured => {
                 pass.set_pipeline(&self.pipelines.textured);
                 pass.set_bind_group(0, self.uniforms.camera.bind_group(), &[]);
-                pass.set_bind_group(1, mesh.textures.albedo.bind_group(), &[]);
-                draw_indexed(pass, mesh.filled(), range);
+                for part in &mesh.parts {
+                    pass.set_bind_group(1, part.textures.albedo.bind_group(), &[]);
+                    draw_indexed_range(pass, mesh.filled(), part.indices.clone(), range.clone());
+                }
             }
             RenderMode::Shaded => {
-                // group 0 = this mesh's PbrUniform slot (selected by a dynamic
-                // offset), group 1 = this mesh's albedo, group 2 = the HDR env
+                // Per material part: group 0 = its PbrUniform slot (selected by a
+                // dynamic offset), group 1 = its albedo, group 2 = the HDR env
                 // map, group 3 = its material maps.
                 pass.set_pipeline(&self.pipelines.pbr);
-                let offset = self.uniforms.pbr.offset(mesh_id as usize);
-                pass.set_bind_group(0, self.uniforms.pbr.bind_group(), &[offset]);
-                pass.set_bind_group(1, mesh.textures.albedo.bind_group(), &[]);
                 pass.set_bind_group(2, self.environment.bind_group(), &[]);
-                pass.set_bind_group(3, mesh.textures.maps.bind_group(), &[]);
                 // Slot 2 carries this mesh's derived normals/tangents; the
                 // geometry at slot 0 is the same buffer every other mode draws
                 // (#247 S7).
                 pass.set_vertex_buffer(2, mesh.geometry.shading.slice());
-                draw_indexed(pass, mesh.filled(), range);
+                for (index, part) in mesh.parts.iter().enumerate() {
+                    let offset = self.uniforms.pbr.offset(mesh.first_slot + index);
+                    pass.set_bind_group(0, self.uniforms.pbr.bind_group(), &[offset]);
+                    pass.set_bind_group(1, part.textures.albedo.bind_group(), &[]);
+                    pass.set_bind_group(3, part.textures.maps.bind_group(), &[]);
+                    draw_indexed_range(pass, mesh.filled(), part.indices.clone(), range.clone());
+                }
             }
             RenderMode::Wireframe => {
                 pass.set_pipeline(&self.pipelines.wireframe);

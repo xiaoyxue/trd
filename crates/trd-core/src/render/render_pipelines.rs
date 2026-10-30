@@ -270,20 +270,19 @@ impl SceneUniforms {
         if !self.slots_dirty {
             return;
         }
-        // A removed mesh leaves a hole whose slot nothing draws; skipping it
-        // keeps every surviving mesh on the slot its id names.
-        for (slot, mesh) in meshes.iter().enumerate() {
-            let Some(mesh) = mesh.as_ref() else {
-                continue;
-            };
+        // One slot per material part; a removed mesh owns none.
+        for mesh in meshes.iter().flatten() {
             let appearance = mesh.appearance();
-            let uniform = PbrUniform::new(PbrUniformInputs {
-                material: &appearance.material,
-                ibl: appearance.ibl,
-                tone_mapping: appearance.tone_mapping,
-                debug_view: appearance.debug_view,
-            });
-            self.pbr.write_slot(queue, slot, &uniform);
+            for (index, part) in mesh.parts.iter().enumerate() {
+                let uniform = PbrUniform::new(PbrUniformInputs {
+                    material: mesh.part_material(part),
+                    ibl: appearance.ibl,
+                    tone_mapping: appearance.tone_mapping,
+                    debug_view: appearance.debug_view,
+                });
+                self.pbr
+                    .write_slot(queue, mesh.first_slot + index, &uniform);
+            }
         }
         // Cleared only once every live slot has been rewritten.
         self.slots_dirty = false;

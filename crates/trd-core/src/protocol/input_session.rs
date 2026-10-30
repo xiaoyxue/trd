@@ -171,7 +171,7 @@ impl InputSession {
             .then(|| {
                 self.mesh_assets
                     .first()
-                    .and_then(|asset| asset.base_color_texture.as_ref())
+                    .and_then(|asset| asset.primary().base_color_texture.as_ref())
             })
             .flatten()
     }
@@ -399,7 +399,7 @@ impl InputSession {
             let MeshResource::Resolved(asset) = resource else {
                 return Err(ProtocolError::TextureWithGltfReference);
             };
-            asset.base_color_texture = Some(texture);
+            asset.primary_mut().base_color_texture = Some(texture);
             self.refresh_resolved_meshes();
             return Ok(());
         }
@@ -414,12 +414,12 @@ impl InputSession {
             let MeshResource::Resolved(asset) = resource else {
                 return Err(ProtocolError::TextureWithGltfReference);
             };
-            if asset.base_color_texture.is_some() {
+            if asset.primary().base_color_texture.is_some() {
                 return Err(parse_error(format!(
                     "texture table contains duplicate mesh_id {mesh_id}"
                 )));
             }
-            asset.base_color_texture = Some(texture);
+            asset.primary_mut().base_color_texture = Some(texture);
         }
         self.refresh_resolved_meshes();
         Ok(())
@@ -513,12 +513,13 @@ mod tests {
 
     #[test]
     fn resolved_gltf_still_rejects_external_texture_rows() {
+        let mesh = Mesh::hello_triangle();
         let gltf = crate::GltfAsset {
-            mesh: Mesh::hello_triangle(),
-            material: crate::DisneyMaterial::default(),
-            base_color_texture: None,
-            metallic_roughness_texture: None,
-            normal_texture: None,
+            parts: vec![crate::MaterialPart::whole(
+                &mesh,
+                crate::DisneyMaterial::default(),
+            )],
+            mesh,
         };
         let mut session = InputSession::new();
         session.mesh_resources = vec![MeshResource::Resolved(Box::new(

@@ -661,8 +661,11 @@ mod tests {
         let assets = scene.mesh_assets().unwrap();
 
         assert_eq!(assets.len(), 1);
-        assert_eq!(assets[0].material, material);
-        assert_eq!(assets[0].base_color_texture.as_ref(), Some(&texture));
+        assert_eq!(assets[0].primary().material, material);
+        assert_eq!(
+            assets[0].primary().base_color_texture.as_ref(),
+            Some(&texture)
+        );
     }
 
     #[test]
@@ -686,9 +689,9 @@ mod tests {
             .resolve_gltf(0, &std::fs::read(root.join(relative)).unwrap())
             .unwrap();
         let assets = scene.mesh_assets().unwrap();
-        assert!(assets[0].base_color_texture.is_some());
-        assert!(assets[0].metallic_roughness_texture.is_some());
-        assert!(assets[0].normal_texture.is_some());
+        assert!(assets[0].primary().base_color_texture.is_some());
+        assert!(assets[0].primary().metallic_roughness_texture.is_some());
+        assert!(assets[0].primary().normal_texture.is_some());
     }
 
     #[test]

@@ -1,7 +1,9 @@
 //! glTF material import into trd's typed Disney model.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, HashMap};
+use std::ops::Range;
 
+use super::MaterialPart;
 use crate::{
     AlphaMode, Auxiliary, DisneyMaterial, ImageTexture, MaterialTextures, Matrix4, Mesh,
     MeshShading, Normal3, Point3, TextureError, Transform, Vector3, Vertex,
@@ -11,14 +13,20 @@ use thiserror::Error;
 const DEFAULT_IOR: f32 = 1.5;
 const MAX_TEXTURE_DIM: u32 = 2048;
 
-/// One renderable glTF primitive and its Disney PBR resources.
+/// A GLB scene as one object: one mesh, drawn in one [`MaterialPart`] per
+/// distinct material.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GltfAsset {
     pub mesh: Mesh,
-    pub material: DisneyMaterial,
-    pub base_color_texture: Option<ImageTexture>,
-    pub metallic_roughness_texture: Option<ImageTexture>,
-    pub normal_texture: Option<ImageTexture>,
+    /// Never empty; in order of each material's first use in the scene walk.
+    pub parts: Vec<MaterialPart>,
+}
+
+impl GltfAsset {
+    /// The first part — the object's material when it has only one.
+    pub fn primary(&self) -> &MaterialPart {
+        &self.parts[0]
+    }
 }
 
 #[derive(Debug, Error)]
@@ -27,8 +35,6 @@ pub enum GltfImportError {
     Gltf(#[from] gltf_rs::Error),
     #[error("glTF scene draws no mesh primitive")]
     MissingPrimitive,
-    #[error("glTF import currently requires every primitive to share one material; found {count}")]
-    MultipleMaterials { count: usize },
     #[error("glTF node {0} is reachable twice; the node graph must be a tree")]
     NodeGraph(usize),
     #[error("glTF scene has more vertices than a u32 index can address")]
@@ -65,59 +71,76 @@ pub enum GltfImportError {
     },
 }
 
-/// Parses a binary glTF scene into one mesh, its Disney material, and its
-/// embedded textures.
+/// Parses a binary glTF scene into one mesh drawn in material parts, with each
+/// part's Disney material and embedded textures.
 ///
 /// The default scene (else the first; else every mesh, for scene-less files)
 /// is walked and each node's world transform baked into its primitives, which
-/// are merged into one [`Mesh`] in traversal order. Skins and morph targets are
-/// ignored, so the bind pose is drawn. The asset stays one object with one
-/// material: primitives using different materials are rejected (#394).
+/// are merged into one [`Mesh`]. Its triangles are grouped by material, so each
+/// [`MaterialPart`] is one contiguous index range; within a part they keep
+/// traversal order. Skins and morph targets are ignored, so the bind pose is
+/// drawn.
 pub fn import_glb(bytes: &[u8]) -> Result<GltfAsset, GltfImportError> {
     let gltf = gltf_rs::Gltf::from_slice(bytes)?;
     let blob = gltf.blob.as_deref().ok_or(GltfImportError::MissingBlob)?;
-    let placed = scene_primitives(&gltf.document)?;
-    let (first, _) = placed.first().ok_or(GltfImportError::MissingPrimitive)?;
-    let materials: BTreeSet<Option<usize>> = placed
-        .iter()
-        .map(|(primitive, _)| primitive.material().index())
-        .collect();
-    if materials.len() > 1 {
-        return Err(GltfImportError::MultipleMaterials {
-            count: materials.len(),
-        });
-    }
-
     let mut merged = MergedMesh::default();
-    for (primitive, world) in &placed {
-        merged.append(primitive, *world, blob)?;
+    // One entry per part, in the order `merged` opens its groups.
+    let mut materials: Vec<gltf_rs::Material<'_>> = Vec::new();
+    for (primitive, world) in &scene_primitives(&gltf.document)? {
+        let material = primitive.material();
+        let group = materials
+            .iter()
+            .position(|known| known.index() == material.index())
+            .unwrap_or_else(|| {
+                materials.push(material);
+                materials.len() - 1
+            });
+        merged.append(primitive, *world, group, blob)?;
     }
     if merged.vertices.is_empty() {
         return Err(GltfImportError::MissingPrimitive);
     }
 
-    let source_material = first.material();
-    let material = import_material(source_material.clone())?;
-    let pbr = source_material.pbr_metallic_roughness();
-    let base_color_texture = pbr
-        .base_color_texture()
-        .map(|info| import_embedded_texture(info.texture().source(), blob))
-        .transpose()?;
-    let metallic_roughness_texture = pbr
-        .metallic_roughness_texture()
-        .map(|info| import_embedded_texture(info.texture().source(), blob))
-        .transpose()?;
-    let normal_texture = source_material
-        .normal_texture()
-        .map(|info| import_embedded_texture(info.texture().source(), blob))
-        .transpose()?;
-    Ok(GltfAsset {
-        mesh: merged.finish(),
-        material,
-        base_color_texture,
-        metallic_roughness_texture,
-        normal_texture,
-    })
+    let (mesh, ranges) = merged.finish();
+    // Keyed by image, so two materials sharing a map decode it once.
+    let mut decoded: HashMap<usize, ImageTexture> = HashMap::new();
+    let mut parts = Vec::with_capacity(ranges.len());
+    for (source, indices) in materials.into_iter().zip(ranges) {
+        // A group whose every primitive sat under a zero-scale node is empty.
+        if indices.is_empty() {
+            continue;
+        }
+        let pbr = source.pbr_metallic_roughness();
+        let base_color = pbr.base_color_texture().map(|info| info.texture().source());
+        let metallic_roughness = pbr
+            .metallic_roughness_texture()
+            .map(|info| info.texture().source());
+        let normal = source.normal_texture().map(|info| info.texture().source());
+        parts.push(MaterialPart {
+            indices,
+            material: import_material(source.clone())?,
+            base_color_texture: decode_once(base_color, blob, &mut decoded)?,
+            metallic_roughness_texture: decode_once(metallic_roughness, blob, &mut decoded)?,
+            normal_texture: decode_once(normal, blob, &mut decoded)?,
+        });
+    }
+    Ok(GltfAsset { mesh, parts })
+}
+
+fn decode_once(
+    image: Option<gltf_rs::Image<'_>>,
+    blob: &[u8],
+    decoded: &mut HashMap<usize, ImageTexture>,
+) -> Result<Option<ImageTexture>, GltfImportError> {
+    let Some(image) = image else {
+        return Ok(None);
+    };
+    if let Some(texture) = decoded.get(&image.index()) {
+        return Ok(Some(texture.clone()));
+    }
+    let texture = import_embedded_texture(image.clone(), blob)?;
+    decoded.insert(image.index(), texture.clone());
+    Ok(Some(texture))
 }
 
 /// Every primitive the scene draws, in depth-first node order, with the world
@@ -165,7 +188,8 @@ fn scene_primitives(
 #[derive(Default)]
 struct MergedMesh {
     vertices: Vec<Vertex>,
-    indices: Vec<u32>,
+    /// Triangle indices per material group, concatenated by [`Self::finish`].
+    groups: Vec<Vec<u32>>,
     /// `None` once any primitive lacks `NORMAL`: the merged mesh then falls
     /// back to derived smooth normals as a whole (#393 makes these flat).
     normals: Option<Vec<[f32; 3]>>,
@@ -178,8 +202,14 @@ impl MergedMesh {
         &mut self,
         primitive: &gltf_rs::Primitive<'_>,
         world: Matrix4,
+        group: usize,
         blob: &[u8],
     ) -> Result<(), GltfImportError> {
+        // Opened even if this primitive turns out hidden, so group `n` stays
+        // aligned with the caller's material `n`.
+        if self.groups.len() <= group {
+            self.groups.resize_with(group + 1, Vec::new);
+        }
         if primitive.mode() != gltf_rs::mesh::Mode::Triangles {
             return Err(GltfImportError::PrimitiveMode(primitive.mode()));
         }
@@ -278,22 +308,30 @@ impl MergedMesh {
                     uv,
                 },
             ));
-        self.indices
-            .extend(indices.into_iter().map(|index| base + index));
+        self.groups[group].extend(indices.into_iter().map(|index| base + index));
         self.normals = merge_attribute(first_primitive, self.normals.take(), normals);
         self.tangents = merge_attribute(first_primitive, self.tangents.take(), tangents);
         Ok(())
     }
 
-    fn finish(self) -> Mesh {
-        Mesh {
+    /// The merged mesh and each group's index range within it.
+    fn finish(self) -> (Mesh, Vec<Range<u32>>) {
+        let mut indices = Vec::with_capacity(self.groups.iter().map(Vec::len).sum());
+        let mut ranges = Vec::with_capacity(self.groups.len());
+        for group in self.groups {
+            let start = indices.len() as u32;
+            indices.extend(group);
+            ranges.push(start..indices.len() as u32);
+        }
+        let mesh = Mesh {
             shading: self.normals.map(|normals| MeshShading {
                 normals,
                 tangents: self.tangents.unwrap_or_default(),
             }),
             vertices: self.vertices,
-            indices: self.indices,
-        }
+            indices,
+        };
+        (mesh, ranges)
     }
 }
 
@@ -548,6 +586,7 @@ pub(crate) struct TestGlb {
     bin: Vec<u8>,
     views: Vec<serde_json::Value>,
     accessors: Vec<serde_json::Value>,
+    images: Vec<serde_json::Value>,
 }
 
 #[cfg(test)]
@@ -577,6 +616,18 @@ impl TestGlb {
         )
     }
 
+    /// A 1×1 embedded PNG of `rgba`; returns its image index.
+    pub(crate) fn image(&mut self, rgba: [u8; 4]) -> usize {
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::RgbaImage::from_pixel(1, 1, image::Rgba(rgba))
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let view = self.view(&png.into_inner());
+        self.images
+            .push(serde_json::json!({"bufferView": view, "mimeType": "image/png"}));
+        self.images.len() - 1
+    }
+
     pub(crate) fn indices(&mut self, values: &[u16]) -> usize {
         let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
         self.accessor(
@@ -586,7 +637,12 @@ impl TestGlb {
     }
 
     fn accessor(&mut self, bytes: &[u8], mut accessor: serde_json::Value) -> usize {
-        accessor["bufferView"] = self.views.len().into();
+        accessor["bufferView"] = self.view(bytes).into();
+        self.accessors.push(accessor);
+        self.accessors.len() - 1
+    }
+
+    fn view(&mut self, bytes: &[u8]) -> usize {
         self.views.push(serde_json::json!({
             "buffer": 0, "byteOffset": self.bin.len(), "byteLength": bytes.len()
         }));
@@ -594,8 +650,7 @@ impl TestGlb {
         while !self.bin.len().is_multiple_of(4) {
             self.bin.push(0);
         }
-        self.accessors.push(accessor);
-        self.accessors.len() - 1
+        self.views.len() - 1
     }
 
     /// Packs `document` (meshes, nodes, scenes, materials…) with the accessors.
@@ -604,6 +659,9 @@ impl TestGlb {
         document["buffers"] = serde_json::json!([{"byteLength": self.bin.len()}]);
         document["bufferViews"] = self.views.into();
         document["accessors"] = self.accessors.into();
+        if !self.images.is_empty() {
+            document["images"] = self.images.into();
+        }
         let mut json = serde_json::to_vec(&document).unwrap();
         while !json.len().is_multiple_of(4) {
             json.push(b' ');
@@ -798,23 +856,102 @@ mod tests {
     }
 
     #[test]
-    fn rejects_primitives_with_different_materials() {
+    fn primitives_split_into_one_part_per_material() {
+        // Materials B, A, B: B's two primitives merge, and B comes first.
         let mut glb = TestGlb::default();
+        let primitives: Vec<_> = [1, 0, 1]
+            .into_iter()
+            .map(|material| {
+                let mut primitive = triangle_primitive(&mut glb, true, false);
+                primitive["material"] = material.into();
+                primitive
+            })
+            .collect();
+        let asset = import_glb(&glb.finish(json!({
+            "materials": [
+                {"name": "A", "pbrMetallicRoughness": {"metallicFactor": 0.1}},
+                {"name": "B", "pbrMetallicRoughness": {"metallicFactor": 0.9}}
+            ],
+            "meshes": [{"primitives": primitives}],
+            "nodes": [{"mesh": 0}],
+            "scenes": [{"nodes": [0]}]
+        })))
+        .unwrap();
+        let names: Vec<_> = asset
+            .parts
+            .iter()
+            .map(|p| p.material.name.as_deref())
+            .collect();
+        assert_eq!(names, [Some("B"), Some("A")]);
+        assert_eq!(asset.parts[0].indices, 0..6);
+        assert_eq!(asset.parts[1].indices, 6..9);
+        assert_eq!(asset.parts[0].material.metallic, 0.9);
+        // B's triangles are the first and third primitives' vertices.
+        assert_eq!(asset.mesh.indices, [0, 1, 2, 6, 7, 8, 3, 4, 5]);
+    }
+
+    #[test]
+    fn a_primitive_without_material_gets_the_default_part() {
+        let mut glb = TestGlb::default();
+        let mut with = triangle_primitive(&mut glb, true, false);
+        with["material"] = 0.into();
+        let without = triangle_primitive(&mut glb, true, false);
+        let asset = import_glb(&glb.finish(json!({
+            "materials": [{"pbrMetallicRoughness": {"metallicFactor": 0.0}}],
+            "meshes": [{"primitives": [with, without]}],
+            "nodes": [{"mesh": 0}],
+            "scenes": [{"nodes": [0]}]
+        })))
+        .unwrap();
+        assert_eq!(asset.parts.len(), 2);
+        assert_eq!(asset.parts[0].material.metallic, 0.0);
+        // glTF's default material is fully metallic.
+        assert_eq!(asset.parts[1].material.metallic, 1.0);
+    }
+
+    #[test]
+    fn parts_sharing_an_image_both_bind_it() {
+        let mut glb = TestGlb::default();
+        let image = glb.image([200, 10, 10, 255]);
         let mut first = triangle_primitive(&mut glb, true, false);
         let mut second = triangle_primitive(&mut glb, true, false);
         first["material"] = 0.into();
         second["material"] = 1.into();
-        let error = import_glb(&glb.finish(json!({
-            "materials": [{}, {}],
+        let textured = json!({"pbrMetallicRoughness": {"baseColorTexture": {"index": 0}}});
+        let asset = import_glb(&glb.finish(json!({
+            "textures": [{"source": image}],
+            "materials": [textured, textured],
             "meshes": [{"primitives": [first, second]}],
             "nodes": [{"mesh": 0}],
             "scenes": [{"nodes": [0]}]
         })))
-        .expect_err("two materials");
-        assert!(matches!(
-            error,
-            GltfImportError::MultipleMaterials { count: 2 }
-        ));
+        .unwrap();
+        assert_eq!(asset.parts.len(), 2);
+        let texture = asset.parts[0].base_color_texture.as_ref().unwrap();
+        assert_eq!(asset.parts[1].base_color_texture.as_ref(), Some(texture));
+        assert_eq!(texture.rgba(), [200, 10, 10, 255]);
+    }
+
+    #[test]
+    fn a_part_hidden_by_zero_scale_is_dropped() {
+        let mut glb = TestGlb::default();
+        let mut shown = triangle_primitive(&mut glb, true, false);
+        let mut hidden = triangle_primitive(&mut glb, true, false);
+        shown["material"] = 0.into();
+        hidden["material"] = 1.into();
+        let asset = import_glb(&glb.finish(json!({
+            "materials": [{}, {}],
+            "meshes": [{"primitives": [hidden]}, {"primitives": [shown]}],
+            "nodes": [
+                {"children": [1, 2]},
+                {"mesh": 0, "scale": [0.0, 0.0, 0.0]},
+                {"mesh": 1}
+            ],
+            "scenes": [{"nodes": [0]}]
+        })))
+        .unwrap();
+        assert_eq!(asset.parts.len(), 1);
+        assert_eq!(asset.parts[0].indices, 0..3);
     }
 
     #[test]
@@ -939,11 +1076,11 @@ mod tests {
         assert_eq!(asset.mesh.indices, [0, 1, 2]);
         assert_eq!(asset.mesh.vertices[1].position, [1.0, 0.0, 0.0]);
         assert_eq!(asset.mesh.vertices[2].uv, [0.0, 1.0]);
-        assert_eq!(asset.material.metallic, 0.25);
-        assert_eq!(asset.material.roughness, 0.75);
-        assert!(asset.base_color_texture.is_none());
-        assert!(asset.metallic_roughness_texture.is_none());
-        assert!(asset.normal_texture.is_none());
+        assert_eq!(asset.primary().material.metallic, 0.25);
+        assert_eq!(asset.primary().material.roughness, 0.75);
+        assert!(asset.primary().base_color_texture.is_none());
+        assert!(asset.primary().metallic_roughness_texture.is_none());
+        assert!(asset.primary().normal_texture.is_none());
     }
 
     #[test]

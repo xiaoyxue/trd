@@ -1100,7 +1100,10 @@ mod tests {
             });
             let prologue = stream.prologue().expect("prologue");
             assert_eq!(prologue.meshes, std::slice::from_ref(&mesh));
-            assert!(prologue.mesh_assets[0].base_color_texture.is_none());
+            assert!(prologue.mesh_assets[0]
+                .primary()
+                .base_color_texture
+                .is_none());
 
             let decoded: Vec<FrameParams> = stream
                 .by_ref()

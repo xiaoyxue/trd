@@ -21,15 +21,14 @@ use trd_gui::scene::{SceneSeed, SceneState};
 /// Uffizi probe the video editor lights the Dragon with.
 pub const DEFAULT_ENV_PATH: &str = "assets/envmap/uffizi-large.hdr";
 
-/// What `--mesh` produced: the geometry, plus the material and maps a glTF
-/// binary carries with it (an OBJ carries neither).
+/// What `--mesh` produced: the geometry, plus the material parts a glTF binary
+/// carries with it (an OBJ carries none).
 pub struct LoadedMesh {
     pub mesh: Mesh,
-    /// The GLB's imported material; `None` for an OBJ, which uses the flags.
+    /// The GLB's first part's material; `None` for an OBJ, which uses the flags.
     pub material: Option<DisneyMaterial>,
-    pub base_color: Option<trd_core::ImageTexture>,
-    pub metallic_roughness: Option<trd_core::ImageTexture>,
-    pub normal: Option<trd_core::ImageTexture>,
+    /// The GLB's material parts and their maps; `None` for an OBJ.
+    pub parts: Option<Vec<trd_core::MaterialPart>>,
 }
 
 impl LoadedMesh {
@@ -37,9 +36,7 @@ impl LoadedMesh {
         Self {
             mesh,
             material: None,
-            base_color: None,
-            metallic_roughness: None,
-            normal: None,
+            parts: None,
         }
     }
 }
@@ -154,11 +151,9 @@ impl Cli {
             let name = path.display().to_string();
             let asset = trd_gui::model::decode_glb(&name, &bytes)?;
             return Ok(LoadedMesh {
+                material: Some(asset.primary().material.clone()),
                 mesh: asset.mesh,
-                material: Some(asset.material),
-                base_color: asset.base_color_texture,
-                metallic_roughness: asset.metallic_roughness_texture,
-                normal: asset.normal_texture,
+                parts: Some(asset.parts),
             });
         }
         let text = String::from_utf8(bytes).map_err(|error| GuiError::MeshIo {

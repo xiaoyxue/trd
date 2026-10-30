@@ -18,7 +18,46 @@ pub struct ImportedAssetDiagnostics {
     pub aabb_min: [f32; 3],
     pub aabb_max: [f32; 3],
     pub preview_scale: f32,
+    /// The first part's; the object's whole material when it has one part.
     pub imported_material: trd_core::DisneyMaterial,
+    /// One per material part, in draw order (#394).
+    pub parts: Vec<PartDiagnostics>,
+}
+
+/// One material part as Details lists it (#394).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PartDiagnostics {
+    pub material_name: Option<String>,
+    pub maps: trd_core::MaterialTextures,
+    /// Distinct vertices its triangles reference.
+    pub vertices: usize,
+    pub triangles: usize,
+}
+
+impl PartDiagnostics {
+    pub fn of(mesh: &trd_core::Mesh, part: &trd_core::MaterialPart) -> Self {
+        let indices = &mesh.indices[part.indices.start as usize..part.indices.end as usize];
+        let vertices = indices
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        Self {
+            material_name: part.material.name.clone(),
+            maps: part.material.auxiliary.textures,
+            vertices,
+            triangles: indices.len() / 3,
+        }
+    }
+}
+
+fn parts_diagnostics(
+    mesh: &trd_core::Mesh,
+    parts: &[trd_core::MaterialPart],
+) -> Vec<PartDiagnostics> {
+    parts
+        .iter()
+        .map(|part| PartDiagnostics::of(mesh, part))
+        .collect()
 }
 
 /// Per-frame CPU↔GPU traffic **on the video frame path**, so the copy count is
@@ -222,23 +261,20 @@ impl VideoPlacementRenderer {
                 .map_err(|error| error.to_string())?;
             (renderer, target)
         };
-        configure_mesh_assets(&mut renderer, assets);
+        configure_mesh_assets(&mut renderer, assets)?;
         renderer.set_env_map(assets::decode_env_hdr(env_bytes).map_err(|error| error.to_string())?);
-        let replay_lighting = if assets.iter().any(|asset| {
-            asset.metallic_roughness_texture.is_some() || asset.normal_texture.is_some()
-        }) {
-            trd_core::Lighting {
-                ambient: 0.0,
-                scale: 0.0,
-                ..trd_core::Lighting::default()
-            }
+        let replay_lighting = if assets
+            .iter()
+            .any(|asset| asset.source == trd_core::MeshAssetSource::Gltf)
+        {
+            crate::scene::ibl_only_lighting()
         } else {
             trd_core::Lighting::default()
         };
         let default_material = assets
             .first()
             .map_or_else(trd_core::DisneyMaterial::default, |asset| {
-                asset.material.clone()
+                asset.primary().material.clone()
             });
         let asset_diagnostics = assets.iter().map(replay_asset_diagnostics).collect();
         Ok(Self {
@@ -331,7 +367,7 @@ impl VideoPlacementRenderer {
         let (mut renderer, target) =
             trd_core::Renderer::with_gpu(gpu, width, height, std::slice::from_ref(mesh))
                 .map_err(|error| error.to_string())?;
-        let (default_mode, default_material) = imported.configure(&mut renderer);
+        let (default_mode, default_material) = imported.configure(&mut renderer)?;
         let env = assets::decode_env_hdr(env_bytes).map_err(|error| error.to_string())?;
         renderer.set_env_map(env);
         Ok(Self {
@@ -772,20 +808,23 @@ fn scale_protocol_k(k: [f32; 9], sx: f32, sy: f32) -> [f32; 9] {
     ]
 }
 
-fn configure_mesh_assets(renderer: &mut trd_core::Renderer, assets: &[trd_core::MeshAsset]) {
+fn configure_mesh_assets(
+    renderer: &mut trd_core::Renderer,
+    assets: &[trd_core::MeshAsset],
+) -> Result<(), String> {
     for (index, asset) in assets.iter().enumerate() {
         let mesh_id = asset.mesh_id_or(index as u32) as usize;
-        renderer.set_disney_material(trd_core::MeshTarget::One(mesh_id), asset.material.clone());
-        if let Some(texture) = asset.base_color_texture.as_ref() {
-            renderer.set_mesh_texture(mesh_id, texture);
-        }
-        if let Some(texture) = asset.metallic_roughness_texture.as_ref() {
-            renderer.set_mesh_metallic_roughness_texture(mesh_id, texture);
-        }
-        if let Some(texture) = asset.normal_texture.as_ref() {
-            renderer.set_mesh_normal_texture(mesh_id, texture);
+        renderer
+            .set_mesh_parts(mesh_id, &asset.parts)
+            .map_err(|error| error.to_string())?;
+        if asset.source == trd_core::MeshAssetSource::Gltf {
+            renderer.set_tone_mapping(
+                trd_core::MeshTarget::One(mesh_id),
+                crate::model::gltf_tone_mapping(),
+            );
         }
     }
+    Ok(())
 }
 
 fn replay_asset_diagnostics(asset: &trd_core::MeshAsset) -> ImportedAssetDiagnostics {
@@ -804,7 +843,8 @@ fn replay_asset_diagnostics(asset: &trd_core::MeshAsset) -> ImportedAssetDiagnos
         } else {
             1.0
         },
-        imported_material: asset.material.clone(),
+        imported_material: asset.primary().material.clone(),
+        parts: parts_diagnostics(&asset.mesh, &asset.parts),
     }
 }
 
@@ -850,7 +890,14 @@ impl ImportedAsset {
                     ..Default::default()
                 },
             ),
-            Self::Pbr(asset) => ("GLB", asset.material.clone()),
+            Self::Pbr(asset) => ("GLB", asset.primary().material.clone()),
+        };
+        let parts = match self {
+            Self::Textured { mesh, .. } => vec![PartDiagnostics::of(
+                mesh,
+                &trd_core::MaterialPart::whole(mesh, imported_material.clone()),
+            )],
+            Self::Pbr(asset) => parts_diagnostics(&asset.mesh, &asset.parts),
         };
         ImportedAssetDiagnostics {
             source_format,
@@ -858,6 +905,7 @@ impl ImportedAsset {
             aabb_max: aabb.max().to_array(),
             preview_scale,
             imported_material,
+            parts,
         }
     }
 
@@ -874,7 +922,7 @@ impl ImportedAsset {
     fn configure(
         self,
         renderer: &mut trd_core::Renderer,
-    ) -> (trd_core::RenderMode, trd_core::DisneyMaterial) {
+    ) -> Result<(trd_core::RenderMode, trd_core::DisneyMaterial), String> {
         match self {
             Self::Textured { texture, .. } => {
                 renderer.set_mesh_texture(0, &texture);
@@ -891,20 +939,16 @@ impl ImportedAsset {
                     ..Default::default()
                 };
                 renderer.set_disney_material(trd_core::MeshTarget::One(0), material.clone());
-                (trd_core::RenderMode::Shaded, material)
+                Ok((trd_core::RenderMode::Shaded, material))
             }
             Self::Pbr(asset) => {
-                if let Some(texture) = asset.base_color_texture.as_ref() {
-                    renderer.set_mesh_texture(0, texture);
-                }
-                if let Some(texture) = asset.metallic_roughness_texture.as_ref() {
-                    renderer.set_mesh_metallic_roughness_texture(0, texture);
-                }
-                if let Some(texture) = asset.normal_texture.as_ref() {
-                    renderer.set_mesh_normal_texture(0, texture);
-                }
-                renderer.set_disney_material(trd_core::MeshTarget::One(0), asset.material.clone());
-                (trd_core::RenderMode::Shaded, asset.material)
+                renderer
+                    .set_mesh_parts(0, &asset.parts)
+                    .map_err(|error| error.to_string())?;
+                Ok((
+                    trd_core::RenderMode::Shaded,
+                    asset.primary().material.clone(),
+                ))
             }
         }
     }
@@ -1012,6 +1056,112 @@ fn replay_scenes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    fn gltf_editor_defaults_match_the_viewer_without_changing_materials() {
+        let mesh = trd_core::Mesh::from_obj(
+            "v -1 -1 0\nv 0 -1 0\nv 0 1 0\nv -1 1 0\n\
+             v 0 -1 0\nv 1 -1 0\nv 1 1 0\nv 0 1 0\n\
+             f 1 2 3 4\nf 5 6 7 8\n",
+        )
+        .unwrap();
+        let material = trd_core::DisneyMaterial {
+            base_color: [0.008, 0.032, 0.107],
+            metallic: 0.45,
+            roughness: 0.4,
+            ..Default::default()
+        };
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let env = std::fs::read(root.join("assets/envmap/uffizi-large.hdr")).unwrap();
+        let gpu = pollster::block_on(VideoPlacementRenderer::own_gpu()).unwrap();
+        let mut cases = Vec::new();
+        for split in [false, true] {
+            let mut parts = vec![trd_core::MaterialPart::whole(&mesh, material.clone())];
+            if split {
+                parts[0].indices = 0..6;
+                let mut screen = parts[0].clone();
+                screen.indices = 6..12;
+                screen.material.base_color = [0.002, 0.005, 0.009];
+                screen.material.metallic = 0.05;
+                screen.material.roughness = 0.9;
+                parts.push(screen);
+            }
+            cases.push(trd_core::MeshAsset::from(trd_core::GltfAsset {
+                mesh: mesh.clone(),
+                parts,
+            }));
+        }
+        cases.push(
+            trd_core::import_glb(&std::fs::read(root.join("assets/meshes/glb/tv.glb")).unwrap())
+                .unwrap()
+                .into(),
+        );
+        for asset in cases {
+            let mut editor = VideoPlacementRenderer::new_assets_with_gpu(
+                gpu.clone(),
+                std::slice::from_ref(&asset),
+                &env,
+                96,
+                96,
+                false,
+            )
+            .unwrap();
+            let mut viewer = pollster::block_on(crate::renderer::GuiRenderer::new(
+                std::slice::from_ref(&asset.mesh),
+                &[],
+                &[],
+                Some(assets::decode_env_hdr(&env).unwrap()),
+                96,
+                96,
+            ))
+            .unwrap();
+            viewer.set_mesh_parts(0, &asset.parts).unwrap();
+            let state = SceneState::seeded(crate::scene::SceneSeed {
+                materials: vec![asset.primary().material.clone()],
+                mode: trd_core::RenderMode::Shaded,
+                image_based_lighting: Default::default(),
+                tone_mapping: crate::model::gltf_tone_mapping(),
+                lighting: crate::scene::ibl_only_lighting(),
+                environment_available: true,
+                show_environment_background: false,
+            });
+            let expected = pollster::block_on(viewer.render(&state)).unwrap().rgba;
+            let mut draws = state.draws();
+            draws[0].model = asset
+                .mesh
+                .preview_transform(trd_core::DEFAULT_PREVIEW_TARGET)
+                .matrix();
+            let scene = trd_core::Scene::from_draws_with_config(
+                &draws,
+                &crate::renderer::render_options(&state),
+                None,
+                state.render_config,
+            )
+            .with_lighting(editor.replay_lighting);
+            editor.renderer.draw_layers(
+                &[trd_core::SceneLayer::new(
+                    state.camera(editor.viewport()),
+                    &scene,
+                )],
+                &editor.target,
+            );
+            let actual = pollster::block_on(editor.read_document_pixels()).unwrap();
+            assert!(
+                expected
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .any(|pixel| u16::from(pixel[2]) > u16::from(pixel[0]) + 20),
+                "the reference must show the blue material"
+            );
+            assert!(
+                actual == expected,
+                "editor and viewer disagree for {} material part(s)",
+                asset.parts.len()
+            );
+        }
+    }
 
     #[test]
     #[ignore = "requires a GPU adapter"]

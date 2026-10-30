@@ -16,17 +16,32 @@ use super::*;
 use crate::material::DisneyMaterial;
 use crate::math::Matrix4;
 
-/// A mesh uploaded to the GPU, in three parts by how they change: `geometry` is
-/// fixed at upload, `textures` are bind groups uploaded the moment they are set,
-/// and `appearance` is the PBR slot's input.
+/// A mesh uploaded to the GPU, in three pieces by how they change: `geometry` is
+/// fixed at upload, `parts` carry bind groups uploaded the moment they are set,
+/// and `appearance` is the PBR slots' input.
 ///
-/// Only `appearance` is private, and that is the point: privacy here means
-/// "there is an invariant", so the one private field is the one
-/// `Renderer::edit_appearance` must be the sole writer of (#347).
+/// `appearance` is private, and that is the point: privacy here means "there is
+/// an invariant", so it is the field `Renderer::edit_appearance` must be the
+/// sole writer of (#347).
 pub(super) struct MeshGpu {
     pub(super) geometry: MeshGeometry,
-    pub(super) textures: MeshTextures,
+    /// Never empty: one part covering every triangle until
+    /// `Renderer::set_mesh_parts` splits it by material (#394).
+    pub(super) parts: Vec<MeshPartGpu>,
     appearance: MeshAppearance,
+    /// This mesh's first PBR slot; part `i` uses `first_slot + i`. Reassigned
+    /// by [`MeshStore::assign_slots`] whenever any mesh's part count changes.
+    pub(super) first_slot: usize,
+}
+
+/// One material's index range of a mesh, with its own maps and PBR slot.
+pub(super) struct MeshPartGpu {
+    pub(super) indices: std::ops::Range<u32>,
+    pub(super) textures: MeshTextures,
+    /// `None` draws the mesh's own [`MeshAppearance::material`], so a
+    /// single-material object stays editable through it. A multi-material
+    /// object's parts each own theirs.
+    pub(super) material: Option<DisneyMaterial>,
 }
 
 /// The buffers and base transform, fixed when the mesh is uploaded. `vertices`
@@ -85,6 +100,11 @@ impl MeshGpu {
         &self.appearance
     }
 
+    /// The material part `part` is shaded with.
+    pub(super) fn part_material<'a>(&'a self, part: &'a MeshPartGpu) -> &'a DisneyMaterial {
+        part.material.as_ref().unwrap_or(&self.appearance.material)
+    }
+
     /// The only way to mutate appearance, so `Renderer::edit_appearance` stays
     /// the one place an appearance edit marks the PBR slots stale.
     pub(super) fn appearance_mut(&mut self) -> &mut MeshAppearance {
@@ -109,6 +129,30 @@ impl MeshGpu {
         self.geometry.triangles.destroy();
         self.geometry.edges.destroy();
         self.geometry.aabb.destroy();
+        for part in &self.parts {
+            part.destroy();
+        }
+    }
+}
+
+impl MeshPartGpu {
+    pub(super) fn new(
+        gpu: &GpuContext,
+        indices: std::ops::Range<u32>,
+        texture_layout: &wgpu::BindGroupLayout,
+        material_maps_layout: &wgpu::BindGroupLayout,
+    ) -> Self {
+        Self {
+            indices,
+            textures: MeshTextures {
+                albedo: BoundTexture::with_layout(gpu, texture_layout.clone()),
+                maps: BoundMaterialMaps::with_layout(gpu, material_maps_layout.clone()),
+            },
+            material: None,
+        }
+    }
+
+    pub(super) fn destroy(&self) {
         self.textures.albedo.destroy();
         self.textures.maps.destroy();
     }
@@ -164,11 +208,14 @@ pub(super) fn upload_mesh(
             aabb_bounds: mesh.aabb(),
             base_model,
         },
-        textures: MeshTextures {
-            albedo: BoundTexture::with_layout(gpu, texture_layout.clone()),
-            maps: BoundMaterialMaps::with_layout(gpu, material_maps_layout.clone()),
-        },
+        parts: vec![MeshPartGpu::new(
+            gpu,
+            0..mesh.indices.len() as u32,
+            texture_layout,
+            material_maps_layout,
+        )],
         appearance: MeshAppearance::default(),
+        first_slot: 0,
     }
 }
 
@@ -212,7 +259,23 @@ impl MeshStore {
                 ))
             })
             .collect();
-        Self { meshes }
+        let mut store = Self { meshes };
+        store.assign_slots();
+        store
+    }
+
+    /// Lays every live mesh's parts out over the PBR slot array, in id order,
+    /// and returns how many slots that takes.
+    ///
+    /// Slots are positions, not identities: `write_pbr` rewrites them all from
+    /// their meshes, so renumbering only requires marking them stale.
+    pub(super) fn assign_slots(&mut self) -> usize {
+        let mut next = 0;
+        for mesh in self.iter_mut() {
+            mesh.first_slot = next;
+            next += mesh.parts.len();
+        }
+        next
     }
 
     /// Adds an uploaded mesh, reusing a removed mesh's slot when there is one,

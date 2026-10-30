@@ -134,9 +134,28 @@ object:
 - a zero-scale node contributes nothing;
 - `NORMAL` / `TANGENT` survive only if every primitive has them; otherwise the
   whole mesh falls back to derived smooth normals / derived tangents;
-- skins and morph targets are ignored (the bind pose is drawn);
-- every primitive must share **one material** — several materials are rejected
-  with `MultipleMaterials` until multi-material parts land (#394).
+- skins and morph targets are ignored (the bind pose is drawn).
+
+The merged mesh is drawn in **material parts** (#394): its triangles are
+grouped by material, so each `MaterialPart` is one contiguous index range with
+its own Disney material and maps, in order of each material's first use. A
+primitive without `material` gets glTF's default (metallic 1, roughness 1) as
+its own part, and an image shared by several materials is decoded once.
+`Renderer::set_mesh_parts` binds them: every part draws with its own PBR slot
+and texture bind groups, while picking, the AABB, the blob shadow and the
+object transform still treat the asset as **one** object.
+
+A single-part asset's material is the mesh's own `MeshAppearance::material`, so
+it stays editable exactly as before. A multi-part asset keeps each part's
+imported material: appearance edits change only the mesh-wide IBL, tone mapping
+and debug view, and the GUI shows its material sliders read-only.
+
+The standalone viewers and video editors share GLB viewing defaults: Uffizi
+IBL only (no direct or ambient fill), ACES, and exposure 1.0. Textureless GLBs
+use the same setup; missing maps do not select a different light rig. These
+viewing defaults do not rewrite asset materials or input params, and an
+explicit document tone-map override still takes precedence.
+
 `trd-gui` web accepts the GLB directly through
 `?mesh=/assets/.../model.glb` and starts it in PBR mode. The glTF path uses
 `pbr.wgsl`, the live PBR shader. The original Disney-only `shader/disney.wgsl`

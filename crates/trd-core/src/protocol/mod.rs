@@ -1312,11 +1312,17 @@ mod tests {
             vec![Some(0), Some(1)]
         );
         assert_eq!(
-            session.mesh_assets()[0].base_color_texture.as_ref(),
+            session.mesh_assets()[0]
+                .primary()
+                .base_color_texture
+                .as_ref(),
             Some(&texture0)
         );
         assert_eq!(
-            session.mesh_assets()[1].base_color_texture.as_ref(),
+            session.mesh_assets()[1]
+                .primary()
+                .base_color_texture
+                .as_ref(),
             Some(&texture1)
         );
     }

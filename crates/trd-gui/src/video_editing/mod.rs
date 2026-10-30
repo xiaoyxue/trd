@@ -3164,6 +3164,7 @@ pub(super) mod tests {
                 },
                 ..Default::default()
             },
+            parts: Vec::new(),
         });
         app.displayed_frame_ready = true;
         app.displayed_frame_index = 0;

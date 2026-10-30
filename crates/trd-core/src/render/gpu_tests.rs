@@ -2406,3 +2406,119 @@ fn removing_a_mesh_releases_its_memory_immediately() {
         "removing must return almost everything: {freed} bytes vs a {baseline}-byte baseline"
     );
 }
+
+/// Removing an earlier mesh moves a multi-part mesh's PBR slots down; each part
+/// must still be shaded with its own material afterwards (#394).
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn material_parts_keep_their_materials_when_slots_are_reassigned() {
+    let vertex = |x: f32, y: f32| crate::Vertex {
+        position: [x, y, 0.0],
+        color: [1.0; 3],
+        uv: [0.0; 2],
+    };
+    // Two triangles, left and right of the origin: one part each.
+    let pair = Mesh {
+        vertices: vec![
+            vertex(-0.8, -0.5),
+            vertex(-0.1, -0.5),
+            vertex(-0.45, 0.5),
+            vertex(0.1, -0.5),
+            vertex(0.8, -0.5),
+            vertex(0.45, 0.5),
+        ],
+        indices: vec![0, 1, 2, 3, 4, 5],
+        shading: None,
+    };
+    let flat = |base_color| crate::DisneyMaterial {
+        base_color,
+        metallic: 0.0,
+        roughness: 0.8,
+        ..Default::default()
+    };
+    let part = |indices, base_color| crate::MaterialPart {
+        indices,
+        material: flat(base_color),
+        base_color_texture: None,
+        metallic_roughness_texture: None,
+        normal_texture: None,
+    };
+    let mut renderer = Renderer::new(
+        test_gpu(),
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+        &[Mesh::hello_triangle(), pair],
+        &[Matrix4::IDENTITY; 2],
+    )
+    .unwrap();
+    renderer.set_disney_material(crate::MeshTarget::One(0), flat([0.0, 1.0, 0.0]));
+    renderer
+        .set_mesh_parts(
+            1,
+            &[part(0..3, [1.0, 0.0, 0.0]), part(3..6, [0.0, 0.0, 1.0])],
+        )
+        .unwrap();
+    assert_eq!(renderer.mesh_part_count(1), Some(2));
+    assert!(
+        renderer
+            .set_mesh_parts(1, &[part(0..4, [1.0, 0.0, 0.0])])
+            .is_err(),
+        "a part must cover whole triangles"
+    );
+
+    let gpu = test_gpu();
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+    let (width, height) = (64, 64);
+    let only_pair: Scene = [DrawableObject::mesh(
+        1,
+        Matrix4::IDENTITY,
+        RenderMode::Shaded,
+    )]
+    .into_iter()
+    .collect();
+    // Per half of the frame: pixels dominated by red, green and blue.
+    let halves = |renderer: &mut Renderer| {
+        let pixels = render_with_readback(&gpu, format, width, height, |e, v| {
+            renderer.encode(
+                e,
+                v,
+                camera_of(FrameParams::IDENTITY, width, height),
+                &only_pair,
+            );
+        });
+        let mut counts = [[0u32; 3]; 2];
+        for (index, px) in pixels.as_chunks::<4>().0.iter().enumerate() {
+            let half = usize::from(index as u32 % width >= width / 2);
+            let [r, g, b] = [px[0], px[1], px[2]].map(i32::from);
+            for (channel, dominant) in [
+                r > g + 40 && r > b + 40,
+                g > r + 40 && g > b + 40,
+                b > r + 40 && b > g + 40,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                counts[half][channel] += u32::from(dominant);
+            }
+        }
+        counts
+    };
+    let assert_red_blue = |counts: [[u32; 3]; 2], when: &str| {
+        let [left, right] = counts;
+        assert!(
+            left[0] > 50 && left[1] == 0 && left[2] == 0,
+            "{when}: left r/g/b {left:?}"
+        );
+        assert!(
+            right[2] > 50 && right[0] == 0 && right[1] == 0,
+            "{when}: right r/g/b {right:?}"
+        );
+    };
+
+    assert_red_blue(halves(&mut renderer), "before the removal");
+    assert!(renderer.remove_mesh(0));
+    assert_red_blue(halves(&mut renderer), "after its slots moved down");
+    let reused = renderer.add_mesh(&Mesh::hello_triangle());
+    assert_eq!(reused, 0, "the freed id is reused");
+    renderer.set_disney_material(crate::MeshTarget::One(0), flat([0.0, 1.0, 0.0]));
+    assert_red_blue(halves(&mut renderer), "after a mesh took the freed id");
+}

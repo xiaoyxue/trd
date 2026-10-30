@@ -57,7 +57,7 @@ impl GlbMesh {
     }
 
     pub fn material(&self) -> Result<&crate::DisneyMaterial, ProtocolError> {
-        Ok(&self.decoded(0)?.asset.material)
+        Ok(&self.decoded(0)?.asset.primary().material)
     }
 
     fn decoded(&self, slot: u32) -> Result<&DecodedGlb, ProtocolError> {
