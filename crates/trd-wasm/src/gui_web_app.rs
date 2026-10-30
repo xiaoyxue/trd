@@ -98,6 +98,8 @@ pub struct WebApp {
     shared: Rc<GuiShared>,
     /// The most recent model-load failure, shown in the panel until one succeeds.
     model_error: Option<String>,
+    /// The selected object's material parts, as last read from the renderer.
+    selected_material_parts: usize,
     /// Meshes whose objects were deleted, waiting for a frame where the renderer
     /// is not out on an async render or pick (#353).
     pending_free: Vec<u32>,
@@ -125,6 +127,7 @@ impl WebApp {
             pick_result: Rc::new(RefCell::new(None)),
             shared,
             model_error: None,
+            selected_material_parts: 0,
             pending_free: Vec::new(),
         }
     }
@@ -290,6 +293,14 @@ impl eframe::App for WebApp {
             self.schedule_render(&ctx);
         }
 
+        // An in-flight render holds the renderer; keep the last count until
+        // it is free again rather than flicker the sliders' enabled state.
+        if let Ok(renderer) = self.renderer.try_borrow() {
+            if let Some(renderer) = renderer.as_ref() {
+                self.selected_material_parts =
+                    renderer.selected_material_parts(&self.controller.state);
+            }
+        }
         let outcome = ui::show(
             ui,
             &mut ui::View {
@@ -298,6 +309,7 @@ impl eframe::App for WebApp {
                 render_size: self.render_size,
                 last_render_ms: None,
                 model_error: self.model_error.as_deref(),
+                selected_material_parts: self.selected_material_parts,
             },
         );
         self.needs_render |= outcome.needs_render;

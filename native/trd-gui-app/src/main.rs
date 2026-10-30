@@ -57,29 +57,11 @@ fn main() -> eframe::Result<()> {
         );
     }
 
-    // `--texture` wins over the GLB's own base colour, so an explicit flag is
-    // never silently ignored.
-    let albedo = texture
-        .as_ref()
-        .map(|t| t as &dyn trd_core::Texture)
-        .or_else(|| {
-            loaded
-                .base_color
-                .as_ref()
-                .map(|t| t as &dyn trd_core::Texture)
-        });
-    let maps = trd_gui::renderer::MaterialMaps {
-        metallic_roughness: loaded
-            .metallic_roughness
-            .as_ref()
-            .map(|t| t as &dyn trd_core::Texture),
-        normal: loaded.normal.as_ref().map(|t| t as &dyn trd_core::Texture),
-    };
-
-    let renderer = match pollster::block_on(GuiRenderer::new(
+    let albedo = texture.as_ref().map(|t| t as &dyn trd_core::Texture);
+    let mut renderer = match pollster::block_on(GuiRenderer::new(
         std::slice::from_ref(&loaded.mesh),
         &[albedo],
-        &[maps],
+        &[],
         env,
         cli.width,
         cli.height,
@@ -90,6 +72,20 @@ fn main() -> eframe::Result<()> {
             std::process::exit(1);
         }
     };
+    if let Some(parts) = &loaded.parts {
+        // `--texture` wins over the GLB's own base colour, so an explicit flag
+        // is never silently ignored.
+        let mut parts = parts.clone();
+        if let Some(texture) = &texture {
+            for part in &mut parts {
+                part.base_color_texture = Some(texture.clone());
+            }
+        }
+        if let Err(err) = renderer.set_mesh_parts(0, &parts) {
+            log::error!("failed to bind the model's material parts: {err}");
+            std::process::exit(1);
+        }
+    }
 
     let controller = InteractionController::new(cli.scene_state(&loaded, has_env));
     let app = TrdGuiApp::new(controller, renderer);

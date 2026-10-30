@@ -167,3 +167,128 @@ fn overlay_toggles_change_the_rendered_image() {
         "enabling the bounding-box overlay must change the image"
     );
 }
+
+/// Two unit cubes side by side (`-x` and `+x`) as one mesh: 36 indices each.
+fn two_cube_mesh() -> trd_core::Mesh {
+    let shifted = |dx: f32, base: usize| {
+        let mut obj = String::new();
+        for line in CUBE_OBJ.lines() {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            match fields.first() {
+                Some(&"v") => {
+                    let x: f32 = fields[1].parse().unwrap();
+                    obj += &format!("v {} {} {}\n", x + dx, fields[2], fields[3]);
+                }
+                Some(&"f") => {
+                    let ids: Vec<String> = fields[1..]
+                        .iter()
+                        .map(|id| (id.parse::<usize>().unwrap() + base).to_string())
+                        .collect();
+                    obj += &format!("f {}\n", ids.join(" "));
+                }
+                _ => {}
+            }
+        }
+        obj
+    };
+    let mesh = trd_core::Mesh::from_obj(&(shifted(-0.5, 0) + &shifted(0.5, 8))).unwrap();
+    assert_eq!(mesh.indices.len(), 72);
+    mesh
+}
+
+fn flat(base_color: [f32; 3]) -> trd_core::DisneyMaterial {
+    trd_core::DisneyMaterial {
+        base_color,
+        metallic: 0.0,
+        roughness: 0.6,
+        ..Default::default()
+    }
+}
+
+/// Centroid x of the pixels `matches` accepts, and how many there were.
+fn centroid_x(
+    image: &trd_gui::renderer::ImageRgba,
+    matches: impl Fn(&[u8; 4]) -> bool,
+) -> (f32, usize) {
+    let (mut sum, mut count) = (0.0, 0);
+    for (index, pixel) in image.rgba.as_chunks::<4>().0.iter().enumerate() {
+        if matches(pixel) {
+            sum += (index as u32 % image.width) as f32;
+            count += 1;
+        }
+    }
+    (sum / count.max(1) as f32, count)
+}
+
+#[test]
+#[ignore = "requires a GPU adapter; run locally"]
+fn a_multi_material_object_draws_both_parts_and_picks_and_moves_as_one() {
+    let (w, h) = (192, 128);
+    let mut renderer =
+        pollster::block_on(GuiRenderer::new(&[two_cube_mesh()], &[], &[], None, w, h))
+            .expect("GPU backend builds");
+    let whole = |range: std::ops::Range<u32>, color| trd_core::MaterialPart {
+        indices: range,
+        material: flat(color),
+        base_color_texture: None,
+        metallic_roughness_texture: None,
+        normal_texture: None,
+    };
+    renderer
+        .set_mesh_parts(
+            0,
+            &[
+                whole(0..36, [0.9, 0.05, 0.05]),
+                whole(36..72, [0.05, 0.05, 0.9]),
+            ],
+        )
+        .unwrap();
+    assert_eq!(renderer.mesh_part_count(0), 2);
+
+    let mut state = SceneState::default();
+    state.modes[0] = trd_core::RenderMode::Shaded;
+    // A multi-part object ignores the mesh-wide material: each part keeps its own.
+    state.materials[0] = flat([0.0, 1.0, 0.0]);
+    let channels = |p: &[u8; 4]| [p[0], p[1], p[2]].map(u16::from);
+    let red = |p: &[u8; 4]| {
+        let [r, g, b] = channels(p);
+        r > g + 40 && r > b + 40
+    };
+    let blue = |p: &[u8; 4]| {
+        let [r, g, b] = channels(p);
+        b > r + 40 && b > g + 40
+    };
+    let green = |p: &[u8; 4]| {
+        let [r, g, b] = channels(p);
+        g > r + 40 && g > b + 40
+    };
+
+    let before = pollster::block_on(renderer.render(&state)).unwrap();
+    let (red_x, red_count) = centroid_x(&before, red);
+    let (blue_x, blue_count) = centroid_x(&before, blue);
+    assert!(
+        red_count > 100 && blue_count > 100,
+        "red {red_count} px, blue {blue_count} px"
+    );
+    assert!(red_x < blue_x, "the red part is the -x cube");
+    assert_eq!(
+        centroid_x(&before, green).1,
+        0,
+        "the mesh-wide material leaked into a part"
+    );
+
+    for x in [red_x, blue_x] {
+        let picked = pollster::block_on(renderer.pick(&state, x as u32, h / 2));
+        assert_eq!(picked, Some(0), "either part picks the one object");
+    }
+
+    state.objects[0].translation[0] += 0.3;
+    let after = pollster::block_on(renderer.render(&state)).unwrap();
+    let shift_red = centroid_x(&after, red).0 - red_x;
+    let shift_blue = centroid_x(&after, blue).0 - blue_x;
+    assert!(shift_red > 5.0, "the object did not move ({shift_red} px)");
+    assert!(
+        (shift_red - shift_blue).abs() < 2.0,
+        "parts moved apart: {shift_red} vs {shift_blue}"
+    );
+}

@@ -100,7 +100,7 @@ pub async fn start(
 ) -> Result<GuiHandle, wasm_bindgen::JsValue> {
     use crate::gui_web_app::WebApp;
     use trd_gui::interaction::InteractionController;
-    use trd_gui::renderer::{GuiRenderer, MaterialMaps};
+    use trd_gui::renderer::GuiRenderer;
     use trd_gui::scene::{SceneSeed, SceneState};
 
     console_error_panic_hook::set_once();
@@ -109,11 +109,12 @@ pub async fn start(
     let to_js = |e: trd_gui::error::GuiError| wasm_bindgen::JsValue::from_str(&e.to_string());
     struct LoadedMesh {
         mesh: trd_core::Mesh,
+        /// The GLB's first part's, else the default an OBJ starts from.
         material: trd_core::DisneyMaterial,
+        /// The positional `?texture=`, which wins over a GLB's base colour.
         texture: Option<trd_core::ImageTexture>,
-        metallic_roughness: Option<trd_core::ImageTexture>,
-        normal: Option<trd_core::ImageTexture>,
-        is_gltf: bool,
+        /// A GLB's material parts and maps; `None` for an OBJ.
+        parts: Option<Vec<trd_core::MaterialPart>>,
     }
 
     /// Starts the video editor. Without `document_bytes`, acts as a plain player
@@ -200,9 +201,7 @@ pub async fn start(
                 .map_err(to_js)?,
             material: trd_core::DisneyMaterial::default(),
             texture: None,
-            metallic_roughness: None,
-            normal: None,
-            is_gltf: false,
+            parts: None,
         }]
     } else {
         mesh_bytes
@@ -213,12 +212,10 @@ pub async fn start(
                     let asset = trd_core::import_glb(&bytes)
                         .map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()))?;
                     Ok(LoadedMesh {
+                        material: asset.primary().material.clone(),
                         mesh: asset.mesh,
-                        material: asset.material,
-                        texture: asset.base_color_texture,
-                        metallic_roughness: asset.metallic_roughness_texture,
-                        normal: asset.normal_texture,
-                        is_gltf: true,
+                        texture: None,
+                        parts: Some(asset.parts),
                     })
                 } else {
                     let text = String::from_utf8(bytes)
@@ -229,15 +226,13 @@ pub async fn start(
                             .map_err(to_js)?,
                         material: trd_core::DisneyMaterial::default(),
                         texture: None,
-                        metallic_roughness: None,
-                        normal: None,
-                        is_gltf: false,
+                        parts: None,
                     })
                 }
             })
             .collect::<Result<_, wasm_bindgen::JsValue>>()?
     };
-    let has_gltf = loaded.iter().any(|asset| asset.is_gltf);
+    let has_gltf = loaded.iter().any(|asset| asset.parts.is_some());
     // One optional albedo texture per mesh (positional); absent ⇒ 1×1 white.
     for (i, asset) in loaded.iter_mut().enumerate() {
         let entry = texture_bytes.get(i as u32);
@@ -253,10 +248,6 @@ pub async fn start(
     let meshes: Vec<trd_core::Mesh> = loaded.iter().map(|asset| asset.mesh.clone()).collect();
     let textures: Vec<Option<trd_core::ImageTexture>> =
         loaded.iter().map(|asset| asset.texture.clone()).collect();
-    let material_maps: Vec<_> = loaded
-        .iter()
-        .map(|asset| (asset.metallic_roughness.clone(), asset.normal.clone()))
-        .collect();
     let env = match env_bytes {
         Some(bytes) => Some(trd_gui::assets::decode_env_hdr(&bytes).map_err(to_js)?),
         None => None,
@@ -295,18 +286,21 @@ pub async fn start(
         .iter()
         .map(|t| t.as_ref().map(|t| t as &dyn trd_core::Texture))
         .collect();
-    let material_maps: Vec<MaterialMaps<'_>> = material_maps
-        .iter()
-        .map(|(metallic_roughness, normal)| MaterialMaps {
-            metallic_roughness: metallic_roughness
-                .as_ref()
-                .map(|t| t as &dyn trd_core::Texture),
-            normal: normal.as_ref().map(|t| t as &dyn trd_core::Texture),
-        })
-        .collect();
-    let renderer = GuiRenderer::new(&meshes, &textures, &material_maps, env, render_w, render_h)
+    let mut renderer = GuiRenderer::new(&meshes, &textures, &[], env, render_w, render_h)
         .await
         .map_err(to_js)?;
+    for (mesh_id, asset) in loaded.iter().enumerate() {
+        let Some(parts) = &asset.parts else {
+            continue;
+        };
+        let mut parts = parts.clone();
+        if let Some(texture) = &asset.texture {
+            for part in &mut parts {
+                part.base_color_texture = Some(texture.clone());
+            }
+        }
+        renderer.set_mesh_parts(mesh_id, &parts).map_err(to_js)?;
+    }
     let shared = Rc::new(crate::gui_web_app::GuiShared::new(on_pick_model));
     let app = WebApp::new(InteractionController::new(scene), renderer, shared.clone());
     let app_shared = shared.clone();

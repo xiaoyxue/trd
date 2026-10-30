@@ -206,21 +206,35 @@ impl GuiRenderer {
     /// parallel vectors, because [`draws`](crate::scene::SceneState::draws) maps
     /// row `i` to `mesh_id: i` — so the caller must register exactly one object
     /// per call, in the same order.
-    pub fn add_model(&mut self, asset: &trd_core::GltfAsset) -> usize {
+    pub fn add_model(&mut self, asset: &trd_core::GltfAsset) -> Result<usize, GuiError> {
         let mesh_id = self.renderer.add_mesh(&asset.mesh);
-        if let Some(texture) = asset.base_color_texture.as_ref() {
-            self.renderer.set_mesh_texture(mesh_id, texture);
-        }
-        if let Some(texture) = asset.metallic_roughness_texture.as_ref() {
-            self.renderer
-                .set_mesh_metallic_roughness_texture(mesh_id, texture);
-        }
-        if let Some(texture) = asset.normal_texture.as_ref() {
-            self.renderer.set_mesh_normal_texture(mesh_id, texture);
-        }
-        self.renderer
-            .set_disney_material(trd_core::MeshTarget::One(mesh_id), asset.material.clone());
-        mesh_id
+        self.set_mesh_parts(mesh_id, &asset.parts)?;
+        Ok(mesh_id)
+    }
+
+    /// Splits mesh `mesh_id` into glTF material parts and binds each one's
+    /// material and maps (#394). A single part's material stays editable
+    /// through [`SceneState::materials`](crate::scene::SceneState::materials);
+    /// several keep their own.
+    pub fn set_mesh_parts(
+        &mut self,
+        mesh_id: usize,
+        parts: &[trd_core::MaterialPart],
+    ) -> Result<(), GuiError> {
+        Ok(self.renderer.set_mesh_parts(mesh_id, parts)?)
+    }
+
+    /// How many material parts mesh `mesh_id` draws.
+    pub fn mesh_part_count(&self, mesh_id: usize) -> usize {
+        self.renderer.mesh_part_count(mesh_id).unwrap_or(0)
+    }
+
+    /// Material parts of `state`'s selected object; `0` with no selection.
+    pub fn selected_material_parts(&self, state: &SceneState) -> usize {
+        state
+            .selected
+            .and_then(|row| state.mesh_ids.get(row as usize))
+            .map_or(0, |&mesh_id| self.mesh_part_count(mesh_id as usize))
     }
 
     /// Renders `state` to an RGBA image.

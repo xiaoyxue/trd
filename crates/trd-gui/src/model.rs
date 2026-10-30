@@ -111,10 +111,10 @@ pub fn load_model(
         renderer.set_env(crate::assets::decode_env_hdr(env_bytes)?);
     }
 
-    let mesh_id = renderer.add_model(&asset);
+    let mesh_id = renderer.add_model(&asset)?;
     let index = state.add_object(
         mesh_id as u32,
-        asset.material,
+        asset.primary().material.clone(),
         trd_core::RenderMode::Shaded,
         gltf_tone_mapping(),
     );

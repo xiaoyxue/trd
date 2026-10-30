@@ -481,17 +481,39 @@ fn placement_rows(_video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut 
     );
 }
 
+fn format_part(part: &crate::video_editing_renderer::PartDiagnostics) -> String {
+    let maps: Vec<&str> = [
+        (part.maps.base_color, "base color"),
+        (part.maps.metallic_roughness, "metallic-roughness"),
+        (part.maps.normal, "normal"),
+    ]
+    .into_iter()
+    .filter_map(|(present, name)| present.then_some(name))
+    .collect();
+    format!(
+        "{} · maps: {} · {} vertices / {} triangles",
+        part.material_name.as_deref().unwrap_or("(unnamed)"),
+        if maps.is_empty() {
+            "none".to_owned()
+        } else {
+            maps.join(", ")
+        },
+        part.vertices,
+        part.triangles,
+    )
+}
+
 fn material_rows(_video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut dyn Rows) {
     let scene = &facts.scene;
     let index = facts.inspected_object;
     let material = scene.materials.get(index);
     let ibl = scene.image_based_lighting.get(index);
     let tone_mapping = scene.tone_mappings.get(index);
-    let imported = facts
+    let asset = facts
         .renderer
         .as_ref()
-        .and_then(|renderer| renderer.asset.as_ref())
-        .map(|asset| &asset.imported_material);
+        .and_then(|renderer| renderer.asset.as_ref());
+    let imported = asset.map(|asset| &asset.imported_material);
 
     r.row("render mode", displayed_mode(facts));
     r.row("shadows enabled", yes_no(scene.render_config.shadow.enable));
@@ -516,6 +538,12 @@ fn material_rows(_video: &trd_core::VideoInfo, facts: &DisplayedFacts, r: &mut d
         "normal map",
         yes_no(imported.is_some_and(|m| m.auxiliary.textures.normal)),
     );
+    // The imported rows above describe part 0; these list every part (#394).
+    let parts = asset.map_or(&[][..], |asset| &asset.parts);
+    r.row("material parts", &parts.len().to_string());
+    for (index, part) in parts.iter().enumerate() {
+        r.row(&format!("part {index}"), &format_part(part));
+    }
     r.row(
         "metallic",
         &option_f32(material.map(|material| material.metallic)),

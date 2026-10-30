@@ -27,6 +27,9 @@ pub struct Controls {
     pub camera_locked: bool,
     /// Use only these reference axes; `None` keeps free, parent and local movement.
     pub move_reference_labels: Option<[&'static str; 3]>,
+    /// Material parts of the selected object. Above one, its material sliders
+    /// are read-only: each part keeps its own imported material (#394).
+    pub selected_material_parts: usize,
 }
 
 /// The central image surface: what to draw and how to size it.
@@ -90,12 +93,17 @@ pub struct View<'a> {
     /// The most recent model-load failure, shown in the panel until the next
     /// load succeeds (#353). The scene behind it is still the previous one.
     pub model_error: Option<&'a str>,
+    /// See [`Controls::selected_material_parts`].
+    pub selected_material_parts: usize,
 }
 
 /// Runs the standard viewer: control sections plus central image.
 pub fn show(ui: &mut egui::Ui, view: &mut View) -> ImageOutcome {
     let mut outcome = ImageOutcome::default();
-    let controls = Controls::default();
+    let controls = Controls {
+        selected_material_parts: view.selected_material_parts,
+        ..Controls::default()
+    };
     egui::Panel::left("controls")
         .resizable(true)
         .default_size(264.0)
@@ -198,7 +206,7 @@ pub fn controls_sections(
     let mut needs_render = interaction_section(ui, controller, controls);
     needs_render |= transform_section(ui, controller);
     needs_render |= render_mode_section(ui, controller);
-    needs_render |= pbr_material_section(ui, controller);
+    needs_render |= pbr_material_section(ui, controller, controls.selected_material_parts);
     needs_render |= shadow_section(ui, &mut controller.state.render_config);
     needs_render |= overlays_section(ui, controller);
     needs_render |= selection_section(ui, controller);
@@ -397,7 +405,11 @@ pub fn render_mode_section(ui: &mut egui::Ui, controller: &mut InteractionContro
 }
 
 /// PBR material controls; draws nothing unless the selected object is in [`RenderMode::Shaded`].
-pub fn pbr_material_section(ui: &mut egui::Ui, controller: &mut InteractionController) -> bool {
+pub fn pbr_material_section(
+    ui: &mut egui::Ui,
+    controller: &mut InteractionController,
+    material_parts: usize,
+) -> bool {
     let selected_is_pbr = controller
         .state
         .selected
@@ -405,7 +417,9 @@ pub fn pbr_material_section(ui: &mut egui::Ui, controller: &mut InteractionContr
     if !selected_is_pbr {
         return false;
     }
-    section(ui, "PBR material", |ui| pbr_panel(ui, controller))
+    section(ui, "PBR material", |ui| {
+        pbr_panel(ui, controller, material_parts)
+    })
 }
 
 /// A checkbox over an optional grid overlay: ticked writes `on`, cleared writes
@@ -608,7 +622,11 @@ fn angle_row(ui: &mut egui::Ui, label: &str, radians: &mut f32) -> bool {
 }
 
 /// PBR material sliders (shown only in [`RenderMode::Shaded`]).
-fn pbr_panel(ui: &mut egui::Ui, controller: &mut InteractionController) -> bool {
+fn pbr_panel(
+    ui: &mut egui::Ui,
+    controller: &mut InteractionController,
+    material_parts: usize,
+) -> bool {
     let mut changed = false;
     let Some((material, ibl, tone_mapping, debug_view)) = controller.state.selected_pbr_mut()
     else {
@@ -630,30 +648,38 @@ fn pbr_panel(ui: &mut egui::Ui, controller: &mut InteractionController) -> bool 
             .selectable_value(debug_view, PbrDebugView::Normal, "Normal")
             .changed();
     });
-    let mapped_metallic_roughness = material.auxiliary.textures.metallic_roughness;
-    ui.label(if mapped_metallic_roughness {
-        "Metallic factor"
-    } else {
-        "Metallic"
-    });
-    changed |= ui
-        .add(egui::Slider::new(&mut material.metallic, 0.0..=1.0))
-        .changed();
-    ui.label(if mapped_metallic_roughness {
-        "Roughness factor"
-    } else {
-        "Roughness"
-    });
-    changed |= ui
-        .add(egui::Slider::new(&mut material.roughness, 0.0..=1.0))
-        .changed();
-    if mapped_metallic_roughness {
-        ui.weak("Factors multiply the imported GLB metallic-roughness map");
+    if material_parts > 1 {
+        ui.weak(format!(
+            "{material_parts} material parts keep their imported materials; \
+             per-part editing is not supported yet"
+        ));
     }
-    ui.label("Clearcoat");
-    changed |= ui
-        .add(egui::Slider::new(&mut material.clearcoat, 0.0..=1.0))
-        .changed();
+    ui.add_enabled_ui(material_parts <= 1, |ui| {
+        let mapped_metallic_roughness = material.auxiliary.textures.metallic_roughness;
+        ui.label(if mapped_metallic_roughness {
+            "Metallic factor"
+        } else {
+            "Metallic"
+        });
+        changed |= ui
+            .add(egui::Slider::new(&mut material.metallic, 0.0..=1.0))
+            .changed();
+        ui.label(if mapped_metallic_roughness {
+            "Roughness factor"
+        } else {
+            "Roughness"
+        });
+        changed |= ui
+            .add(egui::Slider::new(&mut material.roughness, 0.0..=1.0))
+            .changed();
+        if mapped_metallic_roughness {
+            ui.weak("Factors multiply the imported GLB metallic-roughness map");
+        }
+        ui.label("Clearcoat");
+        changed |= ui
+            .add(egui::Slider::new(&mut material.clearcoat, 0.0..=1.0))
+            .changed();
+    });
     ui.label("Env intensity");
     changed |= ui
         .add(egui::Slider::new(&mut ibl.intensity, 0.0..=4.0))
@@ -850,6 +876,7 @@ mod tests {
                     Controls {
                         camera_locked: true,
                         move_reference_labels: Some(["e1", "e2", "e3"]),
+                        ..Controls::default()
                     },
                 )
             });

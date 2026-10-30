@@ -270,6 +270,7 @@ impl VideoEditingApp {
                 crate::ui::Controls {
                     camera_locked: true,
                     move_reference_labels: Some(super::QUAD_MOVE_LABELS),
+                    ..crate::ui::Controls::default()
                 },
             );
             changed |= crate::ui::transform_section(ui, &mut self.controller);

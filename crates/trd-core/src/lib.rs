@@ -36,7 +36,7 @@ pub use math::{
 // crate root beside `texture`/`camera`/`material` while their GPU residency
 // stays in `render/` (#221/#224). Public paths are unchanged.
 pub use mesh::{
-    import_glb, import_gltf_materials, GltfAsset, GltfImportError, Mesh, MeshAsset,
+    import_glb, import_gltf_materials, GltfAsset, GltfImportError, MaterialPart, Mesh, MeshAsset,
     MeshAssetSource, MeshError, MeshReference, MeshResource, MeshShading, DEFAULT_PREVIEW_TARGET,
 };
 

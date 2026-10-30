@@ -33,6 +33,11 @@ impl IndexBuffer {
     pub(super) fn destroy(&self) {
         self.buffer.destroy();
     }
+
+    /// How many indices it holds.
+    pub(super) fn count(&self) -> u32 {
+        self.count
+    }
 }
 
 /// A vertex buffer plus its element count, typed by the vertex record it holds
@@ -160,6 +165,19 @@ pub(super) fn draw_indexed<T>(
     pass.set_vertex_buffer(0, vertices.slice());
     pass.set_index_buffer(index.buffer.slice(..), wgpu::IndexFormat::Uint32);
     pass.draw_indexed(0..index.count, 0, instances);
+}
+
+/// [`draw_indexed`] restricted to `indices`, one material part's run of the
+/// shared index buffer (#394).
+pub(super) fn draw_indexed_range<T>(
+    pass: &mut wgpu::RenderPass,
+    (vertices, index): (&VertexBuffer<T>, &IndexBuffer),
+    indices: Range<u32>,
+    instances: Range<u32>,
+) {
+    pass.set_vertex_buffer(0, vertices.slice());
+    pass.set_index_buffer(index.buffer.slice(..), wgpu::IndexFormat::Uint32);
+    pass.draw_indexed(indices, 0, instances);
 }
 
 /// The non-indexed twin: binds `vertices` at slot 0 and draws its whole span.

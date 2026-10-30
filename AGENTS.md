@@ -294,6 +294,7 @@ that would also change local gizmos.
 | `golden_params_single_glb_edit_roundtrip` | absent/identity model → edit → export → reload, with exact same-device pixels and retained source data |
 | `golden_params_multiple_glb_bindings` | two distinguishable GLBs with independent transforms; reversing mesh rows cannot change UUID bindings |
 | `golden_params_blob_shadows_toggle_and_replay` | default-enabled blobs over a visible background, shadow-off, exact export/replay pixels, and no shadows from reference-only guides |
+| `golden_params_multi_material_glb` | one GLB with two materials (red dielectric and gold metal boxes) placed via params: one object, two material parts, both visible (#394) |
 
 The placement baselines live under `crates/trd-placement/tests/golden/` and use
 Uffizi for model shading. They are headless pixel regressions, **not** the

@@ -365,6 +365,165 @@ fn golden_params_multiple_glb_bindings() {
     check("params_multiple", &image);
 }
 
+/// Two flat-shaded boxes side by side in one mesh: a red dielectric on `-x` and
+/// gold metal on `+x`, as two primitives with two materials (#394).
+fn two_material_glb() -> Vec<u8> {
+    fn cuboid(min: [f32; 3], max: [f32; 3]) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<u16>) {
+        let (mut positions, mut normals, mut indices) = (Vec::new(), Vec::new(), Vec::new());
+        // Each face: its normal axis and sign, then two tangent axes in CCW order.
+        for (axis, sign, u, v) in [
+            (0, 1.0, 1, 2),
+            (0, -1.0, 2, 1),
+            (1, 1.0, 2, 0),
+            (1, -1.0, 0, 2),
+            (2, 1.0, 0, 1),
+            (2, -1.0, 1, 0),
+        ] {
+            let base = positions.len() as u16;
+            for (a, b) in [(0, 0), (1, 0), (1, 1), (0, 1)] {
+                let mut corner = [0.0; 3];
+                corner[axis] = if sign > 0.0 { max[axis] } else { min[axis] };
+                corner[u] = if a == 0 { min[u] } else { max[u] };
+                corner[v] = if b == 0 { min[v] } else { max[v] };
+                positions.push(corner);
+                let mut normal = [0.0; 3];
+                normal[axis] = sign;
+                normals.push(normal);
+            }
+            indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+        (positions, normals, indices)
+    }
+
+    let mut bin = Vec::new();
+    let mut views = Vec::new();
+    let mut accessors = Vec::new();
+    let mut push = |bytes: Vec<u8>, accessor: serde_json::Value| {
+        let mut accessor = accessor;
+        accessor["bufferView"] = views.len().into();
+        views.push(serde_json::json!({
+            "buffer": 0, "byteOffset": bin.len(), "byteLength": bytes.len()
+        }));
+        bin.extend(bytes);
+        while bin.len() % 4 != 0 {
+            bin.push(0);
+        }
+        accessors.push(accessor);
+        accessors.len() - 1
+    };
+    let mut primitives = Vec::new();
+    for (material, (min, max)) in [
+        ([-1.0, 0.0, -0.5], [0.0, 1.0, 0.5]),
+        ([0.0, 0.0, -0.5], [1.0, 1.0, 0.5]),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (positions, normals, indices) = cuboid(min, max);
+        let floats = |values: &[[f32; 3]]| -> Vec<u8> {
+            values
+                .iter()
+                .flatten()
+                .flat_map(|v| v.to_le_bytes())
+                .collect()
+        };
+        let position = push(
+            floats(&positions),
+            serde_json::json!({
+                "componentType": 5126, "count": positions.len(), "type": "VEC3",
+                "min": min, "max": max
+            }),
+        );
+        let normal = push(
+            floats(&normals),
+            serde_json::json!({"componentType": 5126, "count": normals.len(), "type": "VEC3"}),
+        );
+        let index = push(
+            indices.iter().flat_map(|v| v.to_le_bytes()).collect(),
+            serde_json::json!({"componentType": 5123, "count": indices.len(), "type": "SCALAR"}),
+        );
+        primitives.push(serde_json::json!({
+            "attributes": {"POSITION": position, "NORMAL": normal},
+            "indices": index,
+            "material": material
+        }));
+    }
+    let mut json = serde_json::to_vec(&serde_json::json!({
+        "asset": {"version": "2.0"},
+        "buffers": [{"byteLength": bin.len()}],
+        "bufferViews": views,
+        "accessors": accessors,
+        "materials": [
+            {"name": "red dielectric", "pbrMetallicRoughness": {
+                "baseColorFactor": [0.8, 0.04, 0.04, 1.0],
+                "metallicFactor": 0.0, "roughnessFactor": 0.45}},
+            {"name": "gold metal", "pbrMetallicRoughness": {
+                "baseColorFactor": [1.0, 0.77, 0.34, 1.0],
+                "metallicFactor": 1.0, "roughnessFactor": 0.25}}
+        ],
+        "meshes": [{"primitives": primitives}],
+        "nodes": [{"mesh": 0}],
+        "scenes": [{"nodes": [0]}],
+        "scene": 0
+    }))
+    .unwrap();
+    while json.len() % 4 != 0 {
+        json.push(b' ');
+    }
+    let mut glb = b"glTF".to_vec();
+    glb.extend(2u32.to_le_bytes());
+    glb.extend(((12 + 8 + json.len() + 8 + bin.len()) as u32).to_le_bytes());
+    glb.extend((json.len() as u32).to_le_bytes());
+    glb.extend(b"JSON");
+    glb.extend(json);
+    glb.extend((bin.len() as u32).to_le_bytes());
+    glb.extend(b"BIN\0");
+    glb.extend(bin);
+    glb
+}
+
+#[test]
+#[ignore = "requires a real GPU"]
+fn golden_params_multi_material_glb() {
+    let _serial = GPU_SERIAL.lock().unwrap_or_else(|error| error.into_inner());
+    let gpu = gpu();
+    let mesh = GlbMesh::new("00000000-0000-0000-0000-00000000a394", &two_material_glb()).unwrap();
+    let mut document = source(&[quad(160.0, 140.0)], std::slice::from_ref(&mesh), true);
+    let mut config = document.render_config();
+    config.shadow.enable = false;
+    document.set_render_config(config).unwrap();
+    document
+        .apply_model_edits(&[ModelEdit {
+            row: 0,
+            object: 0,
+            model: edit(1.6, 0.0, 0.35),
+        }])
+        .unwrap();
+    let assets = trd_placement::document_assets(&document).unwrap();
+    assert_eq!(assets[0].parts.len(), 2, "one part per material");
+
+    let image = render(&document, gpu);
+    // Both materials must be on screen, or a baseline of a one-part mistake
+    // could be committed without anyone noticing.
+    let pixels = image
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|p| (p[0] as i32, p[1] as i32, p[2] as i32));
+    // The probe and the default rig wash both out, so classify by channel
+    // differences rather than saturation.
+    let red = pixels
+        .clone()
+        .filter(|&(r, g, b)| r > g + 30 && r > b + 30)
+        .count();
+    let gold = pixels
+        .filter(|&(r, g, b)| (r - g).abs() < 30 && g > b + 15 && r > b + 15)
+        .count();
+    assert!(red > 300, "red dielectric half missing ({red} px)");
+    assert!(gold > 300, "gold metal half missing ({gold} px)");
+    check("params_multi_material", &image);
+}
+
 #[test]
 #[ignore = "requires a real GPU"]
 fn golden_params_blob_shadows_toggle_and_replay() {
