@@ -51,7 +51,7 @@ fn renders_a_nonblank_frame_of_expected_size() {
     // color, so the frame carries actual geometry.
     let first = &image.rgba[0..4];
     assert!(
-        image.rgba.chunks_exact(4).any(|px| px != first),
+        image.rgba.as_chunks::<4>().0.iter().any(|px| px != first),
         "frame is a flat color — nothing was drawn"
     );
 }
@@ -89,7 +89,9 @@ fn textured_mode_samples_the_bound_texture() {
 
     let red_px = image
         .rgba
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .any(|p| p[0] > 150 && p[1] < 100 && p[2] < 100);
     assert!(red_px, "textured cube shows no red from the bound texture");
 }

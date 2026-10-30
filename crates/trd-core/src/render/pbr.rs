@@ -180,7 +180,7 @@ impl PbrUniform {
 /// normalized. Degenerate (zero-length) accumulations fall back to `+Z`.
 pub(crate) fn compute_smooth_normals(vertices: &[Vertex], indices: &[u32]) -> Vec<[f32; 3]> {
     let mut normals = vec![Vector3::ZERO; vertices.len()];
-    for tri in indices.chunks_exact(3) {
+    for tri in indices.as_chunks::<3>().0 {
         let (i0, i1, i2) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
         let p0 = Vector3::from_array(vertices[i0].position);
         let p1 = Vector3::from_array(vertices[i1].position);
@@ -214,7 +214,7 @@ pub(crate) fn compute_tangents(
 ) -> Vec<[f32; 4]> {
     let mut tangents = vec![Vector3::ZERO; vertices.len()];
     let mut bitangents = vec![Vector3::ZERO; vertices.len()];
-    for tri in indices.chunks_exact(3) {
+    for tri in indices.as_chunks::<3>().0 {
         let [i0, i1, i2] = [tri[0] as usize, tri[1] as usize, tri[2] as usize];
         let p0 = Vector3::from_array(vertices[i0].position);
         let p1 = Vector3::from_array(vertices[i1].position);

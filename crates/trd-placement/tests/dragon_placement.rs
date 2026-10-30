@@ -104,7 +104,14 @@ fn dragon_gpu_pick_uses_the_same_grounded_model_as_rendering() {
         let mesh = &assets[0].mesh;
         let step = (mesh.indices.len() / 3 / 16).max(1);
         let mut hit = None;
-        for triangle in mesh.indices.chunks_exact(3).step_by(step).take(16) {
+        for triangle in mesh
+            .indices
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .step_by(step)
+            .take(16)
+        {
             let mut center = [0.0; 4];
             for &index in triangle {
                 let vertex = mesh.vertices[index as usize].position;

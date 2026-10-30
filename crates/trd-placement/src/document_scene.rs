@@ -617,7 +617,9 @@ mod tests {
             let pixels = renderer.read_pixels(&target).await.unwrap();
             assert_eq!(pixels.len(), 128 * 128 * 4);
             assert!(pixels
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .any(|pixel| pixel[..3].iter().any(|channel| *channel > 20)));
         });
     }

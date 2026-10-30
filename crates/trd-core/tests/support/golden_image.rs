@@ -32,7 +32,12 @@ pub fn compare_or_update(
     let total = (width * height) as usize;
     let mut differing = 0;
     let mut maximum = 0;
-    for (actual, expected) in actual.chunks_exact(4).zip(expected.chunks_exact(4)) {
+    for (actual, expected) in actual
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(expected.as_chunks::<4>().0)
+    {
         let delta = actual
             .iter()
             .zip(expected)

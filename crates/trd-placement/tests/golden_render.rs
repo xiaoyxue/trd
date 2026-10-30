@@ -398,8 +398,10 @@ fn golden_params_blob_shadows_toggle_and_replay() {
     document.set_render_config(config).unwrap();
     let disabled = render_with_background(&document, gpu.clone(), Some([190, 190, 190, 255]));
     let darker = enabled
-        .chunks_exact(4)
-        .zip(disabled.chunks_exact(4))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(disabled.as_chunks::<4>().0)
         .filter(|(on, off)| on[0].saturating_add(5) < off[0])
         .count();
     assert!(
@@ -511,10 +513,12 @@ fn quad_guides_stay_below_meshes_and_their_gizmos() {
             let mut opaque = 0;
             let mut exposed_regression = 0;
             for (((black, white), actual), old) in black_base
-                .chunks_exact(4)
-                .zip(white_base.chunks_exact(4))
-                .zip(composited.chunks_exact(4))
-                .zip(old_order.chunks_exact(4))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(white_base.as_chunks::<4>().0)
+                .zip(composited.as_chunks::<4>().0)
+                .zip(old_order.as_chunks::<4>().0)
             {
                 if black == white {
                     opaque += 1;
