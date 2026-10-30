@@ -267,7 +267,7 @@ impl PixelColumn<'_> {
                     shape: vec![self.height as usize, self.width as usize, self.channels],
                 })?;
             let mut rgba = Vec::with_capacity(rgba_len);
-            for rgb in bytes.values().chunks_exact(3) {
+            for rgb in bytes.values().as_chunks::<3>().0 {
                 rgba.extend_from_slice(rgb);
                 rgba.push(255);
             }

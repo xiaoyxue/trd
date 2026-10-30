@@ -103,7 +103,7 @@ pub(crate) fn colored_aabb_line_vertices(
     color: [f32; 3],
 ) -> Vec<GizmoLineVertex> {
     let mut vertices = Vec::with_capacity(12 * LINE_QUAD_CORNERS.len());
-    for edge in AABB_EDGE_INDICES.chunks_exact(2) {
+    for edge in AABB_EDGE_INDICES.as_chunks::<2>().0 {
         push_line(
             &mut vertices,
             corners[edge[0]],

@@ -274,7 +274,11 @@ fn draw_then_read_pixels_matches_render_layers() {
         "splitting draw from readback changed the pixels"
     );
     assert!(
-        fused.chunks_exact(4).any(|px| px[..3] != [0, 0, 0]),
+        fused
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|px| px[..3] != [0, 0, 0]),
         "the test scene drew nothing, so the comparison is vacuous"
     );
 }
@@ -334,7 +338,11 @@ fn the_target_view_samples_the_bytes_read_pixels_returns() {
     let actual = pollster::block_on(renderer.read_pixels(&sampled)).expect("sampled readback");
 
     assert!(
-        expected.chunks_exact(4).any(|px| px[..3] != [0, 0, 0]),
+        expected
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|px| px[..3] != [0, 0, 0]),
         "the test scene drew nothing, so the comparison is vacuous"
     );
     assert_eq!(
@@ -443,7 +451,11 @@ fn render_layers_composites_and_matches_render_for_one_layer() {
     assert_eq!(one_layer, single_pass, "one layer != render");
     assert_eq!(one_layer.len(), (width * height * 4) as usize);
     assert!(
-        one_layer.chunks_exact(4).any(|px| px[..3] != [0, 0, 0]),
+        one_layer
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|px| px[..3] != [0, 0, 0]),
         "a single layer drew nothing"
     );
 
@@ -561,7 +573,11 @@ fn render_params_after_resizing_a_caller_owned_target() {
         .expect("renders at the new size");
     assert_eq!(large.len(), 64 * 32 * 4);
     assert!(
-        large.chunks_exact(4).any(|px| px[..3] != [0, 0, 0]),
+        large
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|px| px[..3] != [0, 0, 0]),
         "the resized target drew nothing"
     );
 }
@@ -783,7 +799,9 @@ fn first_frame_renders_with_no_setters_called() {
         assert_eq!(pixels.len(), (width * height * 4) as usize);
         assert!(
             pixels
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .any(|px| px[3] > 0 && px[..3] != [0, 0, 0]),
             "{mode:?} drew nothing on the first frame with no setters called"
         );
@@ -1416,7 +1434,7 @@ fn environment_background_draws_bound_probe() {
         );
     });
     assert!(
-        pixels.chunks_exact(4).any(|pixel| pixel[0] > 128),
+        pixels.as_chunks::<4>().0.iter().any(|pixel| pixel[0] > 128),
         "environment background should produce visible probe color"
     );
 }
@@ -1541,7 +1559,9 @@ fn cg_and_cv_cameras_render_matching_output() {
 
     // Both must actually show the quad (non-trivial coverage).
     let lit = |px: &[u8]| {
-        px.chunks_exact(4)
+        px.as_chunks::<4>()
+            .0
+            .iter()
             .filter(|c| c[0] > 0 || c[1] > 0 || c[2] > 0)
             .count()
     };
@@ -1551,8 +1571,10 @@ fn cg_and_cv_cameras_render_matching_output() {
     // ...and their outputs must match within a tiny tolerance (a few edge
     // pixels may differ by rounding in the K⇄projection round-trip).
     let differing = cg_px
-        .chunks_exact(4)
-        .zip(cv_px.chunks_exact(4))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(cv_px.as_chunks::<4>().0)
         .filter(|(a, b)| {
             a.iter()
                 .zip(b.iter())
@@ -1604,7 +1626,9 @@ fn dolly_turntable_bird_eye_cg_cv_wireframe_stays_framed() {
     let angles = [0.0f32, std::f32::consts::FRAC_PI_2, 2.4];
 
     let lit = |px: &[u8]| -> usize {
-        px.chunks_exact(4)
+        px.as_chunks::<4>()
+            .0
+            .iter()
             .filter(|c| c[0] > 0 || c[1] > 0 || c[2] > 0)
             .count()
     };
@@ -1684,8 +1708,10 @@ fn dolly_turntable_bird_eye_cg_cv_wireframe_stays_framed() {
             // (a) CG and CV forms render matching pixels (few edge pixels may
             // differ by rounding in the K⇄projection round-trip).
             let differing = cg_px
-                .chunks_exact(4)
-                .zip(cv_px.chunks_exact(4))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(cv_px.as_chunks::<4>().0)
                 .filter(|(a, b)| {
                     a.iter()
                         .zip(b.iter())

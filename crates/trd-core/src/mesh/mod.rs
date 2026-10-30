@@ -140,7 +140,7 @@ impl Mesh {
         use std::collections::HashSet;
         let mut seen: HashSet<(u32, u32)> = HashSet::new();
         let mut edges: Vec<u32> = Vec::new();
-        for tri in self.indices.chunks_exact(3) {
+        for tri in self.indices.as_chunks::<3>().0 {
             for &(a, b) in &[(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
                 let key = if a <= b { (a, b) } else { (b, a) };
                 if seen.insert(key) {
@@ -185,7 +185,9 @@ mod tests {
     fn edge_set(edges: &[u32]) -> std::collections::BTreeSet<(u32, u32)> {
         assert_eq!(edges.len() % 2, 0, "edge buffer must be pairs of indices");
         edges
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|e| (e[0].min(e[1]), e[0].max(e[1])))
             .collect()
     }
