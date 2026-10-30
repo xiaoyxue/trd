@@ -292,6 +292,9 @@ OBJ/internal mesh viewers remain supported outside this editor input contract.
 Models use `assets/envmap/uffizi-large.hdr` as the default IBL probe. Imported
 GLB maps/materials remain authoritative; Dragon's mapped-material setup uses
 zero direct/ambient light. Raw tracking is not temporally smoothed.
+The default GLB tone-map operator is ACES, as in the standalone viewers;
+this does not change exposure, lighting or authored material parameters.
+An explicit document tone-map override still wins.
 
 ## Rendering and visibility
 

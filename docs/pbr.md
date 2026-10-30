@@ -150,6 +150,10 @@ it stays editable exactly as before. A multi-part asset keeps each part's
 imported material: appearance edits change only the mesh-wide IBL, tone mapping
 and debug view, and the GUI shows its material sliders read-only.
 
+The video editors default GLB tone mapping to ACES, matching the standalone
+viewers' operator, without changing imported materials, exposure or lighting.
+An explicit document tone-map override still takes precedence.
+
 `trd-gui` web accepts the GLB directly through
 `?mesh=/assets/.../model.glb` and starts it in PBR mode. The glTF path uses
 `pbr.wgsl`, the live PBR shader. The original Disney-only `shader/disney.wgsl`

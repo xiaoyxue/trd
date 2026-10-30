@@ -821,6 +821,10 @@ fn configure_mesh_assets(
         renderer
             .set_mesh_parts(mesh_id, &asset.parts)
             .map_err(|error| error.to_string())?;
+        if asset.source == trd_core::MeshAssetSource::Gltf {
+            renderer
+                .set_tonemap_operator(trd_core::MeshTarget::One(mesh_id), trd_core::Tonemap::Aces);
+        }
     }
     Ok(())
 }
@@ -1054,6 +1058,96 @@ fn replay_scenes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    fn gltf_editor_tonemap_matches_the_viewer_with_other_settings_unchanged() {
+        let mesh = trd_core::Mesh::from_obj(
+            "v -1 -1 0\nv 0 -1 0\nv 0 1 0\nv -1 1 0\n\
+             v 0 -1 0\nv 1 -1 0\nv 1 1 0\nv 0 1 0\n\
+             f 1 2 3 4\nf 5 6 7 8\n",
+        )
+        .unwrap();
+        let material = trd_core::DisneyMaterial {
+            base_color: [0.008, 0.032, 0.107],
+            metallic: 0.45,
+            roughness: 0.4,
+            ..Default::default()
+        };
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let env = std::fs::read(root.join("assets/envmap/uffizi-large.hdr")).unwrap();
+        let gpu = pollster::block_on(VideoPlacementRenderer::own_gpu()).unwrap();
+        for split in [false, true] {
+            let mut parts = vec![trd_core::MaterialPart::whole(&mesh, material.clone())];
+            if split {
+                parts[0].indices = 0..6;
+                let mut screen = parts[0].clone();
+                screen.indices = 6..12;
+                screen.material.base_color = [0.002, 0.005, 0.009];
+                screen.material.metallic = 0.05;
+                screen.material.roughness = 0.9;
+                parts.push(screen);
+            }
+            let asset = trd_core::MeshAsset::from(trd_core::GltfAsset {
+                mesh: mesh.clone(),
+                parts,
+            });
+            let mut editor = VideoPlacementRenderer::new_assets_with_gpu(
+                gpu.clone(),
+                std::slice::from_ref(&asset),
+                &env,
+                96,
+                96,
+                false,
+            )
+            .unwrap();
+            let mut viewer = pollster::block_on(crate::renderer::GuiRenderer::new(
+                std::slice::from_ref(&mesh),
+                &[],
+                &[],
+                Some(assets::decode_env_hdr(&env).unwrap()),
+                96,
+                96,
+            ))
+            .unwrap();
+            viewer.set_mesh_parts(0, &asset.parts).unwrap();
+            let state = SceneState::seeded(crate::scene::SceneSeed {
+                materials: vec![material.clone()],
+                mode: trd_core::RenderMode::Shaded,
+                image_based_lighting: Default::default(),
+                tone_mapping: trd_core::ToneMapping {
+                    operator: trd_core::Tonemap::Aces,
+                    ..Default::default()
+                },
+                lighting: editor.replay_lighting,
+                environment_available: true,
+                show_environment_background: false,
+            });
+            let expected = pollster::block_on(viewer.render(&state)).unwrap().rgba;
+            let scene = crate::renderer::scene_for(&state).with_lighting(editor.replay_lighting);
+            editor.renderer.draw_layers(
+                &[trd_core::SceneLayer::new(
+                    state.camera(editor.viewport()),
+                    &scene,
+                )],
+                &editor.target,
+            );
+            let actual = pollster::block_on(editor.read_document_pixels()).unwrap();
+            assert!(
+                expected
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .any(|pixel| u16::from(pixel[2]) > u16::from(pixel[0]) + 20),
+                "the reference must show the blue material"
+            );
+            assert!(
+                actual == expected,
+                "editor and viewer disagree for {} material part(s)",
+                asset.parts.len()
+            );
+        }
+    }
 
     #[test]
     #[ignore = "requires a GPU adapter"]
