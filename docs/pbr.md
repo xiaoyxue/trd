@@ -121,8 +121,22 @@ bytes into this model without filesystem access; its per-parameter `sources` map
 records whether values came from glTF, an extension-derived mapping, or a
 default.
 
-`trd_core::import_glb` additionally imports one triangle primitive, authored
-normals, and its embedded base-color / metallic-roughness / normal textures.
+`trd_core::import_glb` additionally imports the GLB's geometry, authored
+normals, and its embedded base-color / metallic-roughness / normal textures. It
+walks the default scene (else the first scene; a scene-less file contributes
+every mesh untransformed), bakes each node's world transform into its triangle
+primitives and merges them into one mesh, so a multi-part asset stays one
+object:
+
+- a mesh referenced by several nodes is emitted once per node;
+- normals use the inverse-transpose; a mirrored node (negative determinant)
+  reverses winding and negates tangent `w`;
+- a zero-scale node contributes nothing;
+- `NORMAL` / `TANGENT` survive only if every primitive has them; otherwise the
+  whole mesh falls back to derived smooth normals / derived tangents;
+- skins and morph targets are ignored (the bind pose is drawn);
+- every primitive must share **one material** — several materials are rejected
+  with `MultipleMaterials` until multi-material parts land (#394).
 `trd-gui` web accepts the GLB directly through
 `?mesh=/assets/.../model.glb` and starts it in PBR mode. The glTF path uses
 `pbr.wgsl`, the live PBR shader. The original Disney-only `shader/disney.wgsl`

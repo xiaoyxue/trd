@@ -25,6 +25,8 @@ mod obj;
 mod resource;
 
 pub(crate) use arrow::{GLTF_PATH_COLUMN, GLTF_URL_COLUMN, MATERIAL_COLUMN};
+#[cfg(test)]
+pub(crate) use gltf::two_mesh_glb;
 pub use gltf::{import_glb, import_gltf_materials, GltfAsset, GltfImportError};
 pub use mesh::{Mesh, MeshShading};
 pub use resource::{MeshAsset, MeshAssetSource, MeshReference, MeshResource};
